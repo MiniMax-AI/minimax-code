@@ -1,0 +1,194 @@
+name: Badcase
+description: Report a case where MiniMax Code didn't behave as expected — wrong output, stuck loop, broken automation, bad team routing, etc.
+title: "[Badcase] "
+labels: ["badcase", "needs-triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a badcase. The more structured the info, the faster we can reproduce and fix.
+        Please fill in everything below. If a section doesn't apply, write `N/A` — don't leave it blank.
+
+  - type: input
+    id: version
+    attributes:
+      label: MiniMax Code version
+      description: Found in Settings → About. Example: `1.4.2 (build 20260530)`
+      placeholder: "1.x.x (build YYYYMMDD)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where are you running MiniMax Code?
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - iOS / iPadOS
+        - Android
+        - Web
+        - Other (describe in "Anything else")
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: OS version
+      description: macOS example: `15.4 (24E5085f)` · Windows example: `Windows 11 23H2 (build 22631.4317)`
+      placeholder: ""
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How bad is the impact on your work?
+      options:
+        - S0 — Crashed / lost data / can't use the app
+        - S1 — Core feature broken (agent team, automation, habit memory)
+        - S2 — Works but with wrong output / degraded behavior
+        - S3 — Cosmetic / minor annoyance
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: area
+    attributes:
+      label: Which area is affected?
+      description: Tick all that apply. If "Other", describe below.
+      options:
+        - label: Habit memory (remembers your habits)
+          required: false
+        - label: Agent team (builds / routes / runs a team)
+          required: false
+        - label: Automation / scheduled task
+          required: false
+        - label: Skill / tool calling
+          required: false
+        - label: Feishu / Lark integration
+          required: false
+        - label: UI / display
+          required: false
+        - label: Performance (slow, freeze, high CPU/memory)
+          required: false
+        - label: Login / account / sync
+          required: false
+        - label: Other
+          required: false
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: One-line summary
+      description: What went wrong, in one sentence. Becomes the issue title prefix.
+      placeholder: "Agent team routed my 'check schedule' request to the skill-expert instead of cron-expert"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen? Be specific.
+      placeholder: |
+        I expected the request "查一下今天飞书日程" to be handled by the Feishu expert and return today's calendar.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include the exact wrong output, error message, or screen state.
+      placeholder: |
+        It got routed to the skill-expert, which then tried to find a skill for it and failed with "no matching skill".
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered list. Minimum to reproduce — strip everything unrelated.
+      placeholder: |
+        1. Open MiniMax Code
+        2. Send the message "查一下今天飞书日程"
+        3. Observe routing
+    validations:
+      required: true
+
+  - type: textarea
+    id: frequency
+    attributes:
+      label: How often does it happen?
+      description: Always / sometimes / once. If sometimes, what pattern?
+      placeholder: |
+        Always for this exact prompt. I haven't tried variations.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context (habit / team / automation involved)
+      description: If a habit, agent team member, or scheduled task is involved, name it. Paste the relevant config / prompt if short.
+      placeholder: |
+        Agent team: Mavis Code 功能问答天团 (4 experts)
+        Routed expert: skill-expert
+        Expected expert: feishu-expert
+    validations:
+      required: false
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if any)
+      description: If you found a way around it, share it. Often more valuable than the bug report itself.
+      placeholder: |
+        None yet. Switching to user-mode chat and manually asking the Feishu expert works.
+    validations:
+      required: false
+
+  - type: input
+    id: logs
+    attributes:
+      label: Logs / screenshots / screen recording (paste or attach)
+      description: |
+        - Paste short log snippets inline.
+        - For longer logs, attach files (drag & drop works).
+        - Screen recording > screenshots > text description, in that order.
+      placeholder: |
+        ![screenshot](https://...)
+        Or attach `app-2026-06-01T21-30.log` below.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submit checklist
+      description: Please confirm before submitting — saves everyone time.
+      options:
+        - label: I searched existing issues and didn't find a duplicate
+          required: true
+        - label: I'm on the latest version
+          required: true
+        - label: I removed sensitive info (API keys, tokens, personal data)
+          required: true
+        - label: I can reproduce this on a fresh account / clean state
+          required: false
+
+  - type: textarea
+    id: anything_else
+    attributes:
+      label: Anything else?
+      description: Anything that didn't fit above, or context that might help.
+      placeholder: ""
+    validations:
+      required: false
