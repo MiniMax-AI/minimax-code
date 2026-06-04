@@ -1,0 +1,118 @@
+name: Bug report / 问题反馈
+description: Report a reproducible MiniMax Code desktop problem
+title: "[Bug]: "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please remove API keys, tokens, private code, and other sensitive information before submitting.
+        感谢反馈。提交前请移除 API Key、Token、私有代码和其他敏感信息。
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / 版本号
+      description: Find this in MiniMax Code Settings.
+      placeholder: "Example: v3.0.35"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform / 平台
+      options:
+        - macOS
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version / 系统版本
+      placeholder: "Example: macOS 15.5, Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue-area
+    attributes:
+      label: Issue area / 问题类型
+      options:
+        - Startup / install / update
+        - Agent stuck / slow / repeated loop
+        - Tool call / permission / daemon
+        - MCP / OAuth / integration
+        - File / workspace / path / encoding
+        - Model output quality
+        - UI / UX
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: upload-id
+    attributes:
+      label: Upload ID / 日志上传 ID
+      description: In MiniMax Code, go to Settings → General → Upload logs. If the app cannot start, write "cannot upload" and attach crash logs below.
+      placeholder: "Example: upload_xxx, or cannot upload"
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened? / 问题描述
+      placeholder: "MiniMax Code crashes when..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      placeholder: |
+        1. Open MiniMax Code
+        2. Click...
+        3. Run...
+        4. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 实际行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or crash reports / 日志、截图或崩溃信息
+      description: Please remove secrets, tokens, API keys, private paths, and private code.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting / 提交前确认
+      options:
+        - label: I have searched existing issues.
+          required: true
+        - label: I am using the latest version available to me.
+          required: true
+        - label: I have removed sensitive information from logs/screenshots.
+          required: true

@@ -16,17 +16,18 @@
 
 ## Report an Issue
 
-This repository collects issue reports for MiniMax Code, optimized for mobile submissions.
+This repository collects issue reports for the MiniMax Code desktop app.
 
-> Desktop users are welcome too — please attach logs and screenshots when possible.
+> For bug reports, please upload logs from **Settings → General → Upload logs** and include the generated upload ID.
 
 ### How to submit
 
 1. Tap **Issues** → **New issue** at the top right
 2. Pick a template (Bug / Feature / Question)
-3. Fill in the following:
+3. Fill in the requested details:
    - **Version** — found in Settings
-   - **Platform** — macOS / Windows / Mobile
+   - **Platform** — macOS / Windows
+   - **Upload ID** — found after uploading logs from Settings → General
    - **Steps to reproduce** — short and reproducible
    - **Screenshots or logs** — optional but appreciated
 

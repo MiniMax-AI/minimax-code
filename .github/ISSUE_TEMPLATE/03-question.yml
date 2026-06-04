@@ -1,0 +1,39 @@
+name: Question / 使用问题
+description: Ask a question about MiniMax Code desktop
+title: "[Question]: "
+labels: ["question"]
+
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question / 问题
+      placeholder: "How do I..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform / 平台
+      options:
+        - macOS
+        - Windows
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / 补充信息
+      description: What have you tried? Add screenshots if useful.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting / 提交前确认
+      options:
+        - label: I have searched existing issues.
+          required: true

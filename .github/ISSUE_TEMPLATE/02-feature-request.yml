@@ -1,0 +1,57 @@
+name: Feature request / 功能建议
+description: Suggest an improvement for MiniMax Code desktop
+title: "[Feature]: "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve MiniMax Code. Please search existing issues before submitting.
+        感谢帮助我们改进 MiniMax Code。提交前请先搜索是否已有相关 Issue。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / 你遇到的问题
+      description: What problem would this feature solve?
+      placeholder: "I often need to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution / 期望方案
+      description: What would you like MiniMax Code to do?
+      placeholder: "I would like MiniMax Code to..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform / 平台
+      options:
+        - macOS
+        - Windows
+        - Linux desktop support
+        - All desktop platforms
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context / 补充信息
+      description: Add screenshots, examples, or related workflows if helpful.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting / 提交前确认
+      options:
+        - label: I have searched existing issues.
+          required: true
