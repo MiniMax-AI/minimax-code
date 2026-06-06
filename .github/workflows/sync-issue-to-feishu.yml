@@ -38,49 +38,135 @@ jobs:
           const issue = event.issue;
           const repository = event.repository;
           const repoName = repository.full_name;
-          const labels = issue.labels.map((label) => label.name).join(', ') || 'none';
-          const body = issue.body || '';
-          const bodyPreview =
-            body
+
+          const normalizeText = (value) =>
+            String(value || '')
               .replace(/\r\n/g, '\n')
               .replace(/\n{3,}/g, '\n\n')
-              .slice(0, 1600) || '(empty)';
+              .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+              .trim();
+
+          const truncate = (value, maxLength) =>
+            value.length > maxLength
+              ? `${value.slice(0, maxLength - 1)}...`
+              : value;
+
+          const escapeLarkMarkdown = (value) =>
+            normalizeText(value)
+              .replace(/\\/g, '\\\\')
+              .replace(/`/g, '\\`')
+              .replace(/\*/g, '\\*')
+              .replace(/_/g, '\\_')
+              .replace(/\[/g, '\\[')
+              .replace(/\]/g, '\\]')
+              .replace(/\(/g, '\\(')
+              .replace(/\)/g, '\\)')
+              .replace(/~/g, '\\~')
+              .replace(/</g, '‹')
+              .replace(/>/g, '›');
+
+          const labelNames = issue.labels.map((label) => label.name);
+          const getIssueKind = (labels) => {
+            if (labels.includes('bug')) {
+              return 'bug';
+            }
+
+            if (labels.includes('enhancement')) {
+              return 'enhancement';
+            }
+
+            if (labels.includes('question')) {
+              return 'question';
+            }
+
+            return 'issue';
+          };
+          const issueKind = getIssueKind(labelNames);
+          const primaryLabel = labelNames[0] || issueKind;
+          const headerTemplateByKind = {
+            bug: 'red',
+            enhancement: 'green',
+            question: 'blue',
+            issue: 'blue',
+          };
+          const getLabelColor = (label) => ({
+            bug: 'red',
+            enhancement: 'green',
+            question: 'blue',
+          })[label] || 'neutral';
+          const headerTemplate = headerTemplateByKind[issueKind];
+          const labelTags =
+            labelNames
+              .map((label) => {
+                const color = getLabelColor(label);
+                return `<text_tag color='${color}'>${escapeLarkMarkdown(label)}</text_tag>`;
+              })
+              .join(' ') || "<font color='grey'>none</font>";
+          const body = issue.body || '';
+          const bodyPreview = truncate(escapeLarkMarkdown(body) || '(empty)', 1000);
+          const title = truncate(normalizeText(issue.title).replace(/\n/g, ' '), 100);
+          const createdAt = new Intl.DateTimeFormat('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+            timeZone: 'Asia/Shanghai',
+          })
+            .format(new Date(issue.created_at))
+            .replace(/\//g, '-');
 
           const payload = {
-            msg_type: 'post',
-            content: {
-              post: {
-                zh_cn: {
-                  title: `GitHub Issue #${issue.number}: ${issue.title}`,
-                  content: [
-                    [
-                      {
-                        tag: 'text',
-                        text: `Repository: ${repoName}\n`,
-                      },
-                    ],
-                    [
-                      {
-                        tag: 'text',
-                        text: `Author: ${issue.user.login} | Labels: ${labels}\n`,
-                      },
-                    ],
-                    [
-                      {
-                        tag: 'text',
-                        text: `Summary:\n${bodyPreview}\n`,
-                      },
-                    ],
-                    [
-                      {
-                        tag: 'a',
-                        text: 'Open issue',
-                        href: issue.html_url,
-                      },
-                    ],
-                  ],
+            msg_type: 'interactive',
+            card: {
+              config: {
+                enable_forward: true,
+                update_multi: true,
+              },
+              card_link: {
+                url: issue.html_url,
+              },
+              header: {
+                template: headerTemplate,
+                title: {
+                  tag: 'plain_text',
+                  content: `GitHub Issue #${issue.number}: ${title}`,
                 },
               },
+              elements: [
+                {
+                  tag: 'markdown',
+                  content: [
+                    `**Repository:** [${repoName}](${repository.html_url})`,
+                    `**Type:** ${escapeLarkMarkdown(primaryLabel)}`,
+                    `**Author:** ${escapeLarkMarkdown(issue.user.login)}`,
+                    `**Created:** ${createdAt} UTC+8`,
+                    `**Labels:** ${labelTags}`,
+                  ].join('\n'),
+                },
+                {
+                  tag: 'hr',
+                },
+                {
+                  tag: 'markdown',
+                  content: `**Summary**\n${bodyPreview}`,
+                },
+                {
+                  tag: 'action',
+                  actions: [
+                    {
+                      tag: 'button',
+                      text: {
+                        tag: 'plain_text',
+                        content: 'Open issue',
+                      },
+                      type: 'primary',
+                      url: issue.html_url,
+                    },
+                  ],
+                },
+              ],
             },
           };
 
