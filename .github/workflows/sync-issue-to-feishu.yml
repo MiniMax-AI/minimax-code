@@ -1,0 +1,125 @@
+name: Sync GitHub issues to Feishu
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  notify-feishu:
+    name: Notify Feishu
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ !github.event.issue.pull_request }}
+    env:
+      FEISHU_BOT_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+      FEISHU_BOT_SECRET: ${{ secrets.FEISHU_BOT_SECRET }}
+    steps:
+      - name: Check Feishu webhook
+        if: ${{ env.FEISHU_BOT_WEBHOOK == '' }}
+        run: |
+          echo "::error::Missing repository secret FEISHU_BOT_WEBHOOK"
+          exit 1
+
+      - name: Build Feishu payload
+        shell: bash
+        run: |
+          node <<'EOF'
+          const crypto = require('crypto');
+          const fs = require('fs');
+
+          const event = JSON.parse(
+            fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'),
+          );
+
+          const issue = event.issue;
+          const repository = event.repository;
+          const repoName = repository.full_name;
+          const labels = issue.labels.map((label) => label.name).join(', ') || 'none';
+          const body = issue.body || '';
+          const bodyPreview =
+            body
+              .replace(/\r\n/g, '\n')
+              .replace(/\n{3,}/g, '\n\n')
+              .slice(0, 1600) || '(empty)';
+
+          const payload = {
+            msg_type: 'post',
+            content: {
+              post: {
+                zh_cn: {
+                  title: `GitHub Issue #${issue.number}: ${issue.title}`,
+                  content: [
+                    [
+                      {
+                        tag: 'text',
+                        text: `Repository: ${repoName}\n`,
+                      },
+                    ],
+                    [
+                      {
+                        tag: 'text',
+                        text: `Author: ${issue.user.login} | Labels: ${labels}\n`,
+                      },
+                    ],
+                    [
+                      {
+                        tag: 'text',
+                        text: `Summary:\n${bodyPreview}\n`,
+                      },
+                    ],
+                    [
+                      {
+                        tag: 'a',
+                        text: 'Open issue',
+                        href: issue.html_url,
+                      },
+                    ],
+                  ],
+                },
+              },
+            },
+          };
+
+          const secret = process.env.FEISHU_BOT_SECRET;
+          if (secret) {
+            const timestamp = Math.floor(Date.now() / 1000).toString();
+            const stringToSign = `${timestamp}\n${secret}`;
+            payload.timestamp = timestamp;
+            payload.sign = crypto
+              .createHmac('sha256', stringToSign)
+              .update('')
+              .digest('base64');
+          }
+
+          fs.writeFileSync('feishu-payload.json', JSON.stringify(payload));
+          EOF
+
+      - name: Send Feishu notification
+        shell: bash
+        run: |
+          response="$(
+            curl --fail-with-body --show-error --silent \
+              --request POST \
+              --header 'Content-Type: application/json' \
+              --data-binary @feishu-payload.json \
+              "$FEISHU_BOT_WEBHOOK"
+          )"
+
+          RESPONSE="$response" node <<'EOF'
+          const response = JSON.parse(process.env.RESPONSE);
+          const success =
+            response.code === 0 ||
+            response.StatusCode === 0 ||
+            response.StatusMessage === 'success';
+
+          if (!success) {
+            console.error(JSON.stringify(response));
+            process.exit(1);
+          }
+
+          console.log('Feishu notification sent.');
+          EOF
