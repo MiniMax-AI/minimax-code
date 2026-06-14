@@ -99,9 +99,23 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Logs, screenshots, or crash reports / 日志、截图或崩溃信息
-      description: Please remove secrets, tokens, API keys, private paths, and private code.
+      label: Logs or crash report / 日志或崩溃信息
+      description: |
+        Paste the relevant log lines or stack trace here. They will be rendered as a code block.
+        Please remove secrets, tokens, API keys, private paths, and private code.
+        粘贴相关日志或堆栈，会自动按代码块渲染。
+        提交前请移除 Secret、Token、API Key、私有路径和私有代码。
       render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / 截图
+      description: |
+        Drag and drop screenshots here, or paste them directly. (GitHub disables image upload inside the Logs field above, so screenshots go here.)
+        把截图直接拖到这里，或者粘贴。（上面「日志」字段是代码块，GitHub 不允许在里面贴图，所以截图请放这里。）
     validations:
       required: false
 
