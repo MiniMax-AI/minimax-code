@@ -31,7 +31,7 @@ Website deployment tools and routes follow the original tool set. Successful dep
 
 ## Release boundary
 
-Production client paths are restored without internal registries or test-service addresses as build dependencies. Real account behavior, quota, billing, model quality, media generation, and deployment require separate acceptance. Mocks, protocol fixtures, and successful builds do not replace that evidence. A private GitHub review repository is in place; the source repository remains private. Public npm `latest` was 0.4.12 on 2026-09-18; that metadata observation does not validate the installed package or deploy a backend. See `release-audit.md` for actual acceptance results.
+Production client paths are restored without internal registries or test-service addresses as build dependencies. Real account behavior, quota, billing, model quality, media generation, and deployment require separate acceptance. Mocks, protocol fixtures, successful builds, and the source import do not replace that evidence. Public npm `latest` was 0.4.12 on 2026-09-18; that metadata observation does not validate the installed package or deploy a backend. See [verification records](verification.md) and the historical [release audit](release-audit.md) for recorded acceptance results.
 
 ## Diagnostic upload privacy
 

@@ -1,16 +1,14 @@
 # Verification records
 
-## Public import preparation, 2026-09-18
+## Initial repository import, 2026-09-18
 
-The private preparation branch adds official CLI onboarding and preserves the existing public Desktop support entry points. At implementation revision `1670bafd684ebf8dbb03dd41330ac2b099ffaf23`, `pnpm verify` passed all 14 applicable gates on macOS arm64, Node.js 26.4.0 and pnpm 9.12.0, including 3,352 capability tests. The six affected platform-fixture files passed locally after correcting PowerShell command quoting, SQLite teardown order, native path expectations, missing synthetic Windows prompt layers, and a fixture process holding a disappearing working directory. These are test-fixture repairs, not changes to runtime behavior.
+The reviewed 0.4.12 CLI snapshot was imported at `c59cf5377045aa1a3e699c242d089b73b7cdc2ad` on top of the existing MiniMax Code Desktop support history. Commit `4e2e7bb5f771e9c42b2edefb1046483819b9032f` restored the Desktop image above the download links. The resulting tree ID, `327eb838c8bdc3da70d9e5f165ca6162a1d15545`, matched the reviewed source tree, and internal Git history was not imported.
 
-The source preparation also tests public issue-form routing and offline Feishu payload generation; no notification was sent. Active documentation links use production sites, and all six CLI documentation links returned HTTP 200. Local Markdown file targets resolved successfully. History and built-distribution Gitleaks scans completed without unaddressed findings under the reviewed configuration; the exported source received a separate scan.
+Before import, `pnpm verify` passed all 14 applicable gates at implementation revision `1670bafd684ebf8dbb03dd41330ac2b099ffaf23` on macOS arm64 with Node.js 26.4.0 and pnpm 9.12.0, including 3,352 capability tests. History, exported-source, and built-distribution Gitleaks scans completed without unaddressed findings. Issue-form routing and Feishu payload generation used synthetic offline inputs and sent no notification.
 
-Subsequent Windows CI runs identified fixture teardown races: completed Bash tasks could still schedule database reads after the test closed SQLite. The fixture now closes delivery scheduling and drains background work before closing the database and removing files. The shared Vitest runner resolves Windows temporary directories to their canonical paths to avoid the [libuv short-path watcher assertion](https://github.com/libuv/libuv/issues/5010), with a subprocess regression covering its environment, arguments and exit status. The built image-preview artifact test now requires both a valid PNG reply and a clean Worker exit; it no longer immediately force-terminates the successful Worker. An earlier Node 22 native crash did not recur in the next unchanged-artifact run, so that observation alone is not treated as proof of its cause. The single Chinese documentation entry is `README_ZH.md`.
+Windows CI exposed fixture teardown races during preparation. The fixes drain background delivery before closing SQLite, normalize temporary paths for the Vitest runner, and require image-preview Workers to exit cleanly. These changes affect test fixtures and shutdown checks, not product behavior.
 
-A local import rehearsal starts from public destination revision `cd025375799a1360d499d5c06cfb2e1111a960fc`, copies only authenticated archive files, and creates one new commit on that public base. The first comparison exposed Git newline normalization in 14 vendored Office XML schemas. The preparation now marks those schema assets as non-normalizing in `.gitattributes` and includes a staging regression for CRLF bytes. Rehearsal acceptance requires the imported Git tree to equal the reviewed source tree exactly, and the new reachable commit count to equal one. This local branch must not be pushed as part of private preparation.
-
-Final cross-platform and source-candidate results belong to the private preparation PR's final head; local passes do not establish Windows/Linux acceptance. Existing main runs were blocked before startup by billing, while later dependency-PR runs executed and exposed the Windows fixture failures above. Check current run annotations rather than carrying the older billing diagnosis forward. Fresh managed login, real model requests, interactive Windows/Linux use and official installer replacement were not performed in this preparation. Publication authorization, an independent human review and destination administrative settings remain separate release-owner steps.
+On the imported commit, the Linux and macOS Source verification jobs passed; the Windows job was cancelled by the immediate README follow-up. The follow-up passed the documentation profile and Release audit. A future source release still needs a completed final-revision platform matrix, Node compatibility run, and source candidate.
 
 ## Dependency security and unused implementation cleanup, 2026-09-18
 
@@ -18,17 +16,13 @@ The standalone workspace pins Vitest and its coverage package to 4.1.11, Vite to
 
 The TOML import regression runs the actual AgentImportService in a bounded child process: valid input succeeds, while comments ending unterminated arrays or inline tables are rejected. A subprocess timeout prevents a synchronous parser regression from hanging the test runner.
 
-The unused Team cycle engine and two unreferenced adapters are removed. Legacy queue, lock and run-location modules retain the compatibility types required by shared adapters; their unused implementations are removed in place. The source inventory, package paths, lockfile and declared dependency licenses are regenerated. This change does not claim live-service acceptance or publication authorization.
+The unused Team cycle engine and two unreferenced adapters are removed. Legacy queue, lock and run-location modules retain the compatibility types required by shared adapters; their unused implementations are removed in place. The source inventory, package paths, lockfile and declared dependency licenses are regenerated. This change does not claim live-service acceptance or alter the repository's publication scope.
 
 ## Current source verification status
 
-The current source target is TUI **0.4.12**, with the separate versions described in [Preparation status](open-source-status.md#version-and-evidence-baseline). The 0.3.11 results below remain a historical record and have not been relabeled as current acceptance.
+The current source target is TUI **0.4.12**, with the separate versions described in [Source status](open-source-status.md#version-and-evidence-baseline). The import results above are the current repository baseline. The 0.3.11 results below remain a historical record and have not been relabeled as current acceptance.
 
-On 2026-09-12, source commit `edbd4bd483f9326fae14bed6852950f371d4feab` exported successfully without Git history: the source gate verified 4,090 files, workspace exports and native helper integrity; generated TypeScript paths matched 119 exports. These checks do not establish a complete build, test or live-service pass.
-
-The Source verification and Release audit workflow runs for that commit failed before their jobs started. GitHub reported failed account payments or a spending-limit issue. Platform verification and the candidate job were skipped; no candidate artifact was generated for that run. This is an infrastructure block, not evidence of a code-test failure.
-
-Current TUI 0.4.12 live-service acceptance, fresh login/logout, cross-platform interactive acceptance and a validated three-platform source candidate remain **NOT RUN / unavailable**. Add subsequent results with their revision, environment and scope instead of replacing the historical record.
+Fresh login/logout, cross-platform interactive acceptance, and a validated three-platform source candidate remain **NOT RUN / unavailable** for the imported revision. Add later results with their revision, environment, and scope instead of replacing the historical record.
 
 ### Source synchronization verification, 2026-09-18
 
@@ -61,7 +55,7 @@ Commit `67ad241fb201c618bdedfba5998f7a6fb6f1d0cf` updates the proxy dispatcher's
 
 On that commit, `pnpm verify` **passed all 14 applicable gates** on macOS arm64, Node.js 26.4.0, pnpm 9.12.0: source checks, generated paths, history-free export, release tooling, typecheck, build, standalone checks, artifact/capability/status/smoke/BYOK/policy/sandbox tests. The capability suite passed 412 tests; the existing real macOS sandbox probes also passed. Local Gitleaks scans of complete Git history, the committed source snapshot and the built distribution reported no findings with the reviewed `.gitleaks.toml` rules.
 
-This resolves the local typecheck failure recorded above. It does not establish Windows/Linux acceptance, successful GitHub Actions runs, a three-platform source candidate or fresh live-service acceptance. The GitHub billing/spending-limit block and publication/admin prerequisites remain separate from this local verification result.
+This resolves the local typecheck failure recorded above. It does not establish Windows/Linux acceptance, successful GitHub Actions runs, a three-platform source candidate or fresh live-service acceptance. Release prerequisites remain separate from this local verification result.
 
 ## Historical TUI 0.3.11 acceptance
 
@@ -110,7 +104,7 @@ That offline PTY check did not open a browser or call a real model. Subsequent o
 - Three tests cover source synchronization candidates, preservation of public changes, conflicts, and unsafe-output rejection. A no-change comparison against the actual baseline reported zero changes.
 - Full-history, source-snapshot, and build-artifact Gitleaks scans were added. GitHub `Release audit` passed; see `release-audit.md` for false-positive handling and case sanitization.
 - Initial Windows CI exposed Git CRLF conversion affecting native helper hashes. `.gitattributes` now pins LF. Later fixes addressed POSIX temporary paths, mock install layouts, and cmd quoting in tests. The relevant 70 tests passed locally; use PR checks for final platform results.
-- GitHub runs macOS / Windows / Linux × Node.js 22 / 24. Each includes frozen install, source checks, source export, build, boundaries, tool artifacts, the 321-case capability suite, status protocol, smoke, and BYOK. Type checking runs once in the Linux / Node.js 22 full profile; the other five jobs use the platform profile, omitting only that compiler gate. Windows skips one POSIX-only capability case. Permission facade tests run outside Windows; actual sandbox probes run on macOS. GitHub runner success is not an interactive user-path check on each physical platform.
+- At that time, GitHub ran macOS / Windows / Linux × Node.js 22 / 24. Each job included frozen install, source checks, source export, build, boundaries, tool artifacts, the 321-case capability suite, status protocol, smoke, and BYOK. Type checking ran once in the Linux / Node.js 22 full profile; the other five jobs used the platform profile, omitting only that compiler gate. Windows skipped one POSIX-only capability case. Permission facade tests ran outside Windows; actual sandbox probes ran on macOS. GitHub runner success did not constitute an interactive user-path check on each physical platform.
 
 ## Live production-account acceptance
 
@@ -122,7 +116,7 @@ Using the user-authorized existing login and dedicated temporary workspaces, the
 - The official plugin marketplace returned 54 available plugins.
 - Real bash → mcode-tools → host-lease authentication succeeded. Connector discovery returned 13 tools with no provider failures.
 
-Actual service responses, credentials, and local account paths were not committed. Only synthetic acceptance results are recorded; this does not claim business calls for every plugin or generation tool.
+Actual service responses, credentials, and local account paths were not committed. The recorded acceptance results summarize sessions run with synthetic inputs; they do not claim business calls for every plugin or generation tool.
 
 ## Not yet verified
 
@@ -131,7 +125,7 @@ Actual service responses, credentials, and local account paths were not committe
 - Actual update installation / upgrade; the development machine's global installation was not changed.
 - Real task quality for each bundled skill, and Desktop features outside the original TUI's defaults.
 
-This historical acceptance did not publish the GitHub source repository or an npm package. The official npm product has a separate release history; its currently verified version is listed in [Preparation status](open-source-status.md). TypeScript remains strict; `noUncheckedIndexedAccess` and `noImplicitOverride` retain the vendored libraries' existing compatibility settings.
+This historical acceptance did not publish the GitHub source repository or an npm package. The official npm product has a separate release history; its currently verified version is listed in [Source status](open-source-status.md). TypeScript remains strict; `noUncheckedIndexedAccess` and `noImplicitOverride` retain the vendored libraries' existing compatibility settings.
 
 ## Windows timeout investigation, 2026-09-12
 

@@ -1,6 +1,6 @@
-# Standalone source preparation status
+# Source status
 
-The current source target is **TUI 0.4.12**. Preserve its capabilities while retaining the public distribution boundary. The earlier BYOK-only extraction strategy is no longer the target.
+The current source target is **TUI 0.4.12**. This repository contains the terminal TUI, headless CLI, ACP implementation, and the public distribution tooling around them.
 
 ## Version and evidence baseline
 
@@ -13,21 +13,20 @@ The current source target is **TUI 0.4.12**. Preserve its capabilities while ret
 | Embedded mcode-tools | 0.0.4, extracted from public `@minimax-ai/code@0.3.11` | `scripts/lib/mcode-tools-artifact.mjs` |
 | Historical live-service acceptance and demo | TUI 0.3.11, recorded 2026-09-11 | `docs/verification.md`, `docs/release-audit.md`, `docs/demo.md` |
 
-The product, TUI and root workspace use the same 0.4.12 version. The embedded tool has its own version; its pinned archive is not the TUI source version. Workspace/local build manifests remain `private: true` to prevent accidental publication. The existing npm release is already available; matching version strings do not prove that this source tree reproduces that exact tarball. Earlier live-service acceptance remains historical evidence; it does not establish acceptance of TUI 0.4.12.
+The product, TUI, and root workspace use the same 0.4.12 version. The embedded tool has its own version. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication. Matching version strings do not prove that this source tree reproduces the published npm tarball.
 
-## Retained implementation
+## Source boundary
 
-- MiniMax OAuth / Token Plan, account and quota views, check-in, the official plugin marketplace, managed connectors, search, mcode-tools, updates, feedback, and diagnostic clients are restored.
-- The in-process runtime, public workspace dependencies, actual tools, and sandbox remain. Internal generated IDL, the Desktop HTTP front door, and cloud-executor-only implementations are not restored.
-- mcode-tools is extracted from a pinned public npm package with archive and file hash verification. Only the host holds refresh tokens.
-- Source scanning permits reviewed public service API paths while continuing to reject internal addresses, generated protocols, and obvious credentials. Build checks also verify that key capabilities remain present.
-- Original internal history stays outside this repository and is not merged into public history.
+- MiniMax OAuth and Token Plan, BYOK, accounts, quota views, the official plugin marketplace, managed connectors, search, mcode-tools, updates, feedback, and bounded diagnostic clients are included.
+- The in-process runtime, public workspace dependencies, tools, and sandbox are included. Internal generated IDL, the Desktop HTTP front door, and cloud-executor-only implementations are excluded.
+- mcode-tools is extracted from a pinned public npm package with archive and file-hash verification. Only the host holds refresh tokens.
+- Source checks permit reviewed public service API paths while rejecting internal addresses, generated protocols, and obvious credentials.
+- Internal Git history stays outside this repository. Shared-source updates use the reviewed process in [Source synchronization](source-sync.md).
 
-See `tui-capabilities.md` for individual capabilities and `verification.md` for evidence. A private GitHub review repository and PR workflow are in place. The public npm registry was checked on 2026-09-18; that metadata check did not install the package, verify its runtime behavior, or publish source or packages. Historical TUI 0.3.11 Token Plan, BYOK, search, plugin catalog, and connector discovery checks have live evidence. Current-revision results and NOT RUN boundaries are tracked in `verification.md`. See `release-audit.md` for remaining limits; not every service or cross-platform interactive user path has been validated.
+See [TUI capability coverage](tui-capabilities.md) for individual features, [Verification records](verification.md) for evidence, and [Publication scope](publication-authorization.md) for the repository boundary.
 
+## Repository baseline
 
-## Prepared public destination
+The initial CLI source snapshot was imported into `MiniMax-AI/minimax-code` on 2026-09-18 at commit `c59cf5377045aa1a3e699c242d089b73b7cdc2ad`. Commit `4e2e7bb5f771e9c42b2edefb1046483819b9032f` restored the Desktop image above the download links. The import preserved the repository's Desktop issue history and support workflow while adding the CLI source without internal Git history.
 
-The destination is `MiniMax-AI/minimax-code`. The private review tree now includes official CLI installation and first-task instructions, production documentation links, Desktop download/support entry points, the destination's established issue-form paths with product selection, a compatible Chinese README entry, and its support notification workflow restricted to the public destination. The reviewed source inventory includes these files. See [import preparation evidence](verification.md#public-import-preparation-2026-09-18) and [the import procedure](releasing.md#import-into-the-existing-public-repository).
-
-The 0.4.12 candidate deliberately excludes open dependency-upgrade PRs; each upgrade needs separate review and validation. The source boundary, retained licenses and private-history exclusion remain unchanged. Registry metadata, local tests, CI, live-service acceptance and publication authorization are distinct evidence categories.
+Open dependency upgrades remain separate changes and require their own review and validation. Current test results and untested service boundaries are recorded in [Verification records](verification.md).

@@ -10,12 +10,12 @@ The default license for first-party code is [MIT](LICENSE), including the root w
 
 The root MIT license is not a statement that every file or bundled component is MIT-licensed.
 
-## Publication decision
+## Publication scope
 
-The proposed material scope and rights-holder decision are tracked in [Publication authorization](docs/publication-authorization.md). Preparing the MIT change does not mark the exact source candidate, brand assets, npm publication or private Git history as approved for publication. That record remains **PENDING**.
+The reviewed repository boundary is recorded in [Publication scope](docs/publication-authorization.md) and `release/public-source.json`. It covers the committed source tree under its existing licenses. npm packages, installers, paid services, third-party accounts, and internal Git history remain separate from this source distribution.
 
 ## Attribution history
 
-On 2026-09-12, review found that the original root license had been copied from Sandbox Runtime and contained Anthropic's attribution. It was corrected to the standard Apache-2.0 text; the subsequently supplied first-party attribution was recorded in `NOTICE`. The first-party default now changes to MIT using that same attribution. Sandbox Runtime's original Apache-2.0 license and copyright remain unchanged.
+On 2026-09-12, review found that the original root license had been copied from Sandbox Runtime and contained Anthropic's attribution. It was corrected to the standard Apache-2.0 text; the subsequently supplied first-party attribution was recorded in `NOTICE`. The first-party default is now MIT, using that same attribution. Sandbox Runtime's original Apache-2.0 license and copyright remain unchanged.
 
 The source gate pins the reviewed MIT license hash so a vendor-specific license cannot silently replace the root license during source synchronization.

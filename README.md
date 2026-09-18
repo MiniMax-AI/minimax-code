@@ -17,7 +17,7 @@
 <p align="center"><strong>English</strong> · <a href="README_ZH.md">简体中文</a></p>
 <p align="center">
   <img src="docs/assets/source-preview.svg" alt="Source preview">
-  <img src="docs/assets/node.svg" alt="CI: Node.js 22 and 24">
+  <img src="docs/assets/node.svg" alt="Compatibility: Node.js 22.19+, 24.2+, 25, and 26">
   <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
 </p>
 
@@ -163,7 +163,7 @@ The [small, reproducible project](examples/clamp) is the same task used in the d
 
 ## Build from source
 
-To develop MCode or run this source checkout, you need Git, **Node.js 22.19+ (22.x) or 24.2+ (24.x)**, and **pnpm 9.12.0**.
+To develop MCode or run this source checkout, you need Git, **Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26**, and **pnpm 9.12.0**.
 
 ```bash
 git clone https://github.com/MiniMax-AI/minimax-code.git
@@ -194,6 +194,8 @@ English is the primary documentation language. The [Chinese README](README_ZH.md
 For now, code and documentation pull requests are accepted only from repository collaborators. If you are not a collaborator but have an idea or proposal, please [open an issue](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) so we can discuss it. Remove secrets, account details, and private project content from reports.
 
 ## Desktop app and support
+
+<img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code desktop app" width="100%" />
 
 [Download for macOS or Windows](https://agent.minimax.io/download) · [Report a problem or ask a question](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
 

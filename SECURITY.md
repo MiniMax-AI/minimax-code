@@ -4,7 +4,7 @@ This project is a source preview. Maintainers prioritize security issues on the 
 
 Report vulnerabilities privately through **Security → Advisories → Report a vulnerability** on GitHub. If that entry is not enabled, open an issue without vulnerability details asking maintainers for a private channel. Share reproduction details only after that channel is available. Do not put credentials, exploit details, or real user data in public issues.
 
-The release coordinator, @hetaoBackend, coordinates security triage; see [Maintainers](docs/maintainers.md). A public fallback security email and a second responder have not yet been confirmed. Before public launch, the release coordinator must enable and verify the private reporting entry on the destination repository, or publish and verify a staffed private contact address. Do not interpret this document as evidence that the GitHub reporting feature is already enabled.
+The release coordinator, @hetaoBackend, coordinates security triage; see [Maintainers](docs/maintainers.md). GitHub private vulnerability reporting is not currently enabled, and no public fallback security email is listed. Until a private channel is available, open an issue without vulnerability details as described above. No response SLA is currently promised.
 
 Include the affected version, operating system and Node.js version, a minimal reproduction, expected and actual permission boundaries, and necessary redacted evidence. Use synthetic files and dedicated test accounts; do not test other people's accounts or infrastructure.
 

@@ -17,7 +17,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>简体中文</strong></p>
 <p align="center">
   <img src="docs/assets/source-preview.svg" alt="Source preview">
-  <img src="docs/assets/node.svg" alt="CI: Node.js 22 and 24">
+  <img src="docs/assets/node.svg" alt="Compatibility: Node.js 22.19+, 24.2+, 25, and 26">
   <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
 </p>
 
@@ -163,7 +163,7 @@ mcode --session
 
 ## 从源码构建
 
-开发 MCode 或运行本仓库源码需要 Git、Node.js **22.19+（22 系列）或 24.2+（24 系列）**，以及 **pnpm 9.12.0**。
+开发 MCode 或运行本仓库源码需要 Git、Node.js **22.19+（22 系列）、24.2+（24 系列）、25 或 26**，以及 **pnpm 9.12.0**。
 
 ```bash
 git clone https://github.com/MiniMax-AI/minimax-code.git
@@ -194,6 +194,8 @@ node /absolute/path/to/minimax-code/dist/cli.js
 目前仅接受仓库协作者提交代码和文档 Pull Request。如果你不是协作者，但有想法或方案，欢迎先通过 [Issue](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) 讨论。请在报告中移除密钥、账号信息和私人项目内容。
 
 ## 桌面版与问题反馈
+
+<img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code 桌面版" width="100%" />
 
 [下载 macOS 或 Windows 桌面版](https://agent.minimaxi.com/download) · [报告问题或提问](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
 
