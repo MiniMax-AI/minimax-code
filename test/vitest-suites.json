@@ -133,7 +133,8 @@
       "packages/tui/test/unit/tui/controller/product/command-flow.test.ts",
       "packages/tui/test/unit/tui/controller/product/feature-flow.test.ts",
       "packages/tui/test/unit/tui/features/settings/hotkeys-picker.test.ts",
-      "packages/tui/test/unit/incident-reporter-privacy.test.ts"
+      "packages/tui/test/unit/incident-reporter-privacy.test.ts",
+      "packages/agent-modules/context-manager/test/compaction-usage.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

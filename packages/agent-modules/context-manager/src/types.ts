@@ -1,5 +1,19 @@
-import type { AgentMessage, StreamFn, ThinkingLevel } from '@earendil-works/pi-agent-core';
+import type {
+  AgentMessage,
+  CompactionSummaryMessage,
+  StreamFn,
+  ThinkingLevel,
+} from '@earendil-works/pi-agent-core';
 import type { Api, Model, Tool } from '@earendil-works/pi-ai';
+
+export interface ContextCompactionSummaryMessage extends CompactionSummaryMessage {
+  /**
+   * Number of following messages retained from the old context, whose usage is stale.
+   * Persist this with the summary so a restored transcript has the same usage boundary.
+   * Absent on legacy summaries, which must use timestamp-based freshness instead.
+   */
+  keptMessageCount?: number;
+}
 
 export interface ContextManagerSettings {
   enabled: boolean;

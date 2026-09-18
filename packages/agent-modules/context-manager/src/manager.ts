@@ -1,8 +1,4 @@
-import {
-  generateSummary,
-  type AgentMessage,
-  type CompactionSummaryMessage,
-} from '@earendil-works/pi-agent-core';
+import { generateSummary, type AgentMessage } from '@earendil-works/pi-agent-core';
 import type {
   PiBeforeLlmCallHook,
   PiBeforeLlmCallHookDecision,
@@ -13,6 +9,7 @@ import { computeCompactionTriggerAt, DEFAULT_CONTEXT_MANAGER_SETTINGS } from './
 import { createDefaultContextTokenEstimator, type TokenEstimator } from './token-estimator.js';
 import type {
   ContextCompactionPlan,
+  ContextCompactionSummaryMessage,
   ContextManagerCheckpointOptions,
   ContextManagerLock,
   ContextManagerObserver,
@@ -116,7 +113,7 @@ export class ContextManager {
 
     const replacementId = this.idGenerator();
     const replacementMessages = [
-      createCompactionSummary(summary, plan.tokensBefore, this.nowMs()),
+      createCompactionSummary(summary, plan.tokensBefore, this.nowMs(), plan.keptMessages.length),
       ...plan.keptMessages,
     ];
     const tokensAfter = this.tokenEstimator.estimateContextTokens(replacementMessages).tokens;
@@ -510,12 +507,14 @@ function createCompactionSummary(
   summary: string,
   tokensBefore: number,
   timestamp: number,
-): CompactionSummaryMessage {
+  keptMessageCount: number,
+): ContextCompactionSummaryMessage {
   return {
     role: 'compactionSummary',
     summary,
     tokensBefore,
     timestamp,
+    keptMessageCount,
   };
 }
 

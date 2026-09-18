@@ -20,7 +20,7 @@
  * Ground-truth-aware estimate
  * ---------------------------
  * `estimateContextTokens` preserves pi-agent-core's good pattern:
- *  1. Find the last successful assistant message with a usage block;
+ *  1. Find the last successful assistant message with usage for the current context;
  *  2. Trust its provider-reported total as the prefix sum;
  *  3. Estimate only the trailing messages after that point.
  * This bounds estimator error to the trailing window — typically a handful of
@@ -48,6 +48,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { Buffer } from 'node:buffer';
 import { countTokens as countO200kBase } from 'gpt-tokenizer/model/gpt-4o';
+import type { ContextCompactionSummaryMessage } from './types.js';
 
 export interface ContextTokenEstimate {
   /** Estimated total tokens consumed by `messages`. */
@@ -163,8 +164,36 @@ function getAssistantUsage(message: AgentMessage): AssistantUsageRef | undefined
 function getLastAssistantUsageInfo(
   messages: AgentMessage[],
 ): { usage: AssistantUsageRef; index: number } | undefined {
+  let firstFreshIndex = 0;
+  let compactedAt: number | undefined;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const usage = getAssistantUsage(messages[i]!);
+    if (messages[i]!.role !== 'compactionSummary') continue;
+    const summary = messages[i] as ContextCompactionSummaryMessage;
+    const keptCount = summary.keptMessageCount;
+    if (keptCount !== undefined) {
+      // Kept assistants appear AFTER the summary too. Only appended responses
+      // describe the replacement context; their wall-clock timestamps may tie
+      // or precede the summary if the clock changed.
+      if (!Number.isSafeInteger(keptCount) || keptCount < 0) return undefined;
+      firstFreshIndex = i + 1 + keptCount;
+    } else {
+      // Legacy persisted transcripts have no explicit retained-tail boundary.
+      // Match the local runtime's conservative timestamp freshness rule.
+      if (!Number.isFinite(summary.timestamp)) return undefined;
+      compactedAt = summary.timestamp;
+      firstFreshIndex = i + 1;
+    }
+    break;
+  }
+  for (let i = messages.length - 1; i >= firstFreshIndex; i -= 1) {
+    const message = messages[i]!;
+    if (
+      compactedAt !== undefined &&
+      (!Number.isFinite(message.timestamp) || message.timestamp <= compactedAt)
+    ) {
+      continue;
+    }
+    const usage = getAssistantUsage(message);
     if (usage) return { usage, index: i };
   }
   return undefined;

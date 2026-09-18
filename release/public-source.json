@@ -139,6 +139,7 @@
     "packages/agent-modules/context-manager/src/settings.ts",
     "packages/agent-modules/context-manager/src/token-estimator.ts",
     "packages/agent-modules/context-manager/src/types.ts",
+    "packages/agent-modules/context-manager/test/compaction-usage.test.ts",
     "packages/agent-modules/conversation-contract/package.json",
     "packages/agent-modules/conversation-contract/src/index.ts",
     "packages/agent-modules/conversation-contract/src/process-local.ts",
