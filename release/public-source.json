@@ -381,6 +381,7 @@
     "packages/agent-tools/src/shared/read-postprocess.ts",
     "packages/agent-tools/src/shared/read-result.ts",
     "packages/agent-tools/src/shared/read-video.ts",
+    "packages/agent-tools/src/shared/replace-all-edit.test.ts",
     "packages/agent-tools/src/shared/replace-all-edit.ts",
     "packages/agent-tools/src/shared/rg-scan-policy.ts",
     "packages/agent-tools/src/shared/rg-sensitive.ts",

@@ -93,7 +93,8 @@ export async function buildReplaceAllEdit(
  */
 function rawStringReplaceAll(haystack: string, needle: string, replacement: string): string {
   if (typeof haystack.replaceAll === 'function') {
-    return haystack.replaceAll(needle, replacement);
+    // A callback keeps replacement text literal instead of expanding $ sequences.
+    return haystack.replaceAll(needle, () => replacement);
   }
   return haystack.split(needle).join(replacement);
 }
