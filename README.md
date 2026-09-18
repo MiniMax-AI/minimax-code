@@ -92,6 +92,8 @@ mcode provider add --name my-provider --base-url https://example.com/v1 \
 mcode
 ```
 
+`--use` tests the first listed model before saving and selecting it. A failed connection test saves nothing. Omit `--use` to save without testing or changing the default model. For custom/local models, add `--context-limit 32768 --output-limit 4096` (use your server's actual limits). Each value must be a positive safe integer and applies to every repeated `--model`. Inspect configured limits with `mcode provider list --json`. Omitting these flags preserves the existing model-limit defaults.
+
 Supported API formats: `openai-completions`, `openai-responses`, and `anthropic-messages`. See the [model examples](docs/examples.md#2-choose-your-own-model) for environment variable setup, connection checks, and model overrides for a single run.
 
 </details>

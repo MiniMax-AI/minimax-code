@@ -28,7 +28,7 @@ function createPort() {
         configRevision: 'rev-1',
         maskedApiKey: 'sk-****1234',
         rawApiKey: 'must-never-cross-the-cli-boundary',
-        models: [{ modelId: 'gpt-4.1', displayName: 'GPT-4.1' }],
+        models: [{ modelId: 'gpt-4.1', displayName: 'GPT-4.1', contextLimit: 32768, maxOutputTokens: 4096 }],
       },
     ]),
     getMiniMaxApiKeyStatus: vi.fn(async () => ({
@@ -118,6 +118,10 @@ describe('McodeProviderApplication', () => {
     expect(JSON.stringify(snapshot)).toContain('MiniMax OAuth');
     expect(JSON.stringify(snapshot)).not.toContain('must-never-cross-the-cli-boundary');
     expect(snapshot.providers[2]).not.toHaveProperty('rawApiKey');
+    expect(snapshot.providers[2]?.models[0]).toMatchObject({
+      contextLimit: 32768,
+      maxOutputTokens: 4096,
+    });
     expect(port.getCodexOAuthStatus).not.toHaveBeenCalled();
   });
 

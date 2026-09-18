@@ -12,6 +12,8 @@ export type McodeProviderCliRequest =
       readonly baseUrl: string;
       readonly apiFormat: McodeProviderApiFormat;
       readonly models: readonly string[];
+      readonly contextLimit?: number;
+      readonly outputLimit?: number;
       readonly apiKeyEnv?: string;
       readonly saveAndUse?: boolean;
     }
@@ -58,14 +60,46 @@ export async function runMcodeProviderCommand(
           `Provider API key is missing. Set ${envName} or pass --api-key-env <name>.`,
         );
       }
-      await context.application.create({
+      const input = {
         name: request.name,
         baseUrl: request.baseUrl,
         apiKey,
         apiFormat: request.apiFormat,
-        models: request.models.map((modelId) => ({ modelId })),
-        saveAndUse: request.saveAndUse,
-      });
+        models: request.models.map((modelId) => ({
+          modelId,
+          ...(request.contextLimit !== undefined || request.outputLimit !== undefined
+            ? {
+                limit: {
+                  ...(request.contextLimit !== undefined ? { context: request.contextLimit } : {}),
+                  ...(request.outputLimit !== undefined ? { output: request.outputLimit } : {}),
+                },
+              }
+            : {}),
+        })),
+      };
+      if (request.saveAndUse) {
+        const modelId = request.models[0];
+        if (!modelId) throw new Error('At least one --model <id> is required.');
+        const result = await context.application.saveCandidate({
+          ...input,
+          modelId,
+          saveAndUse: true,
+        });
+        if (!result.success) {
+          throw new Error(
+            formatTuiActionFailure(
+              result.status?.lastErrorMessage ?? result.status?.state ?? 'Connection unavailable',
+              {
+                summary: 'Provider connection test failed. Nothing was saved or selected.',
+                nextStep:
+                  'Check the URL, API key, and first model ID, then retry; omit --use to save without testing.',
+              },
+            ),
+          );
+        }
+        return `Provider added and selected: ${request.name}`;
+      }
+      await context.application.create(input);
       return `Provider added: ${request.name}`;
     }
     if (request.action === 'remove') {

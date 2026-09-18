@@ -50,7 +50,19 @@ pnpm mcode provider test <provider-id> --model <model-id>
 pnpm mcode exec "Explain this project's test entry points" --model <provider-id>/<model-id>
 ```
 
-Replace the example URL, model name, and IDs with your configuration and the IDs returned by the list command. `--use` sets the default model; `exec --model` overrides only the current run. Backslash line continuations are for POSIX shells; use a single line in PowerShell.
+Replace the example URL, model name, and IDs with your configuration and the IDs returned by the list command. `--use` tests the first listed model, then saves the provider and selects that model as the default. A failed connection test exits nonzero without saving or changing the default; correct the URL, key, or first model ID and retry. Omit `--use` to save without a connection test or default-model change. `exec --model` overrides only the current run. Backslash line continuations are for POSIX shells; use a single line in PowerShell.
+
+For a local server, configure its actual token limits explicitly:
+
+```bash
+pnpm mcode provider add --name local-models --base-url http://localhost:8080/v1 \
+  --api-format openai-completions --model local-model --model another-model \
+  --api-key-env MCODE_PROVIDER_API_KEY \
+  --context-limit 32768 --output-limit 4096 --use
+pnpm mcode provider list --json
+```
+
+`--context-limit` and `--output-limit` each accept a positive safe integer (at most `9007199254740991`). Either flag can be used independently. The same limits apply to every repeated `--model`; only the first model is tested and selected by `--use`. The JSON list shows the configured values as `contextLimit` and `maxOutputTokens`. Without these flags, the existing defaults remain unchanged (unknown custom models currently fall back to 200,000 context tokens and 16,384 output tokens). Model discovery does not infer your local server's context size.
 
 [Live acceptance](verification.md) separately verified MiniMax Token Plan and one configured BYOK provider. This is not a guarantee for every compatible service.
 

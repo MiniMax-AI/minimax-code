@@ -92,6 +92,8 @@ mcode provider add --name my-provider --base-url https://example.com/v1 \
 mcode
 ```
 
+`--use` 会先测试第一个模型，成功后保存并设为默认模型；连接测试失败时不保存。省略 `--use` 则仅保存，不测试，也不改变默认模型。对于自定义或本地模型，可添加 `--context-limit 32768 --output-limit 4096`（请填写服务器的实际限制）。两个值都必须是正安全整数，并应用于所有重复指定的 `--model`。可通过 `mcode provider list --json` 查看已配置的限制。省略这两个参数时保持现有的模型限制默认值。
+
 支持 `openai-completions`、`openai-responses` 和 `anthropic-messages`。连接测试、单次模型切换及环境变量设置见 [模型示例](docs/examples.md#2-choose-your-own-model)。
 
 </details>

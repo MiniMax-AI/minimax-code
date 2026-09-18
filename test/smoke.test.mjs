@@ -199,3 +199,22 @@ test("local plugin browsing remains available with managed services offline", (t
     assert.match(result.stdout, /Usage:/);
   }
 });
+
+test("provider add validates token limits before opening the runtime", (t) => {
+  const options = fixture(t);
+  const args = [
+    "provider", "add", "--name", "Invalid limits", "--base-url", "http://127.0.0.1:1/v1",
+    "--model", "synthetic-model",
+  ];
+  for (const flag of ["--context-limit", "--output-limit"]) {
+    for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"]) {
+      const result = spawnSync(process.execPath, [cli, ...args, `${flag}=${value}`], {
+        ...options, encoding: "utf8", timeout: 15000,
+      });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /positive safe integer/);
+      assert.ok(result.stderr.includes(flag), result.stderr);
+    }
+  }
+  assert.equal(existsSync(path.join(options.cwd, "config.yaml")), false);
+});

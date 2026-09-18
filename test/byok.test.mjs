@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { parse as parseYaml } from "yaml";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 // This fixture validates BYOK transport and real Runtime persistence, not model quality.
@@ -38,6 +39,7 @@ test(
     const readMarker = `ACTUAL_FILE_CONTENT_${Date.now()}`;
     writeFileSync(path.join(dataDir, "read-fixture.txt"), readMarker);
     let toolRequested = false;
+    let rejectConnection = false;
     const networkAudit = path.join(dataDir, "network-audit.log");
     const server = createServer(async (req, res) => {
       let raw = "";
@@ -46,6 +48,12 @@ test(
       requests.push({ url: req.url, auth: req.headers.authorization, body });
       if (!req.url?.endsWith("/chat/completions")) {
         res.writeHead(404).end();
+        return;
+      }
+      if (rejectConnection) {
+        res.writeHead(401, { "content-type": "application/json" }).end(
+          JSON.stringify({ error: { message: "Synthetic invalid credential" } }),
+        );
         return;
       }
       if (!body.stream) {
@@ -229,6 +237,7 @@ test(
       "--model",
       "fixture-model",
     ]);
+    assert.equal(requests.length, 0, "Adding without --use must not test or activate");
     const snapshot = JSON.parse(await run(["provider", "list", "--json"]));
     assert.equal(
       snapshot.providers.some((p) => p.kind === "minimax-oauth"),
@@ -245,11 +254,60 @@ test(
       "--model",
       "fixture-model",
     ]);
+    const configPath = path.join(dataDir, "config.yaml");
+    const savedConfig = () => parseYaml(readFileSync(configPath, "utf8"));
+    assert.equal(savedConfig().defaultModel, "minimax/MiniMax-M3");
+    assert.equal(savedConfig().custom_provider.fixture.models["fixture-model"].limit, undefined);
+    assert.equal(selected.active, false);
+    assert.equal(selected.models[0].contextLimit, undefined);
+    assert.equal(selected.models[0].maxOutputTokens, undefined);
+
+    const addArgs = [
+      "provider", "add", "--name", "Limited", "--base-url", baseUrl,
+      "--api-format", "openai-completions", "--model", "fixture-model",
+      "--model", "second-model", "--context-limit", "32768", "--output-limit", "4096", "--use",
+    ];
+    const beforeFailure = readFileSync(configPath, "utf8");
+    rejectConnection = true;
+    await assert.rejects(run(addArgs), /Provider connection test failed.*Nothing was saved/s);
+    assert.equal(readFileSync(configPath, "utf8"), beforeFailure);
+    rejectConnection = false;
+    const beforeAdd = requests.length;
+    assert.match(await run(addArgs), /Provider added and selected: Limited/);
+    assert.ok(requests.length > beforeAdd, "Activation must test the candidate before saving");
+    assert.equal(requests[beforeAdd].body.model, "fixture-model");
+    const config = savedConfig();
+    assert.equal(config.defaultModel, "custom_provider:limited/fixture-model");
+    for (const model of ["fixture-model", "second-model"]) {
+      assert.deepEqual(config.custom_provider.limited.models[model].limit, { context: 32768, output: 4096 });
+    }
+    const configured = JSON.parse(await run(["provider", "list", "--json"])).providers.find(
+      (provider) => provider.name === "Limited",
+    );
+    assert.equal(configured.active, true);
+    assert.equal(configured.models[0].selected, true);
+    for (const model of configured.models) {
+      assert.equal(model.contextLimit, 32768);
+      assert.equal(model.maxOutputTokens, 4096);
+    }
+    const beforeSaveOnly = requests.length;
+    for (const [name, flag, limit] of [
+      ["context-only", "--context-limit", { context: 32768 }],
+      ["output-only", "--output-limit", { output: 32768 }],
+    ]) {
+      await run([
+        "provider", "add", "--name", name, "--base-url", baseUrl,
+        "--api-format", "openai-completions", "--model", "fixture-model", flag, "32768",
+      ]);
+      assert.deepEqual(savedConfig().custom_provider[name].models["fixture-model"].limit, limit);
+      assert.equal(savedConfig().defaultModel, config.defaultModel);
+    }
+    assert.equal(requests.length, beforeSaveOnly, "Limits alone must not test or select a model");
     const modelArgs = ["--model", `${selected.providerId}/fixture-model`];
+    // The first run must work through the saved default, without --model or managed login.
     const first = await run([
       "exec",
       "Remember this marker: SOURCE_REPOSITORY_TEST",
-      ...modelArgs,
       "--timeout",
       "20s",
       "--max-steps",

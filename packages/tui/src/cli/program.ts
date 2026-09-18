@@ -192,13 +192,17 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     )
     .option('--model <id>', 'model ID (repeatable)', collectOptionValue, [])
     .option('--api-key-env <name>', 'environment variable containing the API key')
-    .option('--use', 'select the first model as the default')
+    .option('--context-limit <tokens>', 'context limit for every listed model', parsePositiveSafeInteger)
+    .option('--output-limit <tokens>', 'output limit for every listed model', parsePositiveSafeInteger)
+    .option('--use', 'test the first model, then save and select it as the default')
     .action(
       (commandOptions: {
         name: string;
         baseUrl: string;
         apiFormat: McodeProviderApiFormat;
         model: string[];
+        contextLimit?: number;
+        outputLimit?: number;
         apiKeyEnv?: string;
         use?: boolean;
       }) => {
@@ -211,6 +215,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
           baseUrl: commandOptions.baseUrl,
           apiFormat: commandOptions.apiFormat,
           models: commandOptions.model,
+          contextLimit: commandOptions.contextLimit,
+          outputLimit: commandOptions.outputLimit,
           apiKeyEnv: commandOptions.apiKeyEnv,
           saveAndUse: commandOptions.use,
         });
@@ -414,4 +420,12 @@ function requireAcpRunner(options: CreateTuiProgramOptions) {
 function requireTelemetryRunner(options: CreateTuiProgramOptions) {
   if (!options.runTelemetry) throw new Error('Telemetry inspection is unavailable.');
   return options.runTelemetry;
+}
+
+function parsePositiveSafeInteger(value: string): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    throw new InvalidArgumentError('expected a positive safe integer');
+  }
+  return number;
 }

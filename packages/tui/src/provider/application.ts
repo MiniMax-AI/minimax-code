@@ -189,6 +189,8 @@ function normalizeCustomProvider(provider: McodeRuntimeProviderView): McodeProvi
       modelId: model.modelId,
       ...(model.displayName ? { displayName: model.displayName } : {}),
       ...(model.selected !== undefined ? { selected: model.selected } : {}),
+      ...(model.contextLimit !== undefined ? { contextLimit: model.contextLimit } : {}),
+      ...(model.maxOutputTokens !== undefined ? { maxOutputTokens: model.maxOutputTokens } : {}),
       ...(model.status ? { status: model.status } : {}),
     })),
     ...(provider.status ? { status: provider.status } : {}),
