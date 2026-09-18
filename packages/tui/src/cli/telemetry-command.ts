@@ -23,16 +23,20 @@ export function runMcodeTelemetryCommand(
 ): string {
   const environment = dependencies.environment ?? process.env;
   const config = (dependencies.readConfig ?? getConfig)();
-  const policy = resolveMcodeBusinessTelemetryPolicy({
-    configEnabled: config.telemetry.enabled,
-    environment,
-  });
+  const channel = (configEnabled: boolean | undefined) =>
+    resolveMcodeBusinessTelemetryPolicy({ configEnabled, environment });
+  const policy = channel(config.telemetry.enabled);
   const status = {
     enabled: policy.enabled,
     configured: policy.configured,
     blockedBy: policy.blockedBy ?? null,
     configFile: (dependencies.readConfigPath ?? getConfigPath)(),
-    optInSetting: { telemetry: { enabled: true } },
+    channels: {
+      usage: policy,
+      metrics: channel(config.telemetry.metrics),
+      diagnostics: channel(config.telemetry.diagnostics),
+    },
+    optInSetting: { telemetry: { enabled: true, metrics: true, diagnostics: true } },
     optOutEnvironment: ['MCODE_DISABLE_TELEMETRY=1', 'DO_NOT_TRACK=1'],
   };
   if (action === 'status') return `${JSON.stringify(status, null, 2)}\n`;
@@ -41,7 +45,7 @@ export function runMcodeTelemetryCommand(
       {
         ...status,
         request: null,
-        message: 'Telemetry is disabled. No business telemetry request will be sent.',
+        message: 'Usage telemetry is disabled. No business telemetry request will be sent.',
       },
       null,
       2,

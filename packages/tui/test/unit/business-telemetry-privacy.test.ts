@@ -176,6 +176,23 @@ describe('business telemetry privacy', () => {
     expect(createTelemetry).toHaveBeenCalledOnce();
   });
 
+  it('distinguishes disabled usage previews from enabled metrics and diagnostics', () => {
+    const output = JSON.parse(runMcodeTelemetryCommand('preview', '0.4.12', {
+      environment: {},
+      readConfig: () => ({ telemetry: { enabled: false, metrics: true, diagnostics: true } }),
+      readConfigPath: () => '/tmp/config.yaml',
+    }));
+    expect(output).toMatchObject({
+      request: null,
+      channels: {
+        usage: { enabled: false },
+        metrics: { enabled: true },
+        diagnostics: { enabled: true },
+      },
+      message: 'Usage telemetry is disabled. No business telemetry request will be sent.',
+    });
+  });
+
   it('reports disabled status and exposes status and preview CLI subcommands', async () => {
     const output = runMcodeTelemetryCommand('preview', '0.4.12', {
       environment: {},

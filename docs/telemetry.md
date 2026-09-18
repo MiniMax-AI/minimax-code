@@ -1,6 +1,6 @@
-# TUI usage telemetry
+# Telemetry
 
-MCode's TUI usage telemetry is disabled by default. No business telemetry client is created and no business telemetry request is sent until the user opts in.
+All automatic telemetry uploads are disabled by default and each requires its own opt-in: TUI usage events (`telemetry.enabled`), runtime performance metrics (`telemetry.metrics`), and automatic error diagnostics (`telemetry.diagnostics`). Opting in to usage events does not authorize the other two channels. Login, model requests, update checks, and user-submitted feedback are separate product actions and are not controlled by these switches.
 
 ## Turn it on or off
 
@@ -8,19 +8,21 @@ Add this to the active profile's `config.yaml`, normally `~/.minimax-code/config
 
 ```yaml
 telemetry:
-  enabled: true
+  enabled: true      # TUI usage events (anonymous, described below)
+  metrics: false     # Runtime counters, gauges, and histograms
+  diagnostics: false # Account-linked TUI and LLM error diagnostics
 ```
 
-Remove the setting or set it to `false` to turn reporting off. Either environment variable below also turns it off and takes precedence over the config file:
+Remove a setting or set it to `false` to turn that channel off. Either environment variable below turns **all channels** off and takes precedence over the config file:
 
 ```sh
 MCODE_DISABLE_TELEMETRY=1 mcode
 DO_NOT_TRACK=1 mcode
 ```
 
-Inspect the effective setting with `mcode telemetry status`. Run `mcode telemetry preview` to see a representative decoded request. Preview does not send a request. When telemetry is disabled, preview shows `request: null`.
+Inspect the effective setting of every channel with `mcode telemetry status`. Run `mcode telemetry preview` to see a representative decoded usage-event request. Preview does not send a request. When usage telemetry is disabled, preview shows `request: null`, independently of the metrics and diagnostics settings.
 
-## Data sent
+## Usage-event data sent
 
 The HTTP body is `application/x-www-form-urlencoded` with two fields:
 
@@ -68,7 +70,7 @@ MCode does not send account IDs, device IDs, workspace paths or names, session I
 
 As with any network request, the receiving server can observe transport metadata such as the source IP address. The client does not add that value to the event payload. `mcode telemetry preview` displays the decoded envelope.
 
-## Destinations
+## Usage-event destinations
 
 The destination depends on region and build environment:
 
@@ -79,4 +81,12 @@ The destination depends on region and build environment:
 
 The client keeps pending events only in memory and does not write them to disk. This repository does not define or verify server-side retention. Keep telemetry disabled when that policy does not meet your requirements.
 
-This page covers TUI usage telemetry. Login, model requests, update checks, user-submitted feedback, and bounded error diagnostics have separate network behavior described in [TUI capability coverage](tui-capabilities.md).
+## Runtime performance metrics
+
+`telemetry.metrics: true` enables the built-in cloud metrics transport: metric names, timestamps, counter/gauge/histogram values, and low-cardinality labels (runtime owner and mode, version, and per-instrument dimensions such as model, tool, or outcome). No account credential is attached. Production destinations are `https://agent.minimax.cn/matrix/api/v1/metrics/batch` (China) and `https://agent.minimax.io/matrix/api/v1/metrics/batch` (global). Metrics stay in memory; when the channel is disabled, no cloud reporter is created.
+
+## Automatic error diagnostics
+
+`telemetry.diagnostics: true` authorizes both TUI incident reports and LLM request-failure reports. Both additionally require a signed-in account: the transport uses the account's Bearer token and a `user_id` query parameter, so these reports are **account-linked** even though their contents are minimized and encrypted. The minimization schemas are described in [TUI capability coverage](tui-capabilities.md#diagnostic-upload-privacy). Both use `/minimax-cloud/api/v1/observability/desktop-errors/batch` on the regional MiniMax host. When the channel is disabled, TUI incidents are written as local-only files (7 days / 200 files) that are never uploaded, and LLM failure reports are dropped before buffering.
+
+Server-side retention for any channel is not defined or verified by this repository. Login, model requests, update checks, and user-submitted feedback have separate network behavior described in [TUI capability coverage](tui-capabilities.md).
