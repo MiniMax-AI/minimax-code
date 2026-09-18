@@ -12,7 +12,7 @@ const cli = path.join(root, "dist/cli.js");
 const version = JSON.parse(
   readFileSync(path.join(root, "packages/tui/package.json"), "utf8"),
 ).version;
-function fixture(t) {
+function fixture(t, environment = process.env) {
   const dataDir = mkdtempSync(path.join(tmpdir(), "minimax-code-smoke-"));
   const audit = path.join(dataDir, "network-attempts.log");
   t.after(() => {
@@ -31,7 +31,17 @@ function fixture(t) {
   return {
     cwd: dataDir,
     env: {
-      ...process.env,
+      ...environment,
+      // Proxy setup installs undici.fetch over the preloaded offline mock.
+      // Keep host proxy settings out of these isolated test children.
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      ALL_PROXY: "",
+      NO_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
+      all_proxy: "",
+      no_proxy: "",
       MINIMAX_DATA_DIR: dataDir,
       MAVIS_DATA_DIR: dataDir,
       MCODE_TEST_NETWORK_AUDIT: audit,
@@ -66,6 +76,38 @@ test("provider configuration loads from an isolated data directory", (t) => {
   assert.match(result.stdout, /minimax/);
 
   assert.doesNotMatch(result.stdout, /custom_provider:/);
+});
+test("offline smoke children ignore ambient proxy variables", async (t) => {
+  const proxyNames = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+  ];
+  for (const name of proxyNames) {
+    await t.test(name, (t) => {
+      const environment = {
+        ...process.env,
+        ...Object.fromEntries(proxyNames.map((key) => [key, ""])),
+        [name]: "http://127.0.0.1:9",
+      };
+      const options = fixture(t, environment);
+      const result = spawnSync(process.execPath, [cli, "provider", "list"], {
+        ...options,
+        encoding: "utf8",
+        timeout: 15000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /minimax/);
+      assert.match(
+        readFileSync(options.env.MCODE_TEST_NETWORK_AUDIT + ".managed", "utf8"),
+        /https:\/\/models\.dev\/api\.json|\/mavis\/api\/v1\/models-dev\/catalog/,
+      );
+      assert.equal(environment[name], "http://127.0.0.1:9");
+    });
+  }
 });
 test("native SQLite binding opens and reads a real database", () => {
   const db = new Database(":memory:");
