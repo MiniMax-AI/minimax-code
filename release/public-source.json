@@ -3,8 +3,6 @@
   "files": [
     ".agents/skills/cli-guide/SKILL.md",
     ".agents/skills/cross-layer-drift-sweep/SKILL.md",
-    ".agents/skills/frontend-design/LICENSE.txt",
-    ".agents/skills/frontend-design/SKILL.md",
     ".agents/skills/retro/SKILL.md",
     ".agents/skills/testing-workflow/SKILL.md",
     ".agents/skills/verify-all-runtime-sinks/SKILL.md",

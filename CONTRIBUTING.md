@@ -27,12 +27,10 @@ Repository development skills are available under [`.agents/skills`](.agents/ski
 | [testing-workflow](.agents/skills/testing-workflow/SKILL.md) | Select focused checks and the required delivery gates |
 | [verify-all-runtime-sinks](.agents/skills/verify-all-runtime-sinks/SKILL.md) | Verify alternate runtime paths, caches and artifacts |
 | [retro](.agents/skills/retro/SKILL.md) | Turn demonstrated failures into focused guidance improvements |
-| [frontend-design](.agents/skills/frontend-design/SKILL.md) | Design web interfaces when a contribution includes one |
 
 These are contributor workflows, separate from bundled product skills. They are
 adapted to this distribution's paths and verification contracts; workflow changes
-should update the relevant skill alongside its source of truth. The
-frontend-design skill retains its own Apache-2.0 license.
+should update the relevant skill alongside its source of truth.
 
 ```bash
 pnpm install --frozen-lockfile
