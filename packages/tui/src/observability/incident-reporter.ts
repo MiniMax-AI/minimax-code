@@ -12,7 +12,7 @@ import {
 import { arch, platform } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
-import type { MavisBuildEnv, MavisRegion } from '@mavis/config';
+import { isTelemetryChannelEnabled, type MavisBuildEnv, type MavisRegion } from '@mavis/config';
 
 export type TuiIncidentPhase = 'startup' | 'runtime' | 'shutdown';
 export type TuiIncidentSeverity = 'fatal' | 'error' | 'warning';
@@ -66,6 +66,8 @@ export interface TuiIncidentAuthContext {
 }
 
 export interface CreateTuiIncidentReporterOptions {
+  /** Explicit `telemetry.diagnostics` opt-in; environment opt-outs always take precedence. */
+  readonly readTelemetryEnabled?: () => boolean | undefined;
   readonly dataDir: string;
   readonly appVersion: string;
   readonly region: MavisRegion;
@@ -313,7 +315,10 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
       };
       writeJsonAtomically(
         this.directory,
-        join(this.directory, `pending-${occurredAtMs}-${incidentId}.json`),
+        join(
+          this.directory,
+          `${this.uploadEnabled() ? 'pending' : 'local'}-${occurredAtMs}-${incidentId}.json`,
+        ),
         stored,
       );
       this.prune();
@@ -379,6 +384,7 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
   }
 
   private async drainPending(): Promise<void> {
+    if (!this.uploadEnabled()) return;
     const resolveAuthContext = this.options.resolveAuthContext;
     if (!resolveAuthContext) return;
     let auth: TuiIncidentAuthContext | undefined;
@@ -415,7 +421,7 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
     accessToken: string,
     realUserID: string,
   ): Promise<boolean> {
-    if (this.networkDrainStopped) return false;
+    if (this.networkDrainStopped || !this.uploadEnabled()) return false;
     const requestController = new AbortController();
     const requestTimeout = setTimeout(
       () => requestController.abort(),
@@ -502,10 +508,14 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
     }
   }
 
+  private uploadEnabled(): boolean {
+    return isTelemetryChannelEnabled('diagnostics', this.options.readTelemetryEnabled);
+  }
+
   private prune(): void {
     const nowMs = this.nowMs();
     const incidentFiles = safeReadDirectory(this.directory)
-      .filter((entry) => /^(?:pending|sent)-.*\.json$/u.test(entry))
+      .filter((entry) => /^(?:pending|sent|local)-.*\.json$/u.test(entry))
       .flatMap((entry) => {
         const path = join(this.directory, entry);
         try {
@@ -527,6 +537,7 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
     }
     const retained = incidentFiles.filter((file) => nowMs - file.modifiedAtMs <= RETENTION_MS);
     const deletionOrder = [
+      ...retained.filter((file) => basename(file.path).startsWith('local-')),
       ...retained.filter((file) => basename(file.path).startsWith('sent-')),
       ...retained.filter((file) => basename(file.path).startsWith('pending-')),
     ];

@@ -10,6 +10,7 @@ import {
 import type {
   TuiIncidentCapture,
   TuiIncidentReporter,
+  CreateTuiIncidentReporterOptions,
 } from '../../src/observability/incident-reporter.js';
 
 const privateText = 'Unannounced acquisition of Example Company /home/private/client-plan.txt';
@@ -29,13 +30,19 @@ function temporaryDirectory() {
   return dataDir;
 }
 
-function fixture(dataDir = temporaryDirectory(), authenticated = true) {
+function fixture(
+  dataDir = temporaryDirectory(),
+  authenticated = true,
+  readTelemetryEnabled: () => boolean | undefined = () => true,
+  resolveAuthContext?: CreateTuiIncidentReporterOptions['resolveAuthContext'],
+) {
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
     requests.push({ url: String(url), init: init! });
     return new Response(null, { status: 204 });
   });
   const reporter = createTuiIncidentReporter({
+    readTelemetryEnabled,
     dataDir,
     appVersion: '0.4.12',
     region: 'en',
@@ -46,8 +53,8 @@ function fixture(dataDir = temporaryDirectory(), authenticated = true) {
     terminal: privateText,
     osVersion: privateText,
     tuiMode: privateText,
-    resolveAuthContext: () =>
-      authenticated ? { accessToken: token, realUserID: userId } : undefined,
+    resolveAuthContext: resolveAuthContext ?? (() =>
+      authenticated ? { accessToken: token, realUserID: userId } : undefined),
     fetchImpl,
   });
   reporters.push(reporter);
@@ -109,6 +116,50 @@ function diskRecords(directory: string) {
 }
 
 describe('TUI automatic incident HTTP privacy boundary', () => {
+  it.each([undefined, false])('keeps incidents local without an explicit diagnostics opt-in (%s)', async (enabled) => {
+    const { reporter, requests, directory } = fixture(undefined, true, () => enabled);
+    reporter.capture(input(new Error('synthetic')));
+    await reporter.drain();
+    expect(requests).toEqual([]);
+    const files = readdirSync(directory);
+    expect(files.filter((name) => name.startsWith('local-'))).toHaveLength(1);
+    expect(files.some((name) => name.startsWith('pending-'))).toBe(false);
+  });
+
+  it.each(['MCODE_DISABLE_TELEMETRY', 'DO_NOT_TRACK'])('%s overrides the diagnostics opt-in', async (key) => {
+    vi.stubEnv(key, '1');
+    try {
+      const { reporter, requests } = fixture(undefined, true, () => true);
+      reporter.capture(input(new Error('synthetic')));
+      await reporter.drain();
+      expect(requests).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each(['config', 'MCODE_DISABLE_TELEMETRY', 'DO_NOT_TRACK'])('does not upload when %s revokes consent during authentication', async (source) => {
+    let enabled = true;
+    let resolveAuth!: (auth: { accessToken: string; realUserID: string }) => void;
+    const auth = new Promise<{ accessToken: string; realUserID: string }>((resolve) => {
+      resolveAuth = resolve;
+    });
+    const resolveAuthContext = vi.fn(() => auth);
+    const { reporter, requests } = fixture(undefined, true, () => enabled, resolveAuthContext);
+    try {
+      reporter.capture(input(new Error('synthetic')));
+      const drain = reporter.drain();
+      expect(resolveAuthContext).toHaveBeenCalled();
+      if (source === 'config') enabled = false;
+      else vi.stubEnv(source, '1');
+      resolveAuth({ accessToken: token, realUserID: userId });
+      await drain;
+      expect(requests).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('decrypts the final fetch payload without recovering private text from any capture field', async () => {
     const { reporter, requests, directory } = fixture();
     const getter = vi.fn(() => privateText);

@@ -917,6 +917,10 @@ export interface ReviewConfig {
 export interface TelemetryConfig {
   /** Send anonymous TUI usage events. Disabled until the user opts in. */
   enabled: boolean;
+  /** Send runtime performance metrics. Separate opt-in, disabled by default. */
+  metrics?: boolean;
+  /** Send minimized, account-linked automatic error reports. Separate opt-in, disabled by default. */
+  diagnostics?: boolean;
 }
 
 export interface Config {
@@ -1765,7 +1769,7 @@ const DEFAULTS: Omit<
   // No status line items by default: the TUI picks its build-specific default
   // when `tui.statusLine` is absent.
   tui: {},
-  telemetry: { enabled: false },
+  telemetry: { enabled: false, metrics: false, diagnostics: false },
   opencode: {
     xdg: {
       dataIsolation: false,
@@ -2098,6 +2102,8 @@ function parseTelemetryConfig(raw: unknown): TelemetryConfig {
   const enabled = Reflect.get(raw, "enabled");
   return {
     enabled: typeof enabled === "boolean" ? enabled : DEFAULTS.telemetry.enabled,
+    metrics: Reflect.get(raw, "metrics") === true,
+    diagnostics: Reflect.get(raw, "diagnostics") === true,
   };
 }
 

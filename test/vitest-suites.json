@@ -15,6 +15,7 @@
       "packages/tui/test/unit/daily-checkin-application.test.ts",
       "packages/tui/test/unit/daily-checkin-http-gateway.test.ts",
       "packages/local-runtime/test/unit/error-reporting-privacy.test.ts",
+      "packages/local-runtime/test/unit/metrics-telemetry-privacy.test.ts",
       "packages/tui/test/unit/runtime-feedback-service.test.ts",
       "packages/tui/test/unit/runtime-feedback-diagnostic-upload.test.ts",
       "packages/tui/test/unit/update-service.test.ts",

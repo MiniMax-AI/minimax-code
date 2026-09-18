@@ -67,6 +67,8 @@ export interface DesktopErrorReporter {
  * DESKTOP_ERROR_REPORTING_DEFAULTS}); tests may override them for deterministic results.
  */
 export interface DesktopErrorReporterOptions {
+  /** Explicit `telemetry.diagnostics` opt-in; environment opt-outs always take precedence. */
+  readTelemetryEnabled?: () => boolean | undefined;
   /** Read live login state (token and real user ID) for each send. */
   authContextGetter?: () => LocalRuntimeAuthContext | undefined;
   /** Managed-backend routing headers, consistent with other cloud calls. */

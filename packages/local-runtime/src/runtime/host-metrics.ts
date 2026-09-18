@@ -1,4 +1,9 @@
-import { getRuntimeBuildEnv, getRuntimeRegion, isManagedRuntime } from '@mavis/config';
+import {
+  getRuntimeBuildEnv,
+  getRuntimeRegion,
+  isManagedRuntime,
+  isTelemetryChannelEnabled,
+} from '@mavis/config';
 import { createPiTurnHistogramBucketsByName } from '@mavis/agent-core/pi-turn-runner';
 
 import { logger } from '../common/logger.js';
@@ -12,6 +17,8 @@ import {
 import type { LocalRuntimeMode } from './mode.js';
 
 export interface LocalRuntimeHostMetricsOptions {
+  /** Explicit `telemetry.metrics` opt-in; environment opt-outs always take precedence. */
+  readonly readTelemetryEnabled?: () => boolean | undefined;
   readonly runtimeOwnerKind: string;
   readonly runtimeMode?: LocalRuntimeMode;
   readonly appVersion?: string;
@@ -101,7 +108,9 @@ export function buildLocalRuntimeMetricsClient(
   options: LocalRuntimeHostMetricsOptions,
 ): MetricsClient {
   const managed = isManagedRuntime();
-  const reporter = options.metricsReporter ?? buildManagedReporter(managed);
+  // The built-in cloud transport additionally requires an explicit `telemetry.metrics` opt-in.
+  const cloudEnabled = managed && isTelemetryChannelEnabled('metrics', options.readTelemetryEnabled);
+  const reporter = options.metricsReporter ?? buildManagedReporter(cloudEnabled);
 
   const onError = (err: unknown): void => {
     logger.warn(
@@ -110,8 +119,11 @@ export function buildLocalRuntimeMetricsClient(
     );
   };
 
-  if (!managed && !options.metricsReporter) {
-    logger.info({ reason: 'unmanaged_runtime' }, 'Local runtime metrics reporter disabled');
+  if (!cloudEnabled && !options.metricsReporter) {
+    logger.info(
+      { reason: managed ? 'telemetry_metrics_opt_in_required' : 'unmanaged_runtime' },
+      'Local runtime metrics reporter disabled',
+    );
   }
 
   return createLocalRuntimeMetricsClient({

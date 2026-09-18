@@ -15,7 +15,7 @@
  * every stage; never expose them to callers or affect LLM requests, retries, or turn results.
  */
 
-import { getRuntimeBuildEnv, getRuntimeRegion } from '@mavis/config';
+import { getRuntimeBuildEnv, getRuntimeRegion, isTelemetryChannelEnabled } from '@mavis/config';
 import { LLM_ERROR_REASONS } from '@mavis/shared/llm-error-classifier';
 
 import { logger } from '../common/logger.js';
@@ -62,6 +62,7 @@ export function createDesktopErrorReporter(
 
   /** Read login state, encrypt each event_log, and POST the batch without letting failures affect the main flow. */
   async function encryptAndSend(events: DesktopErrorLog[]): Promise<void> {
+    if (!isTelemetryChannelEnabled('diagnostics', options.readTelemetryEnabled)) return;
     const authContext = options.authContextGetter?.();
     const token = authContext?.accessToken?.trim();
     const userId = authContext?.realUserID?.trim();
@@ -103,6 +104,7 @@ export function createDesktopErrorReporter(
   return {
     report(event: DesktopErrorLog): void {
       try {
+        if (!isTelemetryChannelEnabled('diagnostics', options.readTelemetryEnabled)) return;
         // Drop oversized raw logs entirely, never truncate (design §2). Measure plaintext size to bound both
         // memory usage and the final request body.
         const byteLength = Buffer.byteLength(event.event_log, 'utf8');

@@ -26,9 +26,10 @@ function receiverDecrypt(event: DesktopErrorLog): string {
   );
 }
 
-function reporterFixture() {
+function reporterFixture(readTelemetryEnabled: () => boolean | undefined = () => true) {
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const reporter = createDesktopErrorReporter({
+    readTelemetryEnabled,
     authContextGetter: () => ({ accessToken: token, realUserID: userId }),
     region: () => 'en',
     buildEnv: () => 'prod',
@@ -41,6 +42,44 @@ function reporterFixture() {
 }
 
 describe('automatic error upload privacy boundary', () => {
+  it.each([undefined, false])('does not upload without an explicit diagnostics opt-in (%s)', async (enabled) => {
+    const { reporter, requests } = reporterFixture(() => enabled);
+    reporter.report({ event_type: 'llm_request_failure', event_log: '{}', occurred_at_ms: 1, code_location: 'synthetic' });
+    await reporter.flush();
+    expect(requests).toEqual([]);
+  });
+
+  it.each(['MCODE_DISABLE_TELEMETRY', 'DO_NOT_TRACK'])('%s overrides the diagnostics opt-in', async (key) => {
+    vi.stubEnv(key, '1');
+    try {
+      const { reporter, requests } = reporterFixture(() => true);
+      reporter.report({ event_type: 'llm_request_failure', event_log: '{}', occurred_at_ms: 1, code_location: 'synthetic' });
+      await reporter.flush();
+      expect(requests).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each(['config', 'MCODE_DISABLE_TELEMETRY', 'DO_NOT_TRACK'])('drops buffered diagnostics when %s revokes consent before flushing', async (source) => {
+    let enabled = true;
+    const { reporter, requests } = reporterFixture(() => enabled);
+    try {
+      reporter.report({ event_type: 'llm_request_failure', event_log: '{}', occurred_at_ms: 1, code_location: 'synthetic' });
+      if (source === 'config') enabled = false;
+      else vi.stubEnv(source, '1');
+      await reporter.flush();
+      expect(requests).toEqual([]);
+      enabled = true;
+      vi.unstubAllEnvs();
+      await reporter.flush();
+      expect(requests).toEqual([]);
+    } finally {
+      await reporter.close();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('captures the final HTTP batch and decrypts it with receiver credentials without recovering provider content', async () => {
     const { reporter, requests } = reporterFixture();
     const headers = new Headers({
