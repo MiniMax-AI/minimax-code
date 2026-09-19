@@ -68,24 +68,6 @@ pnpm mcode provider list --json
 
 [Live acceptance](verification.md) separately verified MiniMax Token Plan and one configured BYOK provider. This is not a guarantee for every compatible service.
 
-### OpenAI-compatible gateways and tool history
-
-Checkpoint requests retain historical tool calls/results without offering new tools. Some gateways reject `tools: []`, while others require it for that history. With no override, MCode omits the field and retries with an empty array once only after a recognized missing-tools HTTP 400. Recognition is limited to a structured missing-required-parameter/argument code for `tools` or the known LiteLLM Anthropic missing-tools error. Other errors and failures after a response stream begins do not trigger this recovery.
-
-For a gateway with a known requirement, set `compat.requiresToolsForToolHistory` on the existing model entry in your active profile's `config.yaml`:
-
-```yaml
-custom_provider:
-  my-provider:
-    # Preserve this provider's existing API, options, and other model settings.
-    models:
-      my-model:
-        compat:
-          requiresToolsForToolHistory: true
-```
-
-`true` sends empty tools proactively when history contains tools but no current definitions are supplied. `false` omits the field and disables automatic recovery in that case. Leaving the field unset enables the bounded recovery above. Nonempty tool definitions are preserved in all modes. This setting is independent of `cacheControlFormat`; prompt-cache support does not determine the tools requirement. These behaviors are covered by offline HTTP fixtures, not a guarantee for every live gateway/version.
-
 ## 3. Search and image input
 
 After signing in to MiniMax, try a task that explicitly requires search:

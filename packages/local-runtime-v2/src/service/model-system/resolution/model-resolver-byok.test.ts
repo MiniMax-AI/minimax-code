@@ -281,15 +281,6 @@ describe('custom BYOK compat overrides', () => {
     });
   });
 
-  it.each([true, false])('preserves requiresToolsForToolHistory=%s independently of caching', (value) => {
-    expect(planWithCompat(JSON.stringify({ compat: { requiresToolsForToolHistory: value } })))
-      .toEqual({ requiresToolsForToolHistory: value });
-  });
-
-  it('rejects a string-valued tools-history compatibility flag', () => {
-    expect(planWithCompat('{"compat":{"requiresToolsForToolHistory":"false"}}')).toBeUndefined();
-  });
-
   it('drops a boolean field carrying a truthy string instead of a boolean', () => {
     expect(planWithCompat('{"compat":{"supportsDeveloperRole":"false"}}')).toBeUndefined();
   });

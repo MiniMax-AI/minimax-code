@@ -1383,11 +1383,6 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     expect(resolved.model.compat).toBeUndefined();
   });
 
-  it.each([true, false])('forwards requiresToolsForToolHistory=%s to the provider model', async (value) => {
-    const resolved = await resolveWithCompat({ requiresToolsForToolHistory: value });
-    expect(resolved.model.compat).toMatchObject({ requiresToolsForToolHistory: value });
-  });
-
   // The incident was a wire-level symptom: pi chooses the system prompt role from the
   // resolved compat, so these two cases pin the request pi would actually send.
   const reasoningModelConfig: LocalModelConfig = {

@@ -35,7 +35,6 @@ export interface LocalModelCompatOverrides {
   supportsReasoningEffort?: boolean;
   supportsUsageInStreaming?: boolean;
   requiresToolResultName?: boolean;
-  requiresToolsForToolHistory?: boolean;
   requiresAssistantAfterToolResult?: boolean;
   requiresThinkingAsText?: boolean;
   requiresReasoningContentOnAssistantMessages?: boolean;
