@@ -26,10 +26,6 @@ const result = spawnSync(
     "run",
     "--config",
     "vitest.oss.config.mjs",
-    // These suites create many SQLite databases and watched directories. On
-    // Windows, concurrent files can exhaust the 5s test budget through I/O
-    // contention. Serialize files without relaxing individual test deadlines.
-    ...(process.platform === "win32" ? ["--maxWorkers", "1"] : []),
     ...files,
   ],
   { stdio: "inherit", cwd: repositoryRoot, env: environment },

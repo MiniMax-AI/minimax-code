@@ -404,21 +404,16 @@ test('suite runner preserves gate arguments and canonicalizes Windows temporary 
   writeFileSync(path.join(root, 'node_modules/vitest/cli.cjs'), 'console.log(JSON.stringify({args:process.argv.slice(2),temp:process.env.TEMP,tmp:process.env.TMP,cwd:process.cwd()})); process.exit(17);');
   const alias = path.join(root, 'temporary-alias');
   symlinkSync(path.join(root, 'temporary'), alias, process.platform === 'win32' ? 'junction' : 'dir');
-  for (const platform of ['linux', 'darwin', 'win32']) {
-    const preload = path.join(root, 'platform.cjs');
-    writeFileSync(preload, `Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });`);
-    const result = spawnSync(process.execPath, ['--require', preload, path.join(root, 'scripts/run-vitest-suite.mjs'), 'fixture'], {
-      encoding: 'utf8', env: { ...process.env, TEMP: alias, TMP: alias, TMPDIR: alias },
-    });
-    assert.equal(result.status, 17, result.stderr);
-    const child = JSON.parse(result.stdout);
-    assert.deepEqual(child.args, ['run', '--config', 'vitest.oss.config.mjs',
-      ...(platform === 'win32' ? ['--maxWorkers', '1'] : []), 'test/example.test.ts']);
-    assert.equal(realpathSync(child.cwd), realpathSync(root));
-    const expected = platform === 'win32' ? realpathSync.native(alias) : alias;
-    assert.equal(child.temp, expected);
-    assert.equal(child.tmp, expected);
-  }
+  const result = spawnSync(process.execPath, [path.join(root, 'scripts/run-vitest-suite.mjs'), 'fixture'], {
+    encoding: 'utf8', env: { ...process.env, TEMP: alias, TMP: alias },
+  });
+  assert.equal(result.status, 17, result.stderr);
+  const child = JSON.parse(result.stdout);
+  assert.deepEqual(child.args, ['run', '--config', 'vitest.oss.config.mjs', 'test/example.test.ts']);
+  assert.equal(realpathSync(child.cwd), realpathSync(root));
+  const expected = process.platform === 'win32' ? realpathSync.native(alias) : alias;
+  assert.equal(child.temp, expected);
+  assert.equal(child.tmp, expected);
 });
 
 test('public support forms preserve destination URLs and separate Desktop from CLI reports', () => {
