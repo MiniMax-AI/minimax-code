@@ -197,7 +197,9 @@ node /absolute/path/to/minimax-code/dist/cli.js
 
 ## 桌面版与问题反馈
 
-<img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code 桌面版" width="100%" />
+<a href="https://agent.minimaxi.com/download" title="下载 MiniMax Code">
+  <img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code 桌面版 — 点击下载" width="100%" />
+</a>
 
 [下载 macOS 或 Windows 桌面版](https://agent.minimaxi.com/download) · [报告问题或提问](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
 

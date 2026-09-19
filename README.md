@@ -197,7 +197,9 @@ For now, code and documentation pull requests are accepted only from repository 
 
 ## Desktop app and support
 
-<img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code desktop app" width="100%" />
+<a href="https://agent.minimax.io/download" title="Download MiniMax Code">
+  <img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code desktop app — click to download" width="100%" />
+</a>
 
 [Download for macOS or Windows](https://agent.minimax.io/download) · [Report a problem or ask a question](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
 
