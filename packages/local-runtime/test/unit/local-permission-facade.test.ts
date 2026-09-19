@@ -16,12 +16,8 @@
  *     facade ↔ gate plumbing is exercised end-to-end.
  *   - localHardCheck.deny (UNC, root rm) is bypass-immune across all
  *     askPolicy and runs BEFORE the gate, so the gate cannot weaken it
- *   - sandbox self-paths: dataDir + ~/.minimax auto-allow ONLY for
- *     read-only tools (read/glob/grep/list) so reading a SKILL.md is
- *     friction-free; writes still go through the normal ask flow
- *     because fs-permission's credential/.env/.git-sensitive guards
- *     only run on the read side, never on writes. Even on the read
- *     side, sensitive files inside dataDir still ASK.
+ *   - designated skill assets remain readable; private runtime state and
+ *     directory-wide searches require approval, including aliases.
  *   - rewrittenInput (rm → mavis-trash) survives the ask branch
  *   - localeHint is derived from inline latestUserMessages
  *   - cloud-gateway timeout / block / confirm route to ask-user with
@@ -31,11 +27,15 @@
  *   - acceptEdits seed adds 3 global rules; idempotent
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { readWindowsTrashExecution } from '@mavis/permission';
+import {
+  configurePermissionHost,
+  readWindowsTrashExecution,
+  resetPermissionHostForTesting,
+} from '@mavis/permission';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   CloudClassifyRequest,
@@ -67,6 +67,7 @@ function freshFacade(
     workspaceDir?: string;
     sandbox?: LocalRuntimeConfig['sandbox'];
     seedPosixTrash?: boolean;
+    dataDirParent?: string;
   } = {},
 ): {
   facade: LocalPermissionFacade;
@@ -74,7 +75,7 @@ function freshFacade(
   pluginHookPermissionStore: LocalPluginHookPermissionStore;
   dataDir: string;
 } {
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'aa-facade-'));
+  const dataDir = mkdtempSync(path.join(opts.dataDirParent ?? tmpdir(), 'aa-facade-'));
   const config: LocalRuntimeConfig = {
     dataDir,
     permissionMode: opts.permissionMode ?? 'default',
@@ -1708,15 +1709,168 @@ describe('LocalPermissionFacade', () => {
   });
 
   describe('sandbox self-paths (dataDir auto-allow)', () => {
-    // Reads of mavis's own runtime data (skills, sessions, agent configs)
-    // are not "external filesystem access" — they're the agent operating
-    // on its own application directory. The facade injects `cfg.dataDir`
-    // and `~/.minimax` into `sandboxAllowPaths`; fs-permission's
-    // step-5 sandbox branch then allows reads and writes of those paths
-    // without an ask card.
+    it.each(['read', 'grep', 'glob', 'list'])(
+      'keeps private runtime %s requests out of automatic approval',
+      async (toolName) => {
+        const classify = vi.fn(async (): Promise<CloudClassifyVerdict> => ({
+          kind: 'allow',
+          reasonLocalized: 'ok',
+        }));
+        const { facade, dataDir } = freshFacade({
+          permissionMode: 'auto',
+          cloudGateway: { classify },
+        });
+        configurePermissionHost({
+          runtimeConfigProvider: {
+            getConfig: () => ({}),
+            getRuntimeRegion: () => 'cn',
+            getRuntimeBuildEnv: () => 'prod',
+            isManagedRuntime: () => true,
+          },
+        });
+        try {
+          const result = await facade.checkPermission({
+            toolName,
+            input: {
+              path: toolName === 'read' ? path.join(dataDir, 'config.yaml') : dataDir,
+              pattern: '*',
+            },
+          });
+          expect(result.behavior).toBe('ask');
+          expect(classify).not.toHaveBeenCalled();
+          expect(result.hookAutoApprovalEligible).toBeUndefined();
+        } finally {
+          resetPermissionHostForTesting();
+          cleanup(dataDir);
+        }
+      },
+    );
 
+    it('requires approval for aliases to credentials, including internal memory paths', async () => {
+      const workspaceDir = mkdtempSync(path.join(tmpdir(), 'runtime-alias-workspace-'));
+      const { facade, dataDir } = freshFacade({
+        workspaceDir,
+        dataDirParent: homedir(),
+      });
+      try {
+        const configPath = path.join(dataDir, 'config.yaml');
+        writeFileSync(configPath, 'synthetic: fixture-only-secret\n');
+        mkdirSync(path.join(dataDir, 'memory'));
+        const aliases = [
+          path.join(workspaceDir, 'notes.txt'),
+          path.join(dataDir, 'memory', 'notes.txt'),
+        ];
+        for (const alias of aliases) {
+          symlinkSync(configPath, alias);
+          expect(
+            (
+              await facade.checkPermission({
+                toolName: 'read',
+                agentName: 'fixture-agent',
+                input: { path: alias },
+              })
+            ).behavior,
+          ).toBe('ask');
+        }
+        const directoryAlias = path.join(workspaceDir, 'runtime');
+        symlinkSync(dataDir, directoryAlias, 'dir');
+        expect(
+          (
+            await facade.checkPermission({
+              toolName: 'grep',
+              agentName: 'fixture-agent',
+              input: { path: directoryAlias, pattern: 'synthetic' },
+            })
+          ).behavior,
+        ).toBe('ask');
+      } finally {
+        cleanup(dataDir);
+        cleanup(workspaceDir);
+      }
+    });
+
+    it('protects a runtime directory nested in the workspace from recursive search', async () => {
+      const workspaceDir = mkdtempSync(path.join(tmpdir(), 'runtime-parent-workspace-'));
+      const { facade, dataDir } = freshFacade({
+        workspaceDir,
+        dataDirParent: workspaceDir,
+      });
+      try {
+        const result = await facade.checkPermission({
+          toolName: 'grep',
+          agentName: 'fixture-agent',
+          input: { path: workspaceDir, pattern: 'secret' },
+        });
+        expect(result.behavior).toBe('ask');
+      } finally {
+        cleanup(dataDir);
+        cleanup(workspaceDir);
+      }
+    });
+
+    it('honors an explicit path approval for private runtime data', async () => {
+      const { facade, ruleStore, dataDir } = freshFacade({
+        dataDirParent: homedir(),
+      });
+      try {
+        const configPath = path.join(dataDir, 'config.yaml');
+        await ruleStore.applyUpdate({
+          type: 'addRules',
+          source: 'global',
+          destination: 'global',
+          behavior: 'allow',
+          rules: [{ tool_name: 'read', rule_content: configPath }],
+        });
+        expect(
+          (
+            await facade.checkPermission({
+              toolName: 'read',
+              input: { path: configPath },
+            })
+          ).behavior,
+        ).toBe('allow');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+    it('keeps the active agent workspace readable when it is stored under runtime data', async () => {
+      const { facade, dataDir } = freshFacade({ dataDirParent: homedir() });
+      try {
+        const result = await facade.checkPermission({
+          toolName: 'read',
+          agentName: 'fixture-agent',
+          input: { path: path.join(dataDir, 'agents', 'fixture-agent', 'workspace', 'report.txt') },
+        });
+        expect(result.behavior).toBe('allow');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+    it.each([tmpdir(), homedir()])(
+      'requires approval before reading the runtime credential configuration under %s',
+      async (dataDirParent) => {
+        const { facade, dataDir } = freshFacade({
+          permissionMode: 'default',
+          workspaceDir: '/synthetic-workspace',
+          dataDirParent,
+        });
+        try {
+          writeFileSync(path.join(dataDir, 'config.yaml'), 'synthetic: fixture-only-secret\n');
+          const result = await facade.checkPermission({
+            toolName: 'read',
+            input: { path: path.join(dataDir, 'config.yaml') },
+          });
+          expect(result.behavior).toBe('ask');
+        } finally {
+          cleanup(dataDir);
+        }
+      },
+    );
     it('default mode: read of a SKILL.md inside dataDir auto-allows (no card)', async () => {
-      const { facade, dataDir } = freshFacade({ permissionMode: 'default' });
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dataDirParent: homedir(),
+      });
       try {
         const r = await facade.checkPermission({
           toolName: 'read',
@@ -1786,12 +1940,12 @@ describe('LocalPermissionFacade', () => {
       }
     });
 
-    it('glob inside dataDir auto-allows (read-only sibling of read)', async () => {
+    it('glob inside the skill assets auto-allows', async () => {
       const { facade, dataDir } = freshFacade({ permissionMode: 'default' });
       try {
         const r = await facade.checkPermission({
           toolName: 'glob',
-          input: { path: dataDir, pattern: 'skills/*/SKILL.md' },
+          input: { path: path.join(dataDir, 'skills'), pattern: '*/SKILL.md' },
         });
         // glob/grep/list share the read-only tool set with `read`; they
         // should auto-allow on self-paths for the same reason.

@@ -4,6 +4,7 @@ import {
   type DeliverAssetItem,
   type DeliverAssetsSegment,
 } from '@mavis/shared/asset-markup';
+import { sanitizeTerminalText } from '../tui/rendering/terminal-text.js';
 
 const RICH_CONTENT_RE =
   /<(?:deliver[-_]assets|media|publish[_-]artifact|preview_card|genui-|mavis-widget|mavis-thinking|mavis-progress|think|final|permission-(?:ask|response)|questionnaire-(?:ask|response))\b|^\s*preview_cards?:\s*$/imu;
@@ -25,6 +26,8 @@ export function simplifyAssistantContentForTerminal(content: string): string {
 }
 
 export function projectAssistantContentForTerminal(content: string): TerminalAssistantContent {
+  // Model content is data. Only the renderer may introduce terminal controls.
+  content = sanitizeTerminalText(content);
   if (!content || !RICH_CONTENT_RE.test(content)) return { text: content, assets: [] };
 
   const segments = splitMarkdownProtectedSegments(content);

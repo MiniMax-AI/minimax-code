@@ -16,6 +16,31 @@ function thinkingStore(content: string, status: 'running' | 'failed' | 'succeede
 }
 
 describe('Thinking preview', () => {
+  it.each(['assistant', 'thinking'] as const)(
+    'sanitizes %s in the expanded transcript inspector',
+    (kind) => {
+      const control = '\x1b]52;c;U1lOVEhFVElD\x07';
+      const store = new TranscriptStore([
+        createTranscriptCell({
+          id: 'untrusted-inspector',
+          kind,
+          status: 'succeeded',
+          content: `${control}\x1b[8mVisible text\x1b[0m`,
+          createdAtMs: 1,
+        }),
+      ]);
+      const panel = new TuiTranscriptPanel({
+        source: store,
+        onCancel: () => undefined,
+        requestRender: () => undefined,
+      });
+      panel.handleInput('\u000f');
+      const rendered = panel.render(100).join('\n');
+      expect(rendered).not.toContain(control);
+      expect(rendered).not.toContain('\x1b[8m');
+      expect(stripVTControlCharacters(rendered)).toContain('Visible text');
+    },
+  );
   afterEach(() => vi.restoreAllMocks());
 
   it('bounds colored layout work while new deltas stream into the same full cell', () => {

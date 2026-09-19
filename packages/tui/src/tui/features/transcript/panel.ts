@@ -15,6 +15,7 @@ import {
   VStack,
 } from '../../engine/public.js';
 import { projectAssistantContentForTerminal } from '../../../application/assistant-content.js';
+import { sanitizeTerminalText } from '../../rendering/terminal-text.js';
 import type { Component, Focusable } from '../../rendering/component.js';
 import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
 import { renderTuiStructuredPreview } from '../../transcript/presentation/structured-preview.js';
@@ -564,7 +565,9 @@ export class TuiTranscriptPanel implements TuiFeatureScreen, Component, Focusabl
   ): string[] {
     const lines: string[] = [];
     if (label) lines.push(this.detailLine(chalk.bold.hex(colors.dim)(label), contentWidth + 4));
-    const rendered = new Text(chalk.hex(colors.muted)(value), 0, 0).render(contentWidth);
+    const rendered = new Text(chalk.hex(colors.muted)(sanitizeTerminalText(value)), 0, 0).render(
+      contentWidth,
+    );
     lines.push(...rendered.map((line) => this.detailLine(line, contentWidth + 4)));
     return lines;
   }

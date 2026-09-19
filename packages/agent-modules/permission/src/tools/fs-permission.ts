@@ -650,6 +650,54 @@ export function isTempDirectory(resolvedPath: string): boolean {
 // Internal whitelist paths
 // ---------------------------------------------------------------------------
 
+/** Resolve existing parents too, so a directory alias cannot hide a protected read. */
+function resolveExistingPath(filePath: string): string {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    const parent = path.dirname(filePath);
+    return parent === filePath
+      ? filePath
+      : path.join(resolveExistingPath(parent), path.basename(filePath));
+  }
+}
+
+/** Runtime state is private; only designated agent assets get implicit read access. */
+function isProtectedRuntimeRead(
+  filePath: string,
+  context: PathCheckContext,
+  recursive: boolean,
+): boolean {
+  const within = (target: string, root: string) => {
+    const relative = path.relative(root, target);
+    return (
+      relative === '' ||
+      (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+    );
+  };
+  const roots = [context.dataDir, path.join(context.homeDir ?? os.homedir(), '.minimax')];
+  const canonicalPath = resolveExistingPath(filePath);
+  for (const root of roots) {
+    if (!root) continue;
+    const resolvedRoot = path.resolve(root);
+    const canonicalRoot = resolveExistingPath(resolvedRoot);
+    if (recursive && within(canonicalRoot, canonicalPath)) return true;
+    if (!within(filePath, resolvedRoot) && !within(canonicalPath, canonicalRoot)) continue;
+    // Do not resolve the asset subdirectory itself: a skills/ symlink pointing
+    // at credentials must not turn its destination into a trusted asset root.
+    const readableAsset =
+      within(canonicalPath, path.join(canonicalRoot, 'skills')) ||
+      (context.agentName != null &&
+        within(canonicalPath, path.join(canonicalRoot, 'agents', context.agentName, 'workspace'))) ||
+      isInternalWhitelistedPath(canonicalPath, {
+        ...context,
+        dataDir: canonicalRoot,
+      });
+    if (!readableAsset) return true;
+  }
+  return false;
+}
+
 /**
  * Check if a path is in the internal whitelist (always writable by the system).
  *
@@ -833,6 +881,24 @@ export function isPathAllowed(
         reason: { type: 'rule', rule },
       };
     }
+  }
+
+  // Runtime state can contain credentials and session data. Check before ALL
+  // implicit allowances, including workspace/temp and internal aliases. A grep
+  // of the data root must be reviewed just like a direct config.yaml read.
+  if (
+    READ_ONLY_TOOLS.has(toolName) &&
+    isProtectedRuntimeRead(resolved, context, toolName === 'grep')
+  ) {
+    return {
+      allowed: false,
+      reason: {
+        type: 'safetyCheck',
+        description: `Private runtime data access requires approval. Path: ${resolved}`,
+        category: 'credentialFile',
+        classifierApprovable: false,
+      },
+    };
   }
 
   // Step 2: Internal path whitelist

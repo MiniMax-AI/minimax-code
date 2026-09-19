@@ -990,7 +990,7 @@ function boundThinkingPreview(detail: string, edge: 'head' | 'tail'): string {
 function renderExecutionDetail(detail: string, width: number, rawPrefix = '  │ '): string[] {
   const prefix = chalk.hex(colors.dim)(rawPrefix);
   const contentWidth = Math.max(1, width - visibleLength(rawPrefix));
-  return new Text(chalk.hex(colors.muted)(detail), 0, 0)
+  return new Text(chalk.hex(colors.muted)(sanitizeTerminalText(detail)), 0, 0)
     .render(contentWidth)
     .map((line) => truncateToWidth(`${prefix}${line}`, Math.max(0, width), ''));
 }

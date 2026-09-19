@@ -977,51 +977,7 @@ export class LocalPermissionFacade {
   // Helpers
   // -------------------------------------------------------------------------
 
-  /**
-   * Self-paths that mavis auto-allows for READ-ONLY tools without
-   * prompting. **Write-side tools always go through the normal review
-   * flow even on these paths.**
-   *
-   * Rationale: mavis's own runtime data (`cfg.dataDir`) and the user-wide
-   * default dataDir (`<dataDir>`) hold the runtime's own assets — built-in
-   * skills (`<dataDir>/skills/<name>/SKILL.md`), session transcripts,
-   * agent configs, generated hooks. The agent READING those is not
-   * "external filesystem access" in any meaningful sense; it is the
-   * runtime reading its own application directory. Prompting the user
-   * for "may the agent read its own SKILL.md?" is noise on par with an
-   * OS asking "may VS Code read its own settings.json?".
-   *
-   * **Writes are deliberately NOT auto-allowed.** The sensitive-file
-   * safeguards in fs-permission (`isCredentialFile`, `isEnvFile`,
-   * `isSensitiveGitFile`, `isSystemSensitivePath`) only run on the
-   * READ side (`fs-permission.ts:818-875` lives under the read-policy
-   * path). On the WRITE side, `sandboxAllowPaths` would short-circuit
-   * to allow at `fs-permission.ts:968` BEFORE any credential / .env /
-   * .git/config check could intervene — letting a default/auto-mode
-   * agent silently create or overwrite
-   * `<dataDir>/.aws/credentials`, `<dataDir>/.env`, or
-   * `<dataDir>/.git/config`. By only injecting the self-paths for
-   * read-only tools (set parity with `READ_ONLY_TOOLS` =
-   * `{read, glob, grep, list}`), writes fall through to the normal
-   * ask flow — the user sees a card for every mavis-internal write,
-   * which keeps the sensitive-write attack surface unchanged.
-   *
-   * What this still does NOT bypass on the read side:
-   *   - `isSystemSensitivePath` / `isCredentialFile` / `isEnvFile` /
-   *     `isInDangerousDirectory + isSensitiveGitFile` checks
-   *     (`fs-permission.ts:818-875`) all run BEFORE the sandbox-allow
-   *     branch (`fs-permission.ts:968`), so a stray
-   *     `<dataDir>/.aws/credentials` or `<dataDir>/.env` still ASKs.
-   *   - The HARD-blocked fs-read registry (ssh / aws / *.pem / Windows
-   *     registry hive / macOS keychain) runs even earlier
-   *     (`path-capability.ts:82`).
-   *   - bypass-immune deny in the facade itself (UNC, root rm).
-   *
-   * The defensive filter drops a self-path if it would become a parent of
-   * `workingDirectory` — if a user accidentally configured their workspace
-   * inside `<dataDir>/`, we don't want the sandbox allow to silently widen
-   * the workspace boundary; the normal workspace check covers it.
-   */
+  /** Built-in skill assets may be read without granting access to private runtime state. */
   private resolveSandboxAllowPaths(toolName: string, workingDirectory: string): string[] {
     // Read-only tool set parity with `READ_ONLY_TOOLS`
     // (`packages/local-runtime/src/permission/tools/fs-permission.ts`).
@@ -1033,8 +989,8 @@ export class LocalPermissionFacade {
 
     const candidates: string[] = [];
     const dataDir = this.deps.configGetter().dataDir;
-    if (dataDir) candidates.push(path.resolve(dataDir));
-    candidates.push(path.resolve(homedir(), '.minimax'));
+    if (dataDir) candidates.push(path.resolve(dataDir, 'skills'));
+    candidates.push(path.resolve(homedir(), '.minimax', 'skills'));
     // De-duplicate (dataDir may already equal <dataDir> on a default install).
     const unique = Array.from(new Set(candidates));
     if (!workingDirectory) return unique;
@@ -1255,7 +1211,7 @@ export class LocalPermissionFacade {
         `  1. Remove ${scriptPath} and restart the app — startup re-seeds the script.\n` +
         '  2. If it fails again, verify the runtime data directory is writable and not ' +
         'mounted noexec, and that the script keeps its execute bit.\n' +
-        '  3. Two app versions sharing one data directory overwrite each other\'s script; ' +
+        "  3. Two app versions sharing one data directory overwrite each other's script; " +
         'close the other version, then restart.',
       denySource: 'safety-immune',
     };

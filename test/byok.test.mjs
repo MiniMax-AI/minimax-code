@@ -23,7 +23,10 @@ test(
   "BYOK runs without managed login and resumes its saved conversation",
   { timeout: 90000 },
   async (t) => {
-    const dataDir = mkdtempSync(path.join(tmpdir(), "minimax-code-byok-"));
+    const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-byok-"));
+    const dataDir = path.join(fixtureDir, "data");
+    const workspaceDir = path.join(fixtureDir, "workspace");
+    mkdirSync(workspaceDir);
     const dbPath = path.join(dataDir, "v2", "sqlite", "runtime-state.sqlite");
     mkdirSync(path.dirname(dbPath), { recursive: true });
     const legacyDb = new Database(dbPath);
@@ -38,7 +41,7 @@ test(
     }
     const requests = [];
     const readMarker = `ACTUAL_FILE_CONTENT_${Date.now()}`;
-    writeFileSync(path.join(dataDir, "read-fixture.txt"), readMarker);
+    writeFileSync(path.join(workspaceDir, "read-fixture.txt"), readMarker);
     let toolRequested = false;
     let rejectConnection = false;
     const networkAudit = path.join(dataDir, "network-audit.log");
@@ -97,7 +100,7 @@ test(
                       function: {
                         name: "read",
                         arguments: JSON.stringify({
-                          path: path.join(dataDir, "read-fixture.txt"),
+                          path: path.join(workspaceDir, "read-fixture.txt"),
                         }),
                       },
                     },
@@ -148,7 +151,7 @@ test(
             : "Unexpected external request",
         );
       } finally {
-        rmSync(dataDir, { recursive: true, force: true });
+        rmSync(fixtureDir, { recursive: true, force: true });
       }
     });
     const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
@@ -173,7 +176,7 @@ test(
         : args;
       return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [cli, ...commandArgs], {
-          cwd: dataDir,
+          cwd: workspaceDir,
           env: { ...withoutProxyEnvironment(environment), ...env },
           stdio: ["ignore", "pipe", "pipe"],
         });

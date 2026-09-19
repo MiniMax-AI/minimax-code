@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { TranscriptView, resolveTuiDecisionColor } from '../../src/tui/transcript/view.js';
 import { createTranscriptCell } from '../../src/tui/transcript/model.js';
 import { TranscriptStore } from '../../src/tui/transcript/store.js';
+import { sanitizeTerminalText } from '../../src/tui/rendering/terminal-text.js';
 import {
   applyTuiRenderTheme,
   createTuiChalk,
@@ -20,6 +21,57 @@ const previewDisplayModes = {
 };
 
 describe('TranscriptView', () => {
+  it.each(['assistant', 'assistant-preamble', 'thinking'] as const)(
+    'removes control strings from %s content without changing stored model output',
+    (kind) => {
+      const control = '\x1b]52;c;U1lOVEhFVElD\x07';
+      const content = `**Visible**\n\n\`\`\`text\n${control}\x1b[8mSafe code\x1b[0m\n\`\`\``;
+      const cell = createTranscriptCell({
+        id: 'untrusted-markdown',
+        kind,
+        status: 'running',
+        content,
+        createdAtMs: 1,
+      });
+      const view = new TranscriptView(() => [cell], {
+        displayModes: { revision: 0, resolveMainDisplayMode: () => 'expanded' },
+      });
+      const rendered = view.render(100).join('\n');
+      expect(rendered).not.toContain(control);
+      expect(rendered).not.toContain('\x1b[8m');
+      expect(stripVTControlCharacters(rendered)).toContain('Safe code');
+      expect(cell.content).toBe(content);
+    },
+  );
+
+  it('safely renders every streaming prefix including C1 and unterminated control strings', () => {
+    const content = 'Visible\x9d52;c;U1lOVEhFVElD\x9c\x1bPprivate payload\x1b\\\x1b[8mtext\x1b[0m';
+    for (let end = 1; end <= content.length; end++) {
+      const text = sanitizeTerminalText(content.slice(0, end));
+      expect(text).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/u);
+      expect(text).not.toContain('private payload');
+      expect(text).not.toContain('U1lOVEhFVElD');
+    }
+    expect(sanitizeTerminalText('中文🙂\ttext\r\nnext\rother')).toBe('中文🙂\ttext\nnext\nother');
+  });
+  it.each(['running', 'succeeded'] as const)(
+    'does not emit model terminal controls from a %s assistant cell',
+    (status) => {
+      const controls = ['\x1b]52;c;U1lOVEhFVElD\x07', '\x1b]2;FORGED_TITLE\x07', '\x1b[8m'];
+      const view = new TranscriptView(() => [
+        createTranscriptCell({
+          id: 'untrusted-controls',
+          kind: 'assistant',
+          status,
+          content: `Visible ${controls.join('')}model text\x1b[0m`,
+          createdAtMs: 1,
+        }),
+      ]);
+      const rendered = view.render(100).join('\n');
+      for (const control of controls) expect(rendered).not.toContain(control);
+      expect(stripVTControlCharacters(rendered)).toContain('Visible model text');
+    },
+  );
   it('renders a Markdown question receipt (Plan Review) as formatted prose', () => {
     const view = new TranscriptView(() => [
       createTranscriptCell({

@@ -292,6 +292,7 @@ export function evaluatePathCapability(
       behavior: 'ask',
       reason: result.reason,
       bypassImmune: wouldBeBypassImmune,
+      ...(result.reason.classifierApprovable === false ? { skipAutoClassifier: true } : {}),
       ...buildPathRuleSuggestion(filePath, action, context),
     };
   }
