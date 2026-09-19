@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — omit empty tools for OpenAI-compatible checkpoint requests
+
+- Reason: checkpoint requests retain tool-call history but omit tool definitions. The OpenAI Completions provider unconditionally added `tools: []` for that history, which can cause a backend to reject compaction with HTTP 400 (public issue MiniMax-AI/minimax-code#194).
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), `src/providers/openai-completions.ts` and its existing empty-tools regression fixture.
+- Change type: generic, upstreamable compatibility fix. Omit `tools` when no nonempty tool definitions are supplied, regardless of tool-call history or cache compatibility. Nonempty tool definitions are unchanged. Remove the obsolete history-based empty-array workaround; no compatibility settings or recovery requests are added.
+- Validation: the distribution-owned `packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts` exercises `compactContext` through checkpoint generation and the real SDK against a local HTTP fixture that rejects empty tools. Regressions cover absent/empty definitions, tool history, Anthropic cache compatibility, ordinary requests, and preserved nonempty definitions. Run with `pnpm exec vitest run --config vitest.oss.config.mjs packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts` and the full `pnpm verify` profile. Offline fixtures do not establish live LiteLLM/vLLM, OpenAI, or Anthropic proxy acceptance.
+- Upstream PR: not created.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.
