@@ -10,6 +10,7 @@
       "packages/tui/test/unit/business-telemetry-privacy.test.ts",
       "packages/tui/test/unit/auth-session.test.ts",
       "packages/tui/test/unit/cli-auth-command.test.ts",
+      "packages/tui/test/unit/network-proxy.test.ts",
       "packages/tui/test/unit/application-login-gate.test.ts",
       "packages/tui/test/unit/mcode-tools-integration.test.ts",
       "packages/tui/test/unit/provider-application.test.ts",

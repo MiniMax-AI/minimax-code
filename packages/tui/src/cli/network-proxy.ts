@@ -44,7 +44,7 @@ export function resolveTuiProxyConfiguration(
     mode: 'proxy',
     httpProxy: httpProxy?.value ?? '',
     httpsProxy: httpsProxy?.value ?? '',
-    noProxy: withLoopbackNoProxy(environment.NO_PROXY ?? environment.no_proxy),
+    noProxy: withLoopbackNoProxy(firstProxyValue(environment, 'NO_PROXY', 'no_proxy')?.value),
   };
 }
 

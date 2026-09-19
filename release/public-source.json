@@ -3213,6 +3213,7 @@
     "packages/tui/test/unit/incident-reporter-privacy.test.ts",
     "packages/tui/test/unit/mcode-tools-integration.test.ts",
     "packages/tui/test/unit/model-effort.test.ts",
+    "packages/tui/test/unit/network-proxy.test.ts",
     "packages/tui/test/unit/plugin-application.test.ts",
     "packages/tui/test/unit/provider-application.test.ts",
     "packages/tui/test/unit/run-coordinator-usage.test.ts",
