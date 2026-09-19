@@ -13,6 +13,15 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — preserve the system role for SiliconFlow
+
+- Reason: thinking-enabled OpenAI-compatible requests sent the `developer` role, which is absent from SiliconFlow's documented message schema.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role on the exact `api.siliconflow.cn` and `api.siliconflow.com` hosts. Preserve thinking, explicit compatibility overrides, other request options, and other endpoints.
+- References: [official Chat Completions schema](https://docs.siliconflow.com/en/api-reference/chat-completions/chat-completions) and [pi's SiliconFlow provider proposal](https://github.com/earendil-works/pi/pull/8113) (closed without merging).
+- Upstream PR: not opened.
+- Validation: outgoing-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`, including both official hosts, unrelated hosts, and explicit compatibility overrides.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.
