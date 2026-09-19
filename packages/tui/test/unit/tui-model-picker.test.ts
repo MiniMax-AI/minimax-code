@@ -3,6 +3,28 @@ import { describe, expect, it, vi } from "vitest";
 import { TuiModelPicker } from "../../src/tui/features/model/picker.js";
 
 describe("TuiModelPicker", () => {
+  it("selects each declared Kimi K3 effort without inventing a medium level", () => {
+    const onSelect = vi.fn();
+    const model = {
+      providerId: "custom_provider:moonshotai",
+      modelId: "kimi-k3",
+      selected: true,
+      effortOptions: ["low", "high", "max"],
+    };
+    const picker = new TuiModelPicker([model], onSelect, vi.fn());
+    expect(stripAnsi(picker.render(80).join("\n"))).toContain("[ high ]");
+    for (const [key, effort] of [
+      ["\u001b[D", "low"],
+      ["\u001b[C", "high"],
+      ["\u001b[C", "max"],
+    ] as const) {
+      picker.handleInput(key);
+      expect(stripAnsi(picker.render(80).join("\n"))).toContain(`[ ${effort} ]`);
+      picker.handleInput("\r");
+      expect(onSelect).toHaveBeenLastCalledWith(model, effort);
+    }
+  });
+
   it("switches M3 context independently of thinking and restores the saved choice", () => {
     const model = {
       providerId: "minimax",

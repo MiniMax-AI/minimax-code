@@ -397,3 +397,42 @@ describe('resolveHeadlessModelSelection', () => {
     ).resolves.toEqual({ providerId: 'provider', modelId: 'model', variant: 'fast' });
   });
 });
+
+describe('resolveHeadlessModelSelection with Kimi K3 effort levels', () => {
+  const k3Runtime = () =>
+    runtimeWith(
+      catalog({
+        providerId: 'custom_provider:moonshotai',
+        modelId: 'kimi-k3',
+        selected: true,
+        effortOptions: ['low', 'high', 'max'],
+      }),
+    );
+
+  it.each(['low', 'high', 'max'] as const)('accepts --effort %s', async (effort) => {
+    await expect(
+      resolveHeadlessModelSelection({
+        model: 'custom_provider:moonshotai/kimi-k3',
+        effort,
+        session: session(),
+        runtime: k3Runtime(),
+      }),
+    ).resolves.toEqual({
+      providerId: 'custom_provider:moonshotai',
+      modelId: 'kimi-k3',
+      thinking: { effort },
+    });
+  });
+
+  it('rejects an effort level Kimi K3 does not declare', async () => {
+    await expectInvocationError(
+      resolveHeadlessModelSelection({
+        model: 'custom_provider:moonshotai/kimi-k3',
+        effort: 'medium',
+        session: session(),
+        runtime: k3Runtime(),
+      }),
+      '--effort medium is not available for custom_provider:moonshotai/kimi-k3. Available levels: low, high, max.',
+    );
+  });
+});

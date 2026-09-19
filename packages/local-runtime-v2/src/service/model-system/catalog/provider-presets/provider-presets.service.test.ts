@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { providerCompletionUrl, providerModelsUrls } from '../../connectivity/provider-request.js';
 import { ProviderPresetCatalog } from './provider-presets.service.js';
 import { readProviderPresetSnapshotCandidates } from './provider-presets.repository.js';
+import { modelsFromInputs } from '../../management/service-input.js';
+import { buildModelEntry } from '../list-models.js';
 
 vi.mock('./provider-presets.repository.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./provider-presets.repository.js')>();
@@ -370,6 +372,117 @@ describe('models.dev Provider Presets', () => {
         ],
       },
     ]);
+  });
+
+  it('parses declared reasoning effort options for Kimi K3 on both Moonshot providers', async () => {
+    const k3 = {
+      name: 'Kimi K3',
+      tool_call: true,
+      attachment: true,
+      reasoning: true,
+      reasoning_options: [
+        { type: 'toggle' },
+        { type: 'effort', values: ['low', 'high', 'max'] },
+      ],
+      temperature: false,
+      modalities: { input: ['text', 'image', 'video'], output: ['text'] },
+      limit: { context: 1_048_576, output: 131_072 },
+    };
+    const presets = await parsePresetsForTest({
+      moonshotai: {
+        name: 'Moonshot AI',
+        npm: '@ai-sdk/openai-compatible',
+        api: 'https://api.moonshot.ai/v1',
+        models: {
+          'kimi-k3': k3,
+          'kimi-k2.6': {
+            name: 'Kimi K2.6',
+            tool_call: true,
+            reasoning: true,
+            reasoning_options: [{ type: 'toggle' }],
+          },
+          'kimi-k2.7-code': {
+            name: 'Kimi K2.7 Code',
+            tool_call: true,
+            reasoning: true,
+            reasoning_options: [],
+          },
+        },
+      },
+      'moonshotai-cn': {
+        name: 'Moonshot AI China',
+        npm: '@ai-sdk/openai-compatible',
+        api: 'https://api.moonshot.cn/v1',
+        models: { 'kimi-k3': k3 },
+      },
+    });
+
+    for (const providerId of ['moonshotai', 'moonshotai-cn'] as const) {
+      const preset = presets.find((candidate) => candidate.providerId === providerId);
+      expect(preset?.models.find((model) => model.modelId === 'kimi-k3')).toMatchObject({
+        reasoning: true,
+        effortOptions: ['low', 'high', 'max'],
+      });
+      if (!preset) throw new Error(`Missing preset ${providerId}`);
+      const savedModel = modelsFromInputs(preset.models)['kimi-k3'];
+      expect(savedModel?.thinking).toEqual({ effortOptions: ['low', 'high', 'max'] });
+      expect(buildModelEntry({
+        providerId: `custom_provider:${providerId}`,
+        modelId: 'kimi-k3',
+        model: savedModel,
+        selected: false,
+        providerSource: 'custom_provider',
+        providerKind: 'custom',
+        providerName: preset.name,
+      }).effortOptions).toEqual(['low', 'high', 'max']);
+    }
+    const moonshot = presets.find((candidate) => candidate.providerId === 'moonshotai');
+    // A toggle-only or bare reasoning model can think, but declares no
+    // selectable effort levels, so it must not gain effortOptions.
+    for (const modelId of ['kimi-k2.6', 'kimi-k2.7-code'] as const) {
+      const model = moonshot?.models.find((candidate) => candidate.modelId === modelId);
+      expect(model).toMatchObject({ reasoning: true });
+      expect(model).not.toHaveProperty('effortOptions');
+    }
+  });
+
+  it('normalizes effort metadata without inventing or dropping declared levels', async () => {
+    const [preset] = await parsePresetsForTest({
+      compatible: {
+        name: 'Compatible API',
+        npm: '@ai-sdk/openai-compatible',
+        api: 'https://api.example.test/v1',
+        models: {
+          custom: {
+            name: 'Custom',
+            tool_call: true,
+            reasoning: true,
+            reasoning_options: [null, {}, { type: 'effort', values: 'high' },
+              { type: 'effort', values: [' light ', 'light', '', ' ', 7, null, 'max'] }],
+          },
+          'empty-effort': {
+            name: 'Empty effort',
+            tool_call: true,
+            reasoning: true,
+            reasoning_options: [{ type: 'effort', values: [] }],
+          },
+          'budget-only': {
+            name: 'Budget only',
+            tool_call: true,
+            reasoning: true,
+            reasoning_options: [{ type: 'budget_tokens', min: 128, max: 32_768 }],
+          },
+        },
+      },
+    });
+
+    const model = (modelId: string) =>
+      preset?.models.find((candidate) => candidate.modelId === modelId);
+    // Unknown levels are preserved verbatim; blanks, duplicates and
+    // non-strings never reach the roster.
+    expect(model('custom')).toMatchObject({ effortOptions: ['light', 'max'] });
+    expect(model('empty-effort')).not.toHaveProperty('effortOptions');
+    expect(model('budget-only')).not.toHaveProperty('effortOptions');
   });
 });
 

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -335,6 +335,28 @@ test(
       assert.equal(savedConfig().defaultModel, config.defaultModel);
     }
     assert.equal(requests.length, beforeSaveOnly, "Limits alone must not test or select a model");
+    // Exercise the metadata persisted by provider preset import through real
+    // config reload, headless validation and the OpenAI-compatible request body.
+    const effortConfig = savedConfig();
+    effortConfig.custom_provider.fixture.models["kimi-k3"] = {
+      reasoning: true,
+      thinking: { effortOptions: ["low", "high", "max"] },
+    };
+    writeFileSync(configPath, stringifyYaml(effortConfig));
+    const effortModel = `${selected.providerId}/kimi-k3`;
+    for (const effort of ["low", "high", "max"]) {
+      const beforeEffort = requests.length;
+      await run(["exec", "EFFORT_TEST", "--model", effortModel, "--effort", effort,
+        "--timeout", "20s", "--max-steps", "1"]);
+      const modelRequests = requests.slice(beforeEffort).filter((r) => r.body.model === "kimi-k3");
+      assert.ok(modelRequests.length > 0);
+      for (const request of modelRequests) assert.equal(request.body.reasoning_effort, effort);
+    }
+    const beforeInvalidEffort = requests.length;
+    await assert.rejects(run(["exec", "EFFORT_TEST", "--model", effortModel,
+      "--effort", "medium", "--timeout", "20s", "--max-steps", "1"]),
+    /Available levels: low, high, max/);
+    assert.equal(requests.length, beforeInvalidEffort, "Invalid effort must fail before transport");
     const modelArgs = ["--model", `${selected.providerId}/fixture-model`];
     // The first run must work through the saved default, without --model or managed login.
     const first = await run([

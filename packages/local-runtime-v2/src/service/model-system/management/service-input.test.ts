@@ -96,6 +96,23 @@ describe('model provider input normalization', () => {
     });
   });
 
+  it('persists declared Kimi K3 effort options as thinking metadata', () => {
+    expect(
+      modelsFromInputs([
+        {
+          modelId: 'kimi-k3',
+          displayName: 'Kimi K3',
+          reasoning: true,
+          effortOptions: ['low', 'high', 'max'],
+        },
+      ])['kimi-k3'],
+    ).toEqual({
+      name: 'Kimi K3',
+      reasoning: true,
+      thinking: { effortOptions: ['low', 'high', 'max'] },
+    });
+  });
+
   it('applies implicit thinking only to eligible new models', () => {
     expect(modelsFromInputs([{ modelId: 'implicit' }], undefined, true).implicit).toMatchObject({
       reasoning: true,
