@@ -426,7 +426,7 @@ test('public support forms preserve destination URLs and separate Desktop from C
   for (const name of forms) {
     const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
     const product = form.body.find(field => field.id === 'product');
-    assert.equal(product.validations.required, true);
+    assert.equal(product.validations.required, name !== '03-question.yml');
     assert.ok(product.attributes.options.includes('Desktop app'));
     assert.ok(product.attributes.options.includes('CLI - ACP'));
     assert.ok(product.attributes.options.includes('CLI - headless'));
@@ -453,6 +453,9 @@ test('issue forms label incoming reports for triage and retain collaborator-only
   const policy = config.contact_links.find(link => link.url.endsWith('/CONTRIBUTING.md'));
   assert.match(policy.about, /only from repository collaborators/);
   assert.match(policy.about, /external PRs are not accepted/);
+  const question = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/03-question.yml', import.meta.url), 'utf8'));
+  assert.equal(question.body.find(field => field.id === 'platform').validations.required, false);
+  assert.equal(question.body.find(field => field.id === 'question').validations.required, true);
 });
 
 test('issue notification is restricted to public destination events and builds payloads offline', t => {
