@@ -39,6 +39,12 @@ suites are outside this distribution's verification.
 Artifact-dependent tests require a current `pnpm build`. Keep test state and
 reports outside the repository, using synthetic data and temporary directories.
 
+The declared Vitest gate runner serializes test files on Windows to limit
+filesystem contention while retaining individual test deadlines. Run the owning
+gate for platform acceptance; a direct Vitest invocation uses its default worker
+count. Full-runtime smoke children have a 30-second Windows startup budget,
+matching ACP; lightweight help and validation checks retain 15 seconds.
+
 ## Delivery verification
 
 Run `git diff --check` and the relevant individual gates while editing. Review
