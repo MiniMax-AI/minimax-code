@@ -327,10 +327,38 @@ export function bindMcodeNpmCommandToRuntime(
     path.join(npmDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     path.join(npmDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   ];
-  const npmCli = candidates.find((file) => existsSync(file) && statSync(file).isFile());
+  const npmCli =
+    candidates.find((file) => existsSync(file) && statSync(file).isFile()) ??
+    resolvePnpmNpmShim(npmExecutable);
   if (!npmCli)
     throw new Error(`Cannot locate npm-cli.js for the owned npm executable: ${command.executable}`);
   return { ...command, executable: runtimeExecutable, args: [npmCli, ...command.args] };
+}
+
+function resolvePnpmNpmShim(npmExecutable: string): string | undefined {
+  // pnpm env places npm behind a shell shim in PNPM_HOME. Read only its literal
+  // versioned CLI target; never execute/source the shim or search other runtimes.
+  try {
+    const metadata = statSync(npmExecutable);
+    if (!metadata.isFile() || metadata.size > 64 * 1024) return undefined;
+    const lines = readFileSync(npmExecutable, 'utf8').split(/\r?\n/u);
+    if (lines[0] !== '#!/bin/sh') return undefined;
+    const commands = lines.map((line) => line.trim()).filter((line) => /^exec\s/u.test(line));
+    if (commands.length === 0) return undefined;
+    const targets = commands.map((line) =>
+      /^exec (?:"\$basedir\/node"|node) "\$basedir\/(nodejs\/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/lib\/node_modules\/npm\/bin\/npm-cli\.js)" "\$@"$/u.exec(line)?.[1],
+    );
+    const target = targets[0];
+    if (!target || targets.some((candidate) => candidate !== target)) return undefined;
+    const npmDirectory = path.dirname(npmExecutable);
+    const versionRoot = path.join(npmDirectory, ...target.split('/').slice(0, 2));
+    const cli = realpathSync(path.join(npmDirectory, target));
+    // Reject symlinks that redirect the target outside this pnpm Node version.
+    if (!isResolvedPathInside(versionRoot, cli, path) || !statSync(cli).isFile()) return undefined;
+    return cli;
+  } catch {
+    return undefined;
+  }
 }
 
 export function createMcodeNpmRuntimeEnvironment(

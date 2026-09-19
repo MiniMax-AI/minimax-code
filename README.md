@@ -78,7 +78,7 @@ mcode login --region global
 
 Complete sign-in in your browser, then open `mcode` and use `/status` to check your account and `/provider` to choose a model. Run `mcode logout` to sign out.
 
-Token Plan requires an account with available credits. User data is stored in `~/.minimax-code` by default.
+Token Plan requires an account with available credits. The published npm CLI `@minimax-ai/code@0.4.12` defaults to `~/.minimax` for user data; builds from this repository default to `~/.minimax-code`. `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can override the data directory. The installer's `~/.minimax-code` installation directory is separate from this choice. See [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
 
 <details>
 <summary>Use your own API key (BYOK)</summary>
@@ -197,7 +197,9 @@ For now, code and documentation pull requests are accepted only from repository 
 
 ## Desktop app and support
 
-<img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code desktop app" width="100%" />
+<a href="https://agent.minimax.io/download" title="Download MiniMax Code">
+  <img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code desktop app — click to download" width="100%" />
+</a>
 
 [Download for macOS or Windows](https://agent.minimax.io/download) · [Report a problem or ask a question](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
 
