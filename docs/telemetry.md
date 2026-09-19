@@ -4,7 +4,7 @@ All automatic telemetry uploads are disabled by default and each requires its ow
 
 ## Turn it on or off
 
-Add this to the active profile's `config.yaml`, normally `~/.minimax-code/config.yaml`, then restart MCode:
+Add this to the active profile's `config.yaml`, then restart MCode. Builds from this repository default to `~/.minimax-code/config.yaml`; the published npm CLI `@minimax-ai/code@0.4.12` defaults to `~/.minimax/config.yaml`. Overrides can change this path; see [Accounts and data](installation.md#accounts-and-data) to locate it. The telemetry controls below describe this repository's source build and are not a guarantee of feature parity with that npm release.
 
 ```yaml
 telemetry:

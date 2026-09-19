@@ -10,7 +10,7 @@ Include the affected version, operating system and Node.js version, a minimal re
 
 ## Data and service boundaries
 
-- The default data directory, `~/.minimax-code`, stores login state, provider configuration, and sessions. It is not shareable project configuration. Restrict local access and keep it out of Git.
+- The active data directory stores login state, provider configuration (including API keys in `config.yaml`), and sessions. The published npm CLI `@minimax-ai/code@0.4.12` defaults to `~/.minimax`; builds from this repository default to `~/.minimax-code`. Environment overrides can select another directory. Follow [Accounts and data](docs/installation.md#accounts-and-data) to identify it; the installer location alone does not identify stored credentials. Restrict local access to every data directory you have used and keep them out of Git, including old profiles. They are not shareable project configuration.
 - Models, official plugins, connectors, search, media, feedback, and telemetry may contact external services. Those services continue to control authorization and credits; source access does not grant access to accounts or third-party resources.
 - mcode-tools obtains short-lived access tokens through the host's lease broker. Never pass refresh tokens to tool processes.
 - Permissions and sandboxing do not replace review of untrusted plugins, MCP servers, and shell commands. If automatic permission classification is unavailable, retain user confirmation rather than allowing operations by default.
