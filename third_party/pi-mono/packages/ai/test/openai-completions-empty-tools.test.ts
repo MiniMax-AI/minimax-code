@@ -202,7 +202,7 @@ describe("openai-completions empty tools handling", () => {
 
 	it("still emits tools: [] for Anthropic/LiteLLM proxy when conversation has tool history", async () => {
 		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = { ...baseModel, api: "openai-completions", compat: { cacheControlFormat: "anthropic" } } as const;
 
 		await streamSimple(
 			model,

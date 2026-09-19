@@ -545,8 +545,9 @@ function buildParams(
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
-	} else if (hasToolHistory(context.messages)) {
-		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
+	} else if (compat.cacheControlFormat === "anthropic" && hasToolHistory(context.messages)) {
+		// Keep the Anthropic proxy workaround scoped to Anthropic-compatible models.
+		// Other OpenAI-compatible backends may reject an empty tools array.
 		params.tools = [];
 	}
 

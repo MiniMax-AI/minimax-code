@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — omit empty tools for ordinary OpenAI-compatible checkpoint requests
+
+- Reason: checkpoint requests retain tool-call history but omit tool definitions. The OpenAI Completions provider unconditionally added `tools: []` for that history, which can cause a backend to reject compaction with HTTP 400 (public issue MiniMax-AI/minimax-code#194).
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), `src/providers/openai-completions.ts` and its existing empty-tools regression fixture.
+- Change type: generic, upstreamable compatibility fix. Scope the existing Anthropic proxy workaround to resolved `cacheControlFormat: "anthropic"`, including explicit custom-provider overrides and detected OpenRouter Anthropic models. The workaround remains independent of cache retention; ordinary models omit empty tools while nonempty tool definitions are preserved. Custom Anthropic proxies that need the workaround must declare that compatibility mode.
+- Validation: the distribution-owned `packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts` exercises `compactContext` through checkpoint generation and the real SDK against a local HTTP fixture. It also covers absent/empty definitions, explicit/detected Anthropic compatibility with caching disabled, and ordinary requests with tools. Run with `pnpm exec vitest run --config vitest.oss.config.mjs packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts` and the full `pnpm verify` profile. Offline fixtures do not establish live LiteLLM/vLLM, OpenAI, or Anthropic proxy acceptance.
+- Upstream PR: not created.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.
