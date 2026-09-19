@@ -13,13 +13,13 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
-### 2026-09-19 — preserve the system role for Kimi Coding and DashScope
+### 2026-09-19 — preserve the system role for Kimi Coding
 
-- Reason: Kimi Coding and DashScope endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
+- Reason: Kimi Coding endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
 - Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
-- Change: default to the `system` role for `api.kimi.com`, `api.kimi.ai`, and the standard DashScope regional hosts (`dashscope`, `dashscope-intl`, and `dashscope-us` under `aliyuncs.com`). Preserve thinking, other request options, explicit compatibility overrides, and other providers.
+- Change: default to the `system` role for `api.kimi.com` and `api.kimi.ai`. Preserve thinking, other request options, explicit compatibility overrides, and other providers.
 - Upstream PR: not opened.
-- Validation: offline request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`. A minimal live `qwen3.5-plus` role comparison on the China DashScope endpoint returned HTTP 200 for `system` and HTTP 400 for `developer`. Live Kimi Coding and other DashScope regions remain untested; this does not establish full CLI acceptance.
+- Validation: offline request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`. Live Kimi Coding validation requires a Coding Plan key and remains untested.
 
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 

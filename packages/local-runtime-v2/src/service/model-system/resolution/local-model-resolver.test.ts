@@ -1450,9 +1450,6 @@ describe('LocalModelResolver custom provider compat overrides', () => {
   it.each([
     'https://api.kimi.com/coding/v1',
     'https://api.kimi.ai/coding/v1',
-    'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-    'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
   ])('keeps the system role for a thinking model at %s', async (baseURL) => {
     expect(await systemPromptRoleFor(undefined, baseURL)).toBe('system');
   });
@@ -1463,20 +1460,15 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     ['https://api.moonshot.ai/v1', 'system'],
     ['https://api.kimi.com.example/v1', 'developer'],
     ['https://gateway.example/api.kimi.com/coding/v1', 'developer'],
-    ['https://dashscope.aliyuncs.com.example/v1', 'developer'],
-    ['https://gateway.example/dashscope.aliyuncs.com/v1', 'developer'],
   ])('preserves the system prompt role for %s', async (baseURL, role) => {
     expect(await systemPromptRoleFor(undefined, baseURL)).toBe(role);
   });
 
-  it.each([
-    'https://api.kimi.com/coding/v1',
-    'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  ])('honors an explicit developer-role override on %s', async (baseURL) => {
+  it('honors an explicit developer-role override on a Kimi Coding endpoint', async () => {
     expect(
       await systemPromptRoleFor(
         { supportsDeveloperRole: true },
-        baseURL,
+        'https://api.kimi.com/coding/v1',
       ),
     ).toBe('developer');
   });
