@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem with the Desktop app, CLI, or source build.
+description: Report a reproducible problem with the CLI or source build.
 title: "[Bug]: "
 labels: ["bug", "needs-triage"]
 body:
@@ -9,9 +9,8 @@ body:
   - type: dropdown
     id: product
     attributes:
-      label: Product or interface
+      label: CLI interface or source build
       options:
-        - Desktop app
         - CLI - interactive TUI
         - CLI - headless
         - CLI - ACP
@@ -22,7 +21,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Desktop Settings version, mcode --version, or source commit. For source builds, also include Node.js and pnpm versions.
+      description: Include mcode --version or the source commit, plus Node.js and pnpm versions.
     validations:
       required: true
   - type: dropdown
@@ -60,11 +59,6 @@ body:
         - Other
     validations:
       required: true
-  - type: input
-    id: upload-id
-    attributes:
-      label: Desktop log upload ID (optional)
-      description: For Desktop only, include an existing ID from Settings → General → Upload logs if available. CLI and source-build reports do not require an upload. Do not paste account credentials or raw session files.
   - type: textarea
     id: steps
     attributes:

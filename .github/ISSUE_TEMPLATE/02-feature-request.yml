@@ -1,14 +1,13 @@
 name: Feature request
-description: Suggest an improvement to the Desktop app, CLI, or source distribution.
+description: Suggest an improvement to the CLI or source distribution.
 title: "[Feature]: "
 labels: ["enhancement", "needs-triage"]
 body:
   - type: dropdown
     id: product
     attributes:
-      label: Product or interface
+      label: CLI interface or source build
       options:
-        - Desktop app
         - CLI - interactive TUI
         - CLI - headless
         - CLI - ACP

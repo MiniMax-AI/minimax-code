@@ -421,20 +421,21 @@ test('suite runner preserves gate arguments and canonicalizes Windows temporary 
   }
 });
 
-test('public support forms preserve destination URLs and separate Desktop from CLI reports', () => {
+test('public support forms cover only CLI interfaces and source builds', () => {
   const forms = ['01-bug-report.yml', '02-feature-request.yml', '03-question.yml'];
   for (const name of forms) {
     const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
     const product = form.body.find(field => field.id === 'product');
     assert.equal(product.validations.required, true);
-    assert.ok(product.attributes.options.includes('Desktop app'));
-    assert.ok(product.attributes.options.includes('CLI - ACP'));
-    assert.ok(product.attributes.options.includes('CLI - headless'));
+    assert.deepEqual(product.attributes.options, [
+      'CLI - interactive TUI', 'CLI - headless', 'CLI - ACP', 'Source build or repository tooling',
+    ]);
+    assert.doesNotMatch(JSON.stringify(form), /Desktop/);
     const ids = form.body.filter(field => field.id).map(field => field.id);
     assert.equal(new Set(ids).size, ids.length);
   }
   const bug = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/01-bug-report.yml', import.meta.url), 'utf8'));
-  assert.notEqual(bug.body.find(field => field.id === 'upload-id').validations?.required, true);
+  assert.equal(bug.body.find(field => field.id === 'upload-id'), undefined);
   for (const retired of ['bug.yml', 'feature.yml'])
     assert.equal(existsSync(new URL(`../.github/ISSUE_TEMPLATE/${retired}`, import.meta.url)), false);
   assert.equal(classifyChanges(['README_ZH.md', 'README.md']).docsOnly, true);

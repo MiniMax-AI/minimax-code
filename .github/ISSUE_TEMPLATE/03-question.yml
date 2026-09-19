@@ -1,14 +1,13 @@
 name: Usage question
-description: Ask about the Desktop app, CLI, or building from source.
+description: Ask about the CLI or building from source.
 title: "[Question]: "
 labels: ["question", "needs-triage"]
 body:
   - type: dropdown
     id: product
     attributes:
-      label: Product or interface
+      label: CLI interface or source build
       options:
-        - Desktop app
         - CLI - interactive TUI
         - CLI - headless
         - CLI - ACP
