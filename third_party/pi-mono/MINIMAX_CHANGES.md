@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — preserve the system role for DashScope
+
+- Reason: DashScope endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role for the standard DashScope regional hosts (`dashscope`, `dashscope-intl`, and `dashscope-us` under `aliyuncs.com`). Preserve thinking, other request options, explicit compatibility overrides, and other providers.
+- Upstream PR: not opened.
+- Validation: offline request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`. A minimal live `qwen3.5-plus` role comparison on the China DashScope endpoint returned HTTP 200 for `system` and HTTP 400 for `developer`. Other DashScope regions remain untested; this does not establish full CLI acceptance.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.
