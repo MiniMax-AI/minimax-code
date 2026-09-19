@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,6 +77,61 @@ test("provider configuration loads from an isolated data directory", (t) => {
 
   assert.doesNotMatch(result.stdout, /custom_provider:/);
 });
+test("config permission failures preserve private reads and terminate unsafe startup", {
+  skip: process.platform !== "darwin",
+}, (t) => {
+  const options = fixture(t);
+  const config = path.join(options.env.MINIMAX_DATA_DIR, "config.yaml");
+  const backup = `${config}.bak.byok-legacy-provider.smoke`;
+  const flag = (file, value) => {
+    const result = spawnSync("chflags", [value, file], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  const list = () => {
+    const result = spawnSync(process.execPath, [cli, "provider", "list"], {
+      ...options,
+      encoding: "utf8",
+      timeout: 15000,
+      // A leaked startup watcher can handle SIGTERM without releasing the process.
+      killSignal: "SIGKILL",
+    });
+    assert.equal(result.error, undefined, result.stderr);
+    return result;
+  };
+  try {
+    for (const file of [config, backup]) {
+      writeFileSync(file, "logLevel: info\n", { mode: 0o400 });
+      flag(file, "uchg");
+    }
+    const privateRead = list();
+    assert.equal(privateRead.status, 0, privateRead.stderr);
+    assert.doesNotMatch(privateRead.stderr, /Could not restrict legacy BYOK backup/);
+    assert.equal(statSync(config).mode & 0o777, 0o400);
+    assert.equal(statSync(backup).mode & 0o777, 0o400);
+
+    flag(backup, "nouchg");
+    chmodSync(backup, 0o644);
+    flag(backup, "uchg");
+    const backupWarning = list();
+    assert.equal(backupWarning.status, 0, backupWarning.stderr);
+    assert.match(backupWarning.stderr, /Could not restrict legacy BYOK backup/);
+    assert.ok(backupWarning.stderr.includes(JSON.stringify(backup)));
+    assert.equal(statSync(backup).mode & 0o777, 0o644);
+
+    flag(config, "nouchg");
+    chmodSync(config, 0o644);
+    flag(config, "uchg");
+    const unsafeRead = list();
+    assert.equal(unsafeRead.status, 1, unsafeRead.stderr);
+    assert.match(unsafeRead.stderr, /EPERM/);
+    assert.equal(statSync(config).mode & 0o777, 0o644);
+  } finally {
+    for (const file of [config, backup]) {
+      if (existsSync(file)) flag(file, "nouchg");
+    }
+  }
+});
+
 test("offline smoke children ignore ambient proxy variables", async (t) => {
   const proxyNames = [
     "HTTP_PROXY",

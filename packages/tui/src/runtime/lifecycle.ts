@@ -154,6 +154,8 @@ export async function createTuiRuntime(
       },
     };
   };
+  // Reject unreadable or unsafe config before auth watchers can keep a failed CLI alive.
+  const requestedMcodeTools = getConfig().beta?.mcodeTools === true;
   const readAuthContext = dependencies.readAuthContext ?? readCliAuthContext;
   const importSharedAuthContext =
     dependencies.importSharedAuthContext ?? importSharedCliAuthContext;
@@ -318,7 +320,6 @@ export async function createTuiRuntime(
       }
     }
   }
-  const requestedMcodeTools = getConfig().beta?.mcodeTools === true;
   let mcodeToolsReadiness: McodeToolsReadiness = fallbackMcodeToolsReadiness(
     requestedMcodeTools,
     authScope.buildEnv,
