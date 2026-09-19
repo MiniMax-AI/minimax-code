@@ -1090,7 +1090,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isTogether =
 		provider === "together" || baseUrl.includes("api.together.ai") || baseUrl.includes("api.together.xyz");
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
-	const isSiliconFlowChina = /^https?:\/\/api\.siliconflow\.cn(?::\d+)?(?:\/|$)/i.test(baseUrl);
+	const isSiliconFlow = /^https?:\/\/api\.siliconflow\.(?:cn|com)(?::\d+)?(?:\/|$)/i.test(baseUrl);
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
@@ -1126,7 +1126,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	return {
 		supportsStore: !isNonStandard,
 		supportsDeveloperRole:
-			!isSiliconFlowChina && (isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
+			!isSiliconFlow && (isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
 		supportsReasoningEffort:
 			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
 		supportsUsageInStreaming: true,

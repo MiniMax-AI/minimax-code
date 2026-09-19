@@ -1447,25 +1447,32 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     expect(await systemPromptRoleFor(undefined)).toBe('developer');
   });
 
-  it('keeps the system role for a thinking model on SiliconFlow China', async () => {
-    expect(await systemPromptRoleFor(undefined, 'https://api.siliconflow.cn/v1')).toBe('system');
+  it.each([
+    'https://api.siliconflow.cn/v1',
+    'https://api.siliconflow.com/v1',
+  ])('keeps the system role for a thinking model at %s', async (baseURL) => {
+    expect(await systemPromptRoleFor(undefined, baseURL)).toBe('system');
   });
 
   it.each([
     ['https://api.openai.com/v1', 'developer'],
     ['https://api.deepseek.com/v1', 'system'],
-    ['https://api.siliconflow.com/v1', 'developer'],
     ['https://api.siliconflow.cn.example/v1', 'developer'],
     ['https://gateway.example/api.siliconflow.cn/v1', 'developer'],
+    ['https://api.siliconflow.com.example/v1', 'developer'],
+    ['https://gateway.example/api.siliconflow.com/v1', 'developer'],
   ])('preserves the system prompt role for %s', async (baseURL, role) => {
     expect(await systemPromptRoleFor(undefined, baseURL)).toBe(role);
   });
 
-  it('honors an explicit developer-role override on SiliconFlow China', async () => {
+  it.each([
+    'https://api.siliconflow.cn/v1',
+    'https://api.siliconflow.com/v1',
+  ])('honors an explicit developer-role override on %s', async (baseURL) => {
     expect(
       await systemPromptRoleFor(
         { supportsDeveloperRole: true },
-        'https://api.siliconflow.cn/v1',
+        baseURL,
       ),
     ).toBe('developer');
   });
