@@ -16,7 +16,7 @@ import type {
   ModelProviderSource,
   ModelProviderView,
 } from '../contracts.js';
-import { modelConnectionTestFingerprint } from './config-fingerprint.js';
+import { byokModelTestStatus, modelConnectionTestFingerprint } from './config-fingerprint.js';
 import {
   MINIMAX_API_FORMAT,
   MINIMAX_API_PROVIDER_NAME,
@@ -92,6 +92,9 @@ export function buildMinimaxProviderView(
     enabled: true,
     baseUrl: minimaxApiBaseUrl(config),
     apiFormat: MINIMAX_API_FORMAT,
+    ...(config.minimax_api?.headers
+      ? { headerNames: Object.keys(config.minimax_api.headers).sort() }
+      : {}),
     hasApiKey: Boolean(apiKey),
     ...(apiKey ? { maskedApiKey: maskSecret(apiKey) } : {}),
     models: providerModelEntries(config, cache, {
@@ -100,8 +103,10 @@ export function buildMinimaxProviderView(
       providerSource: 'minimax_api',
       providerKind: 'minimax-api-key',
       providerName: MINIMAX_API_PROVIDER_NAME,
+      statusForModel: (modelId) =>
+        byokModelTestStatus(config, cache, MINIMAX_API_PROVIDER_ID, modelId),
     }),
-    ...(statusOf(cache, MINIMAX_API_PROVIDER_ID) ?? {}),
+    ...(minimaxProviderStatus(config, cache) ?? {}),
   };
 }
 
@@ -228,14 +233,20 @@ function customModelFingerprint(
   );
 }
 
-// Unvalidated read, reserved for the MiniMax API view returned straight after a
-// key write. The badge the settings UI renders comes from
-// `getMinimaxApiKeyStatus`, which does check the fingerprint. BYOK provider
-// views must use `fingerprintedProviderStatus` instead.
-function statusOf(
+// Provider tests use the first catalog model. Ignore per-model cache entries here.
+function minimaxProviderStatus(
+  config: LocalRuntimeConfig,
   cache: ModelCacheData,
-  providerId: string,
 ): { status: ModelCacheStatusView } | undefined {
-  const view = cacheStatusView(cache.provider_status[providerId]);
+  const modelId = Object.keys(minimaxApiModels(config))[0];
+  if (!modelId) return undefined;
+  const view = cacheStatusView(
+    byokModelTestStatus(
+      config,
+      { ...cache, model_status: {} },
+      MINIMAX_API_PROVIDER_ID,
+      modelId,
+    ),
+  );
   return view ? { status: view } : undefined;
 }

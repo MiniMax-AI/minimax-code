@@ -66,6 +66,18 @@ pnpm mcode provider list --json
 
 `--api-key-env` reads the current environment variable value and stores that value in the active profile's `config.yaml`; it does not save an environment-variable reference. The file still contains plaintext credentials. On POSIX systems, config writes and temporary copies use `0600`. When loading existing files, MCode removes group/other access while preserving the owner's permissions; already-private files such as `0400` or `0600` do not require a permission change. Loading fails if an unsafe main config cannot be restricted. Older migration backups are also checked, but inspection or repair failures produce a warning identifying the directory or backup that needs manual attention rather than preventing the main config from loading. Windows file modes do not provide equivalent ACL protection; restrict access to the profile directory using Windows permissions.
 
+For a MiniMax API key routed through an Anthropic Messages-compatible relay, you can hand-edit the active profile's `config.yaml`:
+
+```yaml
+minimax_api:
+  apiKey: fixture-api-key
+  baseURL: https://relay.example/anthropic
+  headers:
+    Authorization: Bearer fixture-relay-key
+```
+
+Replace the synthetic credentials with the relay's credentials. `headers` applies to connection tests and actual MiniMax API conversations. Header names are case-insensitive: explicit `Authorization` suppresses the default `x-api-key`, while an explicitly configured `x-api-key` is preserved. Without header overrides, MiniMax API authentication remains unchanged. Header values are credentials; settings views expose names only, and editing headers invalidates cached connection results. This does not switch the provider to the OpenAI protocol or change mobile-channel model selection.
+
 [Live acceptance](verification.md) separately verified MiniMax Token Plan and one configured BYOK provider. This is not a guarantee for every compatible service.
 
 ## 3. Search and image input

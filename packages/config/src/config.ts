@@ -1159,6 +1159,8 @@ export interface MinimaxApiConfig {
   apiKey?: string;
   /** Optional endpoint override; defaults to the runtime's builtin MiniMax API endpoint. */
   baseURL?: string;
+  /** Hand-edited request headers; values may contain credentials and must not be displayed. */
+  headers?: Record<string, string>;
   /** User-owned context selections applied only to the independent MiniMax API catalog. */
   modelContextLimits?: Record<string, number>;
 }

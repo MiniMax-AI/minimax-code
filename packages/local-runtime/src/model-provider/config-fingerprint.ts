@@ -30,6 +30,7 @@ export function byokModelTestStatus(
         baseUrl: normalizeProviderBaseUrl('anthropic-messages', minimaxApiBaseUrl(config)),
         apiKey,
         modelId,
+        ...(config.minimax_api?.headers ? { headers: config.minimax_api.headers } : {}),
       },
       model,
     );

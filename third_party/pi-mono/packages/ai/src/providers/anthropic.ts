@@ -949,7 +949,9 @@ function createClient(
 		return { client, isOAuthToken: true };
 	}
 
-	// API key auth
+	// API key auth. An explicit Authorization header replaces the SDK default key.
+	const configuredAuthHeaders = new Headers({ ...model.headers, ...optionsHeaders });
+	const omitDefaultApiKey = configuredAuthHeaders.has("authorization") && !configuredAuthHeaders.has("x-api-key");
 	const sessionAffinityHeaders: Record<string, string | null> =
 		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
 	const client = new Anthropic({
@@ -964,6 +966,7 @@ function createClient(
 				"anthropic-dangerous-direct-browser-access": "true",
 				...(betaFeatures.length > 0 ? { "anthropic-beta": betaFeatures.join(",") } : {}),
 			},
+			...(omitDefaultApiKey ? [{ "x-api-key": null }] : []),
 			sessionAffinityHeaders,
 			model.headers,
 			optionsHeaders,

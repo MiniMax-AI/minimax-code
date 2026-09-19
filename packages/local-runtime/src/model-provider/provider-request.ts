@@ -29,6 +29,11 @@ export function buildProviderHeaders(input: {
   for (const [name, value] of Object.entries(attributedHeaders ?? {})) {
     headers.set(name, value);
   }
+  // Explicit Authorization replaces the default API key, but explicit dual auth is preserved.
+  const supplied = new Headers(input.headers);
+  if (supplied.has('authorization') && !supplied.has('x-api-key')) {
+    headers.delete('x-api-key');
+  }
   return headers;
 }
 

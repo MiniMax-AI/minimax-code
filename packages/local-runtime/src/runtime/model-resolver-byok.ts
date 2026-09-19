@@ -77,6 +77,7 @@ export function planMinimaxApiResolution(input: {
   if (!apiKey) {
     throw new Error('LocalModelResolver: minimax_api apiKey is not configured.');
   }
+  const configHeaders = readStringRecord(cfg.headers);
   const catalogModel = MINIMAX_API_MODEL_CATALOG[input.modelId];
   const contextOverride = cfg.modelContextLimits?.[input.modelId];
   const contextLimit =
@@ -87,6 +88,7 @@ export function planMinimaxApiResolution(input: {
     provider: 'minimax_api',
     api: 'anthropic-messages',
     apiKey,
+    ...(configHeaders ? { configHeaders } : {}),
     baseUrl: normalizeProviderBaseUrl(
       'anthropic-messages',
       cfg.baseURL?.trim() || MINIMAX_API_DEFAULT_BASE_URL,
