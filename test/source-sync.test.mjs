@@ -14,6 +14,7 @@ import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { runInNewContext } from 'node:vm';
 
 function fixture(t) {
   const home = mkdtempSync(path.join(tmpdir(), 'source-sync-'));
@@ -422,11 +423,13 @@ test('suite runner preserves gate arguments and canonicalizes Windows temporary 
 });
 
 test('public support forms preserve destination URLs and separate Desktop from CLI reports', () => {
-  const forms = ['01-bug-report.yml', '02-feature-request.yml', '03-question.yml'];
+  const forms = ['01-bug-report.yml', '02-feature-request.yml', '03-question.yml', 'docs.yml'];
   for (const name of forms) {
     const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
     const product = form.body.find(field => field.id === 'product');
     assert.equal(product.validations.required, true);
+    assert.equal(product.attributes.label, 'Product or interface');
+    assert.ok(product.attributes.options.includes('CLI - interactive TUI'));
     assert.ok(product.attributes.options.includes('Desktop app'));
     assert.ok(product.attributes.options.includes('CLI - ACP'));
     assert.ok(product.attributes.options.includes('CLI - headless'));
@@ -438,6 +441,54 @@ test('public support forms preserve destination URLs and separate Desktop from C
   for (const retired of ['bug.yml', 'feature.yml'])
     assert.equal(existsSync(new URL(`../.github/ISSUE_TEMPLATE/${retired}`, import.meta.url)), false);
   assert.equal(classifyChanges(['README_ZH.md', 'README.md']).docsOnly, true);
+});
+
+test('issue product labels follow current form answers without replacing unrelated labels', async () => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/label-issue-product.yml', import.meta.url), 'utf8'));
+  assert.deepEqual(workflow.on, { issues: { types: ['opened', 'edited'] } });
+  assert.deepEqual(workflow.permissions, { issues: 'write' });
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  const job = workflow.jobs['label-product'];
+  assert.equal(job.if, "${{ github.repository == 'MiniMax-AI/minimax-code' && github.event.repository.private == false && !github.event.issue.pull_request }}");
+  assert.equal(job.steps.length, 1); // No checkout or execution of issue-supplied code.
+  const run = job.steps[0].run;
+  assert.doesNotMatch(run, /\$\{\{/);
+  const script = run.match(/^node <<'EOF'\r?\n([\s\S]*?)\r?\nEOF\s*$/)?.[1];
+  assert.ok(script);
+  async function replay(body, labels, failureStatus) {
+    const writes = [];
+    const issuePath = '/repos/MiniMax-AI/minimax-code/issues/7';
+    await runInNewContext(script, {
+      require: name => {
+        assert.equal(name, 'node:fs');
+        return { readFileSync: () => JSON.stringify({ issue: { number: 7, body: '### Product or interface\n\nDesktop app', labels: [] } }) };
+      },
+      process: { env: { GITHUB_EVENT_PATH: 'fixture.json', GITHUB_REPOSITORY: 'MiniMax-AI/minimax-code', GITHUB_API_URL: 'https://api.github.invalid', GH_TOKEN: 'synthetic' } },
+      fetch: async (url, options) => {
+        assert.equal(options.headers.Authorization, 'Bearer synthetic');
+        if (options.method === 'GET') {
+          assert.equal(url, `https://api.github.invalid${issuePath}`);
+          return { ok: !failureStatus, status: failureStatus || 200, json: async () => ({ body, labels: labels.map(name => ({ name })) }) };
+        }
+        writes.push({ method: options.method, path: url.replace(`https://api.github.invalid${issuePath}`, ''), body: options.body && JSON.parse(options.body) });
+        return { ok: true, status: 204 };
+      },
+    });
+    return writes;
+  }
+  const answer = product => `### Product or interface\n\n${product}\n\n### Question\n\nSynthetic question`;
+  const add = name => ({ method: 'POST', path: '/labels', body: { labels: [name] } });
+  const remove = name => ({ method: 'DELETE', path: `/labels/${name}`, body: undefined });
+  assert.deepEqual(await replay(answer('CLI - interactive TUI'), ['bug', 'desktop']), [add('tui'), remove('desktop')]);
+  assert.deepEqual(await replay(answer('Desktop app').replace(/\n/g, '\r\n'), ['question']), [add('desktop')]);
+  assert.deepEqual(await replay(answer('Desktop app'), ['desktop', 'bug']), []);
+  for (const product of ['CLI - headless', 'CLI - ACP', 'Source build or repository tooling']) {
+    assert.deepEqual(await replay(answer(product), ['tui', 'bug']), [remove('tui')]);
+  }
+  for (const body of [null, 'Desktop app', answer('_No response_'), answer('$(touch must-not-execute)')]) {
+    assert.deepEqual(await replay(body, ['desktop', 'bug']), []);
+  }
+  await assert.rejects(replay(answer('Desktop app'), [], 403), /GitHub GET failed: 403/);
 });
 
 test('issue notification is restricted to public destination events and builds payloads offline', t => {

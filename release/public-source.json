@@ -19,6 +19,7 @@
     ".github/dependabot.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/compatibility.yml",
+    ".github/workflows/label-issue-product.yml",
     ".github/workflows/security.yml",
     ".github/workflows/source-candidate.yml",
     ".github/workflows/sync-issue-to-feishu.yml",
