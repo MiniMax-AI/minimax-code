@@ -34,6 +34,7 @@ export const TUI_STATUS_LINE_ITEMS = [
   'token-quota',
   'cache-read-ratio',
   'context-remaining',
+  'context-meter',
   'custom-command',
 ] as const;
 
@@ -67,6 +68,8 @@ const TUI_STATUS_LINE_ITEM_ALIASES: Readonly<Record<string, TuiStatusLineItem>> 
   'cache-read': 'cache-read-ratio',
   context: 'context-remaining',
   'context-left': 'context-remaining',
+  'context-bar': 'context-meter',
+  'context-gauge': 'context-meter',
   custom: 'custom-command',
 };
 

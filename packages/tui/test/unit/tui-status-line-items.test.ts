@@ -582,3 +582,66 @@ describe('review link status item', () => {
     expect(narrow).toContain('!312');
   });
 });
+
+describe('context meter item', () => {
+  it('resolves the canonical id and its aliases', () => {
+    expect(parseTuiStatusLineItem('context-meter')).toBe('context-meter');
+    expect(parseTuiStatusLineItem('context-bar')).toBe('context-meter');
+    expect(parseTuiStatusLineItem('context-gauge')).toBe('context-meter');
+  });
+
+  it('stays out of the default status line', () => {
+    expect(TUI_STATUS_LINE_DEFAULT_ITEMS).not.toContain('context-meter');
+    const state = {
+      ...BASE_STATE,
+      contextUsage: { usedTokens: 20_000, contextWindowTokens: 100_000 },
+    };
+    expect(stripAnsi(render(state))).not.toContain('▕');
+  });
+
+  it('renders the remaining-headroom gauge when configured explicitly', () => {
+    const state = {
+      ...BASE_STATE,
+      statusLineItems: ['context-meter'],
+      contextUsage: { usedTokens: 20_000, contextWindowTokens: 100_000 },
+    };
+    expect(stripAnsi(render(state))).toContain('Context ▕██████░░▏ 80% left');
+  });
+
+  it('drains the gauge with the remaining headroom', () => {
+    const state = {
+      ...BASE_STATE,
+      statusLineItems: ['context-meter'],
+      contextUsage: { usedTokens: 50_000, contextWindowTokens: 100_000 },
+    };
+    expect(stripAnsi(render(state))).toContain('▕████░░░░▏ 50% left');
+  });
+
+  it('shrinks to a shorter gauge in narrow terminals', () => {
+    const state = {
+      ...BASE_STATE,
+      statusLineItems: ['context-meter'],
+      contextUsage: { usedTokens: 50_000, contextWindowTokens: 100_000 },
+    };
+    const narrow = stripAnsi(render(state, 20));
+    expect(narrow).toContain('Ctx');
+    expect(narrow).toContain('50%');
+    expect(narrow).not.toContain('left');
+    expect(narrow).not.toContain('▕████░░░░▏');
+  });
+
+  it('is hidden without usage and never shows NaN', () => {
+    expect(stripAnsi(render({ ...BASE_STATE, statusLineItems: ['context-meter'] }))).not.toContain(
+      '▕',
+    );
+    expect(
+      stripAnsi(
+        render({
+          ...BASE_STATE,
+          statusLineItems: ['context-meter'],
+          contextUsage: { usedTokens: Number.NaN, contextWindowTokens: 100_000 },
+        }),
+      ),
+    ).not.toContain('NaN');
+  });
+});

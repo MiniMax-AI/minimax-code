@@ -257,6 +257,15 @@ function buildStatusSegment(
         ],
         { shrinkPriority: 50, dropPriority: 80 },
       );
+    case 'context-meter':
+      return createStatusSegment(
+        [
+          renderContextMeter(state, 'full'),
+          renderContextMeter(state, 'compact'),
+          renderContextMeter(state, 'minimal'),
+        ],
+        { shrinkPriority: 50, dropPriority: 80 },
+      );
     case 'custom-command':
       return createStatusSegment(
         [
@@ -456,6 +465,33 @@ function renderContextRemaining(
       : density === 'compact'
         ? `Ctx ${remaining}%`
         : `Ctx ${remaining}%`;
+  return chalk.hex(color)(label);
+}
+
+/**
+ * Renders remaining context headroom as a compact gauge.
+ *
+ * Uses the same snapshot and thresholds as `context-remaining`: the filled
+ * cells show how much headroom is left, so the gauge drains and recolors as
+ * the Session approaches its context window. Returns an empty string when no
+ * usage is known, for the same reasons as the percentage variant.
+ */
+function renderContextMeter(
+  state: TuiShellState,
+  density: 'full' | 'compact' | 'minimal' = 'full',
+): string {
+  const remaining = contextRemainingPercent(state);
+  if (remaining === undefined) return '';
+  const color = remaining <= 10 ? colors.error : remaining <= 25 ? colors.warning : colors.muted;
+  const cells = density === 'full' ? 8 : 6;
+  const filled = Math.round((remaining / 100) * cells);
+  const gauge = `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏`;
+  const label =
+    density === 'minimal'
+      ? `Ctx ${remaining}%`
+      : density === 'full'
+        ? `Context ${gauge} ${remaining}% left`
+        : `Ctx ${gauge} ${remaining}%`;
   return chalk.hex(color)(label);
 }
 
