@@ -3216,6 +3216,7 @@
     "packages/tui/test/unit/provider-application.test.ts",
     "packages/tui/test/unit/run-coordinator-usage.test.ts",
     "packages/tui/test/unit/run-coordinator.test.ts",
+    "packages/tui/test/unit/runtime-data-dir.test.ts",
     "packages/tui/test/unit/runtime-event-normalizer.test.ts",
     "packages/tui/test/unit/runtime-feedback-diagnostic-upload.test.ts",
     "packages/tui/test/unit/runtime-feedback-service.test.ts",

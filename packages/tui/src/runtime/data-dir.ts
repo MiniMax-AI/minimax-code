@@ -1,5 +1,4 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { getPrimaryDataDirPath, getProfile } from '@mavis/config';
 import { resolveMcodeDataEnvironment, type McodeDataEnvironment } from '../auth/environment.js';
 import { configureTuiRuntimeEnvironment } from '../cli/environment.js';
 
@@ -17,8 +16,12 @@ export interface PrepareTuiDataDirOptions {
   configureRuntimeEnvironment?: typeof configureTuiRuntimeEnvironment;
 }
 
-export function resolveDefaultTuiDataDir(_buildEnv: McodeDataEnvironment): string {
-  return join(homedir(), '.minimax-code');
+export function resolveDefaultTuiDataDir(
+  _buildEnv: McodeDataEnvironment,
+  getPrimaryDataDir: typeof getPrimaryDataDirPath = getPrimaryDataDirPath,
+  getCurrentProfile: typeof getProfile = getProfile,
+): string {
+  return getPrimaryDataDir(undefined, getCurrentProfile());
 }
 
 function getDefaultTuiDataDir(): string {

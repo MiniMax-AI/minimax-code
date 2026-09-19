@@ -15,7 +15,7 @@ Open `/statusline` to configure ordinary items:
 - Both regular and fullscreen modes adapt the panel to available height. Small windows prioritize search, the selected option, and save / cancel hints.
 - The panel is unavailable during pending permission / question interactions and in side sessions. It may open during ordinary execution without sending a model request.
 
-The panel manages ordinary items only. For automation, edit the current profile's `config.yaml` (default in this distribution: `~/.minimax-code/config.yaml`):
+The panel manages ordinary items only. For automation, edit the current profile's `config.yaml` (default in this distribution: `~/.minimax/config.yaml`):
 
 ```yaml
 tui:
@@ -27,7 +27,7 @@ Restart mcode after saving to enable the `[V]` line. `build-mode` is not in the 
 
 ## Configuration location
 
-- File: `config.yaml` in the runtime data directory, normally `~/.minimax-code/config.yaml`.
+- File: `config.yaml` in the runtime data directory, normally `~/.minimax/config.yaml`.
 - Key: `tui.statusLine`, a **string array** of item IDs.
 - List order is display order, left to right. Items not listed are hidden.
 
@@ -243,7 +243,7 @@ A command may ignore stdin. stdout is accepted only after exit code `0` without 
 - A deterministic selection changes every 30-second time bucket, using existing redraws rather than a dedicated timer. An idle terminal does not redraw merely to rotate tips; the next normal redraw selects the current bucket.
 - Left-side composer mode and action hints remain stable. Prefer a full tip, then a short version, then hide it if space is insufficient.
 - Welcome, active execution, follow-ups, goals, permission / question interactions, attachments, nonempty drafts, and temporary hints take precedence and suppress tips.
-- Tips are enabled by default. Disable them in `~/.minimax-code/config.yaml`:
+- Tips are enabled by default. Disable them in `~/.minimax/config.yaml`:
 
 ```yaml
 tui:

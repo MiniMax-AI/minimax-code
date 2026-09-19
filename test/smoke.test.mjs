@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, chmodSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +65,36 @@ test("CLI version and command help work outside the source directory", (t) => {
     assert.equal(result.status, 0, result.stderr);
     assert.ok(result.stdout.includes(expected), result.stdout);
   }
+});
+test("CLI defaults to the shared user config without migrating the old source directory", (t) => {
+  const options = fixture(t);
+  const home = options.cwd;
+  const config = path.join(home, ".minimax", "config.yaml");
+  const oldConfig = path.join(home, ".minimax-code", "config.yaml");
+  for (const file of [config, oldConfig]) mkdirSync(path.dirname(file));
+  writeFileSync(config, "telemetry:\n  enabled: true\n", { mode: 0o600 });
+  const oldContents = "telemetry:\n  enabled: false\n";
+  writeFileSync(oldConfig, oldContents, { mode: 0o600 });
+  for (const name of Object.keys(options.env)) {
+    if (name.startsWith("__MAVIS_RUNTIME")) delete options.env[name];
+  }
+  delete options.env.MINIMAX_DATA_DIR;
+  delete options.env.MAVIS_DATA_DIR;
+  Object.assign(options.env, {
+    HOME: home,
+    USERPROFILE: home,
+    MCODE_DISABLE_TELEMETRY: "1",
+  });
+  const result = spawnSync(process.execPath, [cli, "telemetry", "status"], {
+    ...options,
+    encoding: "utf8",
+    timeout: runtimeTimeoutMs,
+  });
+  assertSuccessfulChild(result);
+  const status = JSON.parse(result.stdout);
+  assert.equal(status.configFile, config);
+  assert.equal(status.configured, true);
+  assert.equal(readFileSync(oldConfig, "utf8"), oldContents);
 });
 test("provider configuration loads from an isolated data directory", (t) => {
   const result = spawnSync(process.execPath, [cli, "provider", "list"], {
