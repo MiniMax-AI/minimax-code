@@ -53,7 +53,11 @@ export class FsToolPermissionChecker implements ToolPermissionChecker {
     }
 
     // Extract file path from input
-    const filePath = extractFilePath(input);
+    const filePath =
+      extractFilePath(input) ??
+      (toolName === 'grep' || toolName === 'glob' || toolName === 'list'
+        ? context.workingDirectory
+        : undefined);
     if (!filePath) return undefined;
 
     const decision = evaluatePathCapability(filePath, toolActionForFsTool(toolName), context, {
@@ -109,9 +113,9 @@ function toolActionForFsTool(toolName: string): 'read' | 'write' {
 
 /** Extract the primary file path from a tool's input object. */
 function extractFilePath(input: Record<string, unknown>): string | undefined {
-  if (typeof input.file_path === 'string') return input.file_path;
-  if (typeof input.filePath === 'string') return input.filePath;
-  if (typeof input.path === 'string') return input.path;
-  if (typeof input.pattern === 'string') return input.pattern;
+  if (typeof input.file_path === 'string' && input.file_path) return input.file_path;
+  if (typeof input.filePath === 'string' && input.filePath) return input.filePath;
+  if (typeof input.path === 'string' && input.path) return input.path;
+  // A search pattern is not a filesystem path. Directory tools default to cwd.
   return undefined;
 }

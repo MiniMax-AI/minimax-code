@@ -1756,9 +1756,11 @@ describe('LocalPermissionFacade', () => {
         const configPath = path.join(dataDir, 'config.yaml');
         writeFileSync(configPath, 'synthetic: fixture-only-secret\n');
         mkdirSync(path.join(dataDir, 'memory'));
+        mkdirSync(path.join(dataDir, 'skills'));
         const aliases = [
           path.join(workspaceDir, 'notes.txt'),
           path.join(dataDir, 'memory', 'notes.txt'),
+          path.join(dataDir, 'skills', 'notes.txt'),
         ];
         for (const alias of aliases) {
           symlinkSync(configPath, alias);
@@ -1789,7 +1791,7 @@ describe('LocalPermissionFacade', () => {
       }
     });
 
-    it('protects a runtime directory nested in the workspace from recursive search', async () => {
+    it.each([true, false])('protects nested runtime data from recursive search (explicit path: %s)', async (explicitPath) => {
       const workspaceDir = mkdtempSync(path.join(tmpdir(), 'runtime-parent-workspace-'));
       const { facade, dataDir } = freshFacade({
         workspaceDir,
@@ -1799,7 +1801,7 @@ describe('LocalPermissionFacade', () => {
         const result = await facade.checkPermission({
           toolName: 'grep',
           agentName: 'fixture-agent',
-          input: { path: workspaceDir, pattern: 'secret' },
+          input: { ...(explicitPath ? { path: workspaceDir } : {}), pattern: 'secret' },
         });
         expect(result.behavior).toBe('ask');
       } finally {
