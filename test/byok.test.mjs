@@ -348,7 +348,11 @@ test(
       const beforeEffort = requests.length;
       await run(["exec", "EFFORT_TEST", "--model", effortModel, "--effort", effort,
         "--timeout", "20s", "--max-steps", "1"]);
-      const modelRequests = requests.slice(beforeEffort).filter((r) => r.body.model === "kimi-k3");
+      // Background title generation is a separate non-streaming request and
+      // does not use the turn's effort selection.
+      const modelRequests = requests.slice(beforeEffort).filter(
+        (r) => r.body.model === "kimi-k3" && r.body.stream === true,
+      );
       assert.ok(modelRequests.length > 0);
       for (const request of modelRequests) assert.equal(request.body.reasoning_effort, effort);
     }
