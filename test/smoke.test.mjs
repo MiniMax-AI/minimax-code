@@ -9,6 +9,14 @@ import Database from "better-sqlite3";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const cli = path.join(root, "dist/cli.js");
+// Full runtime startup can exceed 15s on Windows CI (ACP took 22s).
+// Match the ACP startup budget; lightweight help/validation stays at 15s.
+const runtimeTimeoutMs = process.platform === "win32" ? 30000 : 15000;
+function assertSuccessfulChild(result) {
+  assert.equal(result.error, undefined,
+    `CLI spawn failed: ${result.error?.message}; signal=${result.signal}; stderr=${result.stderr}`);
+  assert.equal(result.status, 0, result.stderr);
+}
 const version = JSON.parse(
   readFileSync(path.join(root, "packages/tui/package.json"), "utf8"),
 ).version;
@@ -46,6 +54,7 @@ function fixture(t, environment = process.env) {
       MAVIS_DATA_DIR: dataDir,
       MCODE_TEST_NETWORK_AUDIT: audit,
       MCODE_TEST_MANAGED_OFFLINE: "1",
+      MCODE_TEST_PROCESS_PROBE: "1",
       NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
     },
   };
@@ -70,9 +79,9 @@ test("provider configuration loads from an isolated data directory", (t) => {
   const result = spawnSync(process.execPath, [cli, "provider", "list"], {
     ...fixture(t),
     encoding: "utf8",
-    timeout: 15000,
+    timeout: runtimeTimeoutMs,
   });
-  assert.equal(result.status, 0, result.stderr);
+  assertSuccessfulChild(result);
   assert.match(result.stdout, /minimax/);
 
   assert.doesNotMatch(result.stdout, /custom_provider:/);
@@ -97,9 +106,9 @@ test("offline smoke children ignore ambient proxy variables", async (t) => {
       const result = spawnSync(process.execPath, [cli, "provider", "list"], {
         ...options,
         encoding: "utf8",
-        timeout: 15000,
+        timeout: runtimeTimeoutMs,
       });
-      assert.equal(result.status, 0, result.stderr);
+      assertSuccessfulChild(result);
       assert.match(result.stdout, /minimax/);
       assert.match(
         readFileSync(options.env.MCODE_TEST_NETWORK_AUDIT + ".managed", "utf8"),
@@ -225,9 +234,9 @@ test("local plugin browsing remains available with managed services offline", (t
     const result = spawnSync(process.execPath, [cli, ...args], {
       ...options,
       encoding: "utf8",
-      timeout: 15000,
+      timeout: runtimeTimeoutMs,
     });
-    assert.equal(result.status, 0, result.stderr);
+    assertSuccessfulChild(result);
     const output = JSON.parse(result.stdout);
     assert.ok(output !== null);
     assert.doesNotMatch(result.stdout, /"official"/);
