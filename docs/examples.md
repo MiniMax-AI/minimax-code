@@ -85,4 +85,45 @@ pnpm mcode exec "Describe this UI screenshot's layout and suggest three improvem
 
 The image is sent as input to the selected model service. Use content suitable for sending and a model that supports images. This is an executable usage example, not a live-service acceptance result from this review. Search, image understanding, and media generation are separate capabilities; mcode-tools generation also requires the relevant account permissions and credits.
 
-Use `/plugins` to manage extensions. See [capability coverage](tui-capabilities.md) for custom MCP, managed connectors, and media tools.
+See [capability coverage](tui-capabilities.md) for custom MCP, managed connectors, and media tools.
+
+## 4. Manage plugins
+
+Open `/plugins` inside the TUI, or run `mcode plugin` from a shell to open that panel. For a source build, use `pnpm mcode plugin` from the source root instead; the commands below use the installed `mcode` executable.
+
+The panel combines the **official** catalog and **local** plugin directories. Use `Tab` / `Shift+Tab` to switch between All Plugins, Installed, Official, and Local; type to search and use the arrow keys to select a row.
+
+| Action | Key | Scope |
+| --- | --- | --- |
+| Install an available plugin | `Enter` | Official catalog; requires MiniMax login |
+| Enable or disable an installed plugin | `Space` | Official and local |
+| Remove an installed plugin | `Delete` or `Ctrl+D` | Official and local; clear the search first with `Esc`, then reselect the plugin |
+| Refresh the catalogs | `Ctrl+R` | Official and local |
+
+With a nonempty search, `Delete` / `Ctrl+D` edit the search instead of removing a plugin. `Esc` clears the search, or closes the panel when the search is already empty. Removing a local plugin deletes its installed directory; keep a separate source copy if you need to restore it.
+
+The same operations are available from the shell:
+
+```bash
+mcode plugin --help
+mcode plugin marketplace list
+mcode plugin list --available --marketplace official
+mcode plugin add <name>@official
+mcode plugin disable <name>@official
+mcode plugin enable <name>@official
+mcode plugin remove <name>@official
+mcode plugin marketplace upgrade
+```
+
+Replace `<name>` with a plugin name returned by `list`. Use `@official` or `@local` to disambiguate names shared by both sources; `--marketplace official` / `--marketplace local` are equivalent source selectors. The list and mutation commands support `--json`. `marketplace upgrade` refreshes source snapshots; it does not register a new marketplace.
+
+For a local plugin, run `mcode plugin marketplace list` to find the active profile's local directory. Place a supported plugin package in a direct child directory there, with its manifest at the package's expected location, then refresh `/plugins`. Copy the individual plugin package, not an entire marketplace repository. Discovered local packages already count as installed:
+
+```bash
+mcode plugin list --available --marketplace local
+mcode plugin disable <name>@local
+mcode plugin enable <name>@local
+mcode plugin remove <name>@local
+```
+
+`mcode plugin add <name>@local` is not a local import command and is unsupported. Neither `plugin add` nor `/plugins` currently accepts a GitHub URL, local path, or arbitrary third-party marketplace registration. Compatible package readers and a GitHub importer exist in the runtime, but the CLI/TUI do not expose that importer. Managing arbitrary marketplaces from the panel remains a separate feature request; the current source selectors are only `official` and `local`.
