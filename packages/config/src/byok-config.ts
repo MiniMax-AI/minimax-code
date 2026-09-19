@@ -474,13 +474,32 @@ function rewriteNexusModelProvider(
   return true;
 }
 
-/** Repair credential-bearing backups produced by older versions on profile load. */
+/** Repair old backups without making archival maintenance a config-load dependency. */
 export function restrictLegacyByokBackups(configPath: string): void {
   if (process.platform === 'win32') return;
   const directory = path.dirname(configPath);
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    console.warn(
+      `[config] Could not inspect legacy BYOK backups in ${JSON.stringify(directory)}. ` +
+      'Backup permissions were not verified; check directory access and restrict backup permissions manually.',
+    );
+    return;
+  }
+  for (const entry of entries) {
     if (entry.isFile() && entry.name.startsWith(LEGACY_BYOK_BACKUP_PREFIX)) {
-      restrictConfigFileSync(path.join(directory, entry.name));
+      const backupPath = path.join(directory, entry.name);
+      try {
+        restrictConfigFileSync(backupPath);
+      } catch {
+        // Do not expose arbitrary error messages that could contain config content.
+        console.warn(
+          `[config] Could not restrict legacy BYOK backup ${JSON.stringify(backupPath)}. ` +
+          'It may still be readable by other users; restrict its permissions manually.',
+        );
+      }
     }
   }
 }
