@@ -11,6 +11,16 @@ import { json } from '../api/host-helpers.js';
 import { applyLocalTurnDiffSnapshotMutation } from './file-changes.js';
 
 const execFile = promisify(execFileCallback);
+// Read paths and metrics as NUL records; patch headers are presentation only.
+const WORKSPACE_DIFF_ARGS = [
+  '--raw',
+  '--numstat',
+  '-z',
+  '--patch',
+  '--no-color',
+  '--no-ext-diff',
+  '--no-textconv',
+];
 
 export interface LocalDiffSession {
   readonly sessionId: string;
@@ -238,22 +248,19 @@ async function readWorkspaceDiff(
   workspaceDir: string,
 ): Promise<{ fileChanges: LocalFileDiff[]; rawDiff?: string }> {
   try {
-    const [nameStatus, numstat, rawDiff] = await Promise.all([
-      execGit(['diff', 'HEAD', '--name-status', '--'], workspaceDir),
-      execGit(['diff', 'HEAD', '--numstat', '--'], workspaceDir),
-      execGit(['diff', 'HEAD', '--'], workspaceDir),
-    ]);
+    const result = await execGit(['diff', 'HEAD', ...WORKSPACE_DIFF_ARGS, '--'], workspaceDir);
+    const trackedDiffs = parseGitDiffSummary(result.stdout);
     const untracked = await readUntrackedFiles(workspaceDir);
     const untrackedDiffs = await Promise.all(
       untracked.map((file) => readUntrackedFileDiff(workspaceDir, file)),
     );
-    const raw = [rawDiff.stdout, ...untrackedDiffs.flatMap((item) => item.rawDiff ?? [])]
+    const raw = [
+      ...trackedDiffs.flatMap((item) => item.diff ?? []),
+      ...untrackedDiffs.flatMap((item) => item.rawDiff ?? []),
+    ]
       .filter(Boolean)
       .join('\n');
-    const fileChanges = [
-      ...parseGitDiffSummary(nameStatus.stdout, numstat.stdout, rawDiff.stdout),
-      ...untrackedDiffs.map((item) => item.fileChange),
-    ];
+    const fileChanges = [...trackedDiffs, ...untrackedDiffs.map((item) => item.fileChange)];
     return { fileChanges, ...(raw ? { rawDiff: raw } : {}) };
   } catch {
     return { fileChanges: [] };
@@ -268,48 +275,59 @@ async function execGit(args: string[], cwd: string): Promise<{ stdout: string; s
   });
 }
 
-function parseGitDiffSummary(
-  nameStatus: string,
-  numstat: string,
-  rawDiff: string,
-): LocalFileDiff[] {
+function parseGitDiffSummary(output: string): LocalFileDiff[] {
+  if (!output) return [];
+  // --raw --numstat -z --patch emits raw records, then numstat records,
+  // then an extra NUL before the patches. Git uses the same order for raw
+  // records and patch blocks, including rename-only and binary changes.
+  const boundary = output.indexOf('\0\0');
+  if (boundary < 0) throw new Error('Git diff is missing its patch boundary');
+  const records = output.slice(0, boundary).split('\0');
+  const files: Array<{ file: string; status: string }> = [];
+  let index = 0;
+  while (records[index]?.startsWith(':')) {
+    const status = records[index++]!.split(' ').at(-1)!;
+    const source = records[index++];
+    const file = /^[RC]/u.test(status) ? records[index++] : source;
+    if (!file) throw new Error('Git diff is missing a raw path');
+    files.push({ file, status: mapGitStatus(status) });
+  }
   const stats = new Map<string, { additions: number; deletions: number }>();
-  for (const line of numstat.split('\n')) {
-    if (!line.trim()) continue;
-    const [additions, deletions, ...pathParts] = line.split('\t');
-    const file = pathParts.join('\t');
-    if (!file) continue;
+  while (index < records.length) {
+    const [additions, deletions, ...pathParts] = records[index++]!.split('\t');
+    let file = pathParts.join('\t');
+    // Renames/copies have an empty numstat path followed by old and new paths.
+    if (!file) {
+      index += 1;
+      file = records[index++] ?? '';
+    }
+    if (!file) throw new Error('Git diff is missing a numstat path');
     stats.set(file, {
       additions: numericDiffStat(additions),
       deletions: numericDiffStat(deletions),
     });
   }
-  const patches = splitPatchByFile(rawDiff);
-  const out: LocalFileDiff[] = [];
-  for (const line of nameStatus.split('\n')) {
-    if (!line.trim()) continue;
-    const [statusToken, ...pathParts] = line.split('\t');
-    const file = pathParts[pathParts.length - 1];
-    if (!file) continue;
-    const stat = stats.get(file) ?? { additions: 0, deletions: 0 };
-    out.push({
-      file,
-      additions: stat.additions,
-      deletions: stat.deletions,
-      status: mapGitStatus(statusToken),
-      ...(patches.get(file) ? { diff: patches.get(file) } : {}),
-    });
+  const patches = output
+    .slice(boundary + 2)
+    .split(/(?=^diff --git )/mu)
+    .filter(Boolean);
+  if (files.length !== patches.length) {
+    throw new Error('Git diff raw paths and patch blocks do not match');
   }
-  return out;
+  return files.map(({ file, status }, position) => {
+    const stat = stats.get(file);
+    if (!stat) throw new Error('Git diff is missing file metrics');
+    return { file, status, ...stat, diff: patches[position] };
+  });
 }
 
 async function readUntrackedFiles(workspaceDir: string): Promise<string[]> {
   try {
-    const result = await execGit(['ls-files', '--others', '--exclude-standard'], workspaceDir);
-    return result.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const result = await execGit(
+      ['ls-files', '--others', '--exclude-standard', '-z'],
+      workspaceDir,
+    );
+    return result.stdout.split('\0').filter(Boolean);
   } catch {
     return [];
   }
@@ -320,28 +338,24 @@ async function readUntrackedFileDiff(
   file: string,
 ): Promise<{ fileChange: LocalFileDiff; rawDiff?: string }> {
   try {
-    const rawDiff = await execFile('git', ['diff', '--no-index', '--', '/dev/null', file], {
-      cwd: workspaceDir,
-      env: cleanGitEnv(),
-      maxBuffer: 10 * 1024 * 1024,
-    }).catch((err: unknown) => {
+    const rawDiff = await execFile(
+      'git',
+      ['diff', '--no-index', ...WORKSPACE_DIFF_ARGS, '--', '/dev/null', file],
+      {
+        cwd: workspaceDir,
+        env: cleanGitEnv(),
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    ).catch((err: unknown) => {
       const error = err as { stdout?: string; code?: number };
       if (error.code === 1 && typeof error.stdout === 'string') return { stdout: error.stdout };
       throw err;
     });
-    const text = rawDiff.stdout;
-    const additions = text
-      .split('\n')
-      .filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+    const parsed = parseGitDiffSummary(rawDiff.stdout)[0];
+    if (!parsed) throw new Error('Git diff is missing an untracked file');
     return {
-      fileChange: {
-        file,
-        additions,
-        deletions: 0,
-        status: 'added',
-        ...(text ? { diff: text } : {}),
-      },
-      ...(text ? { rawDiff: text } : {}),
+      fileChange: { ...parsed, file, status: 'added' },
+      ...(parsed.diff ? { rawDiff: parsed.diff } : {}),
     };
   } catch {
     return {
@@ -353,19 +367,6 @@ async function readUntrackedFileDiff(
       },
     };
   }
-}
-
-function splitPatchByFile(rawDiff: string): Map<string, string> {
-  const patches = new Map<string, string>();
-  const chunks = rawDiff.split(/^diff --git /m);
-  for (const chunk of chunks) {
-    if (!chunk.trim()) continue;
-    const text = `diff --git ${chunk}`;
-    const match = /^diff --git a\/(.+?) b\/(.+)$/m.exec(text);
-    const file = match?.[2];
-    if (file) patches.set(file, text);
-  }
-  return patches;
 }
 
 function mapGitStatus(status: string | undefined): string {
