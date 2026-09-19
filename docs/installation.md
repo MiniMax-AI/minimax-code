@@ -64,4 +64,4 @@ For tests, explicitly set `MINIMAX_DATA_DIR` to a temporary directory to keep no
 
 Save your changes, fetch a reviewed revision with Git, then repeat the frozen install and build. A source installation does not automatically become an official npm installation.
 
-To uninstall, remove the source directory you created. User data is separate and remains in place. Delete that directory only when you no longer need its account configuration or sessions.
+To uninstall a source build, save any work and remove the source directory you created. Separately stored user data remains in place. See [Uninstall](../README.md#uninstall) for official installer and npm removal, shell PATH cleanup, and optional user-data deletion.

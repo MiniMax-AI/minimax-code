@@ -45,6 +45,8 @@ curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash
 irm https://filecdn.minimax.chat/public/install.ps1 | iex
 ```
 
+The scripts install into `~/.minimax-code` on macOS / Linux / WSL and `%USERPROFILE%\.minimax-code` on Windows. The launchers are `bin/mcode` and `bin/mcode-tools` on POSIX, or `mcode.cmd` / `mcode.ps1` and `mcode-tools.cmd` / `mcode-tools.ps1` on Windows. Set `MCODE_INSTALL_DIR` before installation to choose a different location. See [Uninstall](#uninstall) to remove the CLI.
+
 **npm** — if you already have **Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26**:
 
 ```bash
@@ -142,6 +144,58 @@ Inside the TUI, use `/sessions` to find previous sessions and `/help` to see all
 | Toggle Plan Mode | `Shift+Tab` |
 | Switch permission modes | `Alt+M` |
 | Close a panel or interrupt a running task | `Esc` |
+
+## Uninstall
+
+Close running MCode sessions, including editor integrations, before uninstalling. First locate the command with `command -v mcode` (macOS / Linux / WSL) or `Get-Command mcode -All` (PowerShell), then follow the matching installation method below. The current official install scripts do **not** provide an uninstall flag.
+
+### Installed with the script
+
+The commands below remove the default installation directory, including both launchers, downloaded releases, and any installer-managed Node.js runtime. If you used `MCODE_INSTALL_DIR`, substitute the actual installation directory. Inspect it first: earlier source builds used `~/.minimax-code` for user data, and a custom data directory can overlap the installation. Back up any configuration or sessions you want to keep before deleting it.
+
+**macOS / Linux / WSL**
+
+```bash
+rm -rf -- "$HOME/.minimax-code"
+```
+
+Remove the `# MiniMax Code CLI` comment and its following PATH line from the shell file the installer updated: `~/.zshrc` for zsh; the first existing file among `~/.bashrc`, `~/.bash_profile`, and `~/.profile` for bash (or a newly created `~/.bashrc`); `~/.config/fish/config.fish` for fish; or `~/.profile` for other shells. The line is `export PATH="/absolute/install/path/bin:$PATH"`, or `fish_add_path -g "/absolute/install/path/bin"` for fish. Remove only the MCode entry, preserving other PATH settings. The installer skips this edit when `MCODE_NO_MODIFY_PATH` is set or the path is already present.
+
+**Windows (PowerShell)**
+
+```powershell
+Remove-Item -LiteralPath "$env:USERPROFILE\.minimax-code" -Recurse -Force
+```
+
+Open **Edit environment variables for your account**, edit the user **Path**, and remove only the installation directory entry (by default `%USERPROFILE%\.minimax-code`, which may appear as an expanded absolute path). The Windows installer updates the user Path, not the PowerShell profile; `MCODE_NO_MODIFY_PATH` skips that persistent update.
+
+### Installed with npm or from source
+
+For a global npm installation, use the same npm installation/prefix you used to install MCode:
+
+```bash
+npm uninstall -g @minimax-ai/code
+```
+
+For a source build, save any work and remove only the checkout you created; see [Update or remove](docs/installation.md#update-or-remove).
+
+After uninstalling, reopen your terminal (fully restart the editor for integrated terminals) and run `command -v mcode` or `Get-Command mcode -All` again. No result means the command is no longer on PATH. If another copy appears, identify its installation method before removing it.
+
+### Optional: delete user data
+
+Removing the program leaves separately stored user data in place. To also delete local login state, provider configuration, caches, and sessions, first confirm the selected directory using [Accounts and data](docs/installation.md#accounts-and-data) and back up anything you need. Other MCode installations can share this directory. For the default `~/.minimax` directory only:
+
+```bash
+# macOS / Linux / WSL — permanently deletes the default user data
+rm -rf -- "$HOME/.minimax"
+```
+
+```powershell
+# Windows — permanently deletes the default user data
+Remove-Item -LiteralPath "$env:USERPROFILE\.minimax" -Recurse -Force
+```
+
+A profile uses `~/.minimax-<profile>`; `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can select a different location. Remove only the specific directories you intend to discard, without wildcard deletion. Remove any MCode-specific environment variable assignments you added to shell profiles or user environment settings if you no longer need them.
 
 ## What you can do
 

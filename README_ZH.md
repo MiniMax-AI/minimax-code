@@ -45,6 +45,8 @@ curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash
 irm https://filecdn.minimax.chat/public/install.ps1 | iex
 ```
 
+脚本在 macOS / Linux / WSL 上默认安装到 `~/.minimax-code`，在 Windows 上默认安装到 `%USERPROFILE%\.minimax-code`。POSIX 启动器为 `bin/mcode` 和 `bin/mcode-tools`；Windows 启动器为 `mcode.cmd` / `mcode.ps1` 和 `mcode-tools.cmd` / `mcode-tools.ps1`。安装前设置 `MCODE_INSTALL_DIR` 可更改安装位置。移除 CLI 的方法见[卸载](#卸载)。
+
 **npm**：适用于已安装 **Node.js 22.19+（22.x）、24.2+（24.x）、25 或 26** 的环境。
 
 ```bash
@@ -142,6 +144,58 @@ mcode --session
 | 切换 Plan Mode | `Shift+Tab` |
 | 切换权限模式 | `Alt+M` |
 | 关闭面板或中断正在运行的任务 | `Esc` |
+
+## 卸载
+
+卸载前请关闭正在运行的 MCode 会话，包括编辑器中的集成。先通过 `command -v mcode`（macOS / Linux / WSL）或 `Get-Command mcode -All`（PowerShell）定位命令，再按对应的安装方式操作。当前官方安装脚本**不提供卸载参数**。
+
+### 通过脚本安装
+
+以下命令会删除默认安装目录，包括两个启动器、下载的版本，以及安装器管理的 Node.js 运行时。如果使用过 `MCODE_INSTALL_DIR`，请替换为实际安装目录。删除前请先检查：早期源码构建曾将用户数据保存在 `~/.minimax-code`，自定义数据目录也可能与安装目录重合。请先备份需要保留的配置和会话。
+
+**macOS / Linux / WSL**
+
+```bash
+rm -rf -- "$HOME/.minimax-code"
+```
+
+从安装器修改的 shell 配置文件中删除 `# MiniMax Code CLI` 注释及其下一行 PATH 配置：zsh 使用 `~/.zshrc`；bash 依次选择 `~/.bashrc`、`~/.bash_profile`、`~/.profile` 中第一个已存在的文件，均不存在时创建 `~/.bashrc`；fish 使用 `~/.config/fish/config.fish`；其他 shell 使用 `~/.profile`。对应配置为 `export PATH="/absolute/install/path/bin:$PATH"`，fish 则为 `fish_add_path -g "/absolute/install/path/bin"`。只移除 MCode 对应的条目，保留其他 PATH 设置。如果设置了 `MCODE_NO_MODIFY_PATH` 或路径已存在，安装器会跳过此修改。
+
+**Windows（PowerShell）**
+
+```powershell
+Remove-Item -LiteralPath "$env:USERPROFILE\.minimax-code" -Recurse -Force
+```
+
+打开“编辑账户的环境变量”，编辑用户 **Path**，仅删除安装目录对应的条目（默认为 `%USERPROFILE%\.minimax-code`，也可能显示为展开后的绝对路径）。Windows 安装器修改的是用户 Path，不是 PowerShell 配置文件；设置 `MCODE_NO_MODIFY_PATH` 会跳过此持久化修改。
+
+### 通过 npm 或源码安装
+
+全局 npm 安装请使用当初安装 MCode 时的同一套 npm 和安装前缀：
+
+```bash
+npm uninstall -g @minimax-ai/code
+```
+
+源码构建请先保存工作，再仅删除自己创建的源码目录，详见[更新或移除](docs/installation.md#update-or-remove)。
+
+卸载后重新打开终端（编辑器集成终端需要完全重启编辑器），再次运行 `command -v mcode` 或 `Get-Command mcode -All`。没有结果表示 PATH 中已找不到该命令。如果出现另一份安装，请先确认它的安装方式再移除。
+
+### 可选：删除用户数据
+
+移除程序会保留单独存储的用户数据。如果还要删除本地登录状态、提供方配置、缓存和会话，请先按[账号与数据](docs/installation.md#accounts-and-data)确认实际数据目录，并备份需要保留的内容。其他 MCode 安装可能共用该目录。以下命令仅适用于默认的 `~/.minimax`：
+
+```bash
+# macOS / Linux / WSL — 永久删除默认用户数据
+rm -rf -- "$HOME/.minimax"
+```
+
+```powershell
+# Windows — 永久删除默认用户数据
+Remove-Item -LiteralPath "$env:USERPROFILE\.minimax" -Recurse -Force
+```
+
+profile 使用 `~/.minimax-<profile>`；`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 可以指定其他位置。只删除确定不再需要的具体目录，不要使用通配符批量删除。如果不再需要自行添加的 MCode 环境变量，也请从 shell 配置或用户环境变量设置中移除对应赋值。
 
 ## 可以做什么
 
