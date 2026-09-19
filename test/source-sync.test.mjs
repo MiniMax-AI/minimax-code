@@ -440,6 +440,21 @@ test('public support forms preserve destination URLs and separate Desktop from C
   assert.equal(classifyChanges(['README_ZH.md', 'README.md']).docsOnly, true);
 });
 
+test('issue forms label incoming reports for triage and retain collaborator-only PR guidance', () => {
+  for (const [name, type] of [
+    ['01-bug-report.yml', 'bug'], ['02-feature-request.yml', 'enhancement'],
+    ['03-question.yml', 'question'], ['docs.yml', 'documentation'],
+  ]) {
+    const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
+    assert.deepEqual(form.labels, [type, 'needs-triage']);
+  }
+  const config = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/config.yml', import.meta.url), 'utf8'));
+  assert.equal(config.blank_issues_enabled, false);
+  const policy = config.contact_links.find(link => link.url.endsWith('/CONTRIBUTING.md'));
+  assert.match(policy.about, /only from repository collaborators/);
+  assert.match(policy.about, /external PRs are not accepted/);
+});
+
 test('issue notification is restricted to public destination events and builds payloads offline', t => {
   const workflow = parseYaml(readFileSync(new URL('../.github/workflows/sync-issue-to-feishu.yml', import.meta.url), 'utf8'));
   assert.deepEqual(workflow.on, { issues: { types: ['opened'] } });

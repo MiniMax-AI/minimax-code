@@ -1,7 +1,7 @@
 name: Usage question
 description: Ask about the Desktop app, CLI, or building from source.
 title: "[Question]: "
-labels: ["question"]
+labels: ["question", "needs-triage"]
 body:
   - type: dropdown
     id: product
