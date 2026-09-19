@@ -1,0 +1,71 @@
+name: Label issue product
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-product-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  label-product:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ github.repository == 'MiniMax-AI/minimax-code' && github.event.repository.private == false && !github.event.issue.pull_request }}
+    steps:
+      - name: Synchronize product labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+
+          async function main() {
+            const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+            const issuePath = `/repos/${process.env.GITHUB_REPOSITORY}/issues/${event.issue.number}`;
+            async function request(path, method = 'GET', body) {
+              const response = await fetch(`${process.env.GITHUB_API_URL}${path}`, {
+                method,
+                headers: {
+                  Authorization: `Bearer ${process.env.GH_TOKEN}`,
+                  Accept: 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                },
+                body: body === undefined ? undefined : JSON.stringify(body),
+              });
+              if (!response.ok) throw new Error(`GitHub ${method} failed: ${response.status}`);
+              return response.status === 204 ? undefined : response.json();
+            }
+
+            // Read current state so queued edits cannot restore an outdated label.
+            const issue = await request(issuePath);
+            const body = (issue.body || '').replace(/\r\n/g, '\n');
+            const product = body.match(/^### Product or interface\n+([^\n]+)\n*(?=### |$)/m)?.[1].trim();
+            const products = new Map([
+              ['Desktop app', 'desktop'],
+              ['CLI - interactive TUI', 'tui'],
+              ['CLI - headless', null],
+              ['CLI - ACP', null],
+              ['Source build or repository tooling', null],
+            ]);
+            // Leave manually triaged issues alone when no valid form answer exists.
+            if (!products.has(product)) return;
+            const desired = products.get(product);
+            const labels = issue.labels.map(label => label.name);
+            if (desired && !labels.includes(desired)) {
+              await request(`${issuePath}/labels`, 'POST', { labels: [desired] });
+            }
+            for (const label of ['desktop', 'tui']) {
+              if (label !== desired && labels.includes(label)) {
+                await request(`${issuePath}/labels/${label}`, 'DELETE');
+              }
+            }
+          }
+
+          main();
+          EOF
