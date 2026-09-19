@@ -8,6 +8,7 @@ export function sanitizeTerminalText(value: string): string {
     '',
   );
   return stripVTControlCharacters(text)
-    .replace(/\r\n?/gu, '\n')
+    .replace(/\r\n/gu, '\n')
+    .replace(/\r/gu, ' ')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, '');
 }

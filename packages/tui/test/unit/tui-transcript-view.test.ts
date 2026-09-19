@@ -52,7 +52,7 @@ describe('TranscriptView', () => {
       expect(text).not.toContain('private payload');
       expect(text).not.toContain('U1lOVEhFVElD');
     }
-    expect(sanitizeTerminalText('中文🙂\ttext\r\nnext\rother')).toBe('中文🙂\ttext\nnext\nother');
+    expect(sanitizeTerminalText('中文🙂\ttext\r\nnext\rother')).toBe('中文🙂\ttext\nnext other');
   });
   it.each(['running', 'succeeded'] as const)(
     'does not emit model terminal controls from a %s assistant cell',
