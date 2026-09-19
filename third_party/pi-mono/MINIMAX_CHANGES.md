@@ -13,6 +13,15 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — preserve the system role for DashScope
+
+- Reason: DashScope endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role for official DashScope regional and Coding Plan hosts, plus workspace, trial, and Token Plan hosts under the documented regional `maas.aliyuncs.com` domains. Preserve thinking, other request options, explicit compatibility overrides, and other providers.
+- References: [official endpoint list](https://help.aliyun.com/en/model-studio/base-url), [Coding Plan role rejection](https://github.com/openclaw/openclaw/issues/23575), [Token Plan role rejection](https://github.com/earendil-works/pi/issues/7723), and [merged OpenClaw DashScope fix](https://github.com/openclaw/openclaw/pull/24675).
+- Upstream PR: not opened.
+- Validation: request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`, including official endpoints, unrelated hosts, and explicit compatibility overrides.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.

@@ -1384,19 +1384,22 @@ describe('LocalModelResolver custom provider compat overrides', () => {
   });
 
   // The incident was a wire-level symptom: pi chooses the system prompt role from the
-  // resolved compat, so these two cases pin the request pi would actually send.
+  // resolved compat, so these cases pin the request pi would actually send.
   const reasoningModelConfig: LocalModelConfig = {
     reasoning: true,
     thinking: { effortOptions: ['low', 'light', 'max'] },
   };
 
-  const systemPromptRoleFor = async (compat: LocalModelConfig['compat']) => {
+  const systemPromptRoleFor = async (
+    compat: LocalModelConfig['compat'],
+    baseURL = 'https://gateway.example/v1',
+  ) => {
     const resolver = new LocalModelResolver({
       byokConfigGetter: () => ({
         custom_provider: {
           gateway: {
             api: 'openai-completions',
-            options: { apiKey: 'gateway-key', baseURL: 'https://gateway.example/v1' },
+            options: { apiKey: 'gateway-key', baseURL },
             models: { 'kimi-k2-thinking': { ...reasoningModelConfig, compat } },
           },
         },
@@ -1442,5 +1445,54 @@ describe('LocalModelResolver custom provider compat overrides', () => {
 
   it('still sends `developer` when the gateway declares nothing, reproducing the incident', async () => {
     expect(await systemPromptRoleFor(undefined)).toBe('developer');
+  });
+
+  it.each([
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+    'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://coding.dashscope.aliyuncs.com/v1',
+    'https://coding-intl.dashscope.aliyuncs.com/v1',
+    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    'https://trial.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.cn-hongkong.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.ap-northeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.eu-central-1.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.us-east-1.maas.aliyuncs.com/compatible-mode/v1',
+  ])('keeps the system role for a thinking model at %s', async (baseURL) => {
+    expect(await systemPromptRoleFor(undefined, baseURL)).toBe('system');
+  });
+
+  it.each([
+    ['https://api.openai.com/v1', 'developer'],
+    ['https://api.moonshot.cn/v1', 'system'],
+    ['https://api.moonshot.ai/v1', 'system'],
+    ['https://dashscope.aliyuncs.com.example/v1', 'developer'],
+    ['https://gateway.example/dashscope.aliyuncs.com/v1', 'developer'],
+    ['https://coding.dashscope.aliyuncs.com.example/v1', 'developer'],
+    ['https://token-plan.cn-beijing.maas.aliyuncs.com.example/v1', 'developer'],
+    ['https://gateway.example/token-plan.cn-beijing.maas.aliyuncs.com/v1', 'developer'],
+    ['https://example-workspace.unknown-region.maas.aliyuncs.com/v1', 'developer'],
+    ['https://example-workspace.cn-beijing.aliyuncs.com/v1', 'developer'],
+  ])('preserves the system prompt role for %s', async (baseURL, role) => {
+    expect(await systemPromptRoleFor(undefined, baseURL)).toBe(role);
+  });
+
+  it.each([
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://coding.dashscope.aliyuncs.com/v1',
+    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    'https://example-workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+  ])('honors an explicit developer-role override on %s', async (baseURL) => {
+    expect(
+      await systemPromptRoleFor(
+        { supportsDeveloperRole: true },
+        baseURL,
+      ),
+    ).toBe('developer');
   });
 });
