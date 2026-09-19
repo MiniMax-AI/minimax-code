@@ -59,6 +59,7 @@
       "packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts",
       "packages/local-runtime-v2/src/service/model-system/resolution/model-ref.test.ts",
       "packages/local-runtime-v2/src/service/model-system/resolution/model-resolver-byok.test.ts",
+      "packages/local-runtime-v2/src/service/model-system/resolution/minimax-auth-headers.test.ts",
       "packages/local-runtime/test/unit/child-bash-lifecycle.test.ts",
       "packages/local-runtime/test/unit/local-background-task-task-output-polling-reminder.test.ts",
       "packages/mcode-tools-host/test/unit/resource-manifest.test.ts",

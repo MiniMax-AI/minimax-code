@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { buildMinimaxProviderView } from '../catalog/provider-views.js';
 import { LocalModelCache } from '../catalog/model-cache.js';
 import type {
   LocalByokConfigDraft,
@@ -120,6 +121,40 @@ describe('LocalModelProviderService context', () => {
     });
     expect(JSON.stringify(harness.service.listEffectiveProviders())).not.toContain(MINIMAX_KEY);
     expect(harness.selectModel).not.toHaveBeenCalled();
+  });
+
+  it('tests MiniMax headers, hides values, and expires cached verdicts after header changes', async () => {
+    const headers = {
+      Authorization: 'Bearer fixture-relay-secret',
+      'X-Tenant': 'fixture-tenant',
+    };
+    const harness = createHarness({
+      minimax_api: {
+        apiKey: MINIMAX_KEY,
+        baseURL: 'https://relay.example/anthropic',
+        headers,
+      },
+      minimaxModelSource: 'minimax_api_key',
+    });
+    const providerView = () => buildMinimaxProviderView(harness.config, harness.cache.load());
+    const modelId = providerView()!.models[0]!.modelId;
+    await harness.service.testProvider('minimax_api');
+    await harness.service.testModel('minimax_api', modelId);
+    expect(harness.testCalls.length).toBeGreaterThan(0);
+    for (const call of harness.testCalls) expect(call.target.headers).toEqual(headers);
+    expect(harness.service.getMinimaxApiKeyStatus().cachedStatus?.state).toBe('available');
+    expect(providerView()?.status?.state).toBe('available');
+    expect(providerView()?.headerNames).toEqual(['Authorization', 'X-Tenant']);
+    expect(JSON.stringify(providerView())).not.toContain('fixture-relay-secret');
+    expect(JSON.stringify(providerView())).not.toContain('fixture-tenant');
+    expect(JSON.stringify(providerView())).not.toContain(MINIMAX_KEY);
+    expect(providerView()?.models[0]?.status?.state).toBe('available');
+
+    headers.Authorization = 'Bearer fixture-rotated-secret';
+    expect(harness.service.getMinimaxApiKeyStatus().cachedStatus).toBeUndefined();
+    expect(providerView()?.status).toBeUndefined();
+    expect(providerView()?.models[0]?.status).toBeUndefined();
+    expect(JSON.stringify(harness.cache.load())).not.toContain('fixture-relay-secret');
   });
 
   it('creates and updates a custom Provider through the same Model System owner', async () => {

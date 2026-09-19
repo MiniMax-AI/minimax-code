@@ -23,6 +23,12 @@ export function parseMinimaxApiConfig(raw: unknown): MinimaxApiConfig | undefine
   const parsed: MinimaxApiConfig = {};
   if (typeof obj.apiKey === 'string') parsed.apiKey = obj.apiKey;
   if (typeof obj.baseURL === 'string') parsed.baseURL = obj.baseURL;
+  if (isPlainRecord(obj.headers)) {
+    const entries = Object.entries(obj.headers).filter(
+      (entry): entry is [string, string] => entry[0].length > 0 && typeof entry[1] === 'string',
+    );
+    if (entries.length > 0) parsed.headers = Object.fromEntries(entries);
+  }
   const modelContextLimits = parseModelContextLimits(obj.modelContextLimits);
   if (modelContextLimits) parsed.modelContextLimits = modelContextLimits;
   return Object.keys(parsed).length > 0 ? parsed : undefined;

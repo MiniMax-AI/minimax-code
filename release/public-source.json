@@ -935,6 +935,7 @@
     "packages/local-runtime-v2/src/service/model-system/resolution/file-api-gateway-auth.ts",
     "packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts",
     "packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.ts",
+    "packages/local-runtime-v2/src/service/model-system/resolution/minimax-auth-headers.test.ts",
     "packages/local-runtime-v2/src/service/model-system/resolution/model-key.ts",
     "packages/local-runtime-v2/src/service/model-system/resolution/model-ref.test.ts",
     "packages/local-runtime-v2/src/service/model-system/resolution/model-ref.ts",

@@ -94,6 +94,8 @@ export type LocalModelsConfig = Record<string, LocalProviderConfig>;
 export interface LocalMinimaxApiConfig {
   apiKey?: string;
   baseURL?: string;
+  /** Hand-edited request headers; values may contain credentials and must not be displayed. */
+  headers?: Record<string, string>;
   modelContextLimits?: Record<string, number>;
 }
 

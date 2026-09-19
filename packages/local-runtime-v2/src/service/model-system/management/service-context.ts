@@ -420,6 +420,7 @@ export class ModelProviderServiceContext {
       apiKey,
       modelId: chosenModelId,
       outputLimit,
+      ...(config.minimax_api?.headers ? { headers: config.minimax_api.headers } : {}),
     };
     return {
       cacheKey: providerTestCacheKey(MINIMAX_API_PROVIDER_ID, modelId),
