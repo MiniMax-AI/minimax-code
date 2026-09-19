@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — preserve the system role for SiliconFlow China
+
+- Reason: thinking-enabled OpenAI-compatible requests to `api.siliconflow.cn` sent the unsupported `developer` role and failed with HTTP 400.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role on the exact China API host. Preserve thinking, explicit compatibility overrides, other request options, and other endpoints; the international host is outside this patch.
+- Upstream PR: not opened.
+- Validation: outgoing-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`. Live role comparisons on `Qwen/Qwen3.5-4B` and `deepseek-ai/DeepSeek-R1` returned HTTP 200 for `system` and HTTP 400 for `developer`. The real resolver and streaming adapter with DeepSeek-R1 failed before the fix and completed after it with identical other request options. Full interactive CLI and tool-loop acceptance remain untested.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.

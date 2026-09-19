@@ -1384,19 +1384,22 @@ describe('LocalModelResolver custom provider compat overrides', () => {
   });
 
   // The incident was a wire-level symptom: pi chooses the system prompt role from the
-  // resolved compat, so these two cases pin the request pi would actually send.
+  // resolved compat, so these cases pin the request pi would actually send.
   const reasoningModelConfig: LocalModelConfig = {
     reasoning: true,
     thinking: { effortOptions: ['low', 'light', 'max'] },
   };
 
-  const systemPromptRoleFor = async (compat: LocalModelConfig['compat']) => {
+  const systemPromptRoleFor = async (
+    compat: LocalModelConfig['compat'],
+    baseURL = 'https://gateway.example/v1',
+  ) => {
     const resolver = new LocalModelResolver({
       byokConfigGetter: () => ({
         custom_provider: {
           gateway: {
             api: 'openai-completions',
-            options: { apiKey: 'gateway-key', baseURL: 'https://gateway.example/v1' },
+            options: { apiKey: 'gateway-key', baseURL },
             models: { 'kimi-k2-thinking': { ...reasoningModelConfig, compat } },
           },
         },
@@ -1442,5 +1445,28 @@ describe('LocalModelResolver custom provider compat overrides', () => {
 
   it('still sends `developer` when the gateway declares nothing, reproducing the incident', async () => {
     expect(await systemPromptRoleFor(undefined)).toBe('developer');
+  });
+
+  it('keeps the system role for a thinking model on SiliconFlow China', async () => {
+    expect(await systemPromptRoleFor(undefined, 'https://api.siliconflow.cn/v1')).toBe('system');
+  });
+
+  it.each([
+    ['https://api.openai.com/v1', 'developer'],
+    ['https://api.deepseek.com/v1', 'system'],
+    ['https://api.siliconflow.com/v1', 'developer'],
+    ['https://api.siliconflow.cn.example/v1', 'developer'],
+    ['https://gateway.example/api.siliconflow.cn/v1', 'developer'],
+  ])('preserves the system prompt role for %s', async (baseURL, role) => {
+    expect(await systemPromptRoleFor(undefined, baseURL)).toBe(role);
+  });
+
+  it('honors an explicit developer-role override on SiliconFlow China', async () => {
+    expect(
+      await systemPromptRoleFor(
+        { supportsDeveloperRole: true },
+        'https://api.siliconflow.cn/v1',
+      ),
+    ).toBe('developer');
   });
 });
