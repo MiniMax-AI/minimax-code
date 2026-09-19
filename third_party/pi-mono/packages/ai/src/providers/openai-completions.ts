@@ -1091,6 +1091,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		provider === "together" || baseUrl.includes("api.together.ai") || baseUrl.includes("api.together.xyz");
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
 	const isKimiCoding = /^https?:\/\/api\.kimi\.(?:com|ai)(?::\d+)?(?:\/|$)/i.test(baseUrl);
+	const isDashScope = /^https?:\/\/dashscope(?:-intl|-us)?\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl);
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
@@ -1125,7 +1126,8 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	return {
 		supportsStore: !isNonStandard,
-		supportsDeveloperRole: !isKimiCoding && (isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
+		supportsDeveloperRole:
+			!isKimiCoding && !isDashScope && (isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
 		supportsReasoningEffort:
 			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
 		supportsUsageInStreaming: true,
