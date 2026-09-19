@@ -30,6 +30,7 @@ const BASE_CHAT_COMPAT: OpenAICompletionsCompat = {
   supportsUsageInStreaming: true,
   maxTokensField: 'max_tokens',
   requiresToolResultName: false,
+  requiresToolsForToolHistory: false,
   requiresAssistantAfterToolResult: false,
   requiresThinkingAsText: false,
   requiresReasoningContentOnAssistantMessages: false,

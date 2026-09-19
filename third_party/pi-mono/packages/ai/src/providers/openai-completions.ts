@@ -59,6 +59,24 @@ function hasToolHistory(messages: Message[]): boolean {
 	return false;
 }
 
+/** Recognize missing tools, never generic tool-validation or empty-array errors. */
+function isMissingToolsError(error: unknown): boolean {
+	if (!error || typeof error !== "object" || Reflect.get(error, "status") !== 400) return false;
+	const detail = Reflect.get(error, "error");
+	if (!detail || typeof detail !== "object") return false;
+	if (
+		Reflect.get(detail, "param") === "tools" &&
+		["missing_required_parameter", "missing_required_argument"].includes(Reflect.get(detail, "code"))
+	) {
+		return true;
+	}
+	const message = Reflect.get(detail, "message");
+	return (
+		typeof message === "string" &&
+		/^(?:litellm\.UnsupportedParamsError:\s*)?Anthropic doesn't support tool calling without `?tools=`? param specified\b/i.test(message)
+	);
+}
+
 function isTextContentBlock(block: { type: string }): block is TextContent {
 	return block.type === "text";
 }
@@ -144,11 +162,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat, options?.fetch);
-			let params = buildParams(model, context, options, compat, cacheRetention);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
-			}
+			const prepareParams = async (includeEmptyTools = false) => {
+				const params = buildParams(model, context, options, compat, cacheRetention);
+				if (includeEmptyTools) params.tools = [];
+				const nextParams = await options?.onPayload?.(params, model);
+				options?.signal?.throwIfAborted();
+				return nextParams === undefined ? params : (nextParams as typeof params);
+			};
+			const params = await prepareParams();
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -156,7 +177,29 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 			const { data: openaiStream, response } = await client.chat.completions
 				.create(params, requestOptions)
-				.withResponse();
+				.withResponse()
+				.catch(async (error: unknown) => {
+					// Recover only before any response stream starts. Explicit false, real
+					// tool definitions, and payload transforms that remove history take precedence.
+					if (
+						model.compat?.requiresToolsForToolHistory === false ||
+						context.tools?.length ||
+						params.tools !== undefined ||
+						!params.messages.some(
+							(message) => message.role === "tool" || (message.role === "assistant" && message.tool_calls?.length),
+						) ||
+						!isMissingToolsError(error)
+					) {
+						throw error;
+					}
+					options?.signal?.throwIfAborted();
+					const retryParams = await prepareParams(true);
+					if (!Array.isArray(retryParams.tools) || retryParams.tools.length !== 0) throw error;
+					// No loop and no SDK retries: at most one compatibility recovery request.
+					return client.chat.completions
+						.create(retryParams, { ...requestOptions, maxRetries: 0 })
+						.withResponse();
+				});
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -545,9 +588,9 @@ function buildParams(
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
-	} else if (compat.cacheControlFormat === "anthropic" && hasToolHistory(context.messages)) {
-		// Keep the Anthropic proxy workaround scoped to Anthropic-compatible models.
-		// Other OpenAI-compatible backends may reject an empty tools array.
+	} else if (compat.requiresToolsForToolHistory && hasToolHistory(context.messages)) {
+		// Some proxies require this field; others reject empty arrays. Do not infer
+		// the requirement from prompt-cache support or a model/provider name.
 		params.tools = [];
 	}
 
@@ -1131,6 +1174,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		supportsUsageInStreaming: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
+		requiresToolsForToolHistory: false,
 		requiresAssistantAfterToolResult: false,
 		requiresThinkingAsText: false,
 		requiresReasoningContentOnAssistantMessages: isDeepSeek,
@@ -1176,6 +1220,7 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		supportsUsageInStreaming: model.compat.supportsUsageInStreaming ?? detected.supportsUsageInStreaming,
 		maxTokensField: model.compat.maxTokensField ?? detected.maxTokensField,
 		requiresToolResultName: model.compat.requiresToolResultName ?? detected.requiresToolResultName,
+		requiresToolsForToolHistory: model.compat.requiresToolsForToolHistory ?? detected.requiresToolsForToolHistory,
 		requiresAssistantAfterToolResult:
 			model.compat.requiresAssistantAfterToolResult ?? detected.requiresAssistantAfterToolResult,
 		requiresThinkingAsText: model.compat.requiresThinkingAsText ?? detected.requiresThinkingAsText,

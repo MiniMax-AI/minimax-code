@@ -411,6 +411,8 @@ export interface OpenAICompletionsCompat {
 	maxTokensField?: "max_completion_tokens" | "max_tokens";
 	/** Whether tool results require the `name` field. Default: auto-detected from URL. */
 	requiresToolResultName?: boolean;
+	/** Send `tools: []` for tool history without current definitions. True: always; false: never (including automatic recovery). Unset: omit initially, retry once only on a recognized missing-tools HTTP 400. Independent of prompt caching. */
+	requiresToolsForToolHistory?: boolean;
 	/** Whether a user message after tool results requires an assistant message in between. Default: auto-detected from URL. */
 	requiresAssistantAfterToolResult?: boolean;
 	/** Whether thinking blocks must be converted to text blocks with <thinking> delimiters. Default: auto-detected from URL. */

@@ -183,6 +183,7 @@ const BOOLEAN_COMPAT_KEYS = [
   'supportsReasoningEffort',
   'supportsUsageInStreaming',
   'requiresToolResultName',
+  'requiresToolsForToolHistory',
   'requiresAssistantAfterToolResult',
   'requiresThinkingAsText',
   'requiresReasoningContentOnAssistantMessages',
