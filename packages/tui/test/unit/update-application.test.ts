@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,7 @@ import {
   type McodeUpdateApplicationDependencies,
 } from '../../src/update/application.js';
 import {
+  bindMcodeNpmCommandToRuntime,
   buildMcodePackageManagerCommand,
   classifyMcodeInstallPath,
   classifyNpmGlobalInstall,
@@ -24,6 +25,149 @@ import {
   resolveMcodePrefixModulesRoot,
   writeMcodePrefixUpdatePending,
 } from '../../src/update/prefix-update.js';
+
+describe('installer-owned npm runtime binding', () => {
+  const target = 'nodejs/26.3.1/lib/node_modules/npm/bin/npm-cli.js';
+  const shim = (cli = target) =>
+    [
+      '#!/bin/sh',
+      'basedir=$(dirname "$(echo "$0" | sed -e \'s,\\\\,/,g\')")',
+      'if [ -x "$basedir/node" ]; then',
+      `  exec "$basedir/node" "$basedir/${cli}" "$@"`,
+      'else',
+      `  exec node "$basedir/${cli}" "$@"`,
+      'fi',
+    ].join('\n');
+
+  async function withLayout(
+    run: (root: string, write: (file: string, text?: string) => string) => void | Promise<void>,
+  ) {
+    const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'mcode-npm-shim-')));
+    const write = (file: string, text = '') => {
+      const fullPath = path.join(root, file);
+      mkdirSync(path.dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, text);
+      return fullPath;
+    };
+    try {
+      await run(root, write);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function bind(executable: string) {
+    return bindMcodeNpmCommandToRuntime(
+      { executable, args: ['view', '@minimax-ai/code@latest', '--json'], display: 'owned npm' },
+      process.execPath,
+    );
+  }
+
+  it('resolves the reported pnpm shell shim and runs its CLI with the selected Node', async () => {
+    await withLayout(async (root, write) => {
+      const marker = path.join(root, 'shim-was-executed');
+      const npm = write(
+        'pnpm home/npm',
+        shim().replace('#!/bin/sh', `#!/bin/sh\ntouch "${marker}"`),
+      );
+      const cli = write(`pnpm home/${target}`, 'console.log(JSON.stringify("1.2.4"));');
+      // A different installed pnpm Node version must not influence the selection.
+      write(
+        'pnpm home/nodejs/24.2.0/lib/node_modules/npm/bin/npm-cli.js',
+        'throw new Error("wrong npm");',
+      );
+      expect(bind(npm)).toEqual({
+        executable: process.execPath,
+        args: [cli, 'view', '@minimax-ai/code@latest', '--json'],
+        display: 'owned npm',
+      });
+      await expect(
+        resolveLatestMcodeRegistryVersion('latest', {
+          npmExecutable: npm,
+          runtimeExecutable: process.execPath,
+          distribution: resolveMcodeNpmDistribution('@minimax-ai/code'),
+        }),
+      ).resolves.toBe('1.2.4');
+      expect(existsSync(marker)).toBe(false);
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves regular npm symlinks and resolves symlinked pnpm shims',
+    async () => {
+      await withLayout((root, write) => {
+        const cli = write(`pnpm home/${target}`);
+        const npm = write('pnpm home/npm', shim());
+        symlinkSync(npm, path.join(root, 'npm'));
+        expect(bind(path.join(root, 'npm')).args[0]).toBe(cli);
+        const regularCli = write('node/lib/node_modules/npm/bin/npm-cli.js');
+        mkdirSync(path.join(root, 'node/bin'), { recursive: true });
+        symlinkSync('../lib/node_modules/npm/bin/npm-cli.js', path.join(root, 'node/bin/npm'));
+        expect(bind(path.join(root, 'node/bin/npm')).args[0]).toBe(regularCli);
+      });
+    },
+  );
+
+  it.each([
+    ['node/npm.cmd', 'node/node_modules/npm/bin/npm-cli.js'],
+    ['node/bin/npm', 'node/lib/node_modules/npm/bin/npm-cli.js'],
+  ])('preserves conventional npm layout for %s', async (executable, cliPath) => {
+    await withLayout((_root, write) => {
+      const npm = write(executable, '@ECHO OFF\r\n');
+      const cli = write(cliPath);
+      expect(bind(npm).args[0]).toBe(cli);
+    });
+  });
+
+  it.each([
+    ['missing target', shim()],
+    ['directory target', shim()],
+    ['traversal', shim(`../${target}`)],
+    ['dynamic version', shim('nodejs/$(node -v)/lib/node_modules/npm/bin/npm-cli.js')],
+    [
+      'ambiguous branches',
+      shim().replace('exec node "$basedir/nodejs/26.3.1/', 'exec node "$basedir/nodejs/24.2.0/'),
+    ],
+    ['comment-only target', `#!/bin/sh\n# exec node "$basedir/${target}" "$@"`],
+    ['unknown wrapper', '#!/bin/sh\nexec npm "$@"'],
+  ])('rejects %s without searching other installed versions', async (kind, content) => {
+    await withLayout((root, write) => {
+      const npm = write('pnpm/npm', content);
+      write('pnpm/nodejs/24.2.0/lib/node_modules/npm/bin/npm-cli.js');
+      if (kind === 'directory target')
+        mkdirSync(path.join(root, 'pnpm', target), { recursive: true });
+      else if (kind !== 'missing target') write(`pnpm/${target}`);
+      write(target);
+      expect(() => bind(npm)).toThrow('Cannot locate npm-cli.js for the owned npm executable');
+    });
+  });
+
+  it.skipIf(process.platform === 'win32').each(['file', 'version directory', 'dangling file'])(
+    'rejects a pnpm %s symlink escaping its version directory',
+    async (kind) => {
+      await withLayout((root, write) => {
+        const npm = write('pnpm/npm', shim());
+        const outside = write('outside/lib/node_modules/npm/bin/npm-cli.js');
+        const cli = path.join(root, 'pnpm', target);
+        if (kind === 'version directory') {
+          mkdirSync(path.join(root, 'pnpm/nodejs'), { recursive: true });
+          symlinkSync(path.join(root, 'outside'), path.join(root, 'pnpm/nodejs/26.3.1'));
+        } else {
+          mkdirSync(path.dirname(cli), { recursive: true });
+          symlinkSync(kind === 'dangling file' ? `${outside}.missing` : outside, cli);
+        }
+        expect(() => bind(npm)).toThrow('Cannot locate npm-cli.js for the owned npm executable');
+      });
+    },
+  );
+
+  it('rejects a missing owned executable even when a conventional CLI exists', async () => {
+    await withLayout((root, write) => {
+      write('node_modules/npm/bin/npm-cli.js');
+      expect(() => bind(path.join(root, 'npm'))).toThrow();
+    });
+  });
+});
 
 describe('McodeUpdateApplication', () => {
   it('keeps signed managed-installer check and apply behind one product intent', async () => {
