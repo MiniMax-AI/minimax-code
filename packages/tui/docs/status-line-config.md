@@ -60,6 +60,7 @@ Configuration loading checks that the value is an array. The TUI validates indiv
 | `token-quota` | Token quota / plan |
 | `cache-read-ratio` | Aggregate cache read ratio for the current session, such as `Cache 80%` |
 | `context-remaining` | Remaining context percentage from the same runtime snapshot as `/context`; hidden if unavailable |
+| `context-meter` | Remaining context gauge, e.g. `Context ▕██████░░▏ 77% left`, from the same runtime snapshot as `/context`; hidden if unavailable; opt-in |
 | `custom-command` | External command stdout; first line inline by default, optional separate multiline block; opt-in |
 
 `cache-read-ratio` aggregates persisted session usage as `cacheRead / (input + cacheRead + cacheWrite)`, where `input` is fresh uncached input. It uses existing provider usage fields; missing cache counts contribute zero, so sessions mixing providers can underestimate cache reads. The item is hidden before any prompt tokens exist. In-process notifications refresh the session after usage persists; read failures stay silent. `/usage` also shows Read, Fresh, and Write token counts.
@@ -78,6 +79,7 @@ Configuration loading checks that the value is an array. The TUI validates indiv
 | `quota` / `token-plan` | `token-quota` |
 | `cache-read` | `cache-read-ratio` |
 | `context` / `context-left` | `context-remaining` |
+| `context-bar` / `context-gauge` | `context-meter` |
 | `custom` | `custom-command` |
 
 ## Defaults
@@ -90,7 +92,7 @@ current-dir · session-title · git-branch · review-link · plan-mode · approv
 
 `build-mode` is **not a default**. Explicitly listing it is the only way to enable the machine-readable protocol; the build type does not matter. It may appear anywhere in the list and takes over the entire line to keep free text out of the strict record. Remove it to disable the protocol.
 
-By default, `context-window` shows capacity before usage is available; `context-remaining` replaces it once a runtime usage snapshot exists. Explicit item lists retain the selected presentation. Session changes clear old data, and refresh failures do not reuse stale values. Context comes from the latest runtime snapshot, not a live per-token counter. `cache-read-ratio` remains opt-in. Narrow terminals prioritize permissions, context warnings, model, and session title. Even the shortest context display retains `Ctx` to distinguish it from `5h` / `W` plan quotas.
+By default, `context-window` shows capacity before usage is available; `context-remaining` replaces it once a runtime usage snapshot exists. Explicit item lists retain the selected presentation. Session changes clear old data, and refresh failures do not reuse stale values. Context comes from the latest runtime snapshot, not a live per-token counter. `cache-read-ratio` and `context-meter` remain opt-in; `context-meter` renders the same remaining-headroom value and thresholds as `context-remaining` with an added gauge, and takes precedence over `context-remaining` when both are listed, regardless of order. Other items retain their order, and the meter stays at its configured position. It shrinks from eight gauge cells to six, then to `Ctx N%` as space runs out. Narrow terminals prioritize permissions, context warnings, model, and session title. Even the shortest context display retains `Ctx` to distinguish it from `5h` / `W` plan quotas.
 
 `custom-command` is also **not a default**. It runs an external command and requires both an explicit item and `tui.customStatusLine.command`.
 

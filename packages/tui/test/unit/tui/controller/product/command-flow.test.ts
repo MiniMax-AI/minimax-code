@@ -37,6 +37,7 @@ function createReadinessCommandFlow(options: {
   };
   persistTuiMode?: (mode: "regular" | "fullscreen") => void;
   reloadTui?: () => Promise<void>;
+  append?: (text: string, kind?: "info" | "warning" | "error") => void;
   queuedCount?: number;
 }) {
   return new TuiCommandFlow({
@@ -86,7 +87,7 @@ function createReadinessCommandFlow(options: {
     ...(options.whenControllerReady
       ? { whenControllerReady: options.whenControllerReady }
       : {}),
-    append: vi.fn(),
+    append: options.append ?? vi.fn(),
     setHint: options.setHint ?? vi.fn(),
     onChanged: vi.fn(),
   });
@@ -345,6 +346,18 @@ describe("TuiCommandFlow", () => {
     expect(reloadTui).toHaveBeenCalledOnce();
     expect(setHint).toHaveBeenCalledWith("Reloading TUI configuration…");
     expect(setHint).toHaveBeenLastCalledWith("TUI configuration reloaded.");
+  });
+
+  it.each(['Plugin refresh failed', 'Invalid keybindings.json'])("preserves /reload cause: %s", async (message) => {
+    const append = vi.fn();
+    const flow = createReadinessCommandFlow({
+      whenReady: async () => {}, append,
+      reloadTui: async () => { throw new Error(message); },
+    });
+    await expect(flow.submit('/reload')).resolves.toBe('consumed');
+    expect(append).toHaveBeenCalledWith(expect.stringContaining(message), 'warning');
+    expect(append).toHaveBeenCalledWith(expect.stringContaining('configuration or plugin refresh error'), 'warning');
+    expect(JSON.stringify(append.mock.calls)).not.toContain('Fix keybindings.json');
   });
 
   it("retains /reload while queued work is present", async () => {

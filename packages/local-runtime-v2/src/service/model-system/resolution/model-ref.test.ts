@@ -626,6 +626,19 @@ describe('resolveThinkingLevel', () => {
 });
 
 describe('model capability helpers', () => {
+  it('requires explicit image input metadata instead of generic attachment support', () => {
+    expect(capabilitiesFromModelConfig({ attachment: true }).support_image).toBe(false);
+    expect(
+      capabilitiesFromModelConfig({ modalities: { input: ['text'], output: ['image'] } }).support_image,
+    ).toBe(false);
+    expect(
+      capabilitiesFromModelConfig({ modalities: { input: ['text', 'image'] } }).support_image,
+    ).toBe(true);
+    expect(
+      capabilitiesFromModelConfig({ capabilities: { support_image: false } }).support_image,
+    ).toBe(false);
+  });
+
   it('uses explicit capability flags and forced thinking modes', () => {
     expect(
       capabilitiesFromModelConfig({

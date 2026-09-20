@@ -1,3 +1,4 @@
+import { logger } from '../../../../infra/logging/index.js';
 import {
   PiTurnRunner,
   type LLMModelConfig,
@@ -633,6 +634,16 @@ async function settleNetworkStop(
   safetyWriter: LocalOutputSafetyEventWriter,
 ): Promise<void> {
   if (safetyWriter.terminalFailed) return;
+  logger.warn(
+    {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      reviewOutcome: safetyWriter.reviewStopVariant === 'auth' ? 'auth_error' : 'unavailable',
+      outputSuppressed: true,
+      terminalStatus: 'completed',
+    },
+    '[content-safety] output review stopped turn',
+  );
   state.networkStopped = true;
   state.retractionVariant = safetyWriter.reviewStopVariant;
   state.approvedPartial = safetyWriter.getApprovedPartial();

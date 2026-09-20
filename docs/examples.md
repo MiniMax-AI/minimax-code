@@ -90,6 +90,41 @@ custom_provider:
 
 ## 3. Search and image input
 
+For a custom BYOK model, declare image input support explicitly when adding the
+provider. Use this only if the selected provider endpoint and model accept images:
+
+```bash
+pnpm mcode provider add --name my-vision-provider --base-url https://example.com/v1 \
+  --api-format openai-completions --model my-vision-model \
+  --api-key-env MCODE_PROVIDER_API_KEY --support-image --use
+```
+
+`--support-image` applies to every repeated `--model` and saves
+`capabilities.support_image: true`. Without it, adding an unknown custom model
+does not infer image support from its name. `--use` and `provider test` check
+connectivity with a text request; they do not verify vision support.
+
+For an existing provider, close MCode and add the capability to the matching model
+in the active profile's `config.yaml` (normally `~/.minimax/config.yaml`; see
+[Accounts and data](installation.md#accounts-and-data) for profiles and overrides).
+Merge this fragment into the existing provider and keep its other settings:
+
+```yaml
+custom_provider:
+  my-vision-provider:
+    models:
+      my-vision-model:
+        capabilities:
+          support_image: true
+```
+
+The existing `modalities: { input: [text, image], output: [text] }` model setting
+also enables image input. Either declaration is sufficient. To make a model
+text-only again, remove `image` from `modalities.input` and remove or set
+`capabilities.support_image` to `false`. Generic `attachment: true` alone does not
+declare image input support. Restart MCode after editing configuration and select
+the configured model with `/provider`, or use `exec --model` for a single run.
+
 After signing in to MiniMax, try a task that explicitly requires search:
 
 > Use web_search to find the official Node.js test runner documentation. Summarize how to run tests and include the source URL. If the tool is unavailable, say so.

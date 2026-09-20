@@ -1,4 +1,5 @@
 import { InvalidArgumentError, Option, type Command } from 'commander';
+import { parseHeadlessModelOverride } from '../headless/model-selection.js';
 import type { TuiMode } from '../tui/engine/public.js';
 import { parseTuiStartupEnvironment } from './environment.js';
 import type { TuiBuildEnvironment } from '../auth/environment.js';
@@ -7,6 +8,7 @@ const RETIRED_TOP_LEVEL_COMMAND_NAMES = new Set(['git', 'changes', 'projects']);
 
 export interface TuiInteractiveLaunchRequest {
   readonly initialPrompt?: string;
+  readonly model?: string;
   readonly sessionId?: string;
   readonly showSessionPicker?: boolean;
   readonly continueLatestSession?: boolean;
@@ -17,6 +19,7 @@ export interface TuiInteractiveLaunchRequest {
 }
 
 export interface RawTuiInteractiveOptions {
+  readonly model?: string;
   readonly session?: string | boolean;
   readonly continue?: boolean;
   readonly resume?: string;
@@ -31,6 +34,7 @@ export function applyInteractiveCliContract(
 ): Command {
   const configured = command
     .argument('[prompt]', 'task to execute in the interactive TUI')
+    .addOption(new Option('-m, --model <provider/model>', 'select the model for this Session only'))
     .addOption(new Option('--lane <lane>', 'managed backend lane for test or staging builds'))
     .addOption(
       new Option('--session [id]', 'open a Session by id, or browse Sessions when id is omitted'),
@@ -75,8 +79,18 @@ export function resolveInteractiveLaunchRequest(
     throw new Error('--session, --continue, and --resume cannot be combined');
   }
   const sessionId = explicitSessionId || compatibilitySessionId;
+  const model = commandOptions.model?.trim();
+  if (commandOptions.model !== undefined) {
+    parseHeadlessModelOverride(model ?? '');
+    if (showSessionPicker) {
+      throw new Error(
+        '--model requires a Session id with --session; use --session <id> or --continue.',
+      );
+    }
+  }
   return {
     ...(prompt ? { initialPrompt: prompt } : {}),
+    ...(model ? { model } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(showSessionPicker ? { showSessionPicker: true } : {}),
     ...(commandOptions.continue ? { continueLatestSession: true } : {}),

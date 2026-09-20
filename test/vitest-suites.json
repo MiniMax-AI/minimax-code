@@ -77,6 +77,7 @@
       "packages/tui/test/unit/tui-chat-controller.test.ts",
       "packages/tui/test/unit/tui-duration.test.ts",
       "packages/tui/test/unit/tui-engine-local-deltas.test.ts",
+      "packages/tui/test/unit/tui-scrollbar-interaction.test.ts",
       "packages/tui/test/unit/tui-image-preview.test.ts",
       "packages/tui/test/unit/tui-session-manager.test.ts",
       "packages/tui/test/unit/tui-shell-block.test.ts",

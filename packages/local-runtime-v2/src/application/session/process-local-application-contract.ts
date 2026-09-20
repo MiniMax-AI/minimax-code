@@ -26,7 +26,12 @@ import type {
   CodexOAuthStartResult,
   CodexOAuthLoginOptions,
   CodexOAuthStatus,
+  UserModelInputView,
 } from "../../service/model-system/index.js";
+
+export type ProcessLocalModelInput = Omit<UserModelInputView, "modalities"> & {
+  modalities?: { input?: readonly string[]; output?: readonly string[] };
+};
 
 export interface ProcessLocalMiniAppLaunch {
   readonly miniApp: MiniAppSurfaceSummary;
@@ -262,7 +267,7 @@ export interface LocalRuntimeApplication {
       baseUrl: string;
       apiKey: string;
       apiFormat?: string;
-      models?: readonly { modelId: string; displayName?: string }[];
+      models?: readonly ProcessLocalModelInput[];
       saveAndUse?: boolean;
     }): Promise<unknown>;
     discoverCandidate(input: {
@@ -278,21 +283,7 @@ export interface LocalRuntimeApplication {
         baseUrl: string;
         apiKey?: string;
         apiFormat?: string;
-        models?: readonly {
-          modelId: string;
-          displayName?: string;
-          configurationSource?: string;
-          enabled?: boolean;
-          attachment?: boolean;
-          reasoning?: boolean;
-          toolCall?: boolean;
-          temperature?: boolean;
-          modalities?: {
-            input?: readonly string[];
-            output?: readonly string[];
-          };
-          limit?: { context?: number; output?: number };
-        }[];
+        models?: readonly ProcessLocalModelInput[];
       };
       modelId?: string;
       saveAndUse?: boolean;
@@ -309,7 +300,7 @@ export interface LocalRuntimeApplication {
       apiKey?: string;
       apiFormat?: string;
       enabled?: boolean;
-      models?: readonly { modelId: string; displayName?: string }[];
+      models?: readonly ProcessLocalModelInput[];
       saveAndUse?: boolean;
     }): Promise<unknown>;
     delete(input: { providerId: string }): Promise<void>;

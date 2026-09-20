@@ -508,3 +508,32 @@ describe('TuiWorkspaceStatusLine custom status command', () => {
     expect(runProcess).toHaveBeenCalledTimes(1);
   });
 });
+
+
+describe('context meter projection', () => {
+  it('previews and refreshes current usage without retaining cleared data', () => {
+    const runtime = { getWorkspaceGitMetadata: vi.fn() };
+    const state = {
+      version: '0.1', workspace: '/repo', runtimeStatus: 'ready' as const,
+      statusLineItems: ['context-meter', 'context-remaining'] as const,
+      contextWindowTokens: 100,
+    };
+    const status = new TuiWorkspaceStatusLine(state, runtime, vi.fn());
+    try {
+      expect(status.preview(['context-meter'], 80, 3).unavailable).toEqual(['context-meter']);
+      expect(status.render(80)).toEqual([]);
+      status.setState({ ...state, contextUsage: { usedTokens: 20 } });
+      const preview = status.preview(['context-meter', 'context-remaining'], 80, 3);
+      expect(preview.unavailable).toEqual([]);
+      expect(preview.lines.join('')).toContain('▕██████░░▏ 80% left');
+      expect(status.render(80).join('').match(/80%/gu)).toHaveLength(1);
+      status.setState({ ...state, contextUsage: { usedTokens: 90 } });
+      expect(status.render(80).join('')).toContain('▕█░░░░░░░▏ 10% left');
+      status.setState(state);
+      expect(status.render(80)).toEqual([]);
+      expect(runtime.getWorkspaceGitMetadata).not.toHaveBeenCalled();
+    } finally {
+      status.dispose();
+    }
+  });
+});

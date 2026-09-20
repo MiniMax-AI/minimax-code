@@ -1,3 +1,4 @@
+import { logger } from '../../src/common/logger.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SAFETY_CHECK_V2_SCENE } from '@mavis/shared/safety-check-v2';
 import { callLocalSafetyCheckV2 } from '../../src/content-safety/api-v2.js';
@@ -14,7 +15,10 @@ const defaults = {
 };
 const fetchResponse = (body: unknown) =>
   vi.fn<typeof fetch>().mockImplementation(async () => Response.json(body));
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 
 describe('local biz-gateway SafetyCheckV2 client', () => {
   it('uses the V2 endpoint and scene with the current Bearer/routing headers', async () => {
@@ -246,5 +250,83 @@ describe('local biz-gateway SafetyCheckV2 client', () => {
       content_text: 'hello',
       scene: 300,
     });
+  });
+});
+
+describe('V2 production failure diagnostics', () => {
+  it.each([
+    [{ cause: { code: 'ENOTFOUND' } }, 'dns'],
+    [{ cause: { code: 'ECONNREFUSED' } }, 'connect'],
+    [{ cause: { code: 'ERR_TLS_CERT_ALTNAME_INVALID' } }, 'tls'],
+    [{ name: 'TimeoutError' }, 'timeout'],
+    [{ cause: { code: 'UND_ERR_BODY_TIMEOUT' } }, 'timeout'],
+    [{ name: 'AbortError' }, 'aborted'],
+    [{ cause: { code: 'private-code' } }, 'unknown'],
+  ] as const)('retains only the transport category %j', async (details, transportKind) => {
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const error = Object.assign(
+      new Error('private-error https://secret.invalid/?token=private-token'),
+      details,
+    );
+    await expect(
+      callLocalSafetyCheckV2({
+        ...defaults,
+        buildEnv: () => 'prod',
+        authContext: { accessToken: 'private-token' },
+        request: { scene: 100, content_text: 'private-content', sessionId: 'private-session' },
+        fetchImpl: async () => {
+          throw error;
+        },
+      }),
+    ).rejects.toMatchObject({ kind: 'transport', transportKind });
+    expect(log).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reviewId: expect.any(String),
+        endpointHost: 'agent.minimax.cn',
+        apiVersion: 'v2',
+        scene: 100,
+        durationMs: expect.any(Number),
+        failureKind: 'transport',
+        transportKind,
+      }),
+      '[content-safety] review failed',
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-');
+    expect(JSON.stringify(log.mock.calls)).not.toContain('secret.invalid');
+  });
+
+  it.each([
+    ['auth', () => new Response('private-body', { status: 401 })],
+    ['http', () => new Response('private-body', { status: 503 })],
+    ['response', () => new Response('private-body')],
+    ['response', () => Response.json({ unexpected: 'private-body' })],
+    ['upstream', () => Response.json({ errorCode: 50200, error: 'private-body' })],
+    [
+      'transport',
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new DOMException('private-body', 'TimeoutError'));
+            },
+          }),
+        ),
+    ],
+  ] as const)('logs failed %s reviews without response data', async (kind, response) => {
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    await expect(
+      callLocalSafetyCheckV2({
+        ...defaults,
+        buildEnv: () => 'prod',
+        fetchImpl: async () => response(),
+      }),
+    ).rejects.toMatchObject({ kind });
+    expect(log).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ failureKind: kind }),
+      '[content-safety] review failed',
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private-body');
   });
 });
