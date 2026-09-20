@@ -16,6 +16,9 @@ const ZHIPU_PATHS = new Set([
   '/api/paas/v4',
   '/api/paas/v4/chat/completions',
   '/api/paas/v4/tokenizer',
+  '/api/coding/paas/v4',
+  '/api/coding/paas/v4/chat/completions',
+  '/api/coding/paas/v4/tokenizer',
 ]);
 const KIMI_PATHS = new Set(['/v1', '/v1/chat/completions', '/v1/tokenizers/estimate-token-count']);
 
@@ -73,7 +76,7 @@ export const zhipuTokenizerTokenCounterAdapter: RemoteTokenCounterAdapter = {
   buildRequest: (ctx) =>
     buildOpenAIChatTokenizerRequest(
       ctx,
-      '/api/paas/v4/tokenizer',
+      zhipuTokenizerEndpointPath(ctx.model.baseUrl),
       'zhipu-tokenizer',
       ZHIPU_CHAT_COMPAT,
     ),
@@ -93,6 +96,20 @@ export const kimiEstimateTokenCountAdapter: RemoteTokenCounterAdapter = {
     ),
   parseTokens: parseDataTotalTokens,
 };
+
+/**
+ * Zhipu exposes the same surface under two plan roots: `/api/paas/v4` (general
+ * API plan) and `/api/coding/paas/v4` (coding plan). The tokenizer endpoint
+ * lives under the same root as the configured base URL, so keep the request on
+ * the caller's plan instead of hardcoding the general-plan path.
+ */
+function zhipuTokenizerEndpointPath(baseUrl: string): string {
+  const url = parseUrl(baseUrl);
+  const pathname = url ? normalizePathname(url.pathname) : '';
+  return pathname === '/api/coding/paas/v4' || pathname.startsWith('/api/coding/paas/v4/')
+    ? '/api/coding/paas/v4/tokenizer'
+    : '/api/paas/v4/tokenizer';
+}
 
 function matchesOfficialOpenAIChatProvider(
   ctx: RemoteTokenCountContext,

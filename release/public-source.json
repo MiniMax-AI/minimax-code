@@ -2653,6 +2653,7 @@
     "packages/local-runtime/test/unit/thread-goal/host-integration-settlement.test.ts",
     "packages/local-runtime/test/unit/thread-goal/host-integration-testkit.ts",
     "packages/local-runtime/test/unit/thread-goal/host-integration-verifier-charge-rearm.test.ts",
+    "packages/local-runtime/test/unit/token-counter-adapter-routing.test.ts",
     "packages/mcode-tools-host/README.md",
     "packages/mcode-tools-host/package.json",
     "packages/mcode-tools-host/src/contracts.ts",

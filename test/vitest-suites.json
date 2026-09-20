@@ -149,7 +149,8 @@
       "packages/tui/test/unit/tui-feature-viewport-contract.test.ts",
       "packages/tui/test/unit/tui-session-history-flow.test.ts",
       "packages/tui/test/unit/tui-session-mutation-panels.test.ts",
-      "packages/tui/test/unit/tui-surface-host.test.ts"
+      "packages/tui/test/unit/tui-surface-host.test.ts",
+      "packages/local-runtime/test/unit/token-counter-adapter-routing.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
