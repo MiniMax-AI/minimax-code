@@ -56,7 +56,7 @@ describe('MCode Pi Engine local deltas', () => {
     }
   });
 
-  it('preserves native scrollback when transient rows shrink above the viewport', async () => {
+  it('rebuilds when a transient collapse changes rows already in scrollback', async () => {
     const terminal = new RecordingVirtualTerminal(40, 5);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -81,11 +81,53 @@ describe('MCode Pi Engine local deltas', () => {
 
     const writes = terminal.takeWrites();
     expect(writes).toContain('\x1b[2J\x1b[H');
-    expect(writes).not.toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer()).toContain('activity-1');
-    expect(terminal.getViewport()).toEqual(['composer', '', '', '', '']);
+    expect(writes).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).not.toContain('activity-1');
+    expect(terminal.getViewport()).toEqual(['header', 'status', 'composer', '', '']);
     expect(terminal.getScrollBuffer().filter((line) => line === 'header')).toHaveLength(1);
     expect(tui.fullRedraws).toBe(2);
+  });
+
+  it('keeps every composer row visible after a collapse crosses the viewport origin', async () => {
+    const terminal = new RecordingVirtualTerminal(40, 10);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    const chat = Array.from({ length: 15 }, (_, index) => `Chat ${index}`);
+    const composer = ['Editor 0', 'Editor 1', `Editor 2${CURSOR_MARKER}`];
+    component.lines = [...chat, ...composer];
+    tui.addChild(component);
+    tui.renderNow();
+    await terminal.flush();
+
+    component.lines = [
+      ...chat,
+      ...Array.from({ length: 8 }, (_, index) => `Selector ${index}`),
+    ];
+    tui.renderNow();
+    await terminal.flush();
+    component.lines = [...chat, ...composer];
+    tui.renderNow();
+    await terminal.flush();
+    terminal.takeWrites();
+
+    component.lines = [...chat.slice(0, 12), ...composer];
+    tui.renderNow();
+    await terminal.flush();
+
+    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.getViewport()).toEqual([
+      ...chat.slice(5, 12),
+      'Editor 0',
+      'Editor 1',
+      'Editor 2',
+    ]);
+    expect(terminal.getScrollBuffer()).toEqual([
+      ...chat.slice(0, 12),
+      'Editor 0',
+      'Editor 1',
+      'Editor 2',
+    ]);
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 9 });
   });
 
   it('does not replay scrolled answer rows after a narrow terminal frame shrinks', async () => {
@@ -99,11 +141,13 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
 
     // Settle the activity row, then repaint a historical line (for example Markdown styling).
+    terminal.takeWrites();
     component.lines = [...answer, `composer${CURSOR_MARKER}`, 'status'];
+    component.lines[0] = '\x1b[1mAnswer line 0\x1b[0m';
     tui.renderNow();
     await terminal.flush();
-    terminal.takeWrites();
-    component.lines[0] = '\x1b[1mAnswer line 0\x1b[0m';
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    component.lines[0] = '\x1b[3mAnswer line 0\x1b[0m';
     tui.renderNow();
     await terminal.flush();
 

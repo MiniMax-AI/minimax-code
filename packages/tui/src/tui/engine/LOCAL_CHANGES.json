@@ -163,8 +163,8 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "146fd4222ae5a48d1f439de2f280b111789151a30c1bdd2735e32fff07329b9d",
-      "changeIds": ["L005", "L017", "L027", "L033", "L034"],
+      "currentSha256": "6970c4bac059263fc1ec420fa07362b7bcc1838fd381dbaa5a61180c15bb4787",
+      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L036"],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
       "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
       "behaviorImpact": "Large regular-mode renders preserve output order without constructing a single V8-limited terminal string. 150ms 后及退出前重放完整投影历史。 内部导航标记不再写入终端，避免 iTerm2 左侧箭头和命令条噪声。 Session 结束后的状态更新不再发送 ESC 3J 清除原生滚动历史，当前视口仍显示最新内容。"

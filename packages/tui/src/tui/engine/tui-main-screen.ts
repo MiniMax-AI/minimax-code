@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.js";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
-import { visibleWidth } from "./utils.js";
+import { stripTerminalSequences, visibleWidth } from "./utils.js";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
@@ -308,9 +308,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			// previous viewport origin so rows already scrolled out are not painted twice,
 			// and growth still writes every row before it scrolls out. Resize previews are
 			// temporary: they show the new tail until the pending full history replay.
-			if (viewportOnly && !this.historyReplayPending && newLines.length <= prevViewportTop) {
-				// Nothing remains addressable on screen; rebuild with one consistent origin.
-				viewportOnly = false;
+			if (viewportOnly && !this.historyReplayPending) {
+				// A shrink can move new content (including the Composer) into immutable
+				// scrollback. Rebuild when that prefix changes, but ignore style-only edits.
+				const changedScrolledPrefix = newLines.length < this.previousLines.length &&
+					newLines.slice(0, prevViewportTop).some((line, index) =>
+						stripTerminalSequences(line) !== stripTerminalSequences(this.previousLines[index] ?? ""));
+				if (newLines.length <= prevViewportTop || changedScrolledPrefix) viewportOnly = false;
 			}
 			const start = viewportOnly
 				? this.historyReplayPending

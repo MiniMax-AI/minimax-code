@@ -115,3 +115,11 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Adaptation: the original contribution widened hits over two live content columns. The reserved gutter prevents those presses from swallowing content clicks or text selection. `chat-layout.ts` opts into the three-column gutter.
 - Evidence: `test/unit/tui-scrollbar-interaction.test.ts` drives SGR press, motion, release and wheel events through VirtualTerminal, covering track jumps, thumb grabs, narrow terminals, content routing, selection, overlays and the actual fullscreen ChatLayout.
 - Removal condition: the selected Pi baseline provides equivalent reserved-gutter track and drag interaction and MCode migrates to it.
+
+## L036: Rebuild structural collapses across native scrollback
+
+- Origin: follow-up to [PR #243](https://github.com/MiniMax-AI/minimax-code/pull/243).
+- Product contract: collapsing transient content must retain the folded summary and every Composer row, even when they move above the previous viewport origin.
+- Minimal difference: during a shrinking viewport-only redraw, compare the text of the scrolled prefix after stripping terminal sequences. If that prefix changed, rebuild the full projection. Tail-only shrink and style-only prefix changes continue to preserve native scrollback; pending resize replay retains its temporary tail view.
+- Evidence: `test/unit/tui-engine-local-deltas.test.ts` covers stale transient rows, all Composer rows after a selector closes, and simultaneous shrink plus style-only changes without duplicate answer rows.
+- Removal condition: the selected Pi baseline supplies equivalent structural-collapse handling.
