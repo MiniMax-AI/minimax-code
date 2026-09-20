@@ -19,7 +19,7 @@ import type {
 import { buildTuiMessageParts } from '../runtime/stream-events.js';
 import type { TuiMessage, TuiStreamEvent } from '../runtime/stream-events.js';
 import type { TuiAcpRuntime } from './runtime.js';
-import { executeTuiAcpCommand, TUI_ACP_AVAILABLE_COMMANDS } from './commands.js';
+import { availableSkillCommands, executeTuiAcpCommand, TUI_ACP_AVAILABLE_COMMANDS } from './commands.js';
 import {
   ACP_CONFIG_MODEL,
   ACP_CONFIG_PERMISSION_MODE,
@@ -101,6 +101,46 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   let pendingPermissionBroadcast: readonly (readonly [string, AcpSession])[] | undefined;
   let permissionBroadcastRunning = false;
   const app = acp.agent({ name: 'minimax-code' });
+
+  const advertiseAvailableCommands = (client: acp.AgentContext, sessionId: string): void => {
+    const attachment = sessions.get(sessionId);
+    if (!attachment) return;
+    let commands: acp.AvailableCommand[] = [...TUI_ACP_AVAILABLE_COMMANDS];
+    const isCurrent = () =>
+      sessions.get(sessionId) === attachment && !attachment.attachmentController.signal.aborted;
+    const notify = () => {
+      if (!isCurrent()) return;
+      void client
+        .notify(acp.methods.client.session.update, {
+          sessionId,
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: commands,
+          },
+        })
+        .catch(() => undefined);
+    };
+
+    // Preserve immediate native command discovery even if Skill discovery fails or stalls.
+    setImmediate(() => {
+      if (!isCurrent()) return;
+      notify();
+      void (async () => {
+        const skills = await options.runtime.listSkills(
+          attachment.session.agentName,
+          undefined,
+          attachment.session.workspaceDir,
+        );
+        if (!isCurrent()) return;
+        commands = [...TUI_ACP_AVAILABLE_COMMANDS, ...availableSkillCommands(skills)];
+        notify();
+      })().catch(() => undefined);
+    });
+    // Some clients attach their notification listener after receiving the Session response.
+    // Retry the latest roster, so a late native-only update cannot erase discovered Skills.
+    const retry = setTimeout(notify, AVAILABLE_COMMANDS_RETRY_DELAY_MS);
+    retry.unref();
+  };
 
   const schedulePermissionBroadcast = (
     client: acp.AgentContext,
@@ -1051,6 +1091,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         runtime: options.runtime,
         sessionId: active.session.sessionId,
         agentName: active.session.agentName,
+        workspaceDir: active.session.workspaceDir,
         prompt: context.params.prompt,
       });
       if (isCancelled()) return { cancelled: true as const };
@@ -1805,24 +1846,6 @@ function mapClientMcpServers(servers: readonly acp.McpServer[]): readonly TuiSes
       `Unsupported client MCP transport: ${server.type}.`,
     );
   });
-}
-
-function advertiseAvailableCommands(client: acp.AgentContext, sessionId: string): void {
-  const notify = () => {
-    void client
-      .notify(acp.methods.client.session.update, {
-        sessionId,
-        update: {
-          sessionUpdate: 'available_commands_update',
-          availableCommands: [...TUI_ACP_AVAILABLE_COMMANDS],
-        },
-      })
-      .catch(() => undefined);
-  };
-
-  setImmediate(notify);
-  const retry = setTimeout(notify, AVAILABLE_COMMANDS_RETRY_DELAY_MS);
-  retry.unref();
 }
 
 interface KeyedSerialExecutor {

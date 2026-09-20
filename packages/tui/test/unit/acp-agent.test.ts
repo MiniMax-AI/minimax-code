@@ -1,6 +1,7 @@
 import * as acp from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 
+import { TUI_ACP_AVAILABLE_COMMANDS } from '../../src/acp/commands.js';
 import { createTuiAcpAgent } from '../../src/acp/agent.js';
 import { TuiAcpPromptContinuation } from '../../src/acp/prompt-continuation.js';
 import type { TuiAcpRuntime } from '../../src/acp/runtime.js';
@@ -79,7 +80,7 @@ function createRuntime(
     Promise.resolve(options.contextSnapshot ?? { status: 'empty' as const }),
   );
   const getSessionUsage = vi.fn(async () => options.sessionUsage ?? {});
-  const listSkills = vi.fn(async () => options.skills ?? {});
+  const listSkills = vi.fn<TuiAcpRuntime['listSkills']>(async () => options.skills ?? {});
   const listMcpServers = vi.fn(async () => [...(options.mcpServers ?? [])]);
   const requestCompaction = vi.fn(async () => ({ success: true }));
   const getPlanModeCapabilities = vi.fn(async () => ({ entryEnabled: true }));
@@ -267,6 +268,219 @@ function createRuntime(
 }
 
 describe('MiniMax Code ACP agent', () => {
+  it.each(['new', 'load', 'resume', 'fork'] as const)(
+    'advertises session Skills on %s and forwards Skill instructions to the Runtime',
+    async (method) => {
+      const { runtime, listSkills, sendMessage, getSession, forkSession } = createRuntime(
+        [{ type: 'session-status', status: 'finished' }],
+        {
+          skills: {
+            skills: [
+              {
+                name: 'matt:review',
+                description: 'Review changes',
+                enabled: true,
+              },
+              { name: 'repo-test', displayDescription: 'Test the project' },
+              { name: 'MATT:REVIEW', description: 'Duplicate' },
+              {
+                name: 'Compact',
+                description: 'Must not replace a native command',
+              },
+              { name: 'disabled', enabled: false },
+              { name: 'invalid/name' },
+              { name: 'invalid name' },
+              { name: '' },
+              { name: 'x'.repeat(129) },
+              { name: 'bad\u001b[31m' },
+            ],
+          },
+        },
+      );
+      getSession.mockImplementation(async (sessionId) => ({
+        sessionId,
+        workspaceDir: '/project',
+        agentName: 'reviewer',
+      }));
+      forkSession.mockResolvedValue({
+        session: {
+          sessionId: 'session-fork',
+          workspaceDir: '/project',
+          agentName: 'reviewer',
+        },
+      });
+      const updates: acp.SessionNotification[] = [];
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp
+        .client({ name: 'zed' })
+        .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const response = await connection.request(acp.methods.agent.session[method], {
+          sessionId: 'session-1',
+          cwd: '/project',
+          mcpServers: [],
+        });
+        const sessionId = 'sessionId' in response ? response.sessionId : 'session-1';
+        const roster = () =>
+          updates
+            .filter(
+              (update) =>
+                update.sessionId === sessionId &&
+                update.update.sessionUpdate === 'available_commands_update',
+            )
+            .at(-1)?.update;
+        const expected = {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            ...TUI_ACP_AVAILABLE_COMMANDS,
+            {
+              name: 'matt:review',
+              description: '[Skill] Review changes',
+              input: { hint: '[instructions]' },
+            },
+            {
+              name: 'repo-test',
+              description: '[Skill] Test the project',
+              input: { hint: '[instructions]' },
+            },
+          ],
+        };
+        await vi.waitFor(() => expect(roster()).toEqual(expected));
+        expect(listSkills).toHaveBeenCalledWith(
+          method === 'new' ? undefined : 'reviewer',
+          undefined,
+          '/project',
+        );
+        // A delayed listener retry must retain the complete Skill roster.
+        await new Promise((resolve) => setTimeout(resolve, 130));
+        expect(roster()).toEqual(expected);
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: 'text', text: '/matt:review focus on error handling' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        expect(sendMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: sessionId,
+            content: '/matt:review focus on error handling',
+          }),
+          expect.any(AbortSignal),
+        );
+      });
+    },
+  );
+
+  it.each(['reject', 'stall'] as const)(
+    'keeps native commands available when Skill discovery can %s',
+    async (failure) => {
+      const { runtime, listSkills } = createRuntime();
+      if (failure === 'reject') listSkills.mockRejectedValue(new Error('Unavailable'));
+      else listSkills.mockImplementation(() => new Promise(() => undefined));
+      const updates: acp.SessionNotification[] = [];
+      const client = acp
+        .client({ name: 'zed' })
+        .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+      await client.connectWith(
+        createTuiAcpAgent({ runtime, version: '1.2.3' }),
+        async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: {},
+          });
+          const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          await vi.waitFor(() =>
+            expect(updates).toContainEqual({
+              sessionId,
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: TUI_ACP_AVAILABLE_COMMANDS,
+              },
+            }),
+          );
+          await expect(
+            connection.request(acp.methods.agent.session.prompt, {
+              sessionId,
+              prompt: [{ type: 'text', text: '/help' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+        },
+      );
+    },
+  );
+
+  it.each(['close', 'resume'] as const)(
+    'ignores late Skill discovery after session %s',
+    async (method) => {
+      const { runtime, listSkills } = createRuntime([], {
+        skills: { skills: [{ name: 'current' }] },
+      });
+      let resolveSkills!: (skills: TuiSkillList) => void;
+      listSkills.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSkills = resolve;
+          }),
+      );
+      const updates: acp.SessionNotification[] = [];
+      const client = acp
+        .client({ name: 'zed' })
+        .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+      await client.connectWith(
+        createTuiAcpAgent({ runtime, version: '1.2.3' }),
+        async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: {},
+          });
+          const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          await vi.waitFor(() => expect(listSkills).toHaveBeenCalledOnce());
+          await connection.request(acp.methods.agent.session[method], {
+            sessionId,
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          if (method === 'resume') {
+            await vi.waitFor(() =>
+              expect(updates).toContainEqual({
+                sessionId,
+                update: {
+                  sessionUpdate: 'available_commands_update',
+                  availableCommands: [
+                    ...TUI_ACP_AVAILABLE_COMMANDS,
+                    {
+                      name: 'current',
+                      description: '[Skill]',
+                      input: { hint: '[instructions]' },
+                    },
+                  ],
+                },
+              }),
+            );
+          }
+          resolveSkills({ skills: [{ name: 'stale' }] });
+          const count = updates.length;
+          await new Promise((resolve) => setTimeout(resolve, 130));
+          const rosters = updates.flatMap(({ update }) =>
+            update.sessionUpdate === 'available_commands_update' ? update.availableCommands : [],
+          );
+          expect(rosters.some((command) => command.name === 'stale')).toBe(false);
+          if (method === 'close') expect(updates).toHaveLength(count);
+        },
+      );
+    },
+  );
+
   it('advertises and executes native help and model commands without starting an Agent turn', async () => {
     const { runtime, sendMessage, listModels, selectModel } = createRuntime([], {
       models: [
@@ -555,7 +769,7 @@ describe('MiniMax Code ACP agent', () => {
     });
 
     expect(getContextSnapshot).toHaveBeenCalledWith('session-1');
-    expect(listSkills).toHaveBeenCalledWith(undefined, 'review');
+    expect(listSkills).toHaveBeenCalledWith(undefined, 'review', '/workspace');
     expect(listMcpServers).toHaveBeenCalledWith('git', 'session-1');
     expect(getSessionUsage).toHaveBeenCalledWith('session-1');
     expect(sendMessage).not.toHaveBeenCalled();

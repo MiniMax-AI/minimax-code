@@ -294,7 +294,7 @@ export interface TuiInspectionPort {
     agentName?: string,
     customInstructions?: string,
   ): Promise<TuiCompactionResult>;
-  listSkills(agentName?: string, keyword?: string): Promise<TuiSkillList>;
+  listSkills(agentName?: string, keyword?: string, workspaceDir?: string): Promise<TuiSkillList>;
   listMcpServers(keyword?: string, sessionId?: string): Promise<TuiMcpServer[]>;
   inspectProjectMcp(sessionId: string): Promise<TuiProjectMcpPreview | undefined>;
   getContextSnapshot(sessionId: string): Promise<TuiContextSnapshotResponse>;
