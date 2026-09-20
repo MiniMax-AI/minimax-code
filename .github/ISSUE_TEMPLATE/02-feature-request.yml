@@ -1,7 +1,7 @@
 name: Feature request
 description: Suggest an improvement to the Desktop app, CLI, or source distribution.
 title: "[Feature]: "
-labels: ["enhancement"]
+labels: ["enhancement", "needs-triage"]
 body:
   - type: dropdown
     id: product

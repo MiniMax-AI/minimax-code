@@ -16,6 +16,7 @@ import {
   managedBackendRoutingHeaders,
   type LocalRuntimeRoutingContext,
 } from '../runtime/routing-headers.js';
+import { createSafetyFailureReporter } from './diagnostics.js';
 import { resolveSafetyApiBase } from './api-base.js';
 
 /** biz-gateway uses V2 numeric scenes with its desktop HTTP envelope. */
@@ -50,26 +51,44 @@ export async function callLocalSafetyCheckV2(input: {
   const buildEnv = (input.buildEnv ?? getRuntimeBuildEnv)();
   const region = (input.region ?? getRuntimeRegion)();
   const token = input.authContext?.accessToken?.trim() || process.env.MAVIS_ACCESS_TOKEN?.trim();
-  const result = await postSafetyCheckV2({
-    url: `${resolveSafetyApiBase(region, buildEnv, input.testBaseURL)}/mavis/api/v2/content?require_auth=true`,
-    headers: {
-      'User-Agent': 'MiniMaxAgent',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...managedBackendRoutingHeaders(input.routingContext, input.buildEnv ? buildEnv : undefined),
-    },
-    body: {
-      scene: input.request.scene,
-      ...(input.request.content_text !== undefined
-        ? { content_text: input.request.content_text }
-        : {}),
-      ...(input.request.sessionId !== undefined ? { sessionId: input.request.sessionId } : {}),
-      ...(input.request.image_url !== undefined ? { image_url: input.request.image_url } : {}),
-      ...(input.request.files !== undefined ? { files: input.request.files } : {}),
-    },
-    fetchImpl: input.fetchImpl,
-    signal: input.signal,
-  });
-  return parseLocalSafetyCheckV2Result(result);
+  const url = `${resolveSafetyApiBase(region, buildEnv, input.testBaseURL)}/mavis/api/v2/content?require_auth=true`;
+  const reportFailure = createSafetyFailureReporter(url, 'v2', input.request.scene);
+  try {
+    const result = await postSafetyCheckV2({
+      url,
+      headers: {
+        'User-Agent': 'MiniMaxAgent',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...managedBackendRoutingHeaders(
+          input.routingContext,
+          input.buildEnv ? buildEnv : undefined,
+        ),
+      },
+      body: {
+        scene: input.request.scene,
+        ...(input.request.content_text !== undefined
+          ? { content_text: input.request.content_text }
+          : {}),
+        ...(input.request.sessionId !== undefined ? { sessionId: input.request.sessionId } : {}),
+        ...(input.request.image_url !== undefined ? { image_url: input.request.image_url } : {}),
+        ...(input.request.files !== undefined ? { files: input.request.files } : {}),
+      },
+      fetchImpl: input.fetchImpl,
+      signal: input.signal,
+    });
+    return parseLocalSafetyCheckV2Result(result);
+  } catch (error) {
+    reportFailure(
+      error instanceof SafetyCheckV2Error
+        ? {
+            failureKind: error.kind,
+            statusCode: error.statusCode,
+            transportKind: error.transportKind,
+          }
+        : { failureKind: 'internal' },
+    );
+    throw error;
+  }
 }
 
 function parseLocalSafetyCheckV2Result(body: Record<string, unknown>): LocalSafetyCheckV2Result {

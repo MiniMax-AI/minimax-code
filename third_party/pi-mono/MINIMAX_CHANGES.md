@@ -13,6 +13,40 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-19 — preserve the system role for Mistral Chat Completions
+
+- Reason: thinking-enabled custom OpenAI-compatible connections to `api.mistral.ai` emitted `developer`, which is absent from the [Mistral Chat Completions message contract](https://docs.mistral.ai/api/endpoint/chat). [OpenClaw's compatibility defaults](https://github.com/openclaw/openclaw/blob/e2bcb1614de060927121bd72de850cee3a08d308/packages/ai/src/transports/openai-completions-compat.ts#L184-L210) also disable this role for the Mistral public endpoint.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to `system` only on the exact Mistral API host. Preserve thinking, explicit compatibility overrides, all other request options, and other endpoints. Native Mistral transport is unchanged.
+- Upstream PR: not opened.
+- Validation: outgoing-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`; the endpoint regression fails before the fix. No live Mistral requests or full CLI acceptance were performed; the decision is based on the official contract and current upstream implementation.
+
+### 2026-09-19 — preserve the system role for SiliconFlow
+
+- Reason: thinking-enabled OpenAI-compatible requests sent the `developer` role, which is absent from SiliconFlow's documented message schema.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role on the exact `api.siliconflow.cn` and `api.siliconflow.com` hosts. Preserve thinking, explicit compatibility overrides, other request options, and other endpoints.
+- References: [official Chat Completions schema](https://docs.siliconflow.com/en/api-reference/chat-completions/chat-completions) and [pi's SiliconFlow provider proposal](https://github.com/earendil-works/pi/pull/8113) (closed without merging).
+- Upstream PR: not opened.
+- Validation: outgoing-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`, including both official hosts, unrelated hosts, and explicit compatibility overrides.
+
+### 2026-09-19 — preserve the system role for DashScope
+
+- Reason: DashScope endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role for official DashScope regional and Coding Plan hosts, plus workspace, trial, and Token Plan hosts under the documented regional `maas.aliyuncs.com` domains. Preserve thinking, other request options, explicit compatibility overrides, and other providers.
+- References: [official endpoint list](https://help.aliyun.com/en/model-studio/base-url), [Coding Plan role rejection](https://github.com/openclaw/openclaw/issues/23575), [Token Plan role rejection](https://github.com/earendil-works/pi/issues/7723), and [merged OpenClaw DashScope fix](https://github.com/openclaw/openclaw/pull/24675).
+- Upstream PR: not opened.
+- Validation: request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`, including official endpoints, unrelated hosts, and explicit compatibility overrides.
+
+### 2026-09-19 — preserve the system role for Kimi Coding
+
+- Reason: Kimi Coding endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role for `api.kimi.com` and `api.kimi.ai`. Preserve thinking, other request options, explicit compatibility overrides, and other providers.
+- Upstream PR: not opened.
+- Validation: offline request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`. Live Kimi Coding validation requires a Coding Plan key and remains untested.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.

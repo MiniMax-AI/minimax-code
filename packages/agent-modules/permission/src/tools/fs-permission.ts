@@ -687,8 +687,10 @@ function isProtectedRuntimeRead(
     // at credentials must not turn its destination into a trusted asset root.
     const readableAsset =
       within(canonicalPath, path.join(canonicalRoot, 'skills')) ||
+      within(canonicalPath, path.join(canonicalRoot, '.builtin-skills')) ||
       (context.agentName != null &&
-        within(canonicalPath, path.join(canonicalRoot, 'agents', context.agentName, 'workspace'))) ||
+        (within(canonicalPath, path.join(canonicalRoot, 'agents', context.agentName, 'workspace')) ||
+          within(canonicalPath, path.join(canonicalRoot, 'agents', context.agentName, 'skills')))) ||
       isInternalWhitelistedPath(canonicalPath, {
         ...context,
         dataDir: canonicalRoot,

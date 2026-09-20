@@ -169,6 +169,8 @@ async function seed(repository: DrizzleAgentRepository): Promise<void> {
 }
 
 describe("Frozen Session deletion continuity", () => {
+  // This real-database create/delete/recreate sequence exceeded 5s on Windows CI.
+  // Keep the larger I/O budget local to this integration case.
   it("reads the persisted definition and renders after deleting and recreating its Agent", async () => {
     const { repository, database, dataDir } = await createRepository();
     const agentService = createTestAgentService({
@@ -275,7 +277,7 @@ describe("Frozen Session deletion continuity", () => {
     const afterRecreate = await read();
     expect(afterRecreate).toEqual(afterDelete);
     expect(afterRecreate.corePrompt).not.toContain("NEW_AGENT_PROMPT");
-  });
+  }, process.platform === "win32" ? 15_000 : 5_000);
 });
 
 describe("Local Agent reference resolver integration", () => {

@@ -1,3 +1,5 @@
+import type { ModelConfig } from '@mavis/config';
+
 export const MCODE_PROVIDER_API_FORMATS = [
   'anthropic-messages',
   'openai-completions',
@@ -74,6 +76,7 @@ export interface McodeProviderModelInput {
   readonly reasoning?: boolean;
   readonly toolCall?: boolean;
   readonly temperature?: boolean;
+  readonly capabilities?: Readonly<NonNullable<ModelConfig['capabilities']>>;
   readonly modalities?: { readonly input?: readonly string[]; readonly output?: readonly string[] };
   readonly limit?: { readonly context?: number; readonly output?: number };
 }

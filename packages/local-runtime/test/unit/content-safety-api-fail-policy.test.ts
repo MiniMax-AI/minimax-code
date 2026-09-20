@@ -276,46 +276,70 @@ describe('callSafetyApi fail-policy classification', () => {
     expect(headers.get('Token')).toBeNull();
   });
 
-  it('logs a sanitized upstream response in local test environments', async () => {
-    const log = vi.spyOn(logger, 'info').mockImplementation(() => {});
-    const fetchImpl = vi.fn(async () =>
-      new Response(JSON.stringify({ code: 401, message: 'auth failed' }), {
-        status: 401,
-        headers: {
-          'Content-Type': 'application/json',
-          'Trace-Id': 'trace-content-safety-test',
-        },
-      }),
-    ) as unknown as typeof fetch;
-
-    await callSafetyApi({
-      content: 'must-not-appear-in-log',
-      scene: SAFETY_SCENE.UserInput,
-      authContext: { accessToken: 'must-not-appear-token' },
-      fetchImpl,
-      region,
-      buildEnv,
-    });
-
-    expect(log).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: 'https://matrix-test.example.invalid/mavis/api/v1/content',
-        method: 'POST',
-        status: 401,
+  it.each([
+    ['auth', () => jsonResponse({ error: 'private-response' }, 401), 401],
+    ['http', () => jsonResponse({ error: 'private-response' }, 503), 503],
+    ['response', () => new Response('private-response'), 200],
+    ['response', () => jsonResponse(null), 200],
+    ['response', () => jsonResponse({ secret: 'private-response' }), 200],
+    [
+      'transport',
+      () => {
+        throw new TypeError('private-error https://secret.invalid/?token=private-token', {
+          cause: { code: 'ENOTFOUND' },
+        });
+      },
+      undefined,
+    ],
+    [
+      'transport',
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new DOMException('private-error', 'TimeoutError'));
+            },
+          }),
+        ),
+      200,
+    ],
+  ] as const)(
+    'logs redacted %s failures in production',
+    async (failureKind, response, statusCode) => {
+      const log = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const result = await callSafetyApi({
+        content: 'private-content',
         scene: SAFETY_SCENE.UserInput,
-        hasBearer: true,
-        durationMs: expect.any(Number),
-        upstreamTraceId: 'trace-content-safety-test',
-      }),
-      '[content-safety] upstream response',
-    );
-    const serialized = JSON.stringify(log.mock.calls);
-    expect(serialized).not.toContain('must-not-appear-token');
-    expect(serialized).not.toContain('must-not-appear-in-log');
-  });
+        authContext: { accessToken: 'private-token' },
+        attachments: [{ fileUrl: 'https://secret.invalid/private-file', fileName: 'private-name' }],
+        fetchImpl: async () => response(),
+        region,
+        buildEnv: () => 'prod',
+      });
+      expect(result.pass).toBe(false);
+      expect(reviewBlocks(result)).toBe(failureKind !== 'http');
+      expect(log).toHaveBeenCalledOnce();
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reviewId: expect.any(String),
+          endpointHost: 'agent.minimax.cn',
+          apiVersion: 'v1',
+          scene: SAFETY_SCENE.UserInput,
+          durationMs: expect.any(Number),
+          failureKind,
+          ...(statusCode === undefined ? { transportKind: 'dns' } : { statusCode }),
+        }),
+        '[content-safety] review failed',
+      );
+      const serialized = JSON.stringify(log.mock.calls);
+      expect(serialized).not.toContain('private-');
+      expect(serialized).not.toContain('secret.invalid');
+      expect(serialized).not.toContain('https://');
+    },
+  );
 
-  it('does not emit the temporary upstream diagnostic in production', async () => {
-    const log = vi.spyOn(logger, 'info').mockImplementation(() => {});
+  it('does not log successful reviews in production', async () => {
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => {});
 
     await callSafetyApi({
       content: 'hello',

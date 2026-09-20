@@ -776,11 +776,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (const scrollView of getScrollViewsAt(this.currentLayout, x, y)) {
 			const box = getScrollViewBox(this.currentLayout, scrollView);
 			const geometry = box ? getScrollbarGeometry(box) : undefined;
+			// Only reserved gutter columns may capture presses beside the painted bar.
+			const hitColumns = box
+				? scrollView.scrollbar === "always"
+					? box.rect.width - scrollView.getContentWidth(box.rect.width)
+					: 1
+				: 0;
 			if (
 				geometry &&
-				x === geometry.column &&
-				y >= geometry.thumbTop &&
-				y < geometry.thumbTop + geometry.thumbHeight
+				x >= geometry.column - (hitColumns - 1) &&
+				x <= geometry.column &&
+				y >= geometry.trackTop &&
+				y < geometry.trackTop + geometry.trackHeight
 			) {
 				return { scrollView, geometry };
 			}
@@ -804,25 +811,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleScrollbarMouseEvent(event: SgrMouseEvent): boolean {
+		if (this.hasOverlay()) {
+			this.stopScrollbarDrag();
+			return false;
+		}
 		if (this.scrollbarDrag) {
 			if (event.release) {
 				this.stopScrollbarDrag();
 				return true;
 			}
-			const box = this.currentLayout
-				? getScrollViewBox(this.currentLayout, this.scrollbarDrag.scrollView)
-				: undefined;
-			const geometry = box ? getScrollbarGeometry(box) : undefined;
-			if (geometry) {
-				const maxThumbOffset = geometry.trackHeight - geometry.thumbHeight;
-				const thumbOffset = Math.max(
-					0,
-					Math.min(maxThumbOffset, event.y - geometry.trackTop - this.scrollbarDrag.grabOffset),
-				);
-				const scrollTop =
-					maxThumbOffset === 0 ? 0 : Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
-				this.scrollbarDrag.scrollView.scrollTo(scrollTop);
-			}
+			this.dragScrollbarTo(event.y);
 			return true;
 		}
 
@@ -839,11 +837,37 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		this.setScrollbarHover(target.scrollView);
+		const onThumb =
+			event.y >= target.geometry.thumbTop &&
+			event.y < target.geometry.thumbTop + target.geometry.thumbHeight;
 		this.scrollbarDrag = {
 			scrollView: target.scrollView,
-			grabOffset: event.y - target.geometry.thumbTop,
+			grabOffset: onThumb
+				? event.y - target.geometry.thumbTop
+				: Math.max(0, Math.floor(target.geometry.thumbHeight / 2)),
 		};
+		// A press on the empty track jumps the thumb so its center follows the
+		// pointer, then keeps dragging from there; a press on the thumb itself
+		// grabs it in place without moving.
+		if (!onThumb) this.dragScrollbarTo(event.y);
 		return true;
+	}
+
+	private dragScrollbarTo(y: number): void {
+		if (!this.scrollbarDrag || !this.currentLayout) return;
+		const box = getScrollViewBox(this.currentLayout, this.scrollbarDrag.scrollView);
+		const geometry = box ? getScrollbarGeometry(box) : undefined;
+		if (!geometry) return;
+		const maxThumbOffset = geometry.trackHeight - geometry.thumbHeight;
+		const thumbOffset = Math.max(
+			0,
+			Math.min(maxThumbOffset, y - geometry.trackTop - this.scrollbarDrag.grabOffset),
+		);
+		const scrollTop =
+			maxThumbOffset === 0
+				? 0
+				: Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
+		this.scrollbarDrag.scrollView.scrollTo(scrollTop);
 	}
 
 	private stopScrollbarDrag(): void {

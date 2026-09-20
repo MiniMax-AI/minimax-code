@@ -124,6 +124,8 @@ export class TuiChatLayout implements Component {
       follow: 'end',
       primary: true,
       overscroll: 'contain',
+      scrollbar: 'always',
+      scrollbarGutter: 3,
     });
     this.fullscreenLayoutRoot = new VStack([
       {

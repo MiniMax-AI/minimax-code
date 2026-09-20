@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Contribution policy
+    url: https://github.com/MiniMax-AI/minimax-code/blob/main/CONTRIBUTING.md
+    about: Everyone may report issues and suggest improvements. Pull requests are accepted only from repository collaborators; external PRs are not accepted.
   - name: CLI quick start and troubleshooting
     url: https://agent.minimax.io/docs/cli/quick-start
     about: Installation, account regions, first tasks, and links to troubleshooting.

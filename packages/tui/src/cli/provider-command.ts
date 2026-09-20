@@ -14,6 +14,7 @@ export type McodeProviderCliRequest =
       readonly models: readonly string[];
       readonly contextLimit?: number;
       readonly outputLimit?: number;
+      readonly supportImage?: boolean;
       readonly apiKeyEnv?: string;
       readonly saveAndUse?: boolean;
     }
@@ -67,6 +68,7 @@ export async function runMcodeProviderCommand(
         apiFormat: request.apiFormat,
         models: request.models.map((modelId) => ({
           modelId,
+          ...(request.supportImage ? { capabilities: { support_image: true } } : {}),
           ...(request.contextLimit !== undefined || request.outputLimit !== undefined
             ? {
                 limit: {

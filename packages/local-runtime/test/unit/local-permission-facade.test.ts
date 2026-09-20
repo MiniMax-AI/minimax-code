@@ -1709,6 +1709,111 @@ describe('LocalPermissionFacade', () => {
   });
 
   describe('sandbox self-paths (dataDir auto-allow)', () => {
+    describe.each(['default', 'auto', 'bypassPermissions'] as const)(
+      'skill resources in %s mode',
+      (permissionMode) => {
+        it.each(['read', 'grep', 'glob', 'list'])(
+          'allows %s for global, builtin and active-agent skill resources',
+          async (toolName) => {
+            const classify = vi.fn(async (): Promise<CloudClassifyVerdict> => ({
+              kind: 'allow',
+              reasonLocalized: 'ok',
+            }));
+            const { facade, dataDir } = freshFacade({
+              permissionMode,
+              cloudGateway: { classify },
+              dataDirParent: homedir(),
+            });
+            try {
+              for (const root of [
+                path.join(dataDir, 'skills'),
+                path.join(dataDir, '.builtin-skills'),
+                path.join(dataDir, 'agents', 'fixture-agent', 'skills'),
+              ]) {
+                const resourceDir = path.join(root, 'fixture-skill', 'references');
+                mkdirSync(resourceDir, { recursive: true });
+                const resource = path.join(resourceDir, 'guide.txt');
+                writeFileSync(resource, 'synthetic skill reference');
+                const result = await facade.checkPermission({
+                  toolName,
+                  agentName: 'fixture-agent',
+                  input: { path: toolName === 'read' ? resource : resourceDir, pattern: '*' },
+                });
+                expect(result.behavior).toBe('allow');
+              }
+              expect(classify).not.toHaveBeenCalled();
+            } finally {
+              cleanup(dataDir);
+            }
+          },
+        );
+      },
+    );
+
+    it.each(['default', 'auto'] as const)(
+      '%s mode keeps other agents and runtime state outside skill read access',
+      async (permissionMode) => {
+        const classify = vi.fn(async (): Promise<CloudClassifyVerdict> => ({
+          kind: 'allow',
+          reasonLocalized: 'ok',
+        }));
+        const { facade, dataDir } = freshFacade({
+          permissionMode,
+          cloudGateway: { classify },
+          dataDirParent: homedir(),
+        });
+        try {
+          for (const relativePath of [
+            'agents/other-agent/skills/fixture-skill/references/guide.txt',
+            'agents/fixture-agent/config.yaml',
+            'agents/fixture-agent/skills-backup/guide.txt',
+            '.builtin-skills-backup/guide.txt',
+          ]) {
+            const resource = path.join(dataDir, relativePath);
+            mkdirSync(path.dirname(resource), { recursive: true });
+            writeFileSync(resource, 'synthetic private state');
+            const result = await facade.checkPermission({
+              toolName: 'read',
+              agentName: 'fixture-agent',
+              input: { path: resource },
+            });
+            expect(result.behavior).toBe('ask');
+          }
+          expect(classify).not.toHaveBeenCalled();
+        } finally {
+          cleanup(dataDir);
+        }
+      },
+    );
+
+    it.each(['.builtin-skills', 'agents/fixture-agent/skills'])(
+      'requires approval when the %s root aliases private runtime state',
+      async (skillRoot) => {
+        const { facade, dataDir } = freshFacade({ dataDirParent: homedir() });
+        try {
+          const privateRoot = path.join(dataDir, 'private-state');
+          mkdirSync(privateRoot);
+          writeFileSync(path.join(privateRoot, 'notes.txt'), 'synthetic private state');
+          const alias = path.join(dataDir, skillRoot);
+          mkdirSync(path.dirname(alias), { recursive: true });
+          symlinkSync(privateRoot, alias, 'dir');
+          for (const toolName of ['read', 'grep']) {
+            const result = await facade.checkPermission({
+              toolName,
+              agentName: 'fixture-agent',
+              input: {
+                path: toolName === 'read' ? path.join(alias, 'notes.txt') : alias,
+                pattern: '*',
+              },
+            });
+            expect(result.behavior).toBe('ask');
+          }
+        } finally {
+          cleanup(dataDir);
+        }
+      },
+    );
+
     it.each(['read', 'grep', 'glob', 'list'])(
       'keeps private runtime %s requests out of automatic approval',
       async (toolName) => {
@@ -1757,10 +1862,14 @@ describe('LocalPermissionFacade', () => {
         writeFileSync(configPath, 'synthetic: fixture-only-secret\n');
         mkdirSync(path.join(dataDir, 'memory'));
         mkdirSync(path.join(dataDir, 'skills'));
+        mkdirSync(path.join(dataDir, '.builtin-skills'));
+        mkdirSync(path.join(dataDir, 'agents', 'fixture-agent', 'skills'), { recursive: true });
         const aliases = [
           path.join(workspaceDir, 'notes.txt'),
           path.join(dataDir, 'memory', 'notes.txt'),
           path.join(dataDir, 'skills', 'notes.txt'),
+          path.join(dataDir, '.builtin-skills', 'notes.txt'),
+          path.join(dataDir, 'agents', 'fixture-agent', 'skills', 'notes.txt'),
         ];
         for (const alias of aliases) {
           symlinkSync(configPath, alias);

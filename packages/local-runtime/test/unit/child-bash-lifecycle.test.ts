@@ -36,6 +36,8 @@ function nodeCommand(script: string): string {
 
 const directories: string[] = [];
 const shutdowns: Array<() => Promise<void>> = [];
+// Windows CI has exceeded the 10s teardown budget for these SQLite/output fixtures.
+// Keep the execution deadlines below separate from this bounded teardown budget.
 afterEach(async () => {
   // A terminal task can still be finalizing output or scheduling delivery.
   // Drain that work before closing SQLite, otherwise it can reopen the file
@@ -45,7 +47,7 @@ afterEach(async () => {
     closeLocalRuntimeDb(path);
     await rm(path, { recursive: true, force: true });
   }
-});
+}, process.platform === 'win32' ? 30_000 : 10_000);
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'child-bash-lifecycle-'));
   directories.push(dataDir);

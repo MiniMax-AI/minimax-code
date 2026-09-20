@@ -103,6 +103,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
       allowStartupEnvironmentSelection: dependencies.allowStartupEnvironmentSelection,
       launchTui: async ({
         initialPrompt,
+        model,
         sessionId,
         showSessionPicker,
         continueLatestSession,
@@ -114,6 +115,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         await launchTui({
           version: MINIMAX_CODE_VERSION,
           ...(initialPrompt ? { initialPrompt } : {}),
+          ...(model ? { model } : {}),
           ...(sessionId ? { sessionId } : {}),
           ...(showSessionPicker ? { showSessionPicker: true } : {}),
           ...(continueLatestSession ? { continueLatestSession: true } : {}),

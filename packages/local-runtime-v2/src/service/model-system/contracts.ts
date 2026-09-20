@@ -414,6 +414,7 @@ export interface UserModelInputView {
   reasoning?: boolean;
   toolCall?: boolean;
   temperature?: boolean;
+  capabilities?: LocalModelConfig['capabilities'];
   modalities?: { input?: string[]; output?: string[] };
   limit?: { context?: number; output?: number };
   thinkingConfig?: { mode?: string; defaultValue?: string };

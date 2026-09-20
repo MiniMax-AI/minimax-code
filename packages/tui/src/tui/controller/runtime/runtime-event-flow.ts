@@ -458,7 +458,7 @@ export class TuiRuntimeEventFlow {
         event.variant === 'auth'
           ? 'Content review authentication expired. Run /login, then retry.'
           : event.variant === 'network'
-            ? 'The content review service could not be reached, so this response stopped. Check your network and proxy or VPN settings, then retry.'
+            ? 'Content review did not return a usable result, so this response stopped. Unreviewed output was withheld. Retry; if this persists, use /feedback to report the review failure.'
             : 'Content review withdrew this response. Rephrase your request, then retry.',
         'warning',
       );

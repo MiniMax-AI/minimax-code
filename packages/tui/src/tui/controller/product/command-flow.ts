@@ -1218,7 +1218,7 @@ export class TuiCommandFlow {
           this.options.append(
             formatTuiActionFailure(error, {
               summary: "Couldn't reload TUI configuration.",
-              nextStep: 'Fix keybindings.json and retry /reload.',
+              nextStep: 'Resolve the reported configuration or plugin refresh error, then retry /reload.',
             }),
             'warning',
           );

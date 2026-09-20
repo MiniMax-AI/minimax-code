@@ -10,7 +10,10 @@ import type {
 } from '../../service/model-system/index.js';
 import { watchGlobalEvents, watchProcessEvents } from '../events.js';
 import type { ModelProviderApplication } from './model-provider-application.js';
-import type { LocalRuntimeApplication } from './process-local-application-contract.js';
+import type {
+  LocalRuntimeApplication,
+  ProcessLocalModelInput,
+} from './process-local-application-contract.js';
 import type { SessionReportCapability } from '../../service/session-system/index.js';
 
 export interface ProcessLocalApplicationOptions {
@@ -201,18 +204,7 @@ function toProviderRecord(provider: ModelProviderView): Record<string, unknown> 
 }
 
 function toUserModelInputs(
-  models: readonly {
-    modelId: string;
-    displayName?: string;
-    configurationSource?: string;
-    enabled?: boolean;
-    attachment?: boolean;
-    reasoning?: boolean;
-    toolCall?: boolean;
-    temperature?: boolean;
-    modalities?: { input?: readonly string[]; output?: readonly string[] };
-    limit?: { context?: number; output?: number };
-  }[],
+  models: readonly ProcessLocalModelInput[],
 ): UserModelInputView[] {
   return models.map(({ modalities, ...model }) => ({
     ...model,

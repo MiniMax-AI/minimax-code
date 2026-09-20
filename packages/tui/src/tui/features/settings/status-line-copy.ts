@@ -52,6 +52,7 @@ const descriptions: Record<Exclude<TuiStatusLineItem, 'build-mode'>, readonly [s
   'token-quota': ['Account token quota', '账户额度'],
   'cache-read-ratio': ['Session cache read ratio', '会话缓存读取比例'],
   'context-remaining': ['Remaining context window', '剩余上下文窗口'],
+  'context-meter': ['Remaining context gauge', '剩余上下文刻度条'],
   'custom-command': ['Configured custom command output', '已配置的自定义命令输出'],
 };
 
