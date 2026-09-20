@@ -3226,6 +3226,7 @@
     "packages/tui/test/unit/runtime-product-access.test.ts",
     "packages/tui/test/unit/tui-activity-line.test.ts",
     "packages/tui/test/unit/tui-app.test.ts",
+    "packages/tui/test/unit/tui-assistant-content.test.ts",
     "packages/tui/test/unit/tui-background-work-panel.test.ts",
     "packages/tui/test/unit/tui-build-mode-contract.test.ts",
     "packages/tui/test/unit/tui-capability-inspection.test.ts",

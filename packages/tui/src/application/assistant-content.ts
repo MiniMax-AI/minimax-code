@@ -251,9 +251,10 @@ function simplifyAssetMarkup(content: string, assets: DeliverAssetItem[]): strin
   for (let pass = 0; pass < 3; pass += 1) {
     const segments = parseDeliverAssetsContent(remaining);
     const extracted = collectAssetSegments(segments);
+    // Keep the parser's cleanup even when every attachment was invalid.
+    remaining = extracted.text;
     if (extracted.assets.length === 0) break;
     assets.push(...extracted.assets);
-    remaining = extracted.text;
   }
   return remaining;
 }

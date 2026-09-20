@@ -7,6 +7,7 @@
       "packages/agent-tools/src/shared/replace-all-edit.test.ts",
       "packages/local-runtime-v2/test/unit/agent/agent-import.test.ts",
       "packages/tui/test/unit/auth-application.test.ts",
+      "packages/tui/test/unit/tui-assistant-content.test.ts",
       "packages/tui/test/unit/business-telemetry-privacy.test.ts",
       "packages/tui/test/unit/auth-session.test.ts",
       "packages/tui/test/unit/cli-auth-command.test.ts",
