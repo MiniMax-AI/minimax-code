@@ -36,11 +36,52 @@ export type SafetyCheckV2Headers = NonNullable<RequestInit['headers']>;
 
 export type SafetyCheckV2ErrorKind = 'auth' | 'http' | 'transport' | 'response' | 'upstream';
 
+export type SafetyTransportKind = 'dns' | 'connect' | 'tls' | 'timeout' | 'aborted' | 'unknown';
+
+/** Only allowlisted categories survive; never retain exception text, URLs or causes. */
+export function classifySafetyTransportError(error: unknown): SafetyTransportKind {
+  let current = error;
+  for (let depth = 0; depth < 4 && isSafetyCheckV2Record(current); depth += 1) {
+    const { name } = current;
+    const code = typeof current.code === 'string' ? current.code : '';
+    if (
+      name === 'TimeoutError' ||
+      [
+        'ETIMEDOUT',
+        'UND_ERR_CONNECT_TIMEOUT',
+        'UND_ERR_HEADERS_TIMEOUT',
+        'UND_ERR_BODY_TIMEOUT',
+      ].includes(code)
+    )
+      return 'timeout';
+    if (name === 'AbortError' || code === 'ABORT_ERR') return 'aborted';
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'dns';
+    if (
+      ['ECONNREFUSED', 'ECONNRESET', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET'].includes(code)
+    )
+      return 'connect';
+    if (
+      [
+        'CERT_HAS_EXPIRED',
+        'DEPTH_ZERO_SELF_SIGNED_CERT',
+        'SELF_SIGNED_CERT_IN_CHAIN',
+        'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'ERR_TLS_CERT_ALTNAME_INVALID',
+        'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      ].includes(code)
+    )
+      return 'tls';
+    current = current.cause;
+  }
+  return 'unknown';
+}
+
 /** A failed check has no verdict. Callers must handle it separately from Allow. */
 export class SafetyCheckV2Error extends Error {
   constructor(
     readonly kind: SafetyCheckV2ErrorKind,
     readonly statusCode?: number,
+    readonly transportKind?: SafetyTransportKind,
   ) {
     super(`SafetyCheckV2 ${kind} error`);
     this.name = 'SafetyCheckV2Error';
@@ -71,8 +112,8 @@ export async function postSafetyCheckV2(input: {
       signal: input.signal ? AbortSignal.any([input.signal, timeout]) : timeout,
       redirect: 'error',
     });
-  } catch {
-    throw new SafetyCheckV2Error('transport');
+  } catch (error) {
+    throw new SafetyCheckV2Error('transport', undefined, classifySafetyTransportError(error));
   }
   if (!response.ok) {
     throw new SafetyCheckV2Error(
@@ -83,8 +124,13 @@ export async function postSafetyCheckV2(input: {
   let body: unknown;
   try {
     body = await response.json();
-  } catch {
-    throw new SafetyCheckV2Error('response');
+  } catch (error) {
+    const transportKind = classifySafetyTransportError(error);
+    throw new SafetyCheckV2Error(
+      transportKind === 'unknown' ? 'response' : 'transport',
+      response.status,
+      transportKind,
+    );
   }
   if (!isSafetyCheckV2Record(body)) throw new SafetyCheckV2Error('response');
   return body;

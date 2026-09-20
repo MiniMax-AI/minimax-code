@@ -2235,6 +2235,7 @@
     "packages/local-runtime/src/content-safety/api-v2.ts",
     "packages/local-runtime/src/content-safety/api.ts",
     "packages/local-runtime/src/content-safety/config-fields.ts",
+    "packages/local-runtime/src/content-safety/diagnostics.ts",
     "packages/local-runtime/src/content-safety/turn-api.ts",
     "packages/local-runtime/src/context/context-usage-calibration.ts",
     "packages/local-runtime/src/context/context-usage-provider-diagnostics.ts",

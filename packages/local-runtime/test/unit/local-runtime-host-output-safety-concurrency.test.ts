@@ -1,3 +1,5 @@
+import { LocalAgentTurnRunner } from '../../../local-runtime-v2/src/service/turn-system/agent-host/runner/local-agent-turn-runner.js';
+import { logger } from '../../src/common/logger.js';
 // Concurrency isolation for the output-safety host loop.
 //
 // The blocked flag / abort / review buffers live on per-attempt writer instances
@@ -8,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocalRuntimeHost, type LocalTurnRunner } from '../../src/runtime/host.js';
 import { RespDataType } from '@mavis/agent-core/protocol/agent-message';
-import { RuntimeEventType, type IRuntimeEvent } from '@mavis/protocol';
+import { RuntimeEventStatus, RuntimeEventType, type IRuntimeEvent } from '@mavis/protocol';
 
 function finalMessage(content: string): IRuntimeEvent {
   return {
@@ -55,6 +57,91 @@ describe('LocalRuntimeHost output safety — concurrency isolation', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env.IDC;
+  });
+
+  it('records a review stop while retaining completed terminal semantics', async () => {
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new DOMException('timeout', 'TimeoutError'));
+    const host = new LocalRuntimeHost({
+      safetyApiVersion: 'v2',
+      outputSafetyRetryDelay: async () => {},
+      piRunner: {
+        async runTurn(input) {
+          await input.eventWriter.pushRuntime(finalMessage('unreviewed-output'));
+        },
+      },
+    });
+    const output = await host.runTurn({
+      workspaceDir: '/tmp/ws',
+      systemPrompt: '',
+      userMessage: { text: 'hi' },
+      llm: { model: {} as never },
+      sessionId: 'ses',
+      turnId: 'turn',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(output).toMatchObject({ networkStopped: true, retracted: false });
+    expect(output.events.filter((event) => event.type === RuntimeEventType.STREAM_RESP)).toEqual(
+      [],
+    );
+    expect(output.events).toContainEqual(
+      expect.objectContaining({
+        type: RuntimeEventType.SESSION_STATUS,
+        payload: expect.objectContaining({ status: RuntimeEventStatus.COMPLETED }),
+      }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      {
+        sessionId: 'ses',
+        turnId: 'turn',
+        reviewOutcome: 'unavailable',
+        outputSuppressed: true,
+        terminalStatus: 'completed',
+      },
+      '[content-safety] output review stopped turn',
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain('unreviewed-output');
+  });
+
+  it.each([false, true])('diagnoses the V2 review stop without overriding runner failure: %s', async (runnerFailed) => {
+    const log = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const events: IRuntimeEvent[] = [];
+    const eventWriter = {
+      events,
+      async pushRuntime(event: IRuntimeEvent) { events.push(event); },
+      async appendEvents(next: IRuntimeEvent[]) { events.push(...next); },
+    };
+    const reviewContent = vi.fn(async () => ({ pass: false, errorKind: 'local_error' as const }));
+    const runner = new LocalAgentTurnRunner({
+      reviewContent,
+      outputSafetyRetryDelay: async () => {},
+      piRunner: { async runTurn(input) {
+        await input.eventWriter.pushRuntime(finalMessage('unreviewed-output'));
+        if (runnerFailed) await input.eventWriter.pushRuntime({
+          ...finalMessage(''), type: RuntimeEventType.SESSION_STATUS,
+          payload: { status: RuntimeEventStatus.FAILED },
+        });
+      } },
+    });
+    const output = await runner.runTurn({
+      workspaceDir: '/tmp/ws', systemPrompt: '', userMessage: { text: 'hi' },
+      llm: { model: {} as never }, sessionId: 'ses', turnId: 'turn', eventWriter,
+      toolContext: { agentName: 'test', parentAgentConfig: {}, trustedExactWritePaths: [], eventWriter } as never,
+    });
+    expect(reviewContent).toHaveBeenCalledTimes(4);
+    expect(events.filter(event => event.type === RuntimeEventType.STREAM_RESP)).toEqual([]);
+    expect(output.outcome.status).toBe(runnerFailed ? 'failed' : 'completed');
+    if (runnerFailed) {
+      expect(log).not.toHaveBeenCalled();
+    } else {
+      expect(output).toMatchObject({ networkStopped: true, retracted: false, reconcile: { kind: 'network-reconcile' } });
+      expect(log).toHaveBeenCalledWith({
+        sessionId: 'ses', turnId: 'turn', reviewOutcome: 'unavailable',
+        outputSuppressed: true, terminalStatus: 'completed',
+      }, '[content-safety] output review stopped turn');
+    }
   });
 
   it('a rejected turn never contaminates a concurrent clean turn', async () => {

@@ -10607,7 +10607,10 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
-  it("restores a content-review retraction to the Composer without a failed Queue item", async () => {
+  it.each([
+    ['content', 'Content review withdrew this response. Rephrase your request, then retry.'],
+    ['network', 'Content review did not return a usable result, so this response stopped.'],
+  ] as const)("presents a %s review stop without a failed Queue item", async (variant, notice) => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
     const busEvents: TuiRuntimeEvent[] = [];
@@ -10655,7 +10658,7 @@ describe("createTuiApp", () => {
         type: "content.retry.exceeded",
         timestamp: 100,
         source: "runtime-v2",
-        payload: { sessionId: "session-1", variant: "content" },
+        payload: { sessionId: "session-1", variant },
       }),
       runtimeEvent({
         type: "message.rewind",
@@ -10671,9 +10674,8 @@ describe("createTuiApp", () => {
       expect(app.editor.getText()).toBe("review this response"),
     );
     const rendered = app.tui.render(100).join("\n");
-    expect(rendered).toContain(
-      "Content review withdrew this response. Rephrase your request, then retry.",
-    );
+    expect(rendered).toContain(notice);
+    expect(rendered).not.toContain('Check your network');
     expect(rendered).not.toContain("Message kept under Failed");
     await app.submit("/queue");
     expect(app.interaction.current()).toBeUndefined();
