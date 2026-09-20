@@ -2,19 +2,34 @@
 
 ## Tag-triggered CLI installation packages
 
-Push an immutable `vX.Y.Z` tag on a reviewed commit reachable from `main` to run
-`CLI release`. For example, after this workflow has landed:
+Run the release command from a clean checkout of the latest reviewed `origin/main`.
+Git and an authenticated `gh-axi` or `gh` are required:
 
 ```bash
-git tag -a v0.4.13 <reviewed-commit> -m "MiniMax Code 0.4.13"
-git push origin v0.4.13
+pnpm release:cli --version 0.4.13 --dry-run
+pnpm release:cli --version 0.4.13
 ```
 
-The tag is the release version. CI injects it into the built CLI and package
-manifest automatically; `mcode --version` and the tarball version match the tag.
-It does not create a version commit, move the tag, or push changes to `main`.
-The source manifests retain the shared-source baseline version until a reviewed
-source update changes them.
+The dry run checks the starting revision, versions and remote refs without changing
+files, creating commits or pushing. The release command then:
+
+1. Creates `release/v0.4.13` from the reviewed starting commit.
+2. Bumps `package.json` and `packages/tui/package.json` together and commits them.
+3. Creates the annotated `v0.4.13` tag on that version commit.
+4. Atomically pushes the release branch and tag, without pushing `main`.
+5. Opens a version PR back to `main`; merge it through the normal review process.
+
+CI requires the tag, both committed source versions and `mcode --version` to agree.
+It does not override the source version during a build. An existing tag or release
+branch, a non-increasing version, uncommitted files, or a starting commit other
+than the latest `origin/main` stops the command before version changes.
+
+The tag starts the release workflow independently of the version PR. If a network
+or PR-creation failure occurs, inspect the local and remote branch/tag before
+retrying: the version commit and tag are retained for recovery. If both refs were
+pushed but opening the PR failed, open that version PR manually. Never delete and
+recreate an already distributed tag. Merge the version PR before starting the
+next release so `main` carries the released version.
 
 The workflow runs the full verification profile and secret scans, builds one
 `minimax-code-X.Y.Z.tar.gz` npm installation package, and authenticates and installs
@@ -31,19 +46,19 @@ finish publication manually or delete only the incomplete draft and rerun.
 Never move an already distributed tag to different code.
 
 To exercise this workflow without publication, dispatch `CLI release` on a
-selected branch with a version tag as input. A manual dispatch only builds and
+selected branch. An optional tag input must match the committed source version. A manual dispatch only builds and
 validates Actions artifacts, even when the requested tag already exists.
-PRs that change release tooling also run the build/install matrix with the
-synthetic version `0.0.0-ci`, without creating a tag or publishing a release.
+PRs that change release tooling also run the build/install matrix using the
+committed source version, without creating a tag or publishing a release.
 
 To reproduce the packaging and installation checks locally, use a clean reviewed
 commit and keep output outside the repository:
 
 ```bash
-export MCODE_RELEASE_TAG=v0.4.13-rc.1
+export MCODE_RELEASE_TAG="v$(node -p 'require("./package.json").version')"
 pnpm verify
 node scripts/package-cli-release.mjs "$MCODE_RELEASE_TAG" /tmp/mcode-release
-MCODE_RELEASE_ARCHIVE=/tmp/mcode-release/minimax-code-0.4.13-rc.1.tar.gz pnpm verify --profile package
+MCODE_RELEASE_ARCHIVE="/tmp/mcode-release/minimax-code-${MCODE_RELEASE_TAG#v}.tar.gz" pnpm verify --profile package
 ```
 
 The `package` profile validates installation of an existing archive; it does not

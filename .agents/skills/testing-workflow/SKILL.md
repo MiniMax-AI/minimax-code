@@ -65,8 +65,9 @@ bypass the clean-commit export requirement.
 The `package` profile authenticates an npm release archive, installs it into a
 temporary npm prefix, and exercises its launcher, native dependencies and offline
 smoke/BYOK suites. It requires `MCODE_RELEASE_TAG` and `MCODE_RELEASE_ARCHIVE` and
-does not replace source validation. The release workflow builds with the tag
-version and runs the full profile before package installation checks.
+does not replace source validation. The release command commits matching root/TUI source versions before tagging.
+The release workflow rejects version mismatches and runs the full profile before
+package installation checks.
 
 ## Manual evidence and reporting
 

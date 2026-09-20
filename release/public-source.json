@@ -3292,6 +3292,7 @@
     "scripts/package-cli-release.mjs",
     "scripts/prepare-source-sync.mjs",
     "scripts/publish-cli-release.mjs",
+    "scripts/release-cli.mjs",
     "scripts/run-vitest-suite.mjs",
     "scripts/source-candidate.mjs",
     "scripts/source-inventory.mjs",

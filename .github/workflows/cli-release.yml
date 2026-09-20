@@ -7,24 +7,25 @@ on:
       - '.github/workflows/cli-release.yml'
       - 'scripts/build.mjs'
       - 'scripts/*cli-release.mjs'
+      - 'scripts/release-cli.mjs'
       - 'scripts/lib/cli-release.mjs'
       - 'scripts/verify.mjs'
       - 'test/smoke.test.mjs'
       - 'test/byok.test.mjs'
       - 'pnpm-lock.yaml'
+      - 'package.json'
+      - 'packages/tui/package.json'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag for a build/install dry run (does not publish)'
-        required: true
+        description: 'Optional tag matching the source version (dry run; does not publish)'
+        required: false
         type: string
 permissions:
   contents: read
 concurrency:
   group: cli-release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
-env:
-  MCODE_RELEASE_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || 'v0.0.0-ci' }}
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,6 +33,7 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       matrix: ${{ steps.release.outputs.matrix }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -46,13 +48,13 @@ jobs:
         id: release
         shell: bash
         run: |
-          node --input-type=module -e 'import { appendFileSync } from "node:fs"; import { versionFromTag, cliReleaseTargets } from "./scripts/lib/cli-release.mjs"; appendFileSync(process.env.GITHUB_OUTPUT, `version=${versionFromTag(process.env.MCODE_RELEASE_TAG)}\nmatrix=${JSON.stringify({include: cliReleaseTargets})}\n`);'
+          node --input-type=module -e 'import { appendFileSync } from "node:fs"; import { cliBuildVersion, cliReleaseTargets } from "./scripts/lib/cli-release.mjs"; const tag = process.env.REQUESTED_TAG || `v${cliBuildVersion(process.cwd())}`; const version = cliBuildVersion(process.cwd(), tag); appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ntag=${tag}\nmatrix=${JSON.stringify({include: cliReleaseTargets})}\n`); appendFileSync(process.env.GITHUB_ENV, `MCODE_RELEASE_TAG=${tag}\n`);'
           if [ "$EVENT_NAME" = push ]; then
-            test "$(git rev-parse "refs/tags/$MCODE_RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
-            git merge-base --is-ancestor HEAD origin/main
+            test "$(git rev-parse "refs/tags/$REQUESTED_TAG^{commit}")" = "$(git rev-parse HEAD)"
           fi
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
       - run: pnpm install --frozen-lockfile
       - uses: ./.github/actions/setup-gitleaks
       - name: Scan source history
@@ -79,6 +81,8 @@ jobs:
           retention-days: 14
   install:
     needs: build
+    env:
+      MCODE_RELEASE_TAG: ${{ needs.build.outputs.tag }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -115,6 +119,8 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      MCODE_RELEASE_TAG: ${{ needs.build.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

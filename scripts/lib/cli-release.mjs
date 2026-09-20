@@ -12,9 +12,11 @@ export function versionFromTag(tag) {
 }
 
 export function cliBuildVersion(root, tag = process.env.MCODE_RELEASE_TAG) {
-  return tag === undefined
-    ? JSON.parse(readFileSync(path.join(root, 'packages/tui/package.json'), 'utf8')).version
-    : versionFromTag(tag);
+  const version = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+  const tuiVersion = JSON.parse(readFileSync(path.join(root, 'packages/tui/package.json'), 'utf8')).version;
+  if (version !== tuiVersion) throw new Error('Root and TUI package versions must match.');
+  if (tag != null && versionFromTag(tag) !== version) throw new Error('Release tag must match root and TUI package versions. Run the release command before tagging.');
+  return version;
 }
 
 // These modules stay outside the JS bundle and must travel with an installation.

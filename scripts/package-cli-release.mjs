@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { c as createTar } from 'tar';
-import { cliExternalModules, versionFromTag } from './lib/cli-release.mjs';
+import { cliBuildVersion, cliExternalModules } from './lib/cli-release.mjs';
 import { readExtraction, dependencyLicensesPath } from './lib/release-metadata.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -72,7 +72,7 @@ export function releaseManifest(importers, version) {
 }
 
 export async function packageCliRelease({ tag, out }) {
-  const version = versionFromTag(tag);
+  const version = cliBuildVersion(root, tag);
   const dist = path.join(root, 'dist');
   if (json(path.join(dist, 'package.json')).version !== version) throw new Error('Build version does not match the release tag. Build with MCODE_RELEASE_TAG first.');
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
