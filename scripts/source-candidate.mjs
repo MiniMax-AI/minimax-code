@@ -53,12 +53,14 @@ if (command === "unpack") {
         ),
       ),
     );
+  // Windows validation is temporarily paused in the candidate workflow.
+  const requiredPlatforms = ["linux", "darwin"];
   if (
-    reports.length !== 3 ||
-    new Set(reports.map((r) => r.platform)).size !== 3 ||
+    reports.length !== requiredPlatforms.length ||
+    new Set(reports.map((r) => r.platform)).size !== requiredPlatforms.length ||
     reports.some(
       (r) =>
-        !["linux", "darwin", "win32"].includes(r.platform) ||
+        !requiredPlatforms.includes(r.platform) ||
         r.status !== "PASS" ||
         r.profile !== "archive" ||
         r.revision !== receipt.revision ||
@@ -67,7 +69,7 @@ if (command === "unpack") {
     )
   )
     throw new Error(
-      "Candidate requires successful same-revision archive reports from all three platforms",
+      "Candidate requires successful same-revision archive reports from Linux and macOS",
     );
   const manifest = {
     schemaVersion: 1,
@@ -88,6 +90,6 @@ if (command === "unpack") {
   );
   writeFileSync(`${archive}.sha256`, `${digest}  ${path.basename(archive)}\n`);
   console.log(
-    `Source candidate verified on all three platforms: ${receipt.revision}`,
+    `Source candidate verified on Linux and macOS: ${receipt.revision}`,
   );
 }

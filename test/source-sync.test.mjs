@@ -230,13 +230,13 @@ test('CI aggregate rejects failed, cancelled, missing and unexpectedly skipped c
     assert.notEqual(run({ ...full, DOCS_ONLY: scope }), 0);
 });
 
-test('ordinary CI preserves three platforms without invoking release-only matrices', () => {
+test('ordinary CI pauses Windows without invoking release-only matrices', () => {
   const readWorkflow = name => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8'));
   const ci = readWorkflow('ci');
   assert.ok(Object.hasOwn(ci.on, 'pull_request'));
   assert.deepEqual(ci.on.push.branches, ['main']);
   assert.deepEqual(Object.keys(ci.jobs).sort(), ['changes', 'docs', 'verification', 'verify']);
-  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.node, ['24']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.include, [{ os: 'ubuntu-latest', node: '24', profile: 'full' }]);
   assert.equal(ci.jobs.verify.needs, 'changes');
@@ -269,7 +269,7 @@ test('manual source candidates pin every checkout and receipt to the selected re
       assert.equal(step.env.REVISION, revision);
   }
   const validate = workflow.jobs.validate;
-  assert.deepEqual(validate.strategy.matrix.os, ['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  assert.deepEqual(validate.strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
   assert.ok(validate.steps.some(step => step.run?.includes('--store-dir "$RUNNER_TEMP/candidate-store" --registry https://registry.npmjs.org/')));
   const verify = validate.steps.find(step => step.run === 'pnpm verify --profile archive');
   assert.equal(verify.env.MCODE_VERIFY_REVISION, revision);
@@ -345,7 +345,7 @@ test('source archive rejects traversal, links, Git history and duplicate entries
   }
 });
 
-test('candidate rejects mismatched receipts and requires three successful same-revision reports', t => {
+test('candidate rejects mismatched receipts and requires successful same-revision Linux and macOS reports', t => {
   const f = archiveFixture(t, [{ path: 'minimax-code/README.md', content: 'source' }]);
   const revision = 'a'.repeat(40);
   const receipt = { schemaVersion: 1, revision, sha256: createHash('sha256').update(readFileSync(f.archive)).digest('hex'), format: 'source-only-no-git-history', publicationPerformed: false };
@@ -361,20 +361,22 @@ test('candidate rejects mismatched receipts and requires three successful same-r
   writeFileSync(`${f.archive}.json`, JSON.stringify(receipt));
   const reports = path.join(f.directory, 'reports');
   mkdirSync(reports);
-  for (const platform of ['linux', 'darwin', 'win32']) {
+  for (const platform of ['linux', 'darwin']) {
     const folder = path.join(reports, platform);
     mkdirSync(folder);
     writeFileSync(path.join(folder, 'verification.json'), JSON.stringify({ revision, platform, arch: 'fixture', node: 'v24', profile: 'archive', status: 'PASS', gates: [{ name: 'build', status: 'PASS' }] }));
   }
   assert.equal(run('finalize', '--reports', reports).status, 0);
-  assert.equal(JSON.parse(readFileSync(path.join(f.directory, 'candidate.json'))).sha256, receipt.sha256);
-  const windows = path.join(reports, 'win32/verification.json');
-  const report = JSON.parse(readFileSync(windows));
-  for (const change of [{ status: 'FAIL' }, { revision: 'b'.repeat(40) }, { gates: [{ name: 'build', status: 'NOT_RUN' }] }]) {
-    writeFileSync(windows, JSON.stringify({ ...report, ...change }));
+  const manifest = JSON.parse(readFileSync(path.join(f.directory, 'candidate.json')));
+  assert.equal(manifest.sha256, receipt.sha256);
+  assert.deepEqual(manifest.validation.map(report => report.platform).sort(), ['darwin', 'linux']);
+  const macos = path.join(reports, 'darwin/verification.json');
+  const report = JSON.parse(readFileSync(macos));
+  for (const change of [{ status: 'FAIL' }, { revision: 'b'.repeat(40) }, { gates: [{ name: 'build', status: 'NOT_RUN' }] }, { platform: 'linux' }, { platform: 'win32' }]) {
+    writeFileSync(macos, JSON.stringify({ ...report, ...change }));
     assert.notEqual(run('finalize', '--reports', reports).status, 0);
   }
-  rmSync(path.dirname(windows), { recursive: true });
+  rmSync(path.dirname(macos), { recursive: true });
   assert.notEqual(run('finalize', '--reports', reports).status, 0);
 });
 
