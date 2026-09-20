@@ -332,7 +332,7 @@ describe('TranscriptView', () => {
     expect(updated.join('\n')).toContain('Updated answer');
   });
 
-  it('renders rich delivery markup as a compact terminal file receipt', () => {
+  it.each(['src', 'path'])('renders %s delivery markup as a compact terminal file receipt', (attribute) => {
     const view = new TranscriptView(() => [
       createTranscriptCell({
         id: 'assistant-assets',
@@ -341,7 +341,7 @@ describe('TranscriptView', () => {
         content: [
           'Done.',
           '<deliver-assets>',
-          '<media src="/workspace/chart.png" caption="Chart" />',
+          `<media ${attribute}="/workspace/chart.png" caption="Chart" />`,
           '</deliver-assets>',
         ].join('\n'),
         createdAtMs: 1,

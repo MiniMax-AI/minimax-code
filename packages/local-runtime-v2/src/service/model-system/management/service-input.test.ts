@@ -13,6 +13,31 @@ import {
 } from './service-input.js';
 
 describe('model provider input normalization', () => {
+  it('preserves declared capabilities on create and merges updates without losing limits', () => {
+    const created = modelsFromInputs([
+      {
+        modelId: 'vision-model',
+        capabilities: { support_image: true, max_image_bytes_inline: 1024 },
+      },
+    ]);
+    expect(created['vision-model']?.capabilities).toEqual({
+      support_image: true,
+      max_image_bytes_inline: 1024,
+    });
+    const patch = [{ modelId: 'vision-model', capabilities: { support_image: false } }];
+    for (const updated of [modelsFromInputs(patch, created), mergeModelsFromInputs(created, patch)]) {
+      expect(updated['vision-model']?.capabilities).toEqual({
+        support_image: false,
+        max_image_bytes_inline: 1024,
+      });
+      const renamed = mergeModelsFromInputs(updated, [
+        { modelId: 'vision-model', displayName: 'Renamed' },
+      ]);
+      expect(renamed['vision-model']?.capabilities).toEqual(updated['vision-model']?.capabilities);
+    }
+    expect(created['vision-model']?.capabilities?.support_image).toBe(true);
+  });
+
   it('normalizes API keys and formats', () => {
     expect(() => assertValidRawApiKey(undefined as unknown as string)).toThrow(
       LocalModelProviderError,
@@ -93,6 +118,23 @@ describe('model provider input normalization', () => {
       thinking_config: { mode: 'switchable', default_value: 'true' },
       thinking: { effortOptions: ['low', 'high'] },
       capabilities: { experimental: true },
+    });
+  });
+
+  it('persists declared Kimi K3 effort options as thinking metadata', () => {
+    expect(
+      modelsFromInputs([
+        {
+          modelId: 'kimi-k3',
+          displayName: 'Kimi K3',
+          reasoning: true,
+          effortOptions: ['low', 'high', 'max'],
+        },
+      ])['kimi-k3'],
+    ).toEqual({
+      name: 'Kimi K3',
+      reasoning: true,
+      thinking: { effortOptions: ['low', 'high', 'max'] },
     });
   });
 

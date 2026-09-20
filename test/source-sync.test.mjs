@@ -14,6 +14,7 @@ import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { runInNewContext } from 'node:vm';
 
 function fixture(t) {
   const home = mkdtempSync(path.join(tmpdir(), 'source-sync-'));
@@ -230,13 +231,13 @@ test('CI aggregate rejects failed, cancelled, missing and unexpectedly skipped c
     assert.notEqual(run({ ...full, DOCS_ONLY: scope }), 0);
 });
 
-test('ordinary CI preserves three platforms without invoking release-only matrices', () => {
+test('ordinary CI pauses Windows without invoking release-only matrices', () => {
   const readWorkflow = name => parseYaml(readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8'));
   const ci = readWorkflow('ci');
   assert.ok(Object.hasOwn(ci.on, 'pull_request'));
   assert.deepEqual(ci.on.push.branches, ['main']);
   assert.deepEqual(Object.keys(ci.jobs).sort(), ['changes', 'docs', 'verification', 'verify']);
-  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.node, ['24']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.include, [{ os: 'ubuntu-latest', node: '24', profile: 'full' }]);
   assert.equal(ci.jobs.verify.needs, 'changes');
@@ -269,7 +270,7 @@ test('manual source candidates pin every checkout and receipt to the selected re
       assert.equal(step.env.REVISION, revision);
   }
   const validate = workflow.jobs.validate;
-  assert.deepEqual(validate.strategy.matrix.os, ['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  assert.deepEqual(validate.strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
   assert.ok(validate.steps.some(step => step.run?.includes('--store-dir "$RUNNER_TEMP/candidate-store" --registry https://registry.npmjs.org/')));
   const verify = validate.steps.find(step => step.run === 'pnpm verify --profile archive');
   assert.equal(verify.env.MCODE_VERIFY_REVISION, revision);
@@ -345,7 +346,7 @@ test('source archive rejects traversal, links, Git history and duplicate entries
   }
 });
 
-test('candidate rejects mismatched receipts and requires three successful same-revision reports', t => {
+test('candidate rejects mismatched receipts and requires successful same-revision Linux and macOS reports', t => {
   const f = archiveFixture(t, [{ path: 'minimax-code/README.md', content: 'source' }]);
   const revision = 'a'.repeat(40);
   const receipt = { schemaVersion: 1, revision, sha256: createHash('sha256').update(readFileSync(f.archive)).digest('hex'), format: 'source-only-no-git-history', publicationPerformed: false };
@@ -361,20 +362,22 @@ test('candidate rejects mismatched receipts and requires three successful same-r
   writeFileSync(`${f.archive}.json`, JSON.stringify(receipt));
   const reports = path.join(f.directory, 'reports');
   mkdirSync(reports);
-  for (const platform of ['linux', 'darwin', 'win32']) {
+  for (const platform of ['linux', 'darwin']) {
     const folder = path.join(reports, platform);
     mkdirSync(folder);
     writeFileSync(path.join(folder, 'verification.json'), JSON.stringify({ revision, platform, arch: 'fixture', node: 'v24', profile: 'archive', status: 'PASS', gates: [{ name: 'build', status: 'PASS' }] }));
   }
   assert.equal(run('finalize', '--reports', reports).status, 0);
-  assert.equal(JSON.parse(readFileSync(path.join(f.directory, 'candidate.json'))).sha256, receipt.sha256);
-  const windows = path.join(reports, 'win32/verification.json');
-  const report = JSON.parse(readFileSync(windows));
-  for (const change of [{ status: 'FAIL' }, { revision: 'b'.repeat(40) }, { gates: [{ name: 'build', status: 'NOT_RUN' }] }]) {
-    writeFileSync(windows, JSON.stringify({ ...report, ...change }));
+  const manifest = JSON.parse(readFileSync(path.join(f.directory, 'candidate.json')));
+  assert.equal(manifest.sha256, receipt.sha256);
+  assert.deepEqual(manifest.validation.map(report => report.platform).sort(), ['darwin', 'linux']);
+  const macos = path.join(reports, 'darwin/verification.json');
+  const report = JSON.parse(readFileSync(macos));
+  for (const change of [{ status: 'FAIL' }, { revision: 'b'.repeat(40) }, { gates: [{ name: 'build', status: 'NOT_RUN' }] }, { platform: 'linux' }, { platform: 'win32' }]) {
+    writeFileSync(macos, JSON.stringify({ ...report, ...change }));
     assert.notEqual(run('finalize', '--reports', reports).status, 0);
   }
-  rmSync(path.dirname(windows), { recursive: true });
+  rmSync(path.dirname(macos), { recursive: true });
   assert.notEqual(run('finalize', '--reports', reports).status, 0);
 });
 
@@ -422,11 +425,13 @@ test('suite runner preserves gate arguments and canonicalizes Windows temporary 
 });
 
 test('public support forms preserve destination URLs and separate Desktop from CLI reports', () => {
-  const forms = ['01-bug-report.yml', '02-feature-request.yml', '03-question.yml'];
+  const forms = ['01-bug-report.yml', '02-feature-request.yml', '03-question.yml', 'docs.yml'];
   for (const name of forms) {
     const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
     const product = form.body.find(field => field.id === 'product');
-    assert.equal(product.validations.required, true);
+    assert.equal(product.validations.required, name !== '03-question.yml');
+    assert.equal(product.attributes.label, 'Product or interface');
+    assert.ok(product.attributes.options.includes('CLI - interactive TUI'));
     assert.ok(product.attributes.options.includes('Desktop app'));
     assert.ok(product.attributes.options.includes('CLI - ACP'));
     assert.ok(product.attributes.options.includes('CLI - headless'));
@@ -438,6 +443,72 @@ test('public support forms preserve destination URLs and separate Desktop from C
   for (const retired of ['bug.yml', 'feature.yml'])
     assert.equal(existsSync(new URL(`../.github/ISSUE_TEMPLATE/${retired}`, import.meta.url)), false);
   assert.equal(classifyChanges(['README_ZH.md', 'README.md']).docsOnly, true);
+});
+
+test('issue product labels follow current form answers without replacing unrelated labels', async () => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/label-issue-product.yml', import.meta.url), 'utf8'));
+  assert.deepEqual(workflow.on, { issues: { types: ['opened', 'edited'] } });
+  assert.deepEqual(workflow.permissions, { issues: 'write' });
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+  const job = workflow.jobs['label-product'];
+  assert.equal(job.if, "${{ github.repository == 'MiniMax-AI/minimax-code' && github.event.repository.private == false && !github.event.issue.pull_request }}");
+  assert.equal(job.steps.length, 1); // No checkout or execution of issue-supplied code.
+  const run = job.steps[0].run;
+  assert.doesNotMatch(run, /\$\{\{/);
+  const script = run.match(/^node <<'EOF'\r?\n([\s\S]*?)\r?\nEOF\s*$/)?.[1];
+  assert.ok(script);
+  async function replay(body, labels, failureStatus) {
+    const writes = [];
+    const issuePath = '/repos/MiniMax-AI/minimax-code/issues/7';
+    await runInNewContext(script, {
+      require: name => {
+        assert.equal(name, 'node:fs');
+        return { readFileSync: () => JSON.stringify({ issue: { number: 7, body: '### Product or interface\n\nDesktop app', labels: [] } }) };
+      },
+      process: { env: { GITHUB_EVENT_PATH: 'fixture.json', GITHUB_REPOSITORY: 'MiniMax-AI/minimax-code', GITHUB_API_URL: 'https://api.github.invalid', GH_TOKEN: 'synthetic' } },
+      fetch: async (url, options) => {
+        assert.equal(options.headers.Authorization, 'Bearer synthetic');
+        if (options.method === 'GET') {
+          assert.equal(url, `https://api.github.invalid${issuePath}`);
+          return { ok: !failureStatus, status: failureStatus || 200, json: async () => ({ body, labels: labels.map(name => ({ name })) }) };
+        }
+        writes.push({ method: options.method, path: url.replace(`https://api.github.invalid${issuePath}`, ''), body: options.body && JSON.parse(options.body) });
+        return { ok: true, status: 204 };
+      },
+    });
+    return writes;
+  }
+  const answer = product => `### Product or interface\n\n${product}\n\n### Question\n\nSynthetic question`;
+  const add = name => ({ method: 'POST', path: '/labels', body: { labels: [name] } });
+  const remove = name => ({ method: 'DELETE', path: `/labels/${name}`, body: undefined });
+  assert.deepEqual(await replay(answer('CLI - interactive TUI'), ['bug', 'desktop']), [add('tui'), remove('desktop')]);
+  assert.deepEqual(await replay(answer('Desktop app').replace(/\n/g, '\r\n'), ['question']), [add('desktop')]);
+  assert.deepEqual(await replay(answer('Desktop app'), ['desktop', 'bug']), []);
+  for (const product of ['CLI - headless', 'CLI - ACP', 'Source build or repository tooling']) {
+    assert.deepEqual(await replay(answer(product), ['tui', 'bug']), [remove('tui')]);
+  }
+  for (const body of [null, 'Desktop app', answer('_No response_'), answer('$(touch must-not-execute)')]) {
+    assert.deepEqual(await replay(body, ['desktop', 'bug']), []);
+  }
+  await assert.rejects(replay(answer('Desktop app'), [], 403), /GitHub GET failed: 403/);
+});
+
+test('issue forms label incoming reports for triage and retain collaborator-only PR guidance', () => {
+  for (const [name, type] of [
+    ['01-bug-report.yml', 'bug'], ['02-feature-request.yml', 'enhancement'],
+    ['03-question.yml', 'question'], ['docs.yml', 'documentation'],
+  ]) {
+    const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
+    assert.deepEqual(form.labels, [type, 'needs-triage']);
+  }
+  const config = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/config.yml', import.meta.url), 'utf8'));
+  assert.equal(config.blank_issues_enabled, false);
+  const policy = config.contact_links.find(link => link.url.endsWith('/CONTRIBUTING.md'));
+  assert.match(policy.about, /only from repository collaborators/);
+  assert.match(policy.about, /external PRs are not accepted/);
+  const question = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/03-question.yml', import.meta.url), 'utf8'));
+  assert.equal(question.body.find(field => field.id === 'platform').validations.required, false);
+  assert.equal(question.body.find(field => field.id === 'question').validations.required, true);
 });
 
 test('issue notification is restricted to public destination events and builds payloads offline', t => {

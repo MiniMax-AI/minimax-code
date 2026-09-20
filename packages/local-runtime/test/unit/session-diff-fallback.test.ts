@@ -13,6 +13,7 @@ let root: string;
 let workspaceDir: string;
 let dataDir: string;
 let diffStore: SqliteLocalTurnDiffStore;
+const pendingReads = new Set<ReturnType<typeof readLocalSessionDiff>>();
 
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: workspaceDir, encoding: 'utf8' });
@@ -29,11 +30,17 @@ function commit(): void {
 }
 
 async function read(messageId?: string) {
-  return readLocalSessionDiff({
+  const pending = readLocalSessionDiff({
     diffStore,
     session: { sessionId: 'test-session', workspaceDir },
     messageId,
   });
+  pendingReads.add(pending);
+  try {
+    return await pending;
+  } finally {
+    pendingReads.delete(pending);
+  }
 }
 
 beforeEach(async () => {
@@ -58,10 +65,14 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // A Vitest timeout does not cancel the Git processes started by a read.
+  // Drain them before changing their environment or deleting their cwd; otherwise
+  // Windows reports EBUSY and unfinished work can overlap the next fixture.
+  await Promise.allSettled(pendingReads);
   closeLocalRuntimeDb(dataDir);
   vi.unstubAllEnvs();
   await rm(root, { recursive: true, force: true });
-});
+}, process.platform === 'win32' ? 30_000 : 10_000);
 
 const portableNames = ['中文.txt', 'with spaces.txt', 'dir/{before after}.txt'];
 const posixNames = [
@@ -77,6 +88,8 @@ describe.each(['true', 'false'])('session diff fallback with core.quotePath=%s',
     git('config', 'core.quotePath', quotePath);
   });
 
+  // This integration case creates a commit, migrates SQLite and runs real Git.
+  // Real Windows runs have exhausted its default 5s test deadline.
   it('preserves Unicode paths and attaches each tracked patch through the public API', async () => {
     for (const file of portableNames) await write(file, 'first\n');
     commit();
@@ -94,7 +107,7 @@ describe.each(['true', 'false'])('session diff fallback with core.quotePath=%s',
         diff: expect.stringContaining(`+added-${index}\n`),
       });
     }
-  });
+  }, process.platform === 'win32' ? 15_000 : 5_000);
 
   it('reports rename edits against the destination path', async () => {
     await write('before.txt', 'a\nb\nc\nd\ne\nf\n');

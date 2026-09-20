@@ -274,6 +274,29 @@ describe('model catalog entry helpers', () => {
     });
   });
 
+  it('exposes Kimi K3 low/high/max effort options in the model roster', () => {
+    const entry = buildModelEntry({
+      providerId: 'custom_provider:moonshotai',
+      modelId: 'kimi-k3',
+      model: {
+        name: 'Kimi K3',
+        reasoning: true,
+        thinking: { effortOptions: ['low', 'high', 'max'] },
+      },
+      selected: false,
+      providerSource: 'custom_provider',
+      providerKind: 'custom',
+      providerName: 'Moonshot AI',
+    });
+
+    expect(entry).toMatchObject({
+      modelId: 'kimi-k3',
+      displayName: 'Kimi K3',
+      effortOptions: ['low', 'high', 'max'],
+    });
+    expect(entry.defaultEffort).toBeUndefined();
+  });
+
   it('exposes context option hints only for managed models', () => {
     const model = {
       limit: { context: 512_000 },

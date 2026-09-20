@@ -9,7 +9,7 @@
  * (`tui.statusLine`), so renaming one is a breaking change. Legacy aliases keep
  * older configuration working.
  *
- * `cache-read-ratio`, `context-remaining` and `review-link` are conditional
+ * `cache-read-ratio`, `context-remaining`, `context-meter` and `review-link` are conditional
  * items. They only render when the Runtime surfaces their matching projection
  * into the shell state, so unsupported or not-yet-recorded metrics stay silent.
  *
@@ -34,6 +34,7 @@ export const TUI_STATUS_LINE_ITEMS = [
   'token-quota',
   'cache-read-ratio',
   'context-remaining',
+  'context-meter',
   'custom-command',
 ] as const;
 
@@ -67,6 +68,8 @@ const TUI_STATUS_LINE_ITEM_ALIASES: Readonly<Record<string, TuiStatusLineItem>> 
   'cache-read': 'cache-read-ratio',
   context: 'context-remaining',
   'context-left': 'context-remaining',
+  'context-bar': 'context-meter',
+  'context-gauge': 'context-meter',
   custom: 'custom-command',
 };
 

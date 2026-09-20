@@ -546,6 +546,25 @@ describe("TuiRuntimeAdapter product access", () => {
     expect(cliService.selectModel).toHaveBeenCalledWith(selection);
   });
 
+  it("discovers Skills in the requested Session workspace without changing the adapter default", async () => {
+    const cliService = cliServiceFixture();
+    const adapter = new TuiRuntimeAdapter(cliService, {
+      workspaceDir: "/default-workspace",
+    });
+    await adapter.listSkills("reviewer", undefined, "/session-workspace");
+    await adapter.listSkills("mavis");
+    expect(cliService.listRuntimeSkills).toHaveBeenNthCalledWith(1, {
+      agentName: "reviewer",
+      workspaceDir: "/session-workspace",
+      includePluginSkills: true,
+    });
+    expect(cliService.listRuntimeSkills).toHaveBeenNthCalledWith(2, {
+      agentName: "mavis",
+      workspaceDir: "/default-workspace",
+      includePluginSkills: true,
+    });
+  });
+
   it("registers installed Plugin Skills from the unified Runtime roster as slash commands", async () => {
     const cliService = cliServiceFixture();
     vi.mocked(cliService.listRuntimeSkills).mockImplementationOnce(

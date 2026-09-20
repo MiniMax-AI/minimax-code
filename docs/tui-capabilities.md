@@ -10,7 +10,7 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | BYOK / custom models | Retained; headless model overrides no longer inherit the default Token Plan login requirement | Local protocol server drives runtime, resume, and file tools; live BYOK session passed; managed models still reject unauthenticated requests |
 | mcode-tools | Public package's unchanged 0.0.4 artifact, launcher, and short-lived token leases restored | Archive SHA-512, CLI SHA-256, real CLI startup, lease and host integration tests; production shared-broker authentication passed |
 | Search and Matrix image / audio / video tools | Matrix MCP and tool assembly restored; search is independent of mcode-tools | MCP configuration and auth-isolation tests; actual search passed; generation requests not run |
-| Official, local, and GitHub plugins | Official sources, marketplace reads, and installation control restored; local sources retained | Plugin application, source-page, and offline local CLI tests; actual official catalog read passed |
+| Official and local plugins; runtime GitHub importer | `/plugins` and `mcode plugin` manage official installations and discovered local packages; arbitrary marketplace registration and GitHub URL import are not exposed in the CLI/TUI. See [plugin management](examples.md#4-manage-plugins) | Plugin application, source-page, and offline local CLI tests; actual official catalog read passed |
 | Managed connectors | Cloud client, permissions, and invocation adapters restored | Connector runtime and cloud transport tests; actual tool discovery passed; business writes not run |
 | Updates | Update entry points, install-source detection, and signature verification restored; public packages use public npm | Update application and service tests; no real installation / upgrade on the development machine |
 | Feedback and diagnostic uploads | Reviewed feedback text and minimized diagnostic summaries | Synthetic fixtures exercise session collection and capture/decode the final ZIP upload; no live uploads or real content |
@@ -20,6 +20,21 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | Model catalog | Online catalog and bundled snapshot fallback restored | Actual build boundary checks and offline startup; online catalog contents not accepted |
 | Files, shell, subagents, sessions, headless, ACP | Actual runtime retained | BYOK, file reads, session resume, ACP, sandbox, and status protocol tests |
 | Built-in skills, MCP, plugin tools | Original TUI assets and activation conditions retained | Asset build, plugin, and MCP tests; no claim that every skill has passed a real task |
+
+## ACP Skill commands
+
+ACP clients receive enabled Skills alongside built-in slash commands when a session
+is created, loaded, resumed, or forked. Discovery uses the session's Agent and
+workspace, including installed plugin Skills. Command names come from the runtime
+Skill roster (for example, `/review` or `/plugin:review`), not the installation
+package name. Select a command and append instructions to invoke it through the
+normal Agent turn. `/skills [filter]` lists the session's available Skills.
+
+Built-in command names take priority over conflicting Skill names. Disabled,
+duplicate, and invalid command names are omitted. If Skill discovery fails,
+built-in commands remain available. Reopen the session after installing or enabling
+Skills to refresh its command menu. Protocol tests cover command discovery and
+prompt forwarding; this does not establish live Zed or model acceptance.
 
 ## Desktop boundary
 
@@ -46,3 +61,22 @@ Every collected diagnostic artifact, including prioritized session artifacts, is
 There is no raw-attachment upload option in this flow. Prompts, conversation text, tool arguments/results, command output, workspace excerpts, raw errors and unknown fields are excluded even if they contain no recognizable credential pattern. This intentionally reduces diagnostic detail: reproducing an exact response or inspecting an original stack is not possible from these uploads. Future raw attachments would require a separate, explicit review and consent surface describing their contents and scope.
 
 The regression tests use temporary synthetic files and intercepted HTTP only. They decrypt the final automatic-report request as a receiver would, and unzip the actual feedback PUT body after real session-report collection. They do not validate production ingestion of the new schemas, retention policies, live services, other telemetry paths or other platforms.
+
+
+## Interactive startup model
+
+Use `mcode -m <provider-id>/<model-id>` or
+`mcode "Fix the failing tests" --model <provider-id>/<model-id>` to select the
+model for the startup Session. References use the same syntax as `exec --model`,
+including `custom_provider:<id>/<model-id>`, model IDs containing `/`, and the
+optional `#variant` suffix. The provider must already be configured and the model
+must be available to Runtime; invalid references fail before the initial prompt runs.
+
+Without a resume option, this creates a new Session even when no prompt is given.
+With `--session <id>` or `--continue`, it updates the opened Session's model before
+submitting the prompt. The selection is saved with that Session, so later turns
+and resumes keep it. It does not change the global default, and `/new` returns to
+the configured default. Omitting `--model` preserves existing startup behavior.
+The untargeted `--session` picker cannot be combined with `--model`; provide an ID
+or use `--continue` instead. If opening or continuing a Session fails, the override
+and initial prompt are not applied.

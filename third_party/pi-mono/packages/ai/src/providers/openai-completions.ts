@@ -1068,6 +1068,12 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isTogether =
 		provider === "together" || baseUrl.includes("api.together.ai") || baseUrl.includes("api.together.xyz");
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
+	const isKimiCoding = /^https?:\/\/api\.kimi\.(?:com|ai)(?::\d+)?(?:\/|$)/i.test(baseUrl);
+	const isDashScope =
+		/^https?:\/\/(?:dashscope(?:-intl|-us)?|(?:coding(?:-intl)?|cn-hongkong)\.dashscope)\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl) ||
+		/^https?:\/\/[a-z0-9-]+\.(?:cn-beijing|cn-hongkong|ap-southeast-1|ap-northeast-1|eu-central-1|us-east-1)\.maas\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl);
+	const isSiliconFlow = /^https?:\/\/api\.siliconflow\.(?:cn|com)(?::\d+)?(?:\/|$)/i.test(baseUrl);
+	const isMistralApi = /^https?:\/\/api\.mistral\.ai(?::\d+)?(?:\/|$)/i.test(baseUrl);
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
 	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
@@ -1102,7 +1108,12 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	return {
 		supportsStore: !isNonStandard,
-		supportsDeveloperRole: isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter),
+		supportsDeveloperRole:
+			!isKimiCoding &&
+			!isDashScope &&
+			!isSiliconFlow &&
+			!isMistralApi &&
+			(isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
 		supportsReasoningEffort:
 			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
 		supportsUsageInStreaming: true,

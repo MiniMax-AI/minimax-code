@@ -1,4 +1,9 @@
 import {
+  classifySafetyTransportError,
+  isSafetyCheckV2Record,
+} from "@mavis/shared/safety-check-v2";
+import { createSafetyFailureReporter } from "./diagnostics.js";
+import {
   getRuntimeBuildEnv,
   getRuntimeRegion,
   type MavisBuildEnv,
@@ -8,7 +13,6 @@ import {
 import { callTurnSafetyApi } from "./turn-api.js";
 import { resolveSafetyApiBase } from "./api-base.js";
 
-import { logger } from "../common/logger.js";
 import type { LocalRuntimeAuthContext } from "../runtime/model-resolver.js";
 import {
   managedBackendRoutingHeaders,
@@ -126,12 +130,7 @@ export async function callSafetyApi(input: {
   const accessToken =
     input.authContext?.accessToken?.trim() ||
     process.env.MAVIS_ACCESS_TOKEN?.trim();
-  // TODO(shared-oauth): Remove this local-only diagnostic after the content-safety
-  // resource server accepts mcode-public Bearer tokens in the joint test environment.
-  // Never add the token, request body/content, or response body to these fields.
-  const logLocalUpstream =
-    resolvedBuildEnv === "dev" || resolvedBuildEnv === "test";
-  const startedAt = Date.now();
+  const reportFailure = createSafetyFailureReporter(url, "v1", input.scene);
   let response: Response;
   try {
     response = await input.fetchImpl(url, {
@@ -162,20 +161,10 @@ export async function callSafetyApi(input: {
       signal: AbortSignal.timeout(CONTENT_REVIEW_TIMEOUT_MS),
     });
   } catch (error) {
-    if (logLocalUpstream) {
-      logger.info(
-        {
-          url,
-          method: "POST",
-          status: null,
-          scene: input.scene,
-          hasBearer: Boolean(accessToken),
-          durationMs: Date.now() - startedAt,
-          errorType: error instanceof Error ? error.name : typeof error,
-        },
-        "[content-safety] upstream transport failure",
-      );
-    }
+    reportFailure({
+      failureKind: "transport",
+      transportKind: classifySafetyTransportError(error),
+    });
     // fetch threw (offline / DNS / connection refused / TLS) or the 10s timeout
     // fired: we never reached a verdict. No gateway confirmation → fail closed.
     return {
@@ -185,26 +174,21 @@ export async function callSafetyApi(input: {
     };
   }
 
-  if (logLocalUpstream) {
-    logger.info(
-      {
-        url,
-        method: "POST",
-        status: response.status,
-        scene: input.scene,
-        hasBearer: Boolean(accessToken),
-        durationMs: Date.now() - startedAt,
-        upstreamTraceId:
-          response.headers.get("trace-id") ??
-          response.headers.get("x-trace-id") ??
-          response.headers.get("x-request-id") ??
-          null,
-      },
-      "[content-safety] upstream response",
-    );
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    reportFailure({
+      failureKind: "transport",
+      transportKind: classifySafetyTransportError(error),
+      statusCode: response.status,
+    });
+    return {
+      pass: false,
+      reason: "Service response could not be read",
+      errorKind: "local_error",
+    };
   }
-
-  const text = await response.text();
   if (!response.ok) {
     // Non-2xx from the gateway, split by class so an auth failure can never be a
     // bypass:
@@ -215,6 +199,10 @@ export async function callSafetyApi(input: {
     //          acceptable, so there is NO valid verdict on our side → `local_error`
     //          (fail closed). Treating 401/403 as `api_error` would let an
     //          unauthenticated user bypass every content gate.
+    reportFailure({
+      failureKind: response.status === 401 || response.status === 403 ? "auth" : "http",
+      statusCode: response.status,
+    });
     const error = readErrorText(text);
     return {
       pass: false,
@@ -240,6 +228,7 @@ export async function callSafetyApi(input: {
   try {
     data = JSON.parse(text) as typeof data;
   } catch {
+    reportFailure({ failureKind: "response", statusCode: response.status });
     // 2xx but the body is not JSON — we cannot read a verdict. Treat as no
     // gateway confirmation → fail closed on the input path.
     return {
@@ -249,8 +238,9 @@ export async function callSafetyApi(input: {
     };
   }
 
-  const pass = data.pass ?? data.safe;
+  const pass = isSafetyCheckV2Record(data) ? data.pass ?? data.safe : undefined;
   if (typeof pass !== "boolean") {
+    reportFailure({ failureKind: "response", statusCode: response.status });
     // 2xx JSON but no boolean pass/safe field — again no usable verdict → fail
     // closed on the input path.
     return {
@@ -262,6 +252,9 @@ export async function callSafetyApi(input: {
   const activeRegion = region();
   const upstreamCode =
     typeof data.errorCode === "number" ? data.errorCode : undefined;
+  if (!pass && upstreamCode === UPSTREAM_CODE.SERVICE_UNAVAILABLE) {
+    reportFailure({ failureKind: "upstream", statusCode: upstreamCode });
+  }
   return {
     pass,
     reason:

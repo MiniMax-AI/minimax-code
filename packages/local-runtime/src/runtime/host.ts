@@ -1,3 +1,4 @@
+import { logger } from "../common/logger.js";
 import type { LocalEventWriter } from "../events/sink.js";
 import { PiTurnRunner } from "@mavis/agent-core/pi-turn-runner";
 import { RuntimeEventStatus, RuntimeEventType } from "@mavis/protocol";
@@ -437,6 +438,16 @@ export class LocalRuntimeHost {
         // writer, so keep it authoritative and do not append a synthetic
         // COMPLETED/network-notice outcome.
         if (safetyWriter.terminalFailed) break;
+        logger.warn(
+          {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            reviewOutcome: "unavailable",
+            outputSuppressed: true,
+            terminalStatus: "completed",
+          },
+          "[content-safety] output review stopped turn",
+        );
         networkStopped = true;
         retractionVariant = "network";
         // Capture the approved prefix so the orchestration can rewrite pi history

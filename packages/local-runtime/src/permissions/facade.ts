@@ -608,7 +608,11 @@ export class LocalPermissionFacade {
       rules,
       workingDirectory,
       allowedWorkingPaths: [...pluginContext.directories],
-      sandboxAllowPaths: this.resolveSandboxAllowPaths(params.toolName, workingDirectory),
+      sandboxAllowPaths: this.resolveSandboxAllowPaths(
+        params.toolName,
+        workingDirectory,
+        params.agentName,
+      ),
       trustedExactWritePaths: params.trustedExactWritePaths,
       dataDir: this.deps.configGetter().dataDir,
       homeDir: homedir(),
@@ -978,7 +982,11 @@ export class LocalPermissionFacade {
   // -------------------------------------------------------------------------
 
   /** Built-in skill assets may be read without granting access to private runtime state. */
-  private resolveSandboxAllowPaths(toolName: string, workingDirectory: string): string[] {
+  private resolveSandboxAllowPaths(
+    toolName: string,
+    workingDirectory: string,
+    agentName?: string,
+  ): string[] {
     // Read-only tool set parity with `READ_ONLY_TOOLS`
     // (`packages/local-runtime/src/permission/tools/fs-permission.ts`).
     // We don't import it directly to avoid coupling facade construction
@@ -989,8 +997,11 @@ export class LocalPermissionFacade {
 
     const candidates: string[] = [];
     const dataDir = this.deps.configGetter().dataDir;
-    if (dataDir) candidates.push(path.resolve(dataDir, 'skills'));
-    candidates.push(path.resolve(homedir(), '.minimax', 'skills'));
+    for (const root of [dataDir, path.join(homedir(), '.minimax')]) {
+      if (!root) continue;
+      candidates.push(path.resolve(root, 'skills'), path.resolve(root, '.builtin-skills'));
+      if (agentName) candidates.push(path.resolve(root, 'agents', agentName, 'skills'));
+    }
     // De-duplicate (dataDir may already equal <dataDir> on a default install).
     const unique = Array.from(new Set(candidates));
     if (!workingDirectory) return unique;

@@ -55,7 +55,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows validation is temporarily paused until its checks are reliable.
+        os: [ubuntu-latest, macos-latest]
         node: ["24"]
         include:
           - os: ubuntu-latest

@@ -403,6 +403,32 @@ describe('BYOK Think Effort selection', () => {
     });
   });
 
+  it.each(['low', 'high', 'max'] as const)(
+    'carries the Kimi K3 effort %s from catalog metadata to the OpenAI-compatible request patch',
+    (effort) => {
+      // What the models.dev preset chain persists for moonshotai/kimi-k3:
+      // reasoning_options { type: 'effort', values: ['low', 'high', 'max'] }
+      // becomes thinking.effortOptions on the stored model config.
+      const config: LocalModelConfig = {
+        name: 'Kimi K3',
+        reasoning: true,
+        thinking: { effortOptions: ['low', 'high', 'max'] },
+      };
+      const ref = modelRefForModel('custom_provider:moonshotai', 'kimi-k3', config, {
+        thinking: { effort },
+      });
+
+      const selectedEffort = readSelectedThinkingEffort(ref.capabilities);
+      expect(selectedEffort).toBe(effort);
+      expect(
+        resolveByokThinkingProtocol('openai-completions', selectedEffort, ref.model_id),
+      ).toMatchObject({
+        effort,
+        requestPatch: { reasoning_effort: effort },
+      });
+    },
+  );
+
   it.each([`${DEFAULT_THINKING_MODEL_IDS[0]}[1m]`, ...DEFAULT_THINKING_MODEL_IDS.slice(1)])(
     'omits thinking for default-thinking model %s while preserving effort',
     (modelId) => {
@@ -600,6 +626,19 @@ describe('resolveThinkingLevel', () => {
 });
 
 describe('model capability helpers', () => {
+  it('requires explicit image input metadata instead of generic attachment support', () => {
+    expect(capabilitiesFromModelConfig({ attachment: true }).support_image).toBe(false);
+    expect(
+      capabilitiesFromModelConfig({ modalities: { input: ['text'], output: ['image'] } }).support_image,
+    ).toBe(false);
+    expect(
+      capabilitiesFromModelConfig({ modalities: { input: ['text', 'image'] } }).support_image,
+    ).toBe(true);
+    expect(
+      capabilitiesFromModelConfig({ capabilities: { support_image: false } }).support_image,
+    ).toBe(false);
+  });
+
   it('uses explicit capability flags and forced thinking modes', () => {
     expect(
       capabilitiesFromModelConfig({

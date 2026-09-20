@@ -1,7 +1,7 @@
 name: Bug report
 description: Report a reproducible problem with the Desktop app, CLI, or source build.
 title: "[Bug]: "
-labels: ["bug"]
+labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:
@@ -10,6 +10,7 @@ body:
     id: product
     attributes:
       label: Product or interface
+      description: Desktop app and interactive TUI reports automatically receive the desktop or tui label.
       options:
         - Desktop app
         - CLI - interactive TUI

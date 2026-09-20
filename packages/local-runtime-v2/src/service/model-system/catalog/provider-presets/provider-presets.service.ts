@@ -169,6 +169,7 @@ function parseModel(modelId: string, value: unknown): UserModelInputView | undef
     modelId,
     displayName: stringValue(value.name) ?? modelId,
     ...parseModelCapabilities(value),
+    ...parseModelEffortOptions(value),
     ...parseModelModalities(value),
     ...parseModelLimit(value),
   };
@@ -181,6 +182,33 @@ function parseModelCapabilities(value: Record<string, unknown>): Partial<UserMod
     toolCall: true,
     temperature: value.temperature === true,
   };
+}
+
+/**
+ * Reads the catalog's declared reasoning-effort levels. models.dev describes
+ * reasoning controls as `reasoning_options` entries; only an explicit
+ * `{ type: 'effort', values: [...] }` entry means the model accepts effort
+ * selection. A bare `reasoning: true` or a `toggle` entry only means the model
+ * can think, so neither one produces `effortOptions` here. Declared strings
+ * are preserved as-is (trimmed, de-duplicated, in catalog order) so levels the
+ * CLI does not know about still reach validation and the wire unchanged.
+ */
+function parseModelEffortOptions(value: Record<string, unknown>): Partial<UserModelInputView> {
+  if (!Array.isArray(value.reasoning_options)) return {};
+  for (const option of value.reasoning_options) {
+    if (!isRecord(option) || option.type !== 'effort' || !Array.isArray(option.values)) continue;
+    const effortOptions: string[] = [];
+    const seen = new Set<string>();
+    for (const candidate of option.values) {
+      if (typeof candidate !== 'string') continue;
+      const effort = candidate.trim();
+      if (!effort || seen.has(effort)) continue;
+      seen.add(effort);
+      effortOptions.push(effort);
+    }
+    if (effortOptions.length > 0) return { effortOptions };
+  }
+  return {};
 }
 
 function parseModelModalities(value: Record<string, unknown>): Partial<UserModelInputView> {

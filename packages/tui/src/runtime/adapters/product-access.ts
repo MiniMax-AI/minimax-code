@@ -377,11 +377,12 @@ export class TuiProductAccess {
   async listSkills(
     agentName = this.defaultAgentName,
     keyword?: string,
+    workspaceDir = this.workspaceDir,
   ): Promise<TuiSkillList> {
     const service = this.context.service("skill.list");
     const result = await service.listRuntimeSkills({
       agentName,
-      ...(this.workspaceDir ? { workspaceDir: this.workspaceDir } : {}),
+      ...(workspaceDir ? { workspaceDir } : {}),
       includePluginSkills: true,
     });
     const normalizedKeyword = keyword?.trim().toLocaleLowerCase();

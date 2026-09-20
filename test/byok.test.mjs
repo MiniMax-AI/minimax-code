@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -298,6 +298,7 @@ test(
       "provider", "add", "--name", "Limited", "--base-url", baseUrl,
       "--api-format", "openai-completions", "--model", "fixture-model",
       "--model", "second-model", "--context-limit", "32768", "--output-limit", "4096", "--use",
+      "--support-image",
     ];
     const beforeFailure = readFileSync(configPath, "utf8");
     rejectConnection = true;
@@ -312,6 +313,7 @@ test(
     assert.equal(config.defaultModel, "custom_provider:limited/fixture-model");
     for (const model of ["fixture-model", "second-model"]) {
       assert.deepEqual(config.custom_provider.limited.models[model].limit, { context: 32768, output: 4096 });
+      assert.deepEqual(config.custom_provider.limited.models[model].capabilities, { support_image: true });
     }
     const configured = JSON.parse(await run(["provider", "list", "--json"])).providers.find(
       (provider) => provider.name === "Limited",
@@ -330,11 +332,80 @@ test(
       await run([
         "provider", "add", "--name", name, "--base-url", baseUrl,
         "--api-format", "openai-completions", "--model", "fixture-model", flag, "32768",
+        "--support-image",
       ]);
       assert.deepEqual(savedConfig().custom_provider[name].models["fixture-model"].limit, limit);
+      assert.deepEqual(savedConfig().custom_provider[name].models["fixture-model"].capabilities, { support_image: true });
       assert.equal(savedConfig().defaultModel, config.defaultModel);
     }
     assert.equal(requests.length, beforeSaveOnly, "Limits alone must not test or select a model");
+    // Exercise the metadata persisted by provider preset import through real
+    // config reload, headless validation and the OpenAI-compatible request body.
+    const effortConfig = savedConfig();
+    effortConfig.custom_provider.fixture.models["kimi-k3"] = {
+      reasoning: true,
+      thinking: { effortOptions: ["low", "high", "max"] },
+    };
+    effortConfig.custom_provider.fixture.models["vision-modalities"] = {
+      modalities: { input: ["text", "image"], output: ["text"] },
+    };
+    effortConfig.custom_provider.fixture.models["attachment-only"] = { attachment: true };
+    writeFileSync(configPath, stringifyYaml(effortConfig));
+    // The packaged command must carry the declaration through saving, a fresh
+    // process/config reload, attachment preparation and SDK serialization.
+    const imageBase64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGP4n8LwnxLMMGrAqAGjBgwXAwCOqWIfmQV0zAAAAABJRU5ErkJggg==";
+    const imagePath = path.join(workspaceDir, "fixture.png");
+    writeFileSync(imagePath, Buffer.from(imageBase64, "base64"));
+    for (const [model, supportsImage] of [
+      ["custom_provider:limited/fixture-model", true],
+      ["custom_provider:context-only/fixture-model", true],
+      ["custom_provider:fixture/vision-modalities", true],
+      ["custom_provider:fixture/fixture-model", false],
+      ["custom_provider:fixture/attachment-only", false],
+    ]) {
+      const beforeImage = requests.length;
+      await run(["exec", "IMAGE_INPUT_TEST", "--model", model, "--file", imagePath,
+        "--timeout", "20s", "--max-steps", "1"]);
+      const turns = requests.slice(beforeImage).filter((r) => r.body.stream === true);
+      assert.ok(turns.length > 0, `Expected a runtime request for ${model}`);
+      for (const { body } of turns) {
+        const images = body.messages.flatMap((message) =>
+          Array.isArray(message.content)
+            ? message.content.filter((part) => part.type === "image_url")
+            : []);
+        if (supportsImage) {
+          assert.equal(images.length, 1, `Expected an inline image for ${model}`);
+          // PNG inputs are transcoded to JPEG by the real attachment pipeline.
+          const url = images[0].image_url.url;
+          assert.match(url, /^data:image\/jpeg;base64,/);
+          const bytes = Buffer.from(url.split(",")[1], "base64");
+          assert.deepEqual([...bytes.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+          assert.deepEqual([...bytes.subarray(-2)], [0xff, 0xd9]);
+          assert.doesNotMatch(JSON.stringify(body.messages), /current model cannot read this image inline/);
+        } else {
+          assert.deepEqual(images, [], `${model} must remain text-only`);
+          assert.match(JSON.stringify(body.messages), /current model cannot read this image inline/);
+        }
+      }
+    }
+    const effortModel = `${selected.providerId}/kimi-k3`;
+    for (const effort of ["low", "high", "max"]) {
+      const beforeEffort = requests.length;
+      await run(["exec", "EFFORT_TEST", "--model", effortModel, "--effort", effort,
+        "--timeout", "20s", "--max-steps", "1"]);
+      // Background title generation is a separate non-streaming request and
+      // does not use the turn's effort selection.
+      const modelRequests = requests.slice(beforeEffort).filter(
+        (r) => r.body.model === "kimi-k3" && r.body.stream === true,
+      );
+      assert.ok(modelRequests.length > 0);
+      for (const request of modelRequests) assert.equal(request.body.reasoning_effort, effort);
+    }
+    const beforeInvalidEffort = requests.length;
+    await assert.rejects(run(["exec", "EFFORT_TEST", "--model", effortModel,
+      "--effort", "medium", "--timeout", "20s", "--max-steps", "1"]),
+    /Available levels: low, high, max/);
+    assert.equal(requests.length, beforeInvalidEffort, "Invalid effort must fail before transport");
     const modelArgs = ["--model", `${selected.providerId}/fixture-model`];
     // The first run must work through the saved default, without --model or managed login.
     const first = await run([

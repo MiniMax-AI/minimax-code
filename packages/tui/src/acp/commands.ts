@@ -1,7 +1,8 @@
 import * as acp from '@agentclientprotocol/sdk';
 
 import { TUI_COMMAND_DESCRIPTORS } from '../application/command-descriptors.js';
-import type { TuiModel } from '../runtime/port.js';
+import { sanitizeTerminalText } from '../tui/rendering/terminal-text.js';
+import type { TuiModel, TuiSkillList } from '../runtime/port.js';
 import type { TuiAcpRuntime } from './runtime.js';
 
 export const TUI_ACP_AVAILABLE_COMMANDS = [
@@ -41,6 +42,34 @@ export const TUI_ACP_AVAILABLE_COMMANDS = [
   },
 ] satisfies readonly acp.AvailableCommand[];
 
+/** Keep native commands authoritative and expose only invocable Skill names. */
+export function availableSkillCommands(result: TuiSkillList): acp.AvailableCommand[] {
+  const seen = new Set<string>(TUI_ACP_AVAILABLE_COMMANDS.map((command) => command.name));
+  return (result.skills ?? [])
+    .flatMap((skill): acp.AvailableCommand[] => {
+      const name = skill.name.trim().toLowerCase();
+      if (
+        skill.enabled === false ||
+        seen.has(name) ||
+        name.length > 128 ||
+        !/^[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)?$/u.test(name)
+      )
+        return [];
+      seen.add(name);
+      const description = sanitizeTerminalText(
+        skill.displayDescription ?? skill.description ?? '',
+      ).trim();
+      return [
+        {
+          name,
+          description: description ? `[Skill] ${description}` : '[Skill]',
+          input: { hint: '[instructions]' },
+        },
+      ];
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
 export type TuiAcpCommandResult =
   | { readonly handled: false }
   | {
@@ -63,6 +92,7 @@ export async function executeTuiAcpCommand(options: {
   >;
   readonly sessionId: string;
   readonly agentName?: string;
+  readonly workspaceDir?: string;
   readonly prompt: readonly acp.ContentBlock[];
 }): Promise<TuiAcpCommandResult> {
   const command = parseCommand(options.prompt);
@@ -112,7 +142,11 @@ export async function executeTuiAcpCommand(options: {
     return {
       handled: true,
       output: formatSkills(
-        await options.runtime.listSkills(options.agentName, command.input || undefined),
+        await options.runtime.listSkills(
+          options.agentName,
+          command.input || undefined,
+          options.workspaceDir,
+        ),
       ),
     };
   }

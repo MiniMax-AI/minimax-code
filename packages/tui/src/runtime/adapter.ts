@@ -532,8 +532,12 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   getActiveRun(sessionId: string): Promise<TuiActiveRunSnapshot> {
     return this.productAccess.getActiveRun(sessionId);
   }
-  listSkills(agentName?: string, keyword?: string): Promise<TuiSkillList> {
-    return this.productAccess.listSkills(agentName, keyword);
+  listSkills(
+    agentName?: string,
+    keyword?: string,
+    workspaceDir?: string,
+  ): Promise<TuiSkillList> {
+    return this.productAccess.listSkills(agentName, keyword, workspaceDir);
   }
   inspectProjectMcp(
     sessionId: string,

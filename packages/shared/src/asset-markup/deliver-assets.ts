@@ -413,7 +413,8 @@ function parseMediaItem(
     }
   }
 
-  const src = attrs['src']?.trim();
+  // Some models emit a local file's path as an attribute instead of src.
+  const src = attrs['src']?.trim() || attrs['path']?.trim();
   if (!src) {
     return null;
   }

@@ -21,7 +21,8 @@ import {
 } from '../host/tui-keybindings.js';
 import { createTuiApp, type CreateTuiAppOptions, type TuiApp } from './app.js';
 import type { CreatedTuiRuntime, CreateTuiRuntimeDependencies } from '../runtime/lifecycle.js';
-import type { TuiWorkspaceRoot } from '../runtime/port.js';
+import { parseHeadlessModelOverride } from '../headless/model-selection.js';
+import type { TuiRuntime, TuiWorkspaceRoot } from '../runtime/port.js';
 import { createDeferredTuiRuntime } from '../runtime/deferred.js';
 import {
   captureTuiIncidentBestEffort,
@@ -66,6 +67,7 @@ const MINIMAX_CODE_EXIT_SLOGAN = 'Intelligence with everyone, bye~';
 export interface LaunchTuiOptions {
   version: string;
   initialPrompt?: string;
+  model?: string;
   sessionId?: string;
   showSessionPicker?: boolean;
   continueLatestSession?: boolean;
@@ -83,7 +85,8 @@ export interface LaunchTuiOptions {
 type LaunchApp = Pick<TuiApp, 'ready' | 'firstFrame' | 'start' | 'stop' | 'stopped' | 'submit'> & {
   readonly editor?: Pick<TuiApp['editor'], 'disableSubmit'>;
   readonly setStartupStatus?: TuiApp['setStartupStatus'];
-  readonly controller?: Pick<TuiApp['controller'], 'snapshot'>;
+  readonly controller?: Pick<TuiApp['controller'], 'snapshot'> &
+    Partial<Pick<TuiApp['controller'], 'ensureSession'>>;
   readonly openSession?: TuiApp['openSession'];
   readonly continueLatestSession?: TuiApp['continueLatestSession'];
   readonly suspend?: TuiApp['suspend'];
@@ -150,6 +153,12 @@ export async function launchTui(
   options: LaunchTuiOptions,
   dependencies: LaunchTuiDependencies = {},
 ): Promise<void> {
+  if (options.model !== undefined) parseHeadlessModelOverride(options.model.trim());
+  if (options.model !== undefined && options.showSessionPicker) {
+    throw new Error(
+      '--model requires a Session id with --session; use --session <id> or --continue.',
+    );
+  }
   if (!options.terminal && (!process.stdin.isTTY || !process.stdout.isTTY)) {
     throw new Error('Minimax Code interactive mode requires a TTY.');
   }
@@ -521,7 +530,7 @@ export async function launchTui(
         durationMs: performance.now() - runtimeStartedAt,
       });
       await app.ready;
-      initialStateReady = await prepareInitialTuiState(app, observability, options);
+      initialStateReady = await prepareInitialTuiState(app, observability, options, runtime.adapter);
       startupStatus.stop();
       startupStatus = undefined;
       if (app.editor) app.editor.disableSubmit = false;
@@ -884,6 +893,7 @@ async function prepareInitialTuiState(
   app: LaunchApp,
   observability: TuiObservability,
   options: LaunchTuiOptions,
+  runtime: TuiRuntime,
 ): Promise<boolean> {
   const sessionId = options.sessionId?.trim();
   if (sessionId) {
@@ -911,6 +921,20 @@ async function prepareInitialTuiState(
       });
       return false;
     }
+  }
+  if (options.model !== undefined) {
+    const model = parseHeadlessModelOverride(options.model.trim());
+    if (!app.controller?.ensureSession || !app.openSession) {
+      throw new Error('TUI Session model selection is unavailable.');
+    }
+    const session = await app.controller.ensureSession();
+    // The normal model picker also saves the global default. Startup overrides
+    // must use the Session-only operation, before login checks or any submission.
+    if (!(await runtime.selectSessionModel(model, session.sessionId))) {
+      throw new Error(`Could not select --model ${options.model}. Check the provider and model id.`);
+    }
+    // Rehydrate account status, model/effort and queued-input state from Runtime.
+    await app.openSession(session.sessionId);
   }
   if (options.showSessionPicker) await app.submit('/sessions');
   return true;

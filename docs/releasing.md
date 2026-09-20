@@ -15,9 +15,11 @@ Before npm or installer distribution, separately validate the published package 
 
 ## Automated source candidates
 
-The `Source candidate` workflow exports the selected commit without Git history, verifies its receipt, and scans both repository history and the extracted source. Linux, macOS, and Windows runners authenticate the same archive, install from public npm into fresh stores, and run the archive verification profile.
+The `Source candidate` workflow exports the selected commit without Git history, verifies its receipt, and scans both repository history and the extracted source. Linux and macOS runners authenticate the same archive, install from public npm into fresh stores, and run the archive verification profile.
 
-After all platform jobs pass, the workflow creates a `source-candidate-<full-SHA>` artifact containing:
+Windows validation is temporarily paused across source verification, Node compatibility, and source candidates. Candidate reports cover only Linux and macOS; a successful candidate does not establish Windows acceptance. Restore the Windows workflow matrices and the required report set in `scripts/source-candidate.mjs` together when Windows checks are reliable again.
+
+After both platform jobs pass, the workflow creates a `source-candidate-<full-SHA>` artifact containing:
 
 - `minimax-code-source.tar.gz`
 - The archive receipt and SHA-256 file

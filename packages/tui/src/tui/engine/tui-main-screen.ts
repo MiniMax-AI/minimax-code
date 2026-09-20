@@ -304,6 +304,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Helper to redraw either the complete logical document or only the visible viewport.
 		// Viewport-only redraws preserve the terminal's native scrollback.
 		const fullRender = (clear: boolean, viewportOnly = false): void => {
+			// Native scrollback cannot move backwards with a shrinking document. Keep the
+			// previous viewport origin so rows already scrolled out are not painted twice,
+			// and growth still writes every row before it scrolls out. Resize previews are
+			// temporary: they show the new tail until the pending full history replay.
+			if (viewportOnly && !this.historyReplayPending && newLines.length <= prevViewportTop) {
+				// Nothing remains addressable on screen; rebuild with one consistent origin.
+				viewportOnly = false;
+			}
+			const start = viewportOnly
+				? this.historyReplayPending
+					? Math.max(0, newLines.length - height)
+					: prevViewportTop
+				: 0;
 			this.fullRedrawCount += 1;
 			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 			output.append("\x1b[?2026h"); // Begin synchronized output
@@ -311,7 +324,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
 				output.append(viewportOnly ? "\x1b[2J\x1b[H" : "\x1b[2J\x1b[H\x1b[3J");
 			}
-			const start = viewportOnly ? Math.max(0, newLines.length - height) : 0;
 			for (let i = start; i < newLines.length; i++) {
 				if (i > start) output.append("\r\n");
 				const line = newLines[i]!;
@@ -339,8 +351,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			} else {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
 			}
-			const bufferLength = Math.max(height, newLines.length);
-			this.previousViewportTop = Math.max(0, bufferLength - height);
+			this.previousViewportTop = Math.max(start, newLines.length - height);
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
