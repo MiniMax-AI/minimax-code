@@ -69,6 +69,16 @@ does not replace source validation. The release command commits matching root/TU
 The release workflow rejects version mismatches and runs the full profile before
 package installation checks.
 
+## Performance coverage
+
+Use [CONTRIBUTING.md](../../../CONTRIBUTING.md#performance-checks) to classify the
+change. Add `perf:full` for performance optimizations, changes to history/token
+processing, storage, streaming or tool execution, and large runtime refactors.
+The label automatically selects the full suite and keeps it selected for later
+commits. Before merge, link a passing `performance` run with `Suite: full` for the
+latest head and intended base. Read [Performance CI](../../../docs/performance-ci.md)
+for evidence, limits and manual dispatch.
+
 ## Manual evidence and reporting
 
 For CLI behavior, exercise the built `dist/cli.js` and inspect stdout, stderr and

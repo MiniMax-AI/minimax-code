@@ -1,14 +1,17 @@
 # Performance CI
 
-Every PR automatically runs `performance (basic)`: only the original 100-round
-scenario. Performance optimization PRs can run the full suite manually. Both
+Every PR runs the `performance` check: the original 100-round scenario by default.
+Adding `perf:full` automatically runs the full suite. While the label remains,
+new commits and reopened PRs run the full suite too. Removing it starts a basic
+run and cancels any previous automatic run for that PR. Unrelated label changes
+skip benchmarking under a separate `performance (label ignored)` check. Both
 revisions build separately, then run serially on one `macos-15` runner with Node
 22.23.2 and Bun 1.4.2. Build and installation time are excluded.
 
 | Mode | Trigger | Scenarios | Job timeout |
 | --- | --- | --- | --- |
-| `basic` | Every PR; optional manual run | `upstream-100` | 15 minutes |
-| `full` | Manual only | Startup, `upstream-100`, `history-300` | 45 minutes |
+| `basic` | PR without `perf:full`; optional manual run | `upstream-100` | 15 minutes |
+| `full` | Add `perf:full`, then new commits/reopens while labeled; optional manual run | Startup, `upstream-100`, `history-300` | 45 minutes |
 
 | Scenario | Input | Purpose |
 | --- | --- | --- |
@@ -48,7 +51,10 @@ needs another clean measurement; it is neither a confirmed regression nor a pass
 Tune budgets from repeated same-revision measurements. Review changes to
 scenarios, comparison logic or limits as changes to the performance contract.
 The workflow does not change branch protection; maintainers can add
-`performance (basic)` as a required check after runner calibration.
+`performance` as a required check after runner calibration; its name stays the
+same for basic and full runs. The summary and artifact identify the selected
+suite. Follow the [label and review requirements](../CONTRIBUTING.md#performance-checks)
+when deciding which PRs need full coverage.
 
 The Job Summary contains machine/method and comparison tables. The 14-day
 artifact includes JSON results, configuration, commit and fixture hashes,

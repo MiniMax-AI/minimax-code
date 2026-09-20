@@ -7,6 +7,7 @@ Describe the user-visible problem and resulting behavior. Link a public issue wh
 ## Validation
 
 - Checks run and results (include the revision/profile where relevant):
+- Performance: basic / `perf:full` (see [requirements](https://github.com/MiniMax-AI/minimax-code/blob/main/CONTRIBUTING.md#performance-checks)); for full coverage, link a passing run for the latest PR head and intended base:
 - NOT RUN, platform limitations and live-service boundaries:
 
 ## Publication and contribution checks

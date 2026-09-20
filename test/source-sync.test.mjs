@@ -31,8 +31,21 @@ test('performance defaults to the 100-round suite; long history requires explici
   assert.equal(workflow.on.workflow_dispatch.inputs.suite.default, 'full');
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.suite.options, ['full', 'basic']);
   const compare = workflow.jobs.performance.steps.find(s => s.name === 'Compare on this runner');
-  assert.equal(compare.env.PERF_SUITE, "${{ inputs.suite || 'basic' }}");
+  assert.equal(compare.env.PERF_SUITE, "${{ matrix.suite }}");
   assert.match(compare.run, /--suite "\$PERF_SUITE"/);
+});
+
+test('performance labels select full coverage without interrupting checks for unrelated labels', () => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/performance.yml', import.meta.url), 'utf8'));
+  const job = workflow.jobs.performance;
+  assert.deepEqual(workflow.on.pull_request.types, ['opened', 'synchronize', 'reopened', 'labeled', 'unlabeled']);
+  assert.equal(job.strategy.matrix.suite, `\${{ fromJSON((inputs.suite == 'full' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'perf:full'))) && '["full"]' || '["basic"]') }}`);
+  assert.equal(job.if, `\${{ !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) || github.event.label.name == 'perf:full' }}`);
+  assert.equal(job.name, `\${{ contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'perf:full' && 'performance (label ignored)' || 'performance' }}`);
+  assert.equal(workflow.concurrency, undefined);
+  assert.equal(job.concurrency.group, `performance-\${{ github.event_name }}-\${{ github.ref }}-\${{ github.event_name == 'workflow_dispatch' && matrix.suite || 'auto' }}`);
+  assert.equal(job.concurrency['cancel-in-progress'], true);
+  assert.equal(job['timeout-minutes'], `\${{ matrix.suite == 'full' && 45 || 15 }}`);
 });
 
 test('performance request audit rejects truncated wire history and empty tool results', () => {

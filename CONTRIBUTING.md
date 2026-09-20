@@ -55,7 +55,32 @@ Test files are declared in `test/vitest-suites.json`, grouped by the gate that r
 
 Review added or removed files before running `node scripts/source-inventory.mjs --write`. Updating the inventory must not bypass checks for private protocols, internal addresses, credentials, or third-party licensing. Before a source release, also scan the complete Git history with Gitleaks; see the [release process](docs/releasing.md).
 
-PRs also run the [performance comparison](docs/performance-ci.md): the pinned 100-round upstream benchmark automatically, with startup and long-history fixtures available through the manual full suite. Both compare base/head on the same runner. Raw evidence and machine configuration accompany the check.
+## Performance checks
+
+Every PR runs the pinned 100-round upstream benchmark. Add the `perf:full` label
+for the changes below; it automatically selects startup, 100-round and 300-round
+long-history tests instead. Keep the label until merge so new commits run the
+full suite too.
+
+| Change | Required performance coverage |
+| --- | --- |
+| Performance optimization, including CPU, memory, startup or throughput fixes | `perf:full` |
+| History construction/serialization, token estimation/caching, session storage, streaming or the tool execution loop | `perf:full` |
+| Large runtime refactors spanning multiple components, or runtime dependency changes affecting these paths | `perf:full` |
+| Other changes, including documentation-only edits and mechanical changes outside runtime paths | Automatic 100-round basic check |
+
+The author adds the label; reviewers verify the classification. File count alone
+does not make a change a large runtime refactor. Before merging a labeled PR,
+require a successful `performance` check with `Suite: full` for the latest PR
+head and intended base, and link the run in the PR's Validation section. Failed,
+cancelled or inconclusive runs do not satisfy this requirement. If the base
+changes after measurement, rerun against the updated base.
+
+Removing `perf:full` restores the basic suite; do not remove it to bypass a
+failure. Unrelated label changes do not run benchmarks. This is a review rule;
+repository administrators must configure required checks separately. See
+[Performance CI](docs/performance-ci.md) for manual dispatch, runner configuration
+and raw evidence.
 
 ## Capability boundaries
 
