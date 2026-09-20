@@ -1,0 +1,72 @@
+name: Performance
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Baseline commit or branch
+        required: true
+        default: main
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  performance:
+    name: performance
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: candidate
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: baseline
+          ref: ${{ github.event.pull_request.base.sha || inputs.base }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: KonghaYao/harness-perf-benchmark
+          ref: 8ad1e09f7653d7e97b83b4f5b4d347ca2fa129c7
+          path: benchmark
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 9.12.0
+          package_json_file: candidate/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Build baseline
+        working-directory: baseline
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Build candidate
+        working-directory: candidate
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Install pinned benchmark
+        working-directory: benchmark
+        run: bun install --frozen-lockfile
+      - name: Compare on this runner
+        run: node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --out "$RUNNER_TEMP/performance"
+      - name: Upload performance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/performance/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn

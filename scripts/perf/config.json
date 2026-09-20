@@ -1,0 +1,47 @@
+{
+  "benchmarkRepository": "https://github.com/KonghaYao/harness-perf-benchmark",
+  "benchmarkRevision": "8ad1e09f7653d7e97b83b4f5b4d347ca2fa129c7",
+  "warmups": 1,
+  "repetitions": 3,
+  "intervalMs": 100,
+  "maxSpread": 0.3,
+  "thresholds": {
+    "durationMs": {
+      "relative": 0.25,
+      "absolute": 1000
+    },
+    "cpuSeconds": {
+      "relative": 0.2,
+      "absolute": 0.5
+    },
+    "rssBytes": {
+      "relative": 0.2,
+      "absolute": 33554432
+    }
+  },
+  "scenarios": [
+    {
+      "id": "startup",
+      "turns": 1,
+      "bodyKb": 0,
+      "chunkSize": 64,
+      "timeoutMs": 60000
+    },
+    {
+      "id": "upstream-100",
+      "turns": 100,
+      "bodyKb": 4,
+      "chunkSize": 64,
+      "timeoutMs": 180000
+    },
+    {
+      "id": "history-300",
+      "turns": 300,
+      "bodyKb": 8,
+      "chunkSize": 64,
+      "timeoutMs": 360000,
+      "contextWindow": 2000000,
+      "minimumTextUnits": 1048577
+    }
+  ]
+}

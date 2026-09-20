@@ -18,6 +18,89 @@ import { cliBuildVersion, cliExternalModules, cliReleaseTargets, versionFromTag 
 import { releaseManifest } from '../scripts/package-cli-release.mjs';
 import { validateReleaseReports } from '../scripts/publish-cli-release.mjs';
 import { compareVersions, releaseCli } from '../scripts/release-cli.mjs';
+import { compareRuns, validateRun, validateRequest, validateToolOutput, median } from '../scripts/perf/report.mjs';
+
+test('performance request audit rejects truncated wire history and empty tool results', () => {
+  const responses = [
+    { message: { content: 'full history', tool_calls: [{ id: 'call_long_run_1', function: { name: 'bash', arguments: { command: 'ls' } } }] } },
+    { message: { content: 'done' } }, { message: { content: ' ' } },
+  ];
+  const messages = [{ role: 'user', content: 'task' },
+    { role: 'assistant', content: 'full history', tool_calls: [{ id: 'call_long_run_1', function: { name: 'bash', arguments: '{"command":"ls"}' } }] },
+    { role: 'tool', tool_call_id: 'call_long_run_1', content: 'README.txt\n' }];
+  assert.doesNotThrow(() => validateRequest({ messages }, responses, 2, process.cwd()));
+  assert.throws(() => validateRequest({ messages: messages.slice(0, 1) }, responses, 2, process.cwd()), /lost assistant history/);
+  const changed = structuredClone(messages);
+  changed[1].content = 'shortened';
+  assert.throws(() => validateRequest({ messages: changed }, responses, 2, process.cwd()), /body changed/);
+  changed[1].content = 'full history'; changed[2].content = '';
+  assert.throws(() => validateRequest({ messages: changed }, responses, 2, process.cwd()), /lost fixture/);
+  assert.throws(() => validateToolOutput([], 'ls', process.cwd()), /lost fixture/);
+  assert.throws(() => validateToolOutput('wrong', 'echo expected', process.cwd()), /Echo/);
+  assert.throws(() => validateToolOutput('/wrong', 'pwd', process.cwd()), /directory/);
+  assert.doesNotThrow(() => validateToolOutput(realpathSync(process.cwd()) + '\n', 'pwd', process.cwd()));
+});
+
+test('performance comparison rejects incomplete, invalid and unstable samples', () => {
+  const config = { repetitions: 3, maxSpread: 0.3, thresholds: { cpuSeconds: { relative: 0.2, absolute: 0.5 } } };
+  const runs = values => values.map(cpuSeconds => ({ cpuSeconds }));
+  assert.equal(median([3, 1, 2]), 2);
+  assert.equal(compareRuns(runs([10, 10, 10]), runs([10, 10, 10]), config)[0].status, 'PASS');
+  assert.equal(compareRuns(runs([10, 10, 10]), runs([13, 13, 13]), config)[0].status, 'REGRESSION');
+  assert.equal(compareRuns(runs([1, 1, 1]), runs([1.4, 1.4, 1.4]), config)[0].status, 'PASS');
+  assert.equal(compareRuns(runs([10, 10, 10]), runs([10, 10, 20]), config)[0].status, 'INCONCLUSIVE');
+  assert.throws(() => compareRuns(runs([10, 10]), runs([10, 10, 10]), config));
+  assert.throws(() => compareRuns(runs([10, NaN, 10]), runs([10, 10, 10]), config));
+  assert.throws(() => compareRuns(runs([0, 0, 0]), runs([10, 10, 10]), config));
+});
+
+test('performance measurements require complete successful tool execution', () => {
+  const meta = { schemaVersion: 1, status: 'ok', exit: { code: 0 }, mock: { requests: 2 },
+    sampling: { backend: 'rusage', withTree: true }, summary: { count: 10 },
+    duration: { endToEndMs: 1000 }, cost: { cpuSeconds: 0.5 }, peaks: { treeRssBytes: 1024 } };
+  const messages = [
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'call_long_run_1', name: 'bash' }] },
+    { role: 'toolResult', toolCallId: 'call_long_run_1', isError: false },
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+  ];
+  assert.equal(validateRun(meta, messages, { turns: 1 }, 'done').rssBytes, 1024);
+  const expected = [{ message: { content: '', tool_calls: [{ function: { arguments: { command: 'pwd' } } }] } }];
+  const withArguments = structuredClone(messages);
+  withArguments[0].content[0].arguments = { command: 'pwd' };
+  assert.doesNotThrow(() => validateRun(meta, withArguments, { turns: 1 }, 'done', expected));
+  withArguments[0].content[0].arguments.command = 'true';
+  assert.throws(() => validateRun(meta, withArguments, { turns: 1 }, 'done', expected), /command changed/);
+  withArguments[0].content[0].arguments.command = 'pwd';
+  expected[0].message.content = 'body that must be retained';
+  assert.throws(() => validateRun(meta, withArguments, { turns: 1 }, 'done', expected), /body changed/);
+  for (const mutate of [
+    (m, _) => { m.status = 'timeout'; }, (m, _) => { m.mock.requests = 1; },
+    (m, _) => { m.sampling.backend = 'ps'; }, (m, _) => { m.summary.count = 0; },
+    (m, _) => { m.cost.cpuSeconds = null; }, (_, rows) => { rows[1].isError = true; },
+    (_, rows) => { rows[1].toolCallId = 'wrong'; }, (_, rows) => { rows.pop(); },
+    (_, rows) => { rows.push(rows[1]); },
+  ]) {
+    const copiedMeta = structuredClone(meta), copiedMessages = structuredClone(messages);
+    mutate(copiedMeta, copiedMessages);
+    assert.throws(() => validateRun(copiedMeta, copiedMessages, { turns: 1 }, 'done'));
+  }
+});
+
+test('performance workflow uses pinned mock input and an unprivileged PR job', () => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/performance.yml', import.meta.url), 'utf8'));
+  const config = JSON.parse(readFileSync(new URL('../scripts/perf/config.json', import.meta.url), 'utf8'));
+  assert.ok(Object.hasOwn(workflow.on, 'pull_request'));
+  assert.ok(!Object.hasOwn(workflow.on, 'pull_request_target'));
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  const steps = workflow.jobs.performance.steps;
+  const benchmark = steps.find(s => s.with?.repository === 'KonghaYao/harness-perf-benchmark');
+  assert.equal(benchmark.with.ref, config.benchmarkRevision);
+  assert.match(config.benchmarkRevision, /^[a-f0-9]{40}$/);
+  for (const step of steps.filter(s => s.uses)) assert.match(step.uses, /@[a-f0-9]{40}$/);
+  const standard = config.scenarios.find(s => s.id === 'upstream-100');
+  assert.deepEqual([standard.turns, standard.bodyKb, standard.chunkSize], [100, 4, 64]);
+  assert.ok(config.scenarios.some(s => s.minimumTextUnits > 1048576));
+});
 
 test('release tags are canonical and must match both source versions without overriding them', t => {
   for (const tag of ['v0.4.13', 'v1.0.0-rc.1', 'v0.0.0', 'v2.3.4-beta-test.0'])

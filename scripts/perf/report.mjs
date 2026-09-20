@@ -1,0 +1,124 @@
+import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
+
+const textContent = content => typeof content === 'string' ? content : Array.isArray(content)
+  ? content.filter(b => b.type === 'text').map(b => b.text).join('') : '';
+
+export function validateToolOutput(content, command, workspace) {
+  const text = textContent(content).trim();
+  if (command.startsWith('echo ')) assert.equal(text, command.slice(5), 'Echo result changed');
+  else if (command === 'pwd') assert.equal(text, realpathSync(workspace), 'Working directory result changed');
+  else if (command === 'ls' || command === 'ls -la') assert.match(text, /(?:^|\s)README\.txt(?:\s|$)/, 'Directory listing lost fixture');
+  else throw new Error('Unknown benchmark command');
+}
+
+export function validateRequest(body, responses, requestNumber, workspace) {
+  const rounds = requestNumber - 1;
+  assert.ok(rounds >= 0 && rounds < responses.length - 1, 'Unexpected request');
+  assert.ok(Array.isArray(body.messages), 'Request messages missing');
+  const assistant = body.messages.filter(m => m.role === 'assistant');
+  const tools = body.messages.filter(m => m.role === 'tool');
+  assert.equal(assistant.length, rounds, 'Request lost assistant history');
+  assert.equal(tools.length, rounds, 'Request lost tool history');
+  for (let i = 0; i < rounds; i++) {
+    const expected = responses[i].message;
+    assert.equal(textContent(assistant[i].content), expected.content, 'Request history body changed');
+    assert.equal(assistant[i].tool_calls?.length, 1, 'Request tool calls changed');
+    const call = assistant[i].tool_calls[0];
+    assert.equal(call.id, expected.tool_calls[0].id, 'Request call identity changed');
+    assert.equal(call.function.name, 'bash', 'Request tool changed');
+    const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments;
+    assert.deepEqual(args, expected.tool_calls[0].function.arguments, 'Request command changed');
+    assert.equal(tools[i].tool_call_id, call.id, 'Request tool result identity changed');
+    validateToolOutput(tools[i].content, args.command, workspace);
+  }
+}
+
+export function median(values) {
+  assert.ok(values.length > 0 && values.every(Number.isFinite), 'Nonempty finite samples required');
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+export function validateRun(meta, messages, scenario, expectedFinal, expectedResponses, workspace) {
+  assert.equal(meta.schemaVersion, 1, 'Unknown upstream run schema');
+  assert.equal(meta.status, 'ok', 'Benchmark did not complete');
+  assert.equal(meta.exit?.code, 0, 'CLI failed');
+  assert.equal(meta.mock?.requests, scenario.turns + 1, 'Unexpected model request count');
+  assert.equal(meta.sampling?.backend, 'rusage', 'macOS rusage sampler is required');
+  assert.equal(meta.sampling?.withTree, true, 'Process-tree sampling is required');
+  assert.ok(meta.summary?.count >= 3, 'Insufficient samples');
+  const calls = messages.flatMap(m => m.role === 'assistant' ? m.content.filter(b => b.type === 'toolCall') : []);
+  const assistant = messages.filter(m => m.role === 'assistant');
+  const results = messages.filter(m => m.role === 'toolResult');
+  assert.equal(calls.length, scenario.turns, 'Missing or extra tool calls');
+  assert.equal(results.length, scenario.turns, 'Missing or extra tool results');
+  const ids = new Set();
+  for (let i = 0; i < scenario.turns; i++) {
+    assert.equal(calls[i].id, `call_long_run_${i + 1}`, 'Unexpected tool sequence');
+    assert.equal(calls[i].name, 'bash', 'Unexpected tool');
+    if (expectedResponses) {
+      assert.deepEqual(calls[i].arguments, expectedResponses[i].message.tool_calls[0].function.arguments, 'Tool command changed');
+      assert.equal(assistant[i].content.filter(b => b.type === 'text').map(b => b.text).join(''), expectedResponses[i].message.content, 'History body changed');
+    }
+    assert.equal(results[i].toolCallId, calls[i].id, 'Tool result does not match call');
+    assert.equal(results[i].isError, false, 'Tool execution failed');
+    if (expectedResponses && workspace) validateToolOutput(results[i].content, calls[i].arguments.command, workspace);
+    assert.ok(!ids.has(results[i].toolCallId), 'Duplicate tool result');
+    ids.add(results[i].toolCallId);
+  }
+  const last = messages.filter(m => m.role === 'assistant').at(-1);
+  const final = last?.content.filter(b => b.type === 'text').map(b => b.text).join('');
+  assert.equal(final, expectedFinal, 'Final response changed');
+  const metrics = {
+    durationMs: meta.duration?.endToEndMs,
+    cpuSeconds: meta.cost?.cpuSeconds,
+    rssBytes: meta.peaks?.treeRssBytes,
+  };
+  for (const [name, value] of Object.entries(metrics)) {
+    assert.ok(Number.isFinite(value) && value > 0, `Invalid ${name}`);
+  }
+  return metrics;
+}
+
+export function compareRuns(base, head, config) {
+  assert.equal(base.length, config.repetitions, 'Incomplete baseline repetitions');
+  assert.equal(head.length, config.repetitions, 'Incomplete candidate repetitions');
+  return Object.entries(config.thresholds).map(([metric, threshold]) => {
+    const before = base.map(r => r[metric]);
+    const after = head.map(r => r[metric]);
+    assert.ok([...before, ...after].every(v => Number.isFinite(v) && v > 0), `Invalid ${metric}`);
+    const baseline = median(before), candidate = median(after);
+    const spread = values => (Math.max(...values) - Math.min(...values)) / median(values);
+    const unstable = spread(before) > config.maxSpread || spread(after) > config.maxSpread;
+    const delta = candidate - baseline;
+    const regression = delta > Math.max(baseline * threshold.relative, threshold.absolute)
+      && after.every((v, i) => v > before[i]);
+    return { metric, baseline, candidate, change: delta / baseline,
+      baseSpread: spread(before), headSpread: spread(after),
+      status: unstable ? 'INCONCLUSIVE' : regression ? 'REGRESSION' : 'PASS' };
+  });
+}
+
+export function renderReport(report) {
+  const lines = ['# Performance comparison', '',
+    `Status: **${report.status}**`, '',
+    '| Item | Value |', '| --- | --- |',
+    `| Base | \`${report.baseRevision}\` |`, `| Candidate | \`${report.headRevision}\` |`,
+    `| Benchmark | [${report.benchmarkRevision}](${report.benchmarkRepository}/tree/${report.benchmarkRevision}) |`,
+    `| Machine | ${report.host.cpuModel}; ${report.host.cpus} CPUs; ${Math.round(report.host.totalMemBytes / 2 ** 30)} GiB; ${report.host.platform} ${report.host.osRelease}; ${report.host.arch} |`,
+    `| Runtime | Node ${report.nodeVersion}; Bun ${report.bunVersion} |`,
+    `| Method | One warmup per revision/scenario; three alternating serial pairs; 100 ms process-tree rusage sampling |`,
+    '', '| Scenario | Metric | Base median | Candidate median | Change | Result |',
+    '| --- | --- | ---: | ---: | ---: | --- |'];
+  for (const scenario of report.results) for (const row of scenario.comparison ?? []) {
+    const scale = row.metric === 'rssBytes' ? 2 ** 20 : row.metric === 'durationMs' ? 1000 : 1;
+    const unit = row.metric === 'rssBytes' ? 'MiB' : row.metric === 'durationMs' ? 's' : 'core-s';
+    lines.push(`| ${scenario.id} | ${row.metric} | ${(row.baseline / scale).toFixed(2)} ${unit} | ${(row.candidate / scale).toFixed(2)} ${unit} | ${(row.change * 100).toFixed(1)}% | ${row.status} |`);
+  }
+  if (report.error) lines.push('', `Failure: ${String(report.error).replaceAll('\n', ' ').replaceAll('`', "'")}`);
+  lines.push('', 'Raw run.json, samples.csv, CLI/mock logs, synthetic histories and any diagnostic CPU profile are attached. Warmups and diagnostic runs are excluded from comparisons.',
+    '', 'This is a mock throughput check, not live-model acceptance. RSS is sampled. INCONCLUSIVE means excessive spread and fails the check; do not treat it as evidence of a regression or a pass.');
+  return lines.join('\n') + '\n';
+}

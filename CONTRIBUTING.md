@@ -55,6 +55,8 @@ Test files are declared in `test/vitest-suites.json`, grouped by the gate that r
 
 Review added or removed files before running `node scripts/source-inventory.mjs --write`. Updating the inventory must not bypass checks for private protocols, internal addresses, credentials, or third-party licensing. Before a source release, also scan the complete Git history with Gitleaks; see the [release process](docs/releasing.md).
 
+PRs also run the [performance comparison](docs/performance-ci.md): a pinned upstream benchmark plus startup and long-history fixtures, comparing base/head on the same runner. Raw evidence and machine configuration accompany the check.
+
 ## Capability boundaries
 
 Preserve MiniMax OAuth, Token Plan, BYOK, mcode-tools, search, plugins, connectors, updates, and feedback. Do not solve standalone-build problems by removing capabilities. Managed services use public clients; internal HTTP services, generated IDL, and cloud executor implementations are outside this repository.
