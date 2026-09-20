@@ -3243,6 +3243,7 @@
     "packages/tui/test/unit/tui-provider-manager.test.ts",
     "packages/tui/test/unit/tui-provider-onboarding.test.ts",
     "packages/tui/test/unit/tui-runtime-adapter.test.ts",
+    "packages/tui/test/unit/tui-scrollbar-interaction.test.ts",
     "packages/tui/test/unit/tui-session-manager.test.ts",
     "packages/tui/test/unit/tui-shell-block.test.ts",
     "packages/tui/test/unit/tui-status-line-items.test.ts",
