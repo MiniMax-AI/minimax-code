@@ -134,7 +134,12 @@ export class TuiStatusLine implements Component {
 function resolveStatusLineItems(state: TuiShellState): readonly TuiStatusLineItem[] {
   const items = state.statusLineItems ?? TUI_STATUS_LINE_DEFAULT_ITEMS;
   if (!items.includes('build-mode')) {
-    if (state.statusLineItems !== undefined) return items;
+    if (state.statusLineItems !== undefined) {
+      // The opt-in meter replaces the percentage at the meter's configured position.
+      return items.includes('context-meter')
+        ? items.filter((item) => item !== 'context-remaining')
+        : items;
+    }
     const remaining = contextRemainingPercent(state);
     return items.filter((item) =>
       remaining === undefined ? item !== 'context-remaining' : item !== 'context-window',
@@ -249,20 +254,12 @@ function buildStatusSegment(
         { shrinkPriority: 48, dropPriority: 10 },
       );
     case 'context-remaining':
-      return createStatusSegment(
-        [
-          renderContextRemaining(state, 'full'),
-          renderContextRemaining(state, 'compact'),
-          renderContextRemaining(state, 'minimal'),
-        ],
-        { shrinkPriority: 50, dropPriority: 80 },
-      );
     case 'context-meter':
       return createStatusSegment(
         [
-          renderContextMeter(state, 'full'),
-          renderContextMeter(state, 'compact'),
-          renderContextMeter(state, 'minimal'),
+          renderContextRemaining(state, 'full', item === 'context-meter'),
+          renderContextRemaining(state, 'compact', item === 'context-meter'),
+          renderContextRemaining(state, 'minimal', item === 'context-meter'),
         ],
         { shrinkPriority: 50, dropPriority: 80 },
       );
@@ -452,46 +449,25 @@ function contextRemainingPercent(state: TuiShellState): number | undefined {
   return Math.round(((contextWindow - used) / contextWindow) * 100);
 }
 
+/** Both presentations share usage, fallback, thresholds and the minimal label. */
 function renderContextRemaining(
   state: TuiShellState,
   density: 'full' | 'compact' | 'minimal' = 'full',
+  meter = false,
 ): string {
   const remaining = contextRemainingPercent(state);
   if (remaining === undefined) return '';
   const color = remaining <= 10 ? colors.error : remaining <= 25 ? colors.warning : colors.muted;
+  let gauge = '';
+  if (meter && density !== 'minimal') {
+    const cells = density === 'full' ? 8 : 6;
+    const filled = Math.round((remaining / 100) * cells);
+    gauge = `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏ `;
+  }
   const label =
     density === 'full'
-      ? `Context ${remaining}% left`
-      : density === 'compact'
-        ? `Ctx ${remaining}%`
-        : `Ctx ${remaining}%`;
-  return chalk.hex(color)(label);
-}
-
-/**
- * Renders remaining context headroom as a compact gauge.
- *
- * Uses the same snapshot and thresholds as `context-remaining`: the filled
- * cells show how much headroom is left, so the gauge drains and recolors as
- * the Session approaches its context window. Returns an empty string when no
- * usage is known, for the same reasons as the percentage variant.
- */
-function renderContextMeter(
-  state: TuiShellState,
-  density: 'full' | 'compact' | 'minimal' = 'full',
-): string {
-  const remaining = contextRemainingPercent(state);
-  if (remaining === undefined) return '';
-  const color = remaining <= 10 ? colors.error : remaining <= 25 ? colors.warning : colors.muted;
-  const cells = density === 'full' ? 8 : 6;
-  const filled = Math.round((remaining / 100) * cells);
-  const gauge = `▕${'█'.repeat(filled)}${'░'.repeat(cells - filled)}▏`;
-  const label =
-    density === 'minimal'
-      ? `Ctx ${remaining}%`
-      : density === 'full'
-        ? `Context ${gauge} ${remaining}% left`
-        : `Ctx ${gauge} ${remaining}%`;
+      ? `Context ${gauge}${remaining}% left`
+      : `Ctx ${gauge}${remaining}%`;
   return chalk.hex(color)(label);
 }
 

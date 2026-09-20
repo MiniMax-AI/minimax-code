@@ -145,3 +145,20 @@ describe('status line picker', () => {
     expect(picker.render(120).join('\n')).not.toContain('0%');
   });
 });
+
+
+describe('context meter settings', () => {
+  it.each([
+    ['en', 'Remaining context gauge'],
+    ['zh-Hans', '剩余上下文刻度条'],
+  ])('describes and saves the opt-in item in %s', async (locale, description) => {
+    const { picker, options } = fixture({ locale });
+    picker.handleInput('context-meter');
+    expect(picker.render(100).join('\n')).toContain(description);
+    expect(picker.render(100).join('\n')).toContain('[ ] context-meter');
+    picker.handleInput(' ');
+    picker.handleInput('\r');
+    await vi.waitFor(() => expect(options.onClose).toHaveBeenCalledOnce());
+    expect(options.save).toHaveBeenCalledWith(['model', 'current-dir', 'context-meter']);
+  });
+});

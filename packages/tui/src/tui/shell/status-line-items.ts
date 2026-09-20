@@ -9,7 +9,7 @@
  * (`tui.statusLine`), so renaming one is a breaking change. Legacy aliases keep
  * older configuration working.
  *
- * `cache-read-ratio`, `context-remaining` and `review-link` are conditional
+ * `cache-read-ratio`, `context-remaining`, `context-meter` and `review-link` are conditional
  * items. They only render when the Runtime surfaces their matching projection
  * into the shell state, so unsupported or not-yet-recorded metrics stay silent.
  *

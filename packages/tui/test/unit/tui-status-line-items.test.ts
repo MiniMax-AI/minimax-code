@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { applyTuiRenderTheme, getTuiThemeSnapshot, tuiChalk, tuiColors } from '../../src/tui/theme/runtime.js';
+import { MINIMAX_CODE_DARK_THEME, MINIMAX_CODE_LIGHT_THEME } from '../../src/tui/theme/palettes.js';
 import { TuiStatusLine } from '../../src/tui/shell/chrome.js';
 import { stripAnsi, visibleWidth } from '../../src/tui/rendering/text.js';
 import { setCapabilityOverrides } from '../../src/tui/engine/public.js';
@@ -591,7 +593,11 @@ describe('context meter item', () => {
   });
 
   it('stays out of the default status line', () => {
-    expect(TUI_STATUS_LINE_DEFAULT_ITEMS).not.toContain('context-meter');
+    expect(TUI_STATUS_LINE_DEFAULT_ITEMS).toEqual([
+      'current-dir', 'session-title', 'git-branch', 'review-link', 'plan-mode',
+      'approval-mode', 'model-with-reasoning', 'context-window', 'subagent',
+      'token-quota', 'context-remaining',
+    ]);
     const state = {
       ...BASE_STATE,
       contextUsage: { usedTokens: 20_000, contextWindowTokens: 100_000 },
@@ -631,9 +637,7 @@ describe('context meter item', () => {
   });
 
   it('is hidden without usage and never shows NaN', () => {
-    expect(stripAnsi(render({ ...BASE_STATE, statusLineItems: ['context-meter'] }))).not.toContain(
-      '▕',
-    );
+    expect(render({ ...BASE_STATE, statusLineItems: ['context-meter'], contextWindowTokens: 100_000 })).toBe('');
     expect(
       stripAnsi(
         render({
@@ -643,5 +647,129 @@ describe('context meter item', () => {
         }),
       ),
     ).not.toContain('NaN');
+  });
+});
+
+describe('context meter presentation contract', () => {
+  it.each([
+    ['context-remaining', 'model', 'context-bar', 'context-gauge'],
+    ['context-gauge', 'model', 'context-left'],
+  ])('prefers the meter at its configured position for %j', (...configured) => {
+    const statusLineItems = parseTuiStatusLineItems(configured);
+    const line = stripAnsi(render({
+      ...BASE_STATE,
+      statusLineItems,
+      contextUsage: { usedTokens: 50_000, contextWindowTokens: 100_000 },
+    }));
+    expect(line.match(/50%/gu)).toHaveLength(1);
+    expect(line).toContain('Context ▕████░░░░▏ 50% left');
+    expect(line.indexOf('Context') < line.indexOf('m2')).toBe(configured[0] === 'context-gauge');
+  });
+});
+
+describe('context meter boundaries', () => {
+  it.each([
+    [undefined, 100_000, 50],
+    [200_000, 100_000, 75],
+    [Number.NaN, 100_000, 50],
+    [0, 100_000, 50],
+    [-1, 100_000, 50],
+    [Number.POSITIVE_INFINITY, 100_000, 50],
+  ])('resolves snapshot window %s before model window %s', (snapshot, model, remaining) => {
+    for (const item of ['context-meter', 'context-remaining'] as const) {
+      const line = stripAnsi(render({
+        ...BASE_STATE,
+        statusLineItems: [item],
+        contextWindowTokens: model,
+        contextUsage: { usedTokens: 50_000, contextWindowTokens: snapshot },
+      }));
+      expect(line).toContain(`${remaining}% left`);
+    }
+  });
+
+  it.each([undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'hides the meter when neither window is usable (%s)', (window) => {
+      expect(render({
+        ...BASE_STATE,
+        statusLineItems: ['context-meter'],
+        contextWindowTokens: window,
+        contextUsage: { usedTokens: 1, contextWindowTokens: window },
+      })).toBe('');
+    },
+  );
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'hides invalid usage %s even with valid model capacity', (usedTokens) => {
+      expect(render({
+        ...BASE_STATE,
+        statusLineItems: ['context-meter'],
+        contextWindowTokens: 100_000,
+        contextUsage: { usedTokens },
+      })).toBe('');
+    },
+  );
+
+  it.each([
+    [-1, '▕████████▏ 100% left'],
+    [0, '▕████████▏ 100% left'],
+    [100, '▕░░░░░░░░▏ 0% left'],
+    [150, '▕░░░░░░░░▏ 0% left'],
+  ])('clamps used tokens %d to a valid gauge', (usedTokens, expected) => {
+    expect(stripAnsi(render({
+      ...BASE_STATE,
+      statusLineItems: ['context-meter'],
+      contextUsage: { usedTokens, contextWindowTokens: 100 },
+    }))).toContain(expected);
+  });
+
+  it.each([
+    [30, 'Context ▕████░░░░▏ 50% left'],
+    [20, 'Ctx ▕███░░░▏ 50%'],
+    [7, 'Ctx 50%'],
+    [6, ''],
+  ])('fits a width of %d with the expected presentation', (width, expected) => {
+    const line = render({
+      ...BASE_STATE,
+      statusLineItems: ['context-meter'],
+      contextUsage: { usedTokens: 50, contextWindowTokens: 100 },
+    }, width);
+    expect(stripAnsi(line).trim()).toBe(expected);
+    expect(line.split('\n').every((row) => visibleWidth(row) <= width)).toBe(true);
+  });
+
+  it('uses the same warning and error boundaries as the percentage item', () => {
+    const previous = getTuiThemeSnapshot();
+    applyTuiRenderTheme(MINIMAX_CODE_DARK_THEME, 3);
+    try {
+      for (const [remaining, color] of [
+        [26, tuiColors.muted], [25, tuiColors.warning],
+        [11, tuiColors.warning], [10, tuiColors.error], [0, tuiColors.error],
+      ] as const) {
+        for (const item of ['context-meter', 'context-remaining'] as const) {
+          const line = render({
+            ...BASE_STATE,
+            statusLineItems: [item],
+            contextUsage: { usedTokens: 100 - remaining, contextWindowTokens: 100 },
+          }).trim();
+          expect(line).not.toBe(stripAnsi(line));
+          expect(line).toBe(tuiChalk.hex(color)(stripAnsi(line)));
+        }
+      }
+    } finally {
+      applyTuiRenderTheme(
+        previous.appearance === 'light' ? MINIMAX_CODE_LIGHT_THEME : MINIMAX_CODE_DARK_THEME,
+        previous.colorLevel,
+      );
+    }
+  });
+
+  it('keeps build-mode in control when the meter is selected', () => {
+    const line = stripAnsi(render({
+      ...BASE_STATE,
+      statusLineItems: ['context-meter', 'build-mode', 'context-remaining'],
+      contextUsage: { usedTokens: 50, contextWindowTokens: 100 },
+    }));
+    expect(line).toContain('[V]');
+    expect(line).not.toContain('Context');
   });
 });
