@@ -142,7 +142,7 @@ export const SESSION_MUTATION_COPY = {
   'sessionMutation.hint.editSubmitting': 'Replacing the message and rewinding history…',
   'sessionMutation.hint.editResubmit': 'Edited draft preserved · Enter resubmit · Esc cancel',
   'sessionMutation.hint.loadingFork': 'Loading fork history…',
-  'sessionMutation.hint.loadingRewind': 'Loading rewind history…',
+  'sessionMutation.hint.loadingRewind': 'Finding messages to rewind to…',
   'sessionMutation.hint.loadingEdit': 'Loading the latest message…',
   'sessionMutation.hint.noForkPrompts':
     'No persisted user prompts are available. Send a message, then retry /fork.',

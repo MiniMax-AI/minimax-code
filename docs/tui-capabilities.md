@@ -80,3 +80,16 @@ the configured default. Omitting `--model` preserves existing startup behavior.
 The untargeted `--session` picker cannot be combined with `--model`; provide an ID
 or use `--continue` instead. If opening or continuing a Session fails, the override
 and initial prompt are not applied.
+
+## Feature panels and chat restoration
+
+In regular mode, independent feature panels occupy the complete visible terminal
+area, including short Rewind previews and scope pickers. Closing a panel restores
+the current conversation. When running content shrinks across the native scrolling
+boundary, the renderer reconstructs the current session to fill the viewport and
+keep its history unique. This reconstruction clears earlier shell scrollback;
+ordinary updates keep native scrolling and selection behavior.
+
+Rewind and Fork history-loading hints disappear as soon as their lists are ready.
+Returning from a cancelled operation must not leave a stale loading message in the
+Composer. Rewind displays its completed result after a successful operation.

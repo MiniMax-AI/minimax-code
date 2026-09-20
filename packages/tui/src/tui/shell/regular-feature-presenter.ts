@@ -89,7 +89,10 @@ class TuiRegularFeatureViewport implements Component {
   render(width: number): string[] {
     if (this.screen.renderViewport && !getLayoutNode(this.screen.layoutRoot)) {
       this.layout = undefined;
-      return [...this.screen.renderViewport(width, Math.max(1, this.terminal.rows))];
+      const height = Math.max(1, this.terminal.rows);
+      const lines = this.screen.renderViewport(width, height);
+      // Feature screens own the viewport even when their content is short.
+      return Array.from({ length: height }, (_, index) => lines[index] ?? '');
     }
     this.layout = renderLayoutFrame(
       this.screen.layoutRoot,

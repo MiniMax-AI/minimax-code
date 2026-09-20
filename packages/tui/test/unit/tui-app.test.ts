@@ -7980,6 +7980,49 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it.each(['/rewind', '/fork'])(
+    'clears the loading hint after %s history loads and stays clear after cancellation',
+    async (command) => {
+      const terminal = new FakeTerminal();
+      const runtime = createRuntime();
+      let resolveHistory!: (
+        value: Awaited<ReturnType<TuiRuntime['listSessionInputSummaries']>>,
+      ) => void;
+      vi.mocked(runtime.listSessionInputSummaries).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveHistory = resolve;
+          }),
+      );
+      const app = createTuiApp({ runtime, terminal, version: '0.1.0', workspaceDir: '/workspace' });
+      app.start();
+      try {
+        await app.ready;
+        await app.submit('Seed session');
+        await app.submit(command);
+        const loadingChat = stripAnsi(app.tui.render(120).join('\n'));
+        expect(loadingChat).toMatch(/Loading|Finding/);
+        resolveHistory([{ userMessageId: 'history-user', timestamp: 1, fileChangeCount: 0 }]);
+        await vi.waitFor(() =>
+          expect(app.surfaceHost.getActiveSurface()).toEqual({
+            kind: 'feature',
+            id: 'session-mutation:history',
+          }),
+        );
+        expect(stripAnsi(app.tui.render(120).join('\n'))).not.toMatch(
+          /Loading (?:rewind|fork) history|Finding messages/,
+        );
+        terminal.input?.('\x1b');
+        expect(app.surfaceHost.getActiveSurface()).toEqual({ kind: 'chat', id: 'chat' });
+        expect(stripAnsi(app.tui.render(120).join('\n'))).not.toMatch(
+          /Loading (?:rewind|fork) history|Finding messages/,
+        );
+      } finally {
+        await app.stop();
+      }
+    },
+  );
+
   it("cancels /rewind preview and ignores duplicate scope submission", async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
@@ -8065,6 +8108,9 @@ describe("createTuiApp", () => {
       id: "session-mutation:rewind-confirm",
     });
     resolveRewind({ rewound: true });
+    await vi.waitFor(() => expect(app.surfaceHost.getActiveSurface()).toEqual({ kind: 'chat', id: 'chat' }));
+    expect(stripAnsi(app.tui.render(120).join('\n'))).toContain('Rewound 1 turn');
+    expect(stripAnsi(app.tui.render(120).join('\n'))).not.toMatch(/Loading rewind history|Finding messages/);
     await app.stop();
   });
 

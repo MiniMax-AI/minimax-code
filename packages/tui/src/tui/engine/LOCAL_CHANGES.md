@@ -115,3 +115,11 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Adaptation: the original contribution widened hits over two live content columns. The reserved gutter prevents those presses from swallowing content clicks or text selection. `chat-layout.ts` opts into the three-column gutter.
 - Evidence: `test/unit/tui-scrollbar-interaction.test.ts` drives SGR press, motion, release and wheel events through VirtualTerminal, covering track jumps, thumb grabs, narrow terminals, content routing, selection, overlays and the actual fullscreen ChatLayout.
 - Removal condition: the selected Pi baseline provides equivalent reserved-gutter track and drag interaction and MCode migrates to it.
+
+## L034: Regular viewport reconstruction after document shrink
+
+- Product contract: after running content or a feature panel closes, show the complete current chat viewport with its Composer and status line. Every current-session row must occur once in native history.
+- Minimal difference: when a shorter document would move the viewport origin backwards, clear and replay the complete current projection. Other updates retain differential rendering and resize retains the existing delayed history replay.
+- Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement.
+- Evidence: local-delta tests assert every visible row and the complete history, while real Tasks and feature lifecycle tests cover short/long content, background growth, paging, resize, nested panels and return to chat. Virtual terminals do not establish native iTerm2 touchpad acceptance.
+- Removal condition: the selected Pi baseline provides equivalent complete viewport and unique-history behavior.

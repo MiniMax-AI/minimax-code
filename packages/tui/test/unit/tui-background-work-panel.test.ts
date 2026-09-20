@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { TuiBackgroundWorkPanel } from "../../src/tui/background-work/panel.js";
 import type { TuiBackgroundTask } from "../../src/runtime/port.js";
 import type { TuiAgentTeamSnapshot } from "../../src/tui/agent-team/model.js";
+import { TuiMainScreen } from '../../src/tui/engine/tui-main-screen.js';
+import { TuiOverlayRegularFeaturePresenter } from '../../src/tui/shell/regular-feature-presenter.js';
 import { TuiAltScreen } from "../../src/tui/engine/tui-alt-screen.js";
 import { VirtualTerminal } from "../pi-084-upstream/virtual-terminal.js";
 import { visibleWidth } from "../../src/tui/rendering/text.js";
@@ -331,4 +333,97 @@ describe("TuiBackgroundWorkPanel", () => {
       "Background task · Failed",
     );
   });
+});
+
+describe('Tasks in the regular terminal viewport', () => {
+  it.each([1, 8, 15])(
+    'keeps tasks reachable after shrinking by %i rows without leaking duplicate tasks into scrollback',
+    async (shrinkRows) => {
+      const terminal = new VirtualTerminal(80, 16);
+      const tui = new TuiMainScreen(terminal);
+      const chatLines = Array.from({ length: 40 }, (_, index) => `chat-line-${index}`);
+      tui.addChild({ render: () => [...chatLines, 'COMPOSER', 'STATUS'], invalidate() {} });
+      const tasks = Array.from({ length: 30 }, (_, index) => ({
+        ...backgroundTasks()[0]!,
+        taskId: `task-${index}`,
+        description: `task-row-${String(index).padStart(2, '0')}`,
+      }));
+      const panel = new TuiBackgroundWorkPanel({
+        agentTeam: () => ({ ...teamSnapshot(), members: [] }),
+        backgroundTasks: () => tasks,
+        activeSessionId: () => 'root',
+        onOpenAgent: vi.fn(),
+        onCancel: vi.fn(),
+        requestRender: () => tui.requestRender(),
+      });
+      tui.start();
+      try {
+        await terminal.waitForRender();
+        chatLines.splice(-shrinkRows);
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.getViewport()).toEqual(
+          [...chatLines, 'COMPOSER', 'STATUS'].slice(-terminal.rows),
+        );
+        const presenter = new TuiOverlayRegularFeaturePresenter(terminal, tui, () =>
+          tui.requestRender(),
+        );
+        let handle = presenter.show(panel, panel);
+        tui.setFocus(handle.focus);
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.getViewport().join('\n')).toContain('Tasks');
+        expect(terminal.getViewport().join('\n')).toContain('task-row-00');
+        handle.close();
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.getViewport()).toEqual(
+          [...chatLines, 'COMPOSER', 'STATUS'].slice(-terminal.rows),
+        );
+        expect(terminal.getScrollBuffer()).toEqual([...chatLines, 'COMPOSER', 'STATUS']);
+        handle = presenter.show(panel, panel);
+        tui.setFocus(handle.focus);
+        tui.renderNow();
+        await terminal.flush();
+        const seen = new Set<string>();
+        for (let index = 0; index < 30; index++) {
+          chatLines.push(`live-chat-${index}`);
+          tui.renderNow();
+          await terminal.flush();
+          const viewport = terminal.getViewport().join('\n');
+          for (const match of viewport.matchAll(/task-row-\d+/g)) seen.add(match[0]);
+          expect(viewport).toContain(`task-row-${String(index).padStart(2, '0')}`);
+          expect(terminal.getScrollBuffer().slice(0, -terminal.rows).join('\n')).not.toContain(
+            'task-row-',
+          );
+          terminal.sendInput('\u001B[B');
+        }
+        expect(seen.size).toBe(30);
+        terminal.sendInput('\u001B[6~');
+        tui.renderNow();
+        await terminal.flush();
+        terminal.sendInput('\u001B[5~');
+        tui.renderNow();
+        await terminal.flush();
+        terminal.resize(60, 12);
+        await terminal.waitForRender();
+        terminal.sendInput('\u001B[B');
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.getViewport().join('\n')).toContain('Tasks');
+        handle.close();
+        tui.renderNow();
+        await terminal.flush();
+        await vi.waitFor(async () => {
+          await terminal.flush();
+          expect(terminal.getScrollBuffer().join('\n')).not.toContain('task-row-');
+        });
+        for (const line of chatLines)
+          expect(terminal.getScrollBuffer().filter((row) => row === line)).toHaveLength(1);
+        expect(terminal.getViewport().join('\n')).toContain('STATUS');
+      } finally {
+        tui.stop();
+      }
+    },
+  );
 });

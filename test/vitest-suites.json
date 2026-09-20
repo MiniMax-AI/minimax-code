@@ -145,7 +145,11 @@
       "packages/config/test/config-update-preservation.test.ts",
       "packages/agent-modules/context-manager/test/compaction-usage.test.ts",
       "packages/local-runtime/test/unit/session-diff-fallback.test.ts",
-      "test/history-processing.test.ts"
+      "test/history-processing.test.ts",
+      "packages/tui/test/unit/tui-feature-viewport-contract.test.ts",
+      "packages/tui/test/unit/tui-session-history-flow.test.ts",
+      "packages/tui/test/unit/tui-session-mutation-panels.test.ts",
+      "packages/tui/test/unit/tui-surface-host.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

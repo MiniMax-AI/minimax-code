@@ -398,6 +398,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
+		// A shorter document can bring previously scrolled rows back into view.
+		// Rebuild the complete projection so the viewport is full and native history
+		// contains each row once; neither tail replay nor blank padding can do both.
+		if (Math.max(0, newLines.length - height) < prevViewportTop) {
+			logRedraw("document shrink reveals scrolled rows");
+			fullRender(true);
+			return;
+		}
+
 		// Content shrunk below the working area and no overlays - re-render to clear empty rows
 		// (overlays need the padding, so only do this when no overlays are active)
 		// Configurable via setClearOnShrink() or PI_CLEAR_ON_SHRINK=0 env var

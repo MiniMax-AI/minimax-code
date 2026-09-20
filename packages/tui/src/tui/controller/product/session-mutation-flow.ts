@@ -708,6 +708,7 @@ export class TuiSessionMutationFlow {
       ...(this.options.nowMs ? { nowMs: this.options.nowMs() } : {}),
     });
     this.options.setHint(undefined);
+    this.options.onChanged();
     const handle = this.options.surfaceHost.pushFeature({ screen: picker, focus: picker });
     this.mutationScreen = handle;
     this.invocations.set(sequence, {
@@ -1201,6 +1202,7 @@ export class TuiSessionMutationFlow {
       ...(this.options.nowMs ? { nowMs: this.options.nowMs() } : {}),
     });
     this.options.setHint(undefined);
+    this.options.onChanged();
     const handle = this.options.surfaceHost.pushFeature({
       screen: picker,
       focus: picker,
@@ -1446,6 +1448,7 @@ export class TuiSessionMutationFlow {
     if (sequence === this.mutationSequence) {
       this.closeMutationScreen();
       this.options.setHint(undefined);
+      this.options.onChanged();
     }
     this.invocations.delete(sequence);
   }

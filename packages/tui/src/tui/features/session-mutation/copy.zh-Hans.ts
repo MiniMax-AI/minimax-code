@@ -130,7 +130,7 @@ export const ZH_HANS_SESSION_MUTATION_COPY = {
   'sessionMutation.hint.editSubmitting': '正在替换消息并回退历史…',
   'sessionMutation.hint.editResubmit': '编辑草稿已保留 · Enter 重新提交 · Esc 取消',
   'sessionMutation.hint.loadingFork': '正在加载分支历史…',
-  'sessionMutation.hint.loadingRewind': '正在加载回退历史…',
+  'sessionMutation.hint.loadingRewind': '正在查找可回退的消息…',
   'sessionMutation.hint.loadingEdit': '正在加载最新消息…',
   'sessionMutation.hint.noForkPrompts': '暂无可用的已持久化用户提示词。发送消息后请重试 /fork。',
   'sessionMutation.confirm.fork.title': '确认创建分支',
