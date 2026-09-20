@@ -11,6 +11,29 @@
 
 These are repository maintenance responsibilities, not an assertion that an account owns the product's copyright. Every PR that requires approval needs a reviewer other than the author, and security reports need a working private response path. Review maintainer additions and policy changes in a PR; do not silently grant repository access.
 
+## Issue triage
+
+Published source covers the standalone CLI (interactive TUI, headless and ACP). The issue tracker also collects Desktop app feedback; accepting those reports does not expand the published source scope.
+
+Everyone may report bugs, request features, ask questions, and flag documentation problems. Code and documentation PRs are accepted only from repository collaborators. Opening an issue or having a proposal accepted does not grant collaborator access or permission to submit a PR. Do not use `good first issue` or `help wanted` while external PRs are closed.
+
+Use these labels independently:
+
+| Category | Labels and meaning |
+| --- | --- |
+| Type | `bug`: reported malfunction; `enhancement`: requested improvement; `documentation`: missing or incorrect docs; `question`: usage or project-policy question |
+| Product | `desktop`: Desktop app; `cli`: standalone mcode, including TUI, headless, ACP and its source builds/tooling |
+| Triage | `needs-triage`: awaiting maintainer assessment; `needs-info`: a maintainer has asked the reporter for specific missing information |
+
+1. Start with [needs-triage](https://github.com/MiniMax-AI/minimax-code/issues?q=is%3Aissue+is%3Aopen+label%3Aneeds-triage) and [unlabelled issues](https://github.com/MiniMax-AI/minimax-code/issues?q=is%3Aissue+is%3Aopen+no%3Alabel). Templates add a type and `needs-triage`; reports created through other routes may need both added manually. A type label describes the report and does not confirm a defect or commit to implementation.
+2. Confirm one primary type and apply `desktop` or `cli` from the report. Product dropdowns stay in the body; maintainers apply product labels manually. Use both only when the report establishes that both are affected. Leave product labels unset for unclear reports or repository-policy questions. The existing `tui` label may supplement `cli` for interactive-terminal-specific issues; it does not cover headless or ACP.
+3. If information is missing, ask for the specific version, reproduction, or expected behavior, replace `needs-triage` with `needs-info`, and retain any known type/product labels. When the reporter replies, remove `needs-info` and reassess. Do not automatically close issues for inactivity.
+4. Once assessed, remove `needs-triage` and record the next step in a comment. Assign a collaborator when someone takes responsibility; classification alone does not promise a fix or release date. For duplicates, link the original issue before closing with `duplicate`. For declined requests, explain the reason before closing with `wontfix`.
+
+Route security reports through [Security](../SECURITY.md). Do not ask for secrets or unredacted logs in public issues. Label setup is a separate repository operation: ensure the labels above exist before merging template changes, since forms cannot create missing labels. The Feishu workflow sends notifications only; it does not perform triage.
+
+This small label set draws on the type and information-request handling in [VS Code's triage guide](https://github.com/microsoft/vscode/wiki/Issues-Triaging) and the `needs-triage`/`needs-info` states used by [Ruff](https://github.com/astral-sh/ruff/labels). Contribution eligibility follows this repository's policy.
+
 ## Review and merge
 
 1. Repository collaborators open an issue for substantial scope or submit a focused feature-branch PR. Other users may open issues to discuss ideas and proposals. Security details follow the private reporting process.

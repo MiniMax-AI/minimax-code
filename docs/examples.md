@@ -66,6 +66,26 @@ pnpm mcode provider list --json
 
 `--api-key-env` reads the current environment variable value and stores that value in the active profile's `config.yaml`; it does not save an environment-variable reference. The file still contains plaintext credentials. On POSIX systems, config writes and temporary copies use `0600`. When loading existing files, MCode removes group/other access while preserving the owner's permissions; already-private files such as `0400` or `0600` do not require a permission change. Loading fails if an unsafe main config cannot be restricted. Older migration backups are also checked, but inspection or repair failures produce a warning identifying the directory or backup that needs manual attention rather than preventing the main config from loading. Windows file modes do not provide equivalent ACL protection; restrict access to the profile directory using Windows permissions.
 
+### Third-party relays and custom auth headers
+
+Providers created by `mcode provider add` are stored under `custom_provider` in the active profile's `config.yaml`. That tree is the supported home for any endpoint other than the official MiniMax API; `minimax_api` is reserved for the official endpoint and keeps its fixed authentication scheme.
+
+Authentication follows the API format: `openai-completions` and `openai-responses` send `Authorization: Bearer <key>`, and `anthropic-messages` sends the key as `x-api-key`. A relay that expects Bearer authentication on an OpenAI-compatible endpoint therefore needs no extra configuration. If a relay only exposes an Anthropic-compatible endpoint (`/v1/messages`) and requires Bearer authentication, add explicit headers to the provider entry in `config.yaml`:
+
+```yaml
+custom_provider:
+  my-relay:
+    options:
+      apiKey: sk-relay-key
+      baseURL: https://relay.example.com
+      headers:
+        Authorization: Bearer sk-relay-key
+    models:
+      MiniMax-M2: {}
+```
+
+`api` can be omitted and defaults to `anthropic-messages`. Configured headers are sent on both connection tests and conversation requests, and they are part of the connection-test fingerprint, so editing them retires a cached test verdict. The default `x-api-key` header is still sent alongside; the relay must tolerate rather than reject it. Header values are stored in plaintext like `apiKey` and are reported by name only in provider views. After editing the file, verify with `mcode provider list` and `mcode provider test <provider-id>`.
+
 [Live acceptance](verification.md) separately verified MiniMax Token Plan and one configured BYOK provider. This is not a guarantee for every compatible service.
 
 ## 3. Search and image input
