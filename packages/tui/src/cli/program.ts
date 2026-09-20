@@ -194,6 +194,7 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .option('--api-key-env <name>', 'environment variable containing the API key')
     .option('--context-limit <tokens>', 'context limit for every listed model', parsePositiveSafeInteger)
     .option('--output-limit <tokens>', 'output limit for every listed model', parsePositiveSafeInteger)
+    .option('--support-image', 'declare image input support for every listed model')
     .option('--use', 'test the first model, then save and select it as the default')
     .action(
       (commandOptions: {
@@ -203,6 +204,7 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
         model: string[];
         contextLimit?: number;
         outputLimit?: number;
+        supportImage?: boolean;
         apiKeyEnv?: string;
         use?: boolean;
       }) => {
@@ -217,6 +219,7 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
           models: commandOptions.model,
           contextLimit: commandOptions.contextLimit,
           outputLimit: commandOptions.outputLimit,
+          supportImage: commandOptions.supportImage,
           apiKeyEnv: commandOptions.apiKeyEnv,
           saveAndUse: commandOptions.use,
         });
