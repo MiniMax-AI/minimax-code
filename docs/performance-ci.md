@@ -4,7 +4,7 @@ Every PR runs the `performance` check: the original 100-round scenario by defaul
 Adding `perf:full` automatically runs the full suite. While the label remains,
 new commits and reopened PRs run the full suite too. Removing it starts a basic
 run and cancels any previous automatic run for that PR. Unrelated label changes
-skip benchmarking under a separate `performance (label ignored)` check. Both
+skip benchmarking and do not replace the active `performance` check. Both
 revisions build separately, then run serially on one `macos-15` runner with Node
 22.23.2 and Bun 1.4.2. Build and installation time are excluded.
 
