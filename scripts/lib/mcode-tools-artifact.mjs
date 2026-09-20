@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { Parser } from 'tar';
 
 export const MCODE_TOOLS_ARTIFACT = Object.freeze({
@@ -51,15 +52,52 @@ export async function extractMcodeToolsArtifact(bytes) {
   return { cli, manifest: manifestBytes, notices };
 }
 
+const transientNetworkCodes = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+const transientHttpStatuses = new Set([408, 429, 500, 502, 503, 504]);
+
+export async function downloadMcodeToolsArtifact(fetchImpl = fetch, { wait = sleep, warn = console.warn } = {}) {
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let retryAfterMs = 0;
+    try {
+      // A new deadline covers both connection setup and the complete response body.
+      const response = await fetchImpl(MCODE_TOOLS_ARTIFACT.url, { signal: AbortSignal.timeout(120_000) });
+      if (!response.ok) {
+        const retryAfter = response.headers.get('retry-after');
+        if (retryAfter !== null) {
+          const milliseconds = /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now();
+          if (!Number.isNaN(milliseconds)) retryAfterMs = Math.min(30_000, Math.max(0, milliseconds));
+        }
+        await response.body?.cancel().catch(() => {});
+        const error = new Error(`Cannot download public mcode-tools artifact: HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      const code = error.cause?.code ?? error.code;
+      const retryable = transientHttpStatuses.has(error.status) ||
+        transientNetworkCodes.has(code) || error.name === 'TimeoutError';
+      if (!retryable) throw error;
+      if (attempt === attempts)
+        throw new Error(`Cannot download public mcode-tools artifact after ${attempts} attempts`, { cause: error });
+      const delayMs = Math.max(1000 * 2 ** (attempt - 1), retryAfterMs);
+      warn(`[mcode-tools] Download attempt ${attempt}/${attempts} failed (${code ?? error.message}); retrying in ${delayMs} ms.`);
+      await wait(delayMs);
+    }
+  }
+}
+
 export async function copyMcodeToolsArtifact(root, outdir, fetchImpl = fetch) {
   const cache = path.join(root, '.cache', 'artifacts', 'code-0.3.11.tgz');
   let bytes;
   try { bytes = await readFile(cache); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    const response = await fetchImpl(MCODE_TOOLS_ARTIFACT.url, { signal: AbortSignal.timeout(120_000) });
-    if (!response.ok) throw new Error(`Cannot download public mcode-tools artifact: HTTP ${response.status}`);
-    bytes = Buffer.from(await response.arrayBuffer());
+    bytes = await downloadMcodeToolsArtifact(fetchImpl);
   }
   const artifact = await extractMcodeToolsArtifact(bytes);
   await mkdir(path.dirname(cache), { recursive: true });

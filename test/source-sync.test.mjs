@@ -19,6 +19,93 @@ import { releaseManifest } from '../scripts/package-cli-release.mjs';
 import { validateReleaseReports } from '../scripts/publish-cli-release.mjs';
 import { compareVersions, releaseCli } from '../scripts/release-cli.mjs';
 import { compareRuns, validateRun, validateRequest, validateToolOutput, median, selectScenarios } from '../scripts/perf/report.mjs';
+import { copyMcodeToolsArtifact, downloadMcodeToolsArtifact, MCODE_TOOLS_ARTIFACT } from '../scripts/lib/mcode-tools-artifact.mjs';
+
+test('artifact download recovers from TLS reset and interrupted response bodies', async () => {
+  const reset = new TypeError('fetch failed', { cause: Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }) });
+  const interrupted = new TypeError('terminated', { cause: Object.assign(new Error('socket closed'), { code: 'UND_ERR_SOCKET' }) });
+  const signals = [], delays = [], warnings = [];
+  const result = await downloadMcodeToolsArtifact(async (url, { signal }) => {
+    assert.equal(url, MCODE_TOOLS_ARTIFACT.url);
+    assert.ok(signal instanceof AbortSignal);
+    signals.push(signal);
+    if (signals.length === 1) throw reset;
+    if (signals.length === 2) return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new Uint8Array([1, 2])); },
+      pull(controller) { controller.error(interrupted); },
+    }));
+    return new Response('complete archive');
+  }, { wait: async ms => delays.push(ms), warn: message => warnings.push(message) });
+  assert.equal(result.toString(), 'complete archive');
+  assert.equal(new Set(signals).size, 3);
+  assert.deepEqual(delays, [1000, 2000]);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /1\/3.*ECONNRESET/);
+  assert.match(warnings[1], /2\/3.*UND_ERR_SOCKET/);
+});
+
+test('artifact download retries temporary HTTP failures and releases rejected bodies', async () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) {
+    let calls = 0, cancelled = false;
+    const delays = [];
+    const result = await downloadMcodeToolsArtifact(async () => {
+      if (++calls > 1) return new Response('ok');
+      return new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status });
+    }, { wait: async ms => delays.push(ms), warn() {} });
+    assert.equal(result.toString(), 'ok');
+    assert.equal(calls, 2);
+    assert.equal(cancelled, true);
+    assert.deepEqual(delays, [1000]);
+  }
+});
+
+test('artifact download bounds Retry-After delays and rejects permanent failures immediately', async () => {
+  for (const [header, expectedDelay] of [['5', 5000], ['999999', 30000], ['invalid', 1000], ['0', 1000]]) {
+    let calls = 0;
+    const delays = [];
+    await downloadMcodeToolsArtifact(async () => ++calls === 1
+      ? new Response(null, { status: 429, headers: { 'Retry-After': header } }) : new Response('ok'),
+    { wait: async ms => delays.push(ms), warn() {} });
+    assert.deepEqual(delays, [expectedDelay]);
+  }
+  const certificateError = new TypeError('fetch failed', { cause: Object.assign(new Error('certificate expired'), { code: 'CERT_HAS_EXPIRED' }) });
+  for (const failure of [new Response(null, { status: 403 }), new Response(null, { status: 404 }), certificateError]) {
+    let calls = 0;
+    await assert.rejects(downloadMcodeToolsArtifact(async () => {
+      calls++;
+      if (failure instanceof Error) throw failure;
+      return failure;
+    }, { wait: async () => assert.fail('permanent failures must not wait'), warn: () => assert.fail('permanent failures must not retry') }));
+    assert.equal(calls, 1);
+  }
+});
+
+test('artifact download stops after three timeouts and preserves the final cause', async () => {
+  const timeout = new DOMException('The operation timed out', 'TimeoutError');
+  let calls = 0;
+  const delays = [];
+  await assert.rejects(downloadMcodeToolsArtifact(async () => { calls++; throw timeout; },
+    { wait: async ms => delays.push(ms), warn() {} }), error => {
+    assert.match(error.message, /after 3 attempts/);
+    assert.equal(error.cause, timeout);
+    return true;
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [1000, 2000]);
+});
+
+test('artifact download never retries or caches an archive that fails integrity', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'mcode-artifact-download-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let calls = 0;
+  await assert.rejects(copyMcodeToolsArtifact(root, path.join(root, 'dist'), async () => {
+    calls++;
+    return new Response('corrupt archive');
+  }), /integrity mismatch/);
+  assert.equal(calls, 1);
+  assert.equal(existsSync(path.join(root, '.cache', 'artifacts', 'code-0.3.11.tgz')), false);
+  assert.equal(existsSync(path.join(root, 'dist')), false);
+});
 
 test('performance defaults to the 100-round suite; long history requires explicit selection', () => {
   const config = JSON.parse(readFileSync(new URL('../scripts/perf/config.json', import.meta.url), 'utf8'));
