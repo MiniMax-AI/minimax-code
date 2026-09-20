@@ -70,6 +70,19 @@ describe('semantic snapshots', () => {
     original.nested.text = 'after';
     expect(snapshot.value.nested.text).toBe('before');
   });
+  it('preserves native rejection of proxies without invoking their traps', () => {
+    const trap = vi.fn();
+    const value = new Proxy({}, { ownKeys: trap });
+    expect(() => captureSemanticSnapshot(value)).toThrow();
+    expect(trap).not.toHaveBeenCalled();
+  });
+  it('preserves native enumeration when an accessor deletes another field', () => {
+    const value = {
+      get first() { delete this.second; return 'first'; },
+      second: 'deleted' as string | undefined,
+    };
+    expect(captureSemanticSnapshot(value).value).toEqual({ first: 'first' });
+  });
   it.each([new Date(), new Map(), new Uint8Array([1]), 1n])(
     'rejects unsupported value-only payloads %#',
     (value) => {

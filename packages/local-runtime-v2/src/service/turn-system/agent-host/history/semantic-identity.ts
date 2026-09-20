@@ -1,3 +1,5 @@
+import { isProxy } from 'node:util/types';
+
 import { IncrementalSha256 } from './incremental-sha256.js';
 
 export interface SemanticSnapshot<T> {
@@ -47,15 +49,22 @@ export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
 function cloneSemanticValue<T>(value: T, clones: Map<object, object>): T {
   if (typeof value !== 'object' || value === null) return structuredClone(value);
   if (ownedValues.has(value)) return value;
+  // Native cloning rejects proxies without running their traps. Preserve that
+  // boundary, and defer accessor side effects to native property enumeration.
+  if (isProxy(value)) return structuredClone(value);
   const previous = clones.get(value);
   if (previous) return previous as T;
   const prototype = Object.getPrototypeOf(value);
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
     return structuredClone(value);
   }
+  const keys = Object.keys(value);
+  if (keys.some((key) => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value'))) {
+    return structuredClone(value);
+  }
   const copy: object = Array.isArray(value) ? new Array(value.length) : {};
   clones.set(value, copy);
-  for (const key of Object.keys(value)) {
+  for (const key of keys) {
     Object.defineProperty(copy, key, {
       value: cloneSemanticValue(Reflect.get(value, key), clones),
       enumerable: true,
