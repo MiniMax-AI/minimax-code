@@ -98,6 +98,8 @@ mcode
 
 Supported API formats: `openai-completions`, `openai-responses`, and `anthropic-messages`. See the [model examples](docs/examples.md#2-choose-your-own-model) for environment variable setup, connection checks, and model overrides for a single run.
 
+Providers added this way are stored under `custom_provider` in the active profile's `config.yaml`; this is the supported path for third-party or self-hosted endpoints, while `minimax_api` stays reserved for the official MiniMax API. Relays that require `Authorization: Bearer` on an Anthropic-compatible endpoint can set custom headers in `config.yaml`; see [Third-party relays and custom auth headers](docs/examples.md#third-party-relays-and-custom-auth-headers).
+
 </details>
 
 ### 3. Run your first task

@@ -1463,6 +1463,8 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     'https://example-workspace.ap-northeast-1.maas.aliyuncs.com/compatible-mode/v1',
     'https://example-workspace.eu-central-1.maas.aliyuncs.com/compatible-mode/v1',
     'https://example-workspace.us-east-1.maas.aliyuncs.com/compatible-mode/v1',
+    'https://api.kimi.com/coding/v1',
+    'https://api.kimi.ai/coding/v1',
   ])('keeps the system role for a thinking model at %s', async (baseURL) => {
     expect(await systemPromptRoleFor(undefined, baseURL)).toBe('system');
   });
@@ -1478,6 +1480,8 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     ['https://gateway.example/token-plan.cn-beijing.maas.aliyuncs.com/v1', 'developer'],
     ['https://example-workspace.unknown-region.maas.aliyuncs.com/v1', 'developer'],
     ['https://example-workspace.cn-beijing.aliyuncs.com/v1', 'developer'],
+    ['https://api.kimi.com.example/v1', 'developer'],
+    ['https://gateway.example/api.kimi.com/coding/v1', 'developer'],
   ])('preserves the system prompt role for %s', async (baseURL, role) => {
     expect(await systemPromptRoleFor(undefined, baseURL)).toBe(role);
   });
@@ -1492,6 +1496,15 @@ describe('LocalModelResolver custom provider compat overrides', () => {
       await systemPromptRoleFor(
         { supportsDeveloperRole: true },
         baseURL,
+      ),
+    ).toBe('developer');
+  });
+
+  it('honors an explicit developer-role override on a Kimi Coding endpoint', async () => {
+    expect(
+      await systemPromptRoleFor(
+        { supportsDeveloperRole: true },
+        'https://api.kimi.com/coding/v1',
       ),
     ).toBe('developer');
   });

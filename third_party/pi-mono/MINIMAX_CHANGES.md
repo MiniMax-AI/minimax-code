@@ -22,6 +22,14 @@ No upstream source files are changed in the baseline import.
 - Upstream PR: not opened.
 - Validation: request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`, including official endpoints, unrelated hosts, and explicit compatibility overrides.
 
+### 2026-09-19 — preserve the system role for Kimi Coding
+
+- Reason: Kimi Coding endpoints were treated as supporting the `developer` role, causing thinking-enabled OpenAI-compatible conversations to send an unsupported system-prompt role.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), OpenAI Completions compatibility detection.
+- Change: default to the `system` role for `api.kimi.com` and `api.kimi.ai`. Preserve thinking, other request options, explicit compatibility overrides, and other providers.
+- Upstream PR: not opened.
+- Validation: offline request-payload regressions in `packages/local-runtime-v2/src/service/model-system/resolution/local-model-resolver.test.ts`. Live Kimi Coding validation requires a Coding Plan key and remains untested.
+
 ### 2026-08-31 — Windows PowerShell ConstrainedLanguage compatibility
 
 - Reason: the Windows PowerShell 5.1 stdin wrapper called `Parser.ParseInput`, `ScriptBlock.Create`, and other restricted .NET APIs before user commands. Under enterprise App Control / AppLocker `ConstrainedLanguage`, the wrapper therefore failed before commands such as Python could run.
