@@ -8,6 +8,10 @@ import {
   VStack,
   type Terminal,
 } from "../../src/tui/engine/public.js";
+import { createTuiProgram } from "../../src/cli/program.js";
+import { resolveTuiStartupEnvironmentOption } from "../../src/cli/environment.js";
+import { runTuiCli } from "../../src/cli/main.js";
+import { launchTui } from "../../src/tui/launcher.js";
 import { createTuiApp } from "../../src/tui/app.js";
 import type {
   TuiModel,
@@ -13172,5 +13176,241 @@ describe("createTuiApp", () => {
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("interactive CLI model startup", () => {
+  it.each([
+    [
+      "new with prompt",
+      ["-m", "custom_provider:relay/vendor/model#thinking", "hello"],
+      "session-1",
+      true,
+    ],
+    [
+      "new without prompt",
+      ["--model=custom_provider:relay/vendor/model#thinking"],
+      "session-1",
+      false,
+    ],
+    [
+      "explicit session",
+      ["--session", "existing", "--model", "custom_provider:relay/vendor/model#thinking", "hello"],
+      "existing",
+      true,
+    ],
+    [
+      "continue",
+      ["--continue", "--model", "custom_provider:relay/vendor/model#thinking", "hello"],
+      "existing",
+      true,
+    ],
+    [
+      "missing session",
+      ["--session", "missing", "-m", "custom_provider:relay/vendor/model#thinking", "hello"],
+      "missing",
+      false,
+    ],
+    [
+      "empty continue",
+      ["--continue", "-m", "custom_provider:relay/vendor/model#thinking", "hello"],
+      "existing",
+      false,
+    ],
+    ["invalid provider", ["--model", "missing/model", "hello"], "session-1", false],
+    ["invalid model", ["--model", "custom_provider:relay/missing", "hello"], "session-1", false],
+  ] as const)(
+    "routes %s through launch, hydration and submission",
+    async (_name, args, sessionId, hasPrompt) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "mcode-model-startup-"));
+      const terminal = new FakeTerminal();
+      const runtime = createRuntime();
+      runtime.listBackgroundTasks = vi.fn(async () => []);
+      const models = new Map<string, { providerId: string; modelId: string; variant?: string }>();
+      const requested = {
+        providerId: "custom_provider:relay",
+        modelId: "vendor/model",
+        variant: "thinking",
+      };
+      const existing = { sessionId: "existing", workspaceDir: "/workspace", updatedAt: 10 };
+      vi.mocked(runtime.listSessions).mockResolvedValue([existing]);
+      vi.mocked(runtime.listSessionPage).mockResolvedValue({
+        sessions: [existing],
+        hasMore: false,
+      });
+      vi.mocked(runtime.getSession).mockImplementation(async (id) => ({
+        sessionId: id,
+        workspaceDir: "/workspace",
+        model: models.get(id),
+      }));
+      const failedResume = _name === "missing session" || _name === "empty continue";
+      if (_name === "missing session")
+        vi.mocked(runtime.getSession).mockRejectedValue(new Error("Session not found"));
+      if (_name === "empty continue") vi.mocked(runtime.listSessions).mockResolvedValue([]);
+      runtime.selectModel = vi.fn(async () => true);
+      runtime.selectSessionModel = vi.fn(async (model, id) => {
+        if (model.providerId !== requested.providerId || model.modelId !== requested.modelId) {
+          throw new Error("Unknown provider or model");
+        }
+        models.set(id, model);
+        return true;
+      });
+      vi.mocked(runtime.listModels).mockImplementation(async (id) => [
+        { ...requested, name: "Startup model", selected: Boolean(id && models.has(id)) },
+      ]);
+      // A global managed default needs login; the selected BYOK Session does not.
+      vi.mocked(runtime.getAccountStatus).mockImplementation(async (id) => ({
+        status: id && models.has(id) ? "ready" : "needs-login",
+        modelSource: id && models.has(id) ? "byok" : "token-plan",
+        managedTokenPresent: false,
+        warnings: [],
+      }));
+      const sentModels: unknown[] = [];
+      vi.mocked(runtime.sendMessage).mockImplementation(async function* (request) {
+        sentModels.push(models.get(request.id));
+        yield { type: "delta", content: "offline reply" };
+        yield { type: "done" };
+      });
+      const invalid = _name.startsWith("invalid");
+      const stderr = vi.fn((_text: string, callback?: () => void) => callback?.());
+      const processRef = {
+        title: "test",
+        argv: ["node", "cli.js", ...args],
+        env: {},
+        versions: { node: "24.2.0" },
+        stdout: {
+          destroyed: false,
+          writableEnded: false,
+          write: vi.fn((_text: string, cb?: () => void) => cb?.()),
+        },
+        stderr: { destroyed: false, writableEnded: false, write: stderr },
+        exit: vi.fn(),
+        exitCode: 0,
+      };
+      let app: ReturnType<typeof createTuiApp> | undefined;
+      const running = runTuiCli({
+        processRef,
+        configureNetworkProxy: () => undefined,
+        launchTui: (input) =>
+          launchTui(
+            { ...input, dataDir, terminal, workspaceDir: "/workspace" },
+            {
+              createObservability,
+              readTelemetryEnabled: () => false,
+              installProcessGuards: () => () => undefined,
+              loadRuntimeLifecycle: async () => ({
+                createTuiRuntime: async () => ({ adapter: runtime }) as never,
+                shutdownTuiRuntime: async () => false,
+              }),
+              loadUpdateApplication: async () =>
+                ({ inspect: async () => ({ status: "up-to-date" }) }) as never,
+              createApp: (options) => {
+                app = createTuiApp({ ...options, productFeatures: { queue: false } });
+                return app;
+              },
+              writeExitMessage: () => undefined,
+            },
+          ),
+      });
+      try {
+        if (invalid) {
+          await running;
+          expect(processRef.exitCode).toBe(1);
+          expect(stderr.mock.calls.flat().join(" ")).toContain("Unknown provider or model");
+          expect(runtime.sendMessage).not.toHaveBeenCalled();
+        } else if (failedResume) {
+          await vi.waitFor(() => expect(app?.editor.disableSubmit).toBe(false));
+          expect(runtime.selectSessionModel).not.toHaveBeenCalled();
+          expect(runtime.createSession).not.toHaveBeenCalled();
+          expect(runtime.sendMessage).not.toHaveBeenCalled();
+        } else {
+          await vi.waitFor(() => {
+            expect(app?.editor.disableSubmit).toBe(false);
+            expect(app?.controller.snapshot().session?.model).toEqual(requested);
+            if (hasPrompt) expect(sentModels).toEqual([requested]);
+          });
+          expect(runtime.selectSessionModel).toHaveBeenCalledWith(requested, sessionId);
+          expect(app?.controller.snapshot().account?.modelSource).toBe("byok");
+          if (sessionId === "existing") expect(runtime.createSession).not.toHaveBeenCalled();
+          if (!hasPrompt) {
+            expect(runtime.sendMessage).not.toHaveBeenCalled();
+            await app?.submit("later prompt");
+            expect(sentModels).toEqual([requested]);
+          }
+          await vi.waitFor(() => expect(app?.controller.snapshot().status).toBe("idle"));
+          await app?.submit("/new");
+          expect(app?.controller.snapshot().session).toBeUndefined();
+          expect(runtime.selectSessionModel).toHaveBeenCalledOnce();
+        }
+        expect(runtime.selectModel).not.toHaveBeenCalled();
+      } finally {
+        await app?.stop();
+        await running;
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("interactive model argument contract", () => {
+  function program() {
+    const launch = vi.fn(async () => undefined);
+    const command = createTuiProgram({
+      version: "test",
+      launchTui: launch,
+      runExec: vi.fn(),
+      runLogin: vi.fn(),
+      runLogout: vi.fn(),
+      runUpdate: vi.fn(),
+    })
+      .exitOverride()
+      .configureOutput({ writeErr: () => undefined });
+    return { command, launch };
+  }
+
+  it.each(["-m", "--model"])("rejects missing values for %s", async (flag) => {
+    const { command, launch } = program();
+    await expect(command.parseAsync([flag], { from: "user" })).rejects.toThrow();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "bare-model", "provider/", "/model", "provider/model#"])(
+    "rejects malformed model %j before launch",
+    async (model) => {
+      const { command, launch } = program();
+      await expect(command.parseAsync(["--model", model], { from: "user" })).rejects.toThrow(
+        "--model must use provider/model",
+      );
+      expect(launch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a model with an untargeted Session picker", async () => {
+    const { command, launch } = program();
+    await expect(
+      command.parseAsync(["--session", "--model", "provider/model"], { from: "user" }),
+    ).rejects.toThrow("requires a Session id");
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("retains the default launch contract without a model", async () => {
+    const { command, launch } = program();
+    await command.parseAsync(["hello"], { from: "user" });
+    expect(launch).toHaveBeenCalledWith({ initialPrompt: "hello" });
+  });
+
+  it.each(["-m", "--model"])("scans startup environment after %s values", (flag) => {
+    expect(
+      resolveTuiStartupEnvironmentOption([flag, "provider/model", "--env", "staging"], true),
+    ).toBe("staging");
+    expect(() =>
+      resolveTuiStartupEnvironmentOption([flag, "provider/model", "--env", "prod"], false),
+    ).toThrow("only available");
+    expect(
+      resolveTuiStartupEnvironmentOption(
+        [flag, "provider/model", "exec", "--env", "staging"],
+        true,
+      ),
+    ).toBeUndefined();
   });
 });

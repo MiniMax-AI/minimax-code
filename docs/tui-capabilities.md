@@ -46,3 +46,22 @@ Every collected diagnostic artifact, including prioritized session artifacts, is
 There is no raw-attachment upload option in this flow. Prompts, conversation text, tool arguments/results, command output, workspace excerpts, raw errors and unknown fields are excluded even if they contain no recognizable credential pattern. This intentionally reduces diagnostic detail: reproducing an exact response or inspecting an original stack is not possible from these uploads. Future raw attachments would require a separate, explicit review and consent surface describing their contents and scope.
 
 The regression tests use temporary synthetic files and intercepted HTTP only. They decrypt the final automatic-report request as a receiver would, and unzip the actual feedback PUT body after real session-report collection. They do not validate production ingestion of the new schemas, retention policies, live services, other telemetry paths or other platforms.
+
+
+## Interactive startup model
+
+Use `mcode -m <provider-id>/<model-id>` or
+`mcode "Fix the failing tests" --model <provider-id>/<model-id>` to select the
+model for the startup Session. References use the same syntax as `exec --model`,
+including `custom_provider:<id>/<model-id>`, model IDs containing `/`, and the
+optional `#variant` suffix. The provider must already be configured and the model
+must be available to Runtime; invalid references fail before the initial prompt runs.
+
+Without a resume option, this creates a new Session even when no prompt is given.
+With `--session <id>` or `--continue`, it updates the opened Session's model before
+submitting the prompt. The selection is saved with that Session, so later turns
+and resumes keep it. It does not change the global default, and `/new` returns to
+the configured default. Omitting `--model` preserves existing startup behavior.
+The untargeted `--session` picker cannot be combined with `--model`; provide an ID
+or use `--continue` instead. If opening or continuing a Session fails, the override
+and initial prompt are not applied.
