@@ -1,4 +1,59 @@
-# Releasing a source preview
+# Releasing MiniMax Code
+
+## Tag-triggered CLI installation packages
+
+Push an immutable `vX.Y.Z` tag on a reviewed commit reachable from `main` to run
+`CLI release`. For example, after this workflow has landed:
+
+```bash
+git tag -a v0.4.13 <reviewed-commit> -m "MiniMax Code 0.4.13"
+git push origin v0.4.13
+```
+
+The tag is the release version. CI injects it into the built CLI and package
+manifest automatically; `mcode --version` and the tarball version match the tag.
+It does not create a version commit, move the tag, or push changes to `main`.
+The source manifests retain the shared-source baseline version until a reviewed
+source update changes them.
+
+The workflow runs the full verification profile and secret scans, builds one
+`minimax-code-X.Y.Z.tar.gz` npm installation package, and authenticates and installs
+that same archive on Linux and macOS with Node 22.19.0, 24.2.0, 25 and 26. Each
+installation checks the generated `mcode` launcher, native SQLite, ripgrep, and
+the offline smoke/BYOK suites. Windows validation remains paused.
+
+Only after every installation succeeds does CI create a GitHub Release with the
+archive and its `.sha256` checksum. Tags such as `v0.4.13-rc.1` create prereleases.
+Release creation starts as a draft; assets are uploaded before it becomes public.
+Existing releases are never overwritten. If publication fails after draft
+creation, inspect the draft and workflow artifacts before deciding whether to
+finish publication manually or delete only the incomplete draft and rerun.
+Never move an already distributed tag to different code.
+
+To exercise this workflow without publication, dispatch `CLI release` on a
+selected branch with a version tag as input. A manual dispatch only builds and
+validates Actions artifacts, even when the requested tag already exists.
+PRs that change release tooling also run the build/install matrix with the
+synthetic version `0.0.0-ci`, without creating a tag or publishing a release.
+
+To reproduce the packaging and installation checks locally, use a clean reviewed
+commit and keep output outside the repository:
+
+```bash
+export MCODE_RELEASE_TAG=v0.4.13-rc.1
+pnpm verify
+node scripts/package-cli-release.mjs "$MCODE_RELEASE_TAG" /tmp/mcode-release
+MCODE_RELEASE_ARCHIVE=/tmp/mcode-release/minimax-code-0.4.13-rc.1.tar.gz pnpm verify --profile package
+```
+
+The `package` profile validates installation of an existing archive; it does not
+replace full source verification. The archive includes the compiled CLI, runtime
+assets, licenses and a `release.json` source receipt. npm installs external runtime
+dependencies, including native dependencies, for the user's platform. It does not
+include Node.js and is not an offline bundle. See [installation](installation.md#install-a-github-release-archive).
+This workflow does not publish to the npm registry or change the official installer.
+
+## Source previews
 
 The current source target is MiniMax Code 0.4.12. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication. A source release, npm package, and installer are separate artifacts with separate verification.
 

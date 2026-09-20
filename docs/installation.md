@@ -1,4 +1,35 @@
-# Install from source
+# Installation packages and source builds
+
+## Install a GitHub release archive
+
+When a CLI release is available on [GitHub Releases](https://github.com/MiniMax-AI/minimax-code/releases),
+download `minimax-code-X.Y.Z.tar.gz` and the matching `.sha256` file. This is an npm
+installation package containing the built CLI; no source build or pnpm is needed.
+Install Node.js 22.19+ (22.x), 24.2+ (24.x), 25 or 26 first. npm still needs network
+access to public npm for runtime dependencies. Native dependencies can require
+Python and C/C++ build tools when no matching prebuilt binary is available.
+
+For example, for an available `v0.4.13` release:
+
+```bash
+# Linux; on macOS use: shasum -a 256 -c minimax-code-0.4.13.tar.gz.sha256
+sha256sum -c minimax-code-0.4.13.tar.gz.sha256
+npm install --global ./minimax-code-0.4.13.tar.gz --registry=https://registry.npmjs.org/ --include=optional --ignore-scripts=false --allow-scripts=better-sqlite3
+mcode --version
+```
+
+Keep optional dependencies enabled and allow the native SQLite installation
+script. The tag determines the installed version. GitHub archive installation is
+validated on Linux and macOS; Windows package acceptance is currently not run.
+
+This archive uses the same `@minimax-ai/code` package name, `mcode` command and
+default user data directory as the official npm CLI. Installing it globally into
+the same npm prefix replaces that npm installation. Update to another GitHub
+version by explicitly installing its archive; the built-in updater follows the
+official npm registry channel and does not select GitHub release assets. To remove
+the package, use `npm uninstall --global @minimax-ai/code`. User data remains in place.
+
+## Install from source
 
 The official CLI is available as [`@minimax-ai/code`](https://www.npmjs.com/package/@minimax-ai/code). Public npm `latest` was 0.4.12 on 2026-09-18. Follow the [official quick start](https://agent.minimax.io/docs/cli/quick-start) or the [README installation steps](../README.md#quick-start) for the macOS / Linux / WSL installer, Windows PowerShell installer, or npm installation.
 

@@ -17,7 +17,7 @@ import Database from "better-sqlite3";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
-const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const cli = process.env.MCODE_TEST_CLI ?? fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 // This fixture validates BYOK transport and real Runtime persistence, not model quality.
 test(
   "BYOK runs without managed login and resumes its saved conversation",

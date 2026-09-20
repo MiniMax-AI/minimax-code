@@ -33,6 +33,7 @@ suites are outside this distribution's verification.
 | Permission facade on macOS/Linux | `pnpm test:policy` |
 | Sandbox on macOS | `pnpm test:sandbox` |
 | Source-sync, workflow and release tools | `pnpm test:release-tools` |
+| npm release archive installation | `MCODE_RELEASE_TAG=vX.Y.Z MCODE_RELEASE_ARCHIVE=/path/to/package.tar.gz pnpm verify --profile package` |
 | Types and standalone build boundary | `pnpm typecheck`, `pnpm build`, `pnpm check:standalone` |
 | Published files and generated paths | `pnpm check:source`, `pnpm check:tsconfig` |
 
@@ -60,6 +61,12 @@ profile only when every changed path qualifies under `scripts/ci-changes.mjs`.
 Skills under `.agents/skills`, unknown paths and inventory changes require the
 full profile. The `archive` profile is for source-archive validation, not a way to
 bypass the clean-commit export requirement.
+
+The `package` profile authenticates an npm release archive, installs it into a
+temporary npm prefix, and exercises its launcher, native dependencies and offline
+smoke/BYOK suites. It requires `MCODE_RELEASE_TAG` and `MCODE_RELEASE_ARCHIVE` and
+does not replace source validation. The release workflow builds with the tag
+version and runs the full profile before package installation checks.
 
 ## Manual evidence and reporting
 

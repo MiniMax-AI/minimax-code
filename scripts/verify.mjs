@@ -25,8 +25,10 @@ const { values } = parseArgs({
   },
 });
 const profile = values.profile;
-if (!["full", "platform", "docs", "archive"].includes(profile))
+if (!["full", "platform", "docs", "archive", "package"].includes(profile))
   throw new Error(`Unknown verification profile: ${profile}`);
+if (profile === 'package' && !['darwin', 'linux'].includes(process.platform))
+  throw new Error('Package verification currently supports Linux and macOS only.');
 // Listing must not leave a temporary export directory behind.
 const temporary = values.list
   ? undefined
@@ -61,9 +63,17 @@ const steps = [
   },
   // Seatbelt sandbox backend; only macOS provides the native helper.
   { name: "test:sandbox", script: "test:sandbox", platforms: ["darwin"] },
+  {
+    name: "test:release-package",
+    command: ['scripts/verify-cli-release.mjs'],
+    packageOnly: true,
+    platforms: ['darwin', 'linux'],
+  },
 ];
 
 function skipReason(step) {
+  if (profile === 'package' && !step.packageOnly) return 'validating an npm release archive';
+  if (profile !== 'package' && step.packageOnly) return 'requires an npm release archive';
   if (profile === "docs" && !step.docs) return "documentation-only change";
   if (profile === "archive" && step.requiresGit)
     return "validating an already exported archive";
