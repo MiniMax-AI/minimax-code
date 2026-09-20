@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { parse as parseYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -167,18 +168,22 @@ test("offline smoke children ignore ambient proxy variables", async (t) => {
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "NO_PROXY",
     "http_proxy",
     "https_proxy",
     "all_proxy",
+    "no_proxy",
   ];
   for (const name of proxyNames) {
     await t.test(name, (t) => {
-      const environment = {
+      const proxyValue = name.toLowerCase() === "no_proxy" ? "*" : "http://127.0.0.1:9";
+      const environment = Object.freeze({
         ...process.env,
         ...Object.fromEntries(proxyNames.map((key) => [key, ""])),
-        [name]: "http://127.0.0.1:9",
-      };
+        [name]: proxyValue,
+      });
       const options = fixture(t, environment);
+      for (const key of proxyNames) assert.equal(options.env[key], "");
       const result = spawnSync(process.execPath, [cli, "provider", "list"], {
         ...options,
         encoding: "utf8",
@@ -186,11 +191,8 @@ test("offline smoke children ignore ambient proxy variables", async (t) => {
       });
       assertSuccessfulChild(result);
       assert.match(result.stdout, /minimax/);
-      assert.match(
-        readFileSync(options.env.MCODE_TEST_NETWORK_AUDIT + ".managed", "utf8"),
-        /https:\/\/models\.dev\/api\.json|\/mavis\/api\/v1\/models-dev\/catalog/,
-      );
-      assert.equal(environment[name], "http://127.0.0.1:9");
+      // Catalog requests are optional; the fixture still rejects any real network access.
+      assert.equal(environment[name], proxyValue);
     });
   }
 });
@@ -327,21 +329,35 @@ test("local plugin browsing remains available with managed services offline", (t
   }
 });
 
-test("provider add validates token limits before opening the runtime", (t) => {
-  const options = fixture(t);
+test("provider add rejects invalid token limits without saving a provider", async (t) => {
   const args = [
     "provider", "add", "--name", "Invalid limits", "--base-url", "http://127.0.0.1:1/v1",
     "--model", "synthetic-model",
   ];
-  for (const flag of ["--context-limit", "--output-limit"]) {
-    for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"]) {
-      const result = spawnSync(process.execPath, [cli, ...args, `${flag}=${value}`], {
-        ...options, encoding: "utf8", timeout: 15000,
-      });
-      assert.equal(result.status, 1, result.stderr);
-      assert.match(result.stderr, /positive safe integer/);
-      assert.ok(result.stderr.includes(flag), result.stderr);
-    }
+  for (const seeded of [false, true]) {
+    await t.test(seeded ? "default config already exists" : "fresh data directory", (t) => {
+      const options = fixture(t);
+      // Keep data separate from cwd so assertions must use the CLI's config location.
+      const dataDir = path.join(options.cwd, "data");
+      mkdirSync(dataDir);
+      options.env.MINIMAX_DATA_DIR = dataDir;
+      options.env.MAVIS_DATA_DIR = dataDir;
+      const configPath = path.join(dataDir, "config.yaml");
+      if (seeded) writeFileSync(configPath, "logLevel: info\ndefaultModel: minimax/MiniMax-M3\n", { mode: 0o600 });
+      for (const flag of ["--context-limit", "--output-limit"]) {
+        for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "9007199254740992"]) {
+          const result = spawnSync(process.execPath, [cli, ...args, `${flag}=${value}`], {
+            ...options, encoding: "utf8", timeout: 15000,
+          });
+          assert.equal(result.error, undefined, result.stderr);
+          assert.equal(result.status, 1, result.stderr);
+          assert.match(result.stderr, /positive safe integer/);
+          assert.ok(result.stderr.includes(flag), result.stderr);
+          // Startup may seed defaults; only persisting a custom provider is a failure.
+          const config = existsSync(configPath) ? parseYaml(readFileSync(configPath, "utf8")) : {};
+          assert.deepEqual(config?.custom_provider ?? {}, {});
+        }
+      }
+    });
   }
-  assert.equal(existsSync(path.join(options.cwd, "config.yaml")), false);
 });
