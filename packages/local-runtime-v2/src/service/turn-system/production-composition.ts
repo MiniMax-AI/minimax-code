@@ -855,8 +855,16 @@ function adaptCanonicalHistory(
         identityVector: snapshot.identityVector,
       };
     },
-    append: (change) => provider.append(requireHistoryOperation(change)),
-    replace: (change) => provider.replace(requireHistoryOperation(change)),
+    append: async (change) => {
+      const committed = await provider.append(requireHistoryOperation(change));
+      validateCanonicalHistoryMessages(committed.messages);
+      return { ...committed, messages: committed.messages };
+    },
+    replace: async (change) => {
+      const committed = await provider.replace(requireHistoryOperation(change));
+      validateCanonicalHistoryMessages(committed.messages);
+      return { ...committed, messages: committed.messages };
+    },
     compact: async (change: CanonicalHistoryCompactionChange) => {
       const operation = requireHistoryOperation(change);
       if (operation.reason !== 'replaceMessages' || operation.operation.kind !== 'compaction') {
@@ -875,14 +883,20 @@ function adaptCanonicalHistory(
           : { currentUserSourceIndex: metadata.currentUserSourceIndex }),
       } as const;
       if (metadata.method !== 'llm_checkpoint') {
-        await provider.compact({
+        const committed = await provider.compact({
           ...baseChange,
           method: metadata.method,
           replacementSourceIndexes: metadata.replacementSourceIndexes,
         });
-        return;
+        validateCanonicalHistoryMessages(committed.messages);
+        return { ...committed, messages: committed.messages };
       }
-      await provider.compact({ ...baseChange, method: metadata.method });
+      const committed = await provider.compact({
+        ...baseChange,
+        method: metadata.method,
+      });
+      validateCanonicalHistoryMessages(committed.messages);
+      return { ...committed, messages: committed.messages };
     },
     settleTurnTail: async (input) => {
       if (!mutation.settleTurnTail) {

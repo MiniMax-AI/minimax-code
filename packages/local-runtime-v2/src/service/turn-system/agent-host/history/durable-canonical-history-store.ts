@@ -27,9 +27,10 @@ export interface DurableCanonicalHistoryProvider {
   read(sessionId: string): Promise<CanonicalHistorySnapshot>;
   /** Active post-mutation history; the final tool round may still await results. */
   readActive(sessionId: string): Promise<CanonicalHistorySnapshot>;
-  append(change: CanonicalHistoryChange): Promise<unknown>;
-  replace(change: CanonicalHistoryChange): Promise<unknown>;
-  compact?(change: CanonicalHistoryCompactionChange): Promise<unknown>;
+  /** Return the verified post-write snapshot from the same lane, or request a reread with void. */
+  append(change: CanonicalHistoryChange): Promise<CanonicalHistorySnapshot | void>;
+  replace(change: CanonicalHistoryChange): Promise<CanonicalHistorySnapshot | void>;
+  compact?(change: CanonicalHistoryCompactionChange): Promise<CanonicalHistorySnapshot | void>;
   settleTurnTail?(mutation: SettleTurnTailMutation): Promise<TurnHistoryMutationCommit>;
   retractTurn?(mutation: RetractTurnMutation): Promise<TurnHistoryMutationCommit>;
 }
@@ -102,13 +103,17 @@ export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
   private commit(
     kind: 'append' | 'replace',
     change: CanonicalHistoryChange,
-    mutate: (snapshot: CanonicalHistoryChange) => Promise<unknown>,
+    mutate: (snapshot: CanonicalHistoryChange) => Promise<CanonicalHistorySnapshot | void>,
   ): Promise<CanonicalHistoryCommit> {
     const snapshot = captureSemanticSnapshot(change).value;
     validateCanonicalHistoryChange(snapshot, kind);
     return this.lane.run(snapshot.sessionId, async () => {
-      await mutate(snapshot);
-      return this.readActiveCommitted(snapshot.sessionId);
+      const committed = await mutate(snapshot);
+      // Session-owned providers already reread and validate inside their lane.
+      // Legacy adapters returning void retain the strict post-write read.
+      return committed === undefined
+        ? this.readActiveCommitted(snapshot.sessionId)
+        : this.readProviderSnapshot(committed);
     });
   }
 

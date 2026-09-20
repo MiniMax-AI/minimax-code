@@ -199,8 +199,15 @@ function getLastAssistantUsageInfo(
   return undefined;
 }
 
+const MAX_CACHED_TEXT_UNITS = 1_048_576;
+const MAX_CACHED_TEXT_ENTRIES = 2_048;
+
 export class BpeTokenEstimator implements TokenEstimator {
   private readonly countExactTokens: (text: string) => number;
+  // Content keys remain valid across detached histories, edits and model
+  // projections. Bound retained UTF-16 text as well as entry count.
+  private readonly textTokens = new Map<string, number>();
+  private cachedTextUnits = 0;
 
   /**
    * @param encoder Override the default o200k_base tokenizer. Tests inject
@@ -222,12 +229,29 @@ export class BpeTokenEstimator implements TokenEstimator {
 
   estimateTextTokens(text: string): number {
     if (!text) return 0;
+    const cached = this.textTokens.get(text);
+    if (cached !== undefined) {
+      this.textTokens.delete(text);
+      this.textTokens.set(text, cached);
+      return cached;
+    }
     try {
       if (text.length > MAX_EXACT_TOKENIZER_CHARS && hasOversizedAlphanumericRun(text)) {
         return estimateTextTokensUpperBound(text);
       }
       const tokens = this.countExactTokens(text);
-      return Number.isFinite(tokens) && tokens >= 0 ? tokens : estimateTextTokensUpperBound(text);
+      if (!Number.isFinite(tokens) || tokens < 0) return estimateTextTokensUpperBound(text);
+      if (text.length <= MAX_CACHED_TEXT_UNITS) {
+        while (this.textTokens.size >= MAX_CACHED_TEXT_ENTRIES || this.cachedTextUnits + text.length > MAX_CACHED_TEXT_UNITS) {
+          const oldest = this.textTokens.keys().next().value;
+          if (oldest === undefined) break;
+          this.textTokens.delete(oldest);
+          this.cachedTextUnits -= oldest.length;
+        }
+        this.textTokens.set(text, tokens);
+        this.cachedTextUnits += text.length;
+      }
+      return tokens;
     } catch {
       return estimateTextTokensUpperBound(text);
     }

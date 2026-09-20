@@ -305,7 +305,7 @@ export function createSessionSystemCanonicalHistoryProvider(
             `Canonical compaction generation verification failed: ${change.sessionId}`,
           );
         }
-        await syncIndex(change.sessionId, paths, true);
+        await syncIndex(change.sessionId, paths, true, committed);
         const result = {
           revision: canonicalActiveHistoryRevision(committed),
           generation: committedGeneration,
@@ -335,7 +335,7 @@ export function createSessionSystemCanonicalHistoryProvider(
       }
       options.activity?.notify(sessionId);
     }
-    await syncIndex(sessionId, paths, true);
+    await syncIndex(sessionId, paths, true, records);
     return historySnapshot(records, allowPendingToolCallTail);
   }
 
@@ -372,8 +372,9 @@ export function createSessionSystemCanonicalHistoryProvider(
     sessionId: string,
     paths: SessionHistoryPaths,
     allowMissingParent = false,
+    verifiedRecords?: readonly CanonicalHistoryEnvelope[],
   ): Promise<void> {
-    const active = await files.readActiveStrict(paths.messages);
+    const active = verifiedRecords ?? (await files.readActiveStrict(paths.messages));
     const adapter = indexes.get(sessionId) ?? createCanonicalHistoryIndexAdapter(paths.sessionDir);
     indexes.set(sessionId, adapter);
     try {

@@ -144,7 +144,8 @@
       "packages/config/test/config-file-permissions.test.ts",
       "packages/config/test/config-update-preservation.test.ts",
       "packages/agent-modules/context-manager/test/compaction-usage.test.ts",
-      "packages/local-runtime/test/unit/session-diff-fallback.test.ts"
+      "packages/local-runtime/test/unit/session-diff-fallback.test.ts",
+      "test/history-processing.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
