@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import fs, { existsSync, readFileSync } from 'node:fs';
+import fs from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import yaml from 'js-yaml';
@@ -277,13 +277,21 @@ async function atomicWriteFile(filePath: string, content: string): Promise<void>
 }
 
 function readLocalRawConfig(configPath: string): Record<string, unknown> {
-  if (!existsSync(configPath)) return {};
+  // Callers create missing files before locking. A read failure must abort the
+  // update rather than turn an existing configuration into an empty document.
+  const source = fs.readFileSync(configPath, 'utf-8');
+  let parsed: unknown;
   try {
-    const parsed = yaml.load(readFileSync(configPath, 'utf-8'));
-    return isPlainRecord(parsed) ? parsed : {};
+    parsed = yaml.load(source);
   } catch {
-    return {};
+    // YAML errors include source snippets, which may contain credentials.
+    throw new LocalModelProviderConfigValidationError('Invalid config.yaml: unable to parse YAML');
   }
+  if (parsed == null) return {};
+  if (!isPlainRecord(parsed) || Object.getPrototypeOf(parsed) !== Object.prototype) {
+    throw new LocalModelProviderConfigValidationError('Invalid config.yaml: expected a YAML mapping');
+  }
+  return parsed;
 }
 
 function withoutEmptyEntries(
