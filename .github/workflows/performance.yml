@@ -8,16 +8,22 @@ on:
         required: true
         default: main
         type: string
+      suite:
+        description: Performance suite (full includes startup and long history)
+        required: true
+        default: full
+        type: choice
+        options: [full, basic]
 permissions:
   contents: read
 concurrency:
-  group: performance-${{ github.ref }}
+  group: performance-${{ github.event_name }}-${{ inputs.suite || 'basic' }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   performance:
-    name: performance
+    name: performance (${{ inputs.suite || 'basic' }})
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.suite == 'full' && 45 || 15 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -60,12 +66,14 @@ jobs:
         working-directory: benchmark
         run: bun install --frozen-lockfile
       - name: Compare on this runner
-        run: node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --out "$RUNNER_TEMP/performance"
+        env:
+          PERF_SUITE: ${{ inputs.suite || 'basic' }}
+        run: node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --suite "$PERF_SUITE" --out "$RUNNER_TEMP/performance"
       - name: Upload performance evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: performance-${{ github.run_attempt }}
+          name: performance-${{ inputs.suite || 'basic' }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/performance/
           include-hidden-files: true
           retention-days: 14

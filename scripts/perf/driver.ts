@@ -25,7 +25,7 @@ const proxy = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
     requests++;
     const start = performance.now();
     let error: string | undefined;
-    try { validateRequest(JSON.parse(new TextDecoder().decode(bytes)), scenario.responses, requests, workspace); }
+    try { validateRequest(JSON.parse(new TextDecoder().decode(bytes)), scenario.responses, requests, workspace, cfg.prompt); }
     catch (failure) { error = String(failure); auditFailure ??= error; }
     appendFileSync(join(input.directory, 'requests.jsonl'), JSON.stringify({ request: requests,
       bytes: bytes.byteLength, validationMs: performance.now() - start, ok: !error, ...(error ? { error } : {}) }) + '\n');

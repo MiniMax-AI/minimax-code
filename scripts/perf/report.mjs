@@ -4,6 +4,17 @@ import { realpathSync } from 'node:fs';
 const textContent = content => typeof content === 'string' ? content : Array.isArray(content)
   ? content.filter(b => b.type === 'text').map(b => b.text).join('') : '';
 
+export function selectScenarios(config, { suite = 'basic', scenario } = {}) {
+  assert.ok(Object.hasOwn(config.suites, suite), 'Unknown performance suite');
+  const ids = scenario ? [scenario] : config.suites[suite];
+  assert.ok(ids.length > 0 && new Set(ids).size === ids.length, 'Invalid scenario selection');
+  return ids.map(id => {
+    const selected = config.scenarios.find(item => item.id === id);
+    assert.ok(selected, `Unknown scenario: ${id}`);
+    return selected;
+  });
+}
+
 export function validateToolOutput(content, command, workspace) {
   const text = textContent(content).trim();
   if (command.startsWith('echo ')) assert.equal(text, command.slice(5), 'Echo result changed');
@@ -12,10 +23,19 @@ export function validateToolOutput(content, command, workspace) {
   else throw new Error('Unknown benchmark command');
 }
 
-export function validateRequest(body, responses, requestNumber, workspace) {
+export function validateRequest(body, responses, requestNumber, workspace, prompt) {
   const rounds = requestNumber - 1;
   assert.ok(rounds >= 0 && rounds < responses.length - 1, 'Unexpected request');
   assert.ok(Array.isArray(body.messages), 'Request messages missing');
+  assert.ok(typeof prompt === 'string' && prompt.length > 0, 'Expected task missing');
+  const conversation = body.messages.filter(m => m.role !== 'system' && m.role !== 'developer');
+  assert.equal(conversation.length, 1 + rounds * 2, 'Request conversation length changed');
+  assert.equal(conversation[0]?.role, 'user', 'Initial user task missing');
+  assert.ok(textContent(conversation[0].content).includes(prompt), 'Initial user task changed');
+  for (let i = 0; i < rounds; i++) {
+    assert.equal(conversation[i * 2 + 1].role, 'assistant', 'Request conversation order changed');
+    assert.equal(conversation[i * 2 + 2].role, 'tool', 'Request conversation order changed');
+  }
   const assistant = body.messages.filter(m => m.role === 'assistant');
   const tools = body.messages.filter(m => m.role === 'tool');
   assert.equal(assistant.length, rounds, 'Request lost assistant history');
@@ -109,6 +129,7 @@ export function renderReport(report) {
     `| Benchmark | [${report.benchmarkRevision}](${report.benchmarkRepository}/tree/${report.benchmarkRevision}) |`,
     `| Machine | ${report.host.cpuModel}; ${report.host.cpus} CPUs; ${Math.round(report.host.totalMemBytes / 2 ** 30)} GiB; ${report.host.platform} ${report.host.osRelease}; ${report.host.arch} |`,
     `| Runtime | Node ${report.nodeVersion}; Bun ${report.bunVersion} |`,
+    `| Suite | ${report.suite}; ${report.selectedScenarios.join(', ')} |`,
     `| Method | One warmup per revision/scenario; three alternating serial pairs; 100 ms process-tree rusage sampling |`,
     '', '| Scenario | Metric | Base median | Candidate median | Change | Result |',
     '| --- | --- | ---: | ---: | ---: | --- |'];

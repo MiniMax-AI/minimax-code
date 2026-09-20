@@ -18,7 +18,22 @@ import { cliBuildVersion, cliExternalModules, cliReleaseTargets, versionFromTag 
 import { releaseManifest } from '../scripts/package-cli-release.mjs';
 import { validateReleaseReports } from '../scripts/publish-cli-release.mjs';
 import { compareVersions, releaseCli } from '../scripts/release-cli.mjs';
-import { compareRuns, validateRun, validateRequest, validateToolOutput, median } from '../scripts/perf/report.mjs';
+import { compareRuns, validateRun, validateRequest, validateToolOutput, median, selectScenarios } from '../scripts/perf/report.mjs';
+
+test('performance defaults to the 100-round suite; long history requires explicit selection', () => {
+  const config = JSON.parse(readFileSync(new URL('../scripts/perf/config.json', import.meta.url), 'utf8'));
+  assert.deepEqual(selectScenarios(config).map(s => s.id), ['upstream-100']);
+  assert.deepEqual(selectScenarios(config, { suite: 'full' }).map(s => s.id), ['startup', 'upstream-100', 'history-300']);
+  assert.deepEqual(selectScenarios(config, { scenario: 'startup' }).map(s => s.id), ['startup']);
+  assert.throws(() => selectScenarios(config, { suite: 'typo' }));
+  assert.throws(() => selectScenarios(config, { scenario: 'typo' }));
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/performance.yml', import.meta.url), 'utf8'));
+  assert.equal(workflow.on.workflow_dispatch.inputs.suite.default, 'full');
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.suite.options, ['full', 'basic']);
+  const compare = workflow.jobs.performance.steps.find(s => s.name === 'Compare on this runner');
+  assert.equal(compare.env.PERF_SUITE, "${{ inputs.suite || 'basic' }}");
+  assert.match(compare.run, /--suite "\$PERF_SUITE"/);
+});
 
 test('performance request audit rejects truncated wire history and empty tool results', () => {
   const responses = [
@@ -28,13 +43,17 @@ test('performance request audit rejects truncated wire history and empty tool re
   const messages = [{ role: 'user', content: 'task' },
     { role: 'assistant', content: 'full history', tool_calls: [{ id: 'call_long_run_1', function: { name: 'bash', arguments: '{"command":"ls"}' } }] },
     { role: 'tool', tool_call_id: 'call_long_run_1', content: 'README.txt\n' }];
-  assert.doesNotThrow(() => validateRequest({ messages }, responses, 2, process.cwd()));
-  assert.throws(() => validateRequest({ messages: messages.slice(0, 1) }, responses, 2, process.cwd()), /lost assistant history/);
+  assert.doesNotThrow(() => validateRequest({ messages }, responses, 2, process.cwd(), 'task'));
+  assert.throws(() => validateRequest({ messages: messages.slice(0, 1) }, responses, 2, process.cwd(), 'task'), /conversation length/);
+  assert.throws(() => validateRequest({ messages: [] }, responses, 1, process.cwd(), 'task'), /conversation length/);
+  assert.throws(() => validateRequest({ messages: [messages[0], messages[2], messages[1]] }, responses, 2, process.cwd(), 'task'), /order changed/);
+  assert.throws(() => validateRequest({ messages: [{ role: 'user', content: 'wrong' }] }, responses, 1, process.cwd(), 'task'), /task changed/);
+  assert.doesNotThrow(() => validateRequest({ messages: [messages[0]] }, responses, 1, process.cwd(), 'task'));
   const changed = structuredClone(messages);
   changed[1].content = 'shortened';
-  assert.throws(() => validateRequest({ messages: changed }, responses, 2, process.cwd()), /body changed/);
+  assert.throws(() => validateRequest({ messages: changed }, responses, 2, process.cwd(), 'task'), /body changed/);
   changed[1].content = 'full history'; changed[2].content = '';
-  assert.throws(() => validateRequest({ messages: changed }, responses, 2, process.cwd()), /lost fixture/);
+  assert.throws(() => validateRequest({ messages: changed }, responses, 2, process.cwd(), 'task'), /lost fixture/);
   assert.throws(() => validateToolOutput([], 'ls', process.cwd()), /lost fixture/);
   assert.throws(() => validateToolOutput('wrong', 'echo expected', process.cwd()), /Echo/);
   assert.throws(() => validateToolOutput('/wrong', 'pwd', process.cwd()), /directory/);

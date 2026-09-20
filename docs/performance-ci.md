@@ -1,8 +1,14 @@
 # Performance CI
 
-Every PR runs `performance`: the base and head SHAs build separately, then run
-serially on one `macos-15` runner with Node 22.23.2 and Bun 1.4.2. Manual dispatch
-accepts a baseline ref. Build and installation time are excluded.
+Every PR automatically runs `performance (basic)`: only the original 100-round
+scenario. Performance optimization PRs can run the full suite manually. Both
+revisions build separately, then run serially on one `macos-15` runner with Node
+22.23.2 and Bun 1.4.2. Build and installation time are excluded.
+
+| Mode | Trigger | Scenarios | Job timeout |
+| --- | --- | --- | --- |
+| `basic` | Every PR; optional manual run | `upstream-100` | 15 minutes |
+| `full` | Manual only | Startup, `upstream-100`, `history-300` | 45 minutes |
 
 | Scenario | Input | Purpose |
 | --- | --- | --- |
@@ -42,7 +48,7 @@ needs another clean measurement; it is neither a confirmed regression nor a pass
 Tune budgets from repeated same-revision measurements. Review changes to
 scenarios, comparison logic or limits as changes to the performance contract.
 The workflow does not change branch protection; maintainers can add
-`performance` as a required check after runner calibration.
+`performance (basic)` as a required check after runner calibration.
 
 The Job Summary contains machine/method and comparison tables. The 14-day
 artifact includes JSON results, configuration, commit and fixture hashes,
@@ -60,7 +66,11 @@ node scripts/perf/run.mjs --base /path/to/base --head /path/to/head \
   --benchmark /path/to/pinned-benchmark --out /tmp/new-performance-output
 ```
 
-The output directory must be new. Use `--scenario startup` for focused checks;
-the PR workflow always runs every declared scenario. It uses read-only
+The output directory must be new. The CLI defaults to `--suite basic`; pass
+`--suite full` explicitly for the complete suite or `--scenario startup` for a
+focused local check. Once the workflow is merged into the default branch, open
+**Actions → Performance → Run workflow**, choose the PR branch, set the baseline
+ref, and select `full` for long-history testing. Manual runs use a separate
+concurrency group and do not cancel automatic PR checks. The workflow uses read-only
 permissions and `pull_request`, without comments or secrets. See GitHub's
 [event security guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).

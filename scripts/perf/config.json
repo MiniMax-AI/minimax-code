@@ -5,6 +5,10 @@
   "repetitions": 3,
   "intervalMs": 100,
   "maxSpread": 0.3,
+  "suites": {
+    "basic": ["upstream-100"],
+    "full": ["startup", "upstream-100", "history-300"]
+  },
   "thresholds": {
     "durationMs": {
       "relative": 0.25,

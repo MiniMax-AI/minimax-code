@@ -55,7 +55,7 @@ Test files are declared in `test/vitest-suites.json`, grouped by the gate that r
 
 Review added or removed files before running `node scripts/source-inventory.mjs --write`. Updating the inventory must not bypass checks for private protocols, internal addresses, credentials, or third-party licensing. Before a source release, also scan the complete Git history with Gitleaks; see the [release process](docs/releasing.md).
 
-PRs also run the [performance comparison](docs/performance-ci.md): a pinned upstream benchmark plus startup and long-history fixtures, comparing base/head on the same runner. Raw evidence and machine configuration accompany the check.
+PRs also run the [performance comparison](docs/performance-ci.md): the pinned 100-round upstream benchmark automatically, with startup and long-history fixtures available through the manual full suite. Both compare base/head on the same runner. Raw evidence and machine configuration accompany the check.
 
 ## Capability boundaries
 

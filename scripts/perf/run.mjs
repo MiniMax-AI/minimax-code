@@ -5,13 +5,14 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
-import { compareRuns, renderReport } from './report.mjs';
+import { compareRuns, renderReport, selectScenarios } from './report.mjs';
 
 const control = fileURLToPath(new URL('../../', import.meta.url));
 const config = JSON.parse(readFileSync(new URL('./config.json', import.meta.url), 'utf8'));
 const { values } = parseArgs({ options: {
   base: { type: 'string' }, head: { type: 'string' }, benchmark: { type: 'string' },
   out: { type: 'string' }, scenario: { type: 'string' },
+  suite: { type: 'string', default: 'basic' },
 }, strict: true });
 for (const name of ['base', 'head', 'benchmark', 'out']) {
   if (!values[name]) throw new Error(`Missing --${name}`);
@@ -24,15 +25,14 @@ const git = (directory, ...args) => execFileSync('git', ['-C', directory, ...arg
 if (git(benchmark, 'rev-parse', 'HEAD') !== config.benchmarkRevision) throw new Error('Wrong benchmark revision');
 if (git(benchmark, 'status', '--porcelain', '--untracked-files=no')) throw new Error('Benchmark has tracked edits');
 const bun = execFileSync('which', ['bun'], { encoding: 'utf8' }).trim();
-const scenarios = config.scenarios.filter(s => !values.scenario || s.id === values.scenario);
-if (!scenarios.length) throw new Error('Unknown scenario');
+const scenarios = selectScenarios(config, values);
 mkdirSync(out, { recursive: true });
 const report = {
   status: 'RUNNING', baseRevision: git(base, 'rev-parse', 'HEAD'), headRevision: git(head, 'rev-parse', 'HEAD'),
   benchmarkRepository: config.benchmarkRepository, benchmarkRevision: config.benchmarkRevision,
   nodeVersion: process.version, bunVersion: execFileSync(bun, ['--version'], { encoding: 'utf8' }).trim(),
   host: { cpuModel: cpus()[0]?.model, cpus: cpus().length, totalMemBytes: totalmem(), platform: platform(), osRelease: release(), arch: arch() },
-  config, selectedScenarios: scenarios.map(s => s.id), results: [],
+  config, suite: values.scenario ? 'focused' : values.suite, selectedScenarios: scenarios.map(s => s.id), results: [],
   builds: Object.fromEntries([['base', base], ['head', head]].map(([name, directory]) => [name, {
     path: directory, entrySha256: createHash('sha256').update(readFileSync(join(directory, 'dist/cli.js'))).digest('hex'),
   }])),
