@@ -53,7 +53,8 @@ describe('semantic snapshots', () => {
       const wrapped = captureSemanticSnapshot({
         history: snapshot.value.messages,
       });
-      expect(wrapped.value.history).toBe(snapshot.value.messages);
+      expect(wrapped.value.history).not.toBe(snapshot.value.messages);
+      expect(wrapped.value.history).toEqual(snapshot.value.messages);
       const fingerprint = snapshot.fingerprint;
       expect(hash).toHaveBeenCalled();
       hash.mockClear();
@@ -78,10 +79,47 @@ describe('semantic snapshots', () => {
   });
   it('preserves native enumeration when an accessor deletes another field', () => {
     const value = {
-      get first() { delete this.second; return 'first'; },
+      get first() {
+        delete this.second;
+        return 'first';
+      },
       second: 'deleted' as string | undefined,
     };
     expect(captureSemanticSnapshot(value).value).toEqual({ first: 'first' });
+  });
+  it.each([false, true])(
+    'preserves shared references across a mutating getter (getter first: %s)',
+    (getterFirst) => {
+      const makeInput = () => {
+        const shared = { value: 1 };
+        const getter = vi.fn(() => {
+          shared.value = 2;
+          return shared;
+        });
+        const nested = {
+          get shared() {
+            return getter();
+          },
+        };
+        return { input: getterFirst ? { nested, shared } : { shared, nested }, getter };
+      };
+      const expected = structuredClone(makeInput().input);
+      const { input, getter } = makeInput();
+      const snapshot = captureSemanticSnapshot(input);
+      expect(snapshot.value).toEqual(expected);
+      expect(snapshot.value.shared).toBe(snapshot.value.nested.shared);
+      expect(snapshot.fingerprint).toBe(captureSemanticSnapshot(expected).fingerprint);
+      expect(getter).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('preserves shared references across a class instance normalized by native cloning', () => {
+    const shared = { value: 1 };
+    class Container {
+      child = shared;
+    }
+    const snapshot = captureSemanticSnapshot({ shared, nested: new Container() });
+    expect(snapshot.value.shared).toBe(snapshot.value.nested.child);
+    expect(Object.getPrototypeOf(snapshot.value.nested)).toBe(Object.prototype);
   });
   it.each([new Date(), new Map(), new Uint8Array([1]), 1n])(
     'rejects unsupported value-only payloads %#',

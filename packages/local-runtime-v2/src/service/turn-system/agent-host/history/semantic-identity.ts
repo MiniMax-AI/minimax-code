@@ -1,5 +1,3 @@
-import { isProxy } from 'node:util/types';
-
 import { IncrementalSha256 } from './incremental-sha256.js';
 
 export interface SemanticSnapshot<T> {
@@ -17,13 +15,12 @@ const fingerprints = new WeakMap<object, string>();
  * encoded payload size.
  */
 export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
+  // Clone an external graph in one operation: independent subtree clones can
+  // change aliasing and getter order. Reuse only an already-owned root.
   const snapshot =
     typeof value === 'object' && value !== null && ownedValues.has(value)
       ? value
-      : freezeSemanticValue(
-          cloneSemanticValue(value, new Map<object, object>()),
-          new WeakSet<object>(),
-        );
+      : freezeSemanticValue(structuredClone(value), new WeakSet<object>());
   let fingerprint: string | undefined;
   return {
     value: snapshot,
@@ -42,37 +39,6 @@ export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
       return fingerprint;
     },
   };
-}
-
-// Preserve structured-clone semantics for plain data, including holes and
-// shared references, while retaining our own immutable history subtrees.
-function cloneSemanticValue<T>(value: T, clones: Map<object, object>): T {
-  if (typeof value !== 'object' || value === null) return structuredClone(value);
-  if (ownedValues.has(value)) return value;
-  // Native cloning rejects proxies without running their traps. Preserve that
-  // boundary, and defer accessor side effects to native property enumeration.
-  if (isProxy(value)) return structuredClone(value);
-  const previous = clones.get(value);
-  if (previous) return previous as T;
-  const prototype = Object.getPrototypeOf(value);
-  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
-    return structuredClone(value);
-  }
-  const keys = Object.keys(value);
-  if (keys.some((key) => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value'))) {
-    return structuredClone(value);
-  }
-  const copy: object = Array.isArray(value) ? new Array(value.length) : {};
-  clones.set(value, copy);
-  for (const key of keys) {
-    Object.defineProperty(copy, key, {
-      value: cloneSemanticValue(Reflect.get(value, key), clones),
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-  }
-  return copy as T;
 }
 
 /**
