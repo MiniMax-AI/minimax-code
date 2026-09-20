@@ -264,27 +264,30 @@ test(
         proxyNames.map((name) => [name, proxyValue(name)]),
       )],
     ]) {
-      await t.test(`offline BYOK ignores ambient proxies: ${label}`, async () => {
-        const environment = Object.freeze({ ...cleanEnvironment, ...proxies });
-        // NO_PROXY alone does not enable proxy mode, so check its isolation explicitly.
-        const isolated = withoutProxyEnvironment(environment);
-        for (const name of proxyNames) assert.equal(isolated[name], "");
-        assert.equal(isolated.PATH, environment.PATH);
-        const beforeRequests = requests.length;
-        const managedAudit = `${networkAudit}.managed`;
-        const beforeManaged = readFileSync(managedAudit, "utf8").length;
-        await run([
-          "provider", "test", selected.providerId, "--model", "fixture-model",
-        ], environment);
-        assert.ok(requests.length > beforeRequests, "The local provider must receive the request");
-        assert.equal(requests[beforeRequests].body.model, "fixture-model");
-        assert.match(
-          readFileSync(managedAudit, "utf8").slice(beforeManaged),
-          /https:\/\/models\.dev\/api\.json|\/mavis\/api\/v1\/models-dev\/catalog/,
-        );
-        assert.equal(existsSync(networkAudit), false, "No outbound network attempt is allowed");
-        for (const [name, value] of Object.entries(proxies)) assert.equal(environment[name], value);
-      });
+      // Node 24.0–24.2 returns undefined from t.test(), so awaiting it does
+      // not wait for the proxy checks. Keep this shared-fixture phase directly
+      // sequential before changing rejectConnection or checking request counts.
+      // https://github.com/nodejs/node/issues/58227
+      t.diagnostic(`offline BYOK ignores ambient proxies: ${label}`);
+      const environment = Object.freeze({ ...cleanEnvironment, ...proxies });
+      // NO_PROXY alone does not enable proxy mode, so check its isolation explicitly.
+      const isolated = withoutProxyEnvironment(environment);
+      for (const name of proxyNames) assert.equal(isolated[name], "");
+      assert.equal(isolated.PATH, environment.PATH);
+      const beforeRequests = requests.length;
+      const managedAudit = `${networkAudit}.managed`;
+      const beforeManaged = readFileSync(managedAudit, "utf8").length;
+      await run([
+        "provider", "test", selected.providerId, "--model", "fixture-model",
+      ], environment);
+      assert.ok(requests.length > beforeRequests, "The local provider must receive the request");
+      assert.equal(requests[beforeRequests].body.model, "fixture-model");
+      assert.match(
+        readFileSync(managedAudit, "utf8").slice(beforeManaged),
+        /https:\/\/models\.dev\/api\.json|\/mavis\/api\/v1\/models-dev\/catalog/,
+      );
+      assert.equal(existsSync(networkAudit), false, "No outbound network attempt is allowed");
+      for (const [name, value] of Object.entries(proxies)) assert.equal(environment[name], value);
     }
     const configPath = path.join(dataDir, "config.yaml");
     const savedConfig = () => parseYaml(readFileSync(configPath, "utf8"));
