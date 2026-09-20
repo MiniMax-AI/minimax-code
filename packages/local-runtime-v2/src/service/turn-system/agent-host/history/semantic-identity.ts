@@ -1,3 +1,4 @@
+import { types } from 'node:util';
 import { IncrementalSha256 } from './incremental-sha256.js';
 
 export interface SemanticSnapshot<T> {
@@ -15,12 +16,15 @@ const fingerprints = new WeakMap<object, string>();
  * encoded payload size.
  */
 export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
-  // Clone an external graph in one operation: independent subtree clones can
-  // change aliasing and getter order. Reuse only an already-owned root.
+  // Native cloning preserves external getters and aliases. Data-only wrappers
+  // can instead share descendants already detached and frozen by this module.
   const snapshot =
     typeof value === 'object' && value !== null && ownedValues.has(value)
       ? value
-      : freezeSemanticValue(structuredClone(value), new WeakSet<object>());
+      : freezeSemanticValue(
+          cloneOwnedWrapper(value) ?? structuredClone(value),
+          new WeakSet<object>(),
+        );
   let fingerprint: string | undefined;
   return {
     value: snapshot,
@@ -39,6 +43,69 @@ export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
       return fingerprint;
     },
   };
+}
+
+const NATIVE_CLONE_REQUIRED = Symbol('native-clone-required');
+
+function plainDataDescriptors(value: object): PropertyDescriptorMap | undefined {
+  // Inspecting a Proxy would invoke traps that native structuredClone rejects.
+  if (types.isProxy(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (
+    prototype !== Object.prototype &&
+    prototype !== null &&
+    !(Array.isArray(value) && prototype === Array.prototype)
+  )
+    return undefined;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Object.values(descriptors).some((d) => d.enumerable && !('value' in d))) return undefined;
+  return descriptors;
+}
+
+function cloneOwnedWrapper<T>(value: T): T | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const descriptors = plainDataDescriptors(value);
+  if (
+    !descriptors ||
+    !Object.values(descriptors).some(
+      (d) =>
+        d.enumerable && typeof d.value === 'object' && d.value !== null && ownedValues.has(d.value),
+    )
+  )
+    return undefined;
+
+  const copies = new WeakMap<object, object>();
+  const clone = (node: unknown): unknown => {
+    if (typeof node !== 'object' || node === null) {
+      if (node !== null && !['undefined', 'string', 'boolean', 'number'].includes(typeof node)) {
+        throw NATIVE_CLONE_REQUIRED;
+      }
+      return node;
+    }
+    if (ownedValues.has(node)) return node;
+    const previous = copies.get(node);
+    if (previous) return previous;
+    const fields = node === value ? descriptors : plainDataDescriptors(node);
+    if (!fields) throw NATIVE_CLONE_REQUIRED;
+    const copy = Array.isArray(node) ? new Array(fields.length!.value as number) : {};
+    copies.set(node, copy);
+    for (const [key, field] of Object.entries(fields)) {
+      if (!field.enumerable) continue;
+      Object.defineProperty(copy, key, {
+        value: clone(field.value),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    return copy;
+  };
+  try {
+    return clone(value) as T;
+  } catch (error) {
+    if (error === NATIVE_CLONE_REQUIRED) return undefined;
+    throw error;
+  }
 }
 
 /**

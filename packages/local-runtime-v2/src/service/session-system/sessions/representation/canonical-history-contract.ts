@@ -13,6 +13,8 @@ export {
 } from '../../../../infra/file/canonical-history.js';
 
 export interface CanonicalHistoryFileAdapter {
+  /** Existence-only migration probe; callers still validate records before using them. */
+  targetExists?(path: string): Promise<boolean>;
   readTarget(path: string): Promise<readonly CanonicalHistoryEnvelope[] | undefined>;
   readTargetStrict(path: string): Promise<readonly CanonicalHistoryEnvelope[] | undefined>;
   readActive(path: string): Promise<readonly CanonicalHistoryEnvelope[]>;
@@ -23,7 +25,12 @@ export interface CanonicalHistoryFileAdapter {
     path: string,
     records: readonly CanonicalHistoryEnvelope[],
   ): Promise<CanonicalHistoryPublication>;
-  append(path: string, records: readonly CanonicalHistoryEnvelope[]): Promise<void>;
+  /** verifiedActive must be read in the same serialized operation, never cached across writes. */
+  append(
+    path: string,
+    records: readonly CanonicalHistoryEnvelope[],
+    verifiedActive?: readonly CanonicalHistoryEnvelope[],
+  ): Promise<void>;
   replace(path: string, records: readonly CanonicalHistoryEnvelope[]): Promise<void>;
   replaceActive(path: string, records: readonly CanonicalHistoryEnvelope[]): Promise<void>;
   publishSnapshot(

@@ -244,8 +244,7 @@ interface MinimalNativeCompactionSummary extends Record<string, unknown> {
 }
 
 export type CanonicalHistoryMessage =
-  | TimestampedCanonicalHistoryMessage
-  | MinimalNativeCompactionSummary;
+  TimestampedCanonicalHistoryMessage | MinimalNativeCompactionSummary;
 
 export interface CanonicalTurnConfigTool extends Record<string, unknown> {
   readonly tool_name: string;
@@ -431,10 +430,15 @@ export class CanonicalHistoryJsonlDataSource {
     return { status, records: await this.readActive() };
   }
 
-  async append(records: readonly CanonicalHistoryEnvelope[]): Promise<void> {
+  async append(
+    records: readonly CanonicalHistoryEnvelope[],
+    verifiedActive?: readonly CanonicalHistoryEnvelope[],
+  ): Promise<void> {
     const appended = decodeRecords(records);
     if (appended.length === 0) return;
-    const active = await this.readActive();
+    // The Session owner may pass its strict read from this same write lane.
+    // Other callers keep the existing disk read; no history survives between operations.
+    const active = verifiedActive ?? (await this.readActive());
     assertCanonicalHistoryAppend(active, appended);
     await appendJsonl(this.options.activePath, appended);
   }
@@ -473,7 +477,9 @@ export class CanonicalHistoryJsonlDataSource {
       const existing = await readStrictEnvelopeFile(snapshotPath);
       if (revisionOfNormalized(existing) !== revision) throw new Error('revision differs');
     } catch (error) {
-      throw new Error(`Canonical history snapshot conflict: ${snapshotPath}`, { cause: error });
+      throw new Error(`Canonical history snapshot conflict: ${snapshotPath}`, {
+        cause: error,
+      });
     }
     return status;
   }

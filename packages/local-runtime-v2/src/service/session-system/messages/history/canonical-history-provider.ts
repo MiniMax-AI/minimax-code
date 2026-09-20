@@ -434,7 +434,7 @@ async function appendWithInterruptedToolRoundRecovery(input: {
     await input.files.replaceActive(input.path, recovery.records);
     return;
   }
-  await input.files.append(input.path, input.appended);
+  await input.files.append(input.path, input.appended, input.existing);
 }
 
 function appendEnvelopes(change: SessionCanonicalHistoryChange): CanonicalHistoryEnvelope[] {

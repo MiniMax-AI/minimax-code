@@ -17,7 +17,7 @@ revisions build separately, then run serially on one `macos-15` runner with Node
 | --- | --- | --- |
 | `startup` | 1 tool round, minimal body | Startup and shutdown |
 | `upstream-100` | 100 rounds × approximately 4 KiB, 64-character chunks, zero delay | Original [harness-perf-benchmark](https://github.com/KonghaYao/harness-perf-benchmark) workload |
-| `history-300` | 300 rounds × approximately 8 KiB | History growth beyond the 1,048,576 UTF-16-unit token cache budget |
+| `history-300` | 300 rounds × approximately 8 KiB | History growth beyond the original 1,048,576 UTF-16-unit token cache budget |
 
 The upstream commit is pinned in `scripts/perf/config.json` and the workflow.
 Its generator, mock, sampler and CPU accounting run without source edits.

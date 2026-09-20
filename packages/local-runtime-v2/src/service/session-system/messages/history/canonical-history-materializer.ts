@@ -64,20 +64,21 @@ interface MaterializedHistory {
 export async function ensureCanonicalHistoryMaterialized(
   options: CanonicalHistoryMaterializerOptions,
 ): Promise<void> {
-  const target = await options.files.readTarget(options.paths.messages);
   if (!options.legacyHistory) {
-    if (target === undefined) await options.files.publishInitial(options.paths.messages, []);
+    if (!(await targetExists(options)))
+      await options.files.publishInitial(options.paths.messages, []);
     return;
   }
 
   const checkpoint = await options.legacyHistory.checkpoints.getCheckpoint(options.sessionId);
   if (checkpoint) {
-    if (target === undefined) {
+    if (!(await targetExists(options))) {
       throw new Error(`Canonical history target is missing after migration: ${options.sessionId}`);
     }
     return;
   }
 
+  const target = await options.files.readTarget(options.paths.messages);
   const selected = await selectLegacySource(options);
   const normalized = normalizeSelectedHistory(options.sessionId, selected.records);
   const materialized =
@@ -101,6 +102,12 @@ export async function ensureCanonicalHistoryMaterialized(
     messageCount: verified.length,
     targetRevision: revision,
   });
+}
+
+async function targetExists(options: CanonicalHistoryMaterializerOptions): Promise<boolean> {
+  return options.files.targetExists
+    ? options.files.targetExists(options.paths.messages)
+    : (await options.files.readTarget(options.paths.messages)) !== undefined;
 }
 
 async function selectLegacySource(options: CanonicalHistoryMaterializerOptions): Promise<{

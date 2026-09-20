@@ -20,6 +20,9 @@ export function createCanonicalHistoryFileAdapter(
 class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
   constructor(private readonly options: CreateCanonicalHistoryFileAdapterOptions) {}
 
+  async targetExists(path: string) {
+    return exists(path);
+  }
   async readTarget(path: string) {
     if (!(await exists(path))) return undefined;
     return this.source(path).readActive();
@@ -43,8 +46,12 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
   async publishInitial(path: string, records: readonly CanonicalHistoryEnvelope[]) {
     return this.source(path).publishInitial(records);
   }
-  async append(path: string, records: readonly CanonicalHistoryEnvelope[]) {
-    await this.source(path).append(records);
+  async append(
+    path: string,
+    records: readonly CanonicalHistoryEnvelope[],
+    verifiedActive?: readonly CanonicalHistoryEnvelope[],
+  ) {
+    await this.source(path).append(records, verifiedActive);
   }
   async replace(path: string, records: readonly CanonicalHistoryEnvelope[]) {
     await this.source(path).replace(records);

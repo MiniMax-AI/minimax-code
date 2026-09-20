@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { CanonicalHistoryJsonlDataSource } from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { captureSemanticSnapshot } from '../packages/local-runtime-v2/src/servic
 import { DurableCanonicalHistoryStore } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/durable-canonical-history-store.js';
 import type { CanonicalHistoryChange } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/contracts.js';
 import { BpeTokenEstimator } from '../packages/agent-modules/context-manager/src/token-estimator.js';
+import { ensureCanonicalHistoryMaterialized } from '../packages/local-runtime-v2/src/service/session-system/messages/history/canonical-history-materializer.js';
 import { createSessionSystemCanonicalHistoryProvider } from '../packages/local-runtime-v2/src/service/session-system/messages/history/canonical-history-provider.js';
 import { createCanonicalHistoryFileAdapter } from '../packages/local-runtime-v2/src/service/session-system/sessions/representation/canonical-history.js';
 import {
@@ -53,7 +55,7 @@ describe('semantic snapshots', () => {
       const wrapped = captureSemanticSnapshot({
         history: snapshot.value.messages,
       });
-      expect(wrapped.value.history).not.toBe(snapshot.value.messages);
+      expect(wrapped.value.history).toBe(snapshot.value.messages);
       expect(wrapped.value.history).toEqual(snapshot.value.messages);
       const fingerprint = snapshot.fingerprint;
       expect(hash).toHaveBeenCalled();
@@ -64,6 +66,71 @@ describe('semantic snapshots', () => {
     } finally {
       hash.mockRestore();
     }
+  });
+  it('shares owned history through delivery wrappers and detaches other branches', () => {
+    const history = captureSemanticSnapshot({
+      messages: [{ text: 'body' }],
+    }).value;
+    const external = { nested: { id: 1 } };
+    const delivered = captureSemanticSnapshot({
+      committedMessages: history.messages,
+      external,
+    });
+    const event = captureSemanticSnapshot({
+      context: external,
+      change: delivered.value,
+    });
+    external.nested.id = 2;
+    expect(delivered.value.committedMessages).toBe(history.messages);
+    expect(event.value.change).toBe(delivered.value);
+    expect(event.value.context.nested.id).toBe(1);
+    expect(event.value.change.external.nested.id).toBe(1);
+    expect(Object.isFrozen(event.value.context.nested)).toBe(true);
+    expect(event.fingerprint).toBe(
+      captureSemanticSnapshot(structuredClone(event.value)).fingerprint,
+    );
+  });
+  it('preserves aliases, sparse arrays and own __proto__ fields in owned wrappers', () => {
+    const owned = captureSemanticSnapshot({ value: 'owned' }).value;
+    const shared = { owned };
+    const array = new Array(3);
+    array[2] = shared;
+    const input = { owned, a: shared, b: shared, array, ['__proto__']: shared };
+    const snapshot = captureSemanticSnapshot(input);
+    expect(snapshot.value.a).toBe(snapshot.value.b);
+    expect(snapshot.value.a).toBe(snapshot.value.array[2]);
+    expect(snapshot.value['__proto__']).toBe(snapshot.value.a);
+    expect(0 in snapshot.value.array).toBe(false);
+    expect(snapshot.value).toEqual(structuredClone(input));
+    const cycle: Record<string, unknown> = { owned };
+    cycle.self = cycle;
+    expect(() => captureSemanticSnapshot(cycle)).toThrow('Cyclic');
+  });
+  it('uses native getter ordering and proxy rejection even beside owned values', () => {
+    const owned = captureSemanticSnapshot({ text: 'owned' }).value;
+    const shared = { value: 1 };
+    const getter = vi.fn(() => {
+      shared.value = 2;
+      return shared;
+    });
+    const snapshot = captureSemanticSnapshot({
+      owned,
+      shared,
+      get later() {
+        return getter();
+      },
+    });
+    expect(snapshot.value.shared).toBe(snapshot.value.later);
+    expect(snapshot.value.shared.value).toBe(1);
+    expect(getter).toHaveBeenCalledTimes(1);
+    const trap = vi.fn();
+    expect(() =>
+      captureSemanticSnapshot({
+        owned,
+        proxy: new Proxy({}, { ownKeys: trap }),
+      }),
+    ).toThrow();
+    expect(trap).not.toHaveBeenCalled();
   });
   it('does not trust externally frozen objects with mutable descendants', () => {
     const original = Object.freeze({ nested: { text: 'before' } });
@@ -101,7 +168,10 @@ describe('semantic snapshots', () => {
             return getter();
           },
         };
-        return { input: getterFirst ? { nested, shared } : { shared, nested }, getter };
+        return {
+          input: getterFirst ? { nested, shared } : { shared, nested },
+          getter,
+        };
       };
       const expected = structuredClone(makeInput().input);
       const { input, getter } = makeInput();
@@ -117,7 +187,10 @@ describe('semantic snapshots', () => {
     class Container {
       child = shared;
     }
-    const snapshot = captureSemanticSnapshot({ shared, nested: new Container() });
+    const snapshot = captureSemanticSnapshot({
+      shared,
+      nested: new Container(),
+    });
     expect(snapshot.value.shared).toBe(snapshot.value.nested.child);
     expect(Object.getPrototypeOf(snapshot.value.nested)).toBe(Object.prototype);
   });
@@ -184,6 +257,31 @@ describe('bounded token count reuse', () => {
     );
     expect(encode).toHaveBeenCalledTimes(3);
   });
+  it.each([256, 257, 300])(
+    'reuses detached histories above the former text budget (%i messages)',
+    (count) => {
+      const encode = vi.fn(() => [1]);
+      const estimator = new BpeTokenEstimator(encode);
+      const messages = Array.from({ length: count }, (_, i) => ({
+        role: 'user' as const,
+        content: String(i).padStart(8, '0') + 'x '.repeat(2044),
+        timestamp: i,
+      }));
+      const first = estimator.estimateMessages(messages);
+      encode.mockClear();
+      expect(estimator.estimateMessages(structuredClone(messages))).toBe(first);
+      expect(encode).not.toHaveBeenCalled();
+      messages[0]!.content = 'changed ' + messages[0]!.content.slice(8);
+      estimator.estimateMessages(messages);
+      expect(encode).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('keeps distinct malformed UTF-16 strings separate in long-text keys', () => {
+    const prefix = 'x '.repeat(256);
+    const estimator = new BpeTokenEstimator((text) => (text.endsWith('\ud800') ? [1] : [1, 2]));
+    expect(estimator.estimateTextTokens(prefix + '\ud800')).toBe(1);
+    expect(estimator.estimateTextTokens(prefix + '\ud801')).toBe(2);
+  });
   it('isolates different estimators and evicts least-recently-used text', () => {
     const encode = vi.fn((text: string) => [...text]);
     const estimator = new BpeTokenEstimator(encode);
@@ -194,7 +292,7 @@ describe('bounded token count reuse', () => {
     expect(encode).toHaveBeenCalledTimes(1);
     expect(new BpeTokenEstimator(() => [0]).estimateTextTokens('old')).toBe(1);
   });
-  it('bounds retained text independently of entry count', () => {
+  it('reuses large texts without retaining their bodies', () => {
     const encode = vi.fn(() => [1]);
     const estimator = new BpeTokenEstimator(encode);
     const first = 'a '.repeat(300_000);
@@ -202,7 +300,7 @@ describe('bounded token count reuse', () => {
     estimator.estimateTextTokens(first);
     estimator.estimateTextTokens(second);
     estimator.estimateTextTokens(first);
-    expect(encode).toHaveBeenCalledTimes(3);
+    expect(encode).toHaveBeenCalledTimes(2);
   });
   it('does not cache tokenizer failures', () => {
     const encode = vi
@@ -220,6 +318,7 @@ describe('bounded token count reuse', () => {
 describe('committed history read reuse', () => {
   it('reuses verified records for indexing while observing external changes and corruption', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'mcode-history-reuse-'));
+    const redundantRead = vi.spyOn(CanonicalHistoryJsonlDataSource.prototype, 'readActive');
     try {
       const session: SessionRecord = {
         sessionId: 'synthetic-session',
@@ -243,6 +342,7 @@ describe('committed history read reuse', () => {
       });
       await provider.initialize(session.sessionId);
       strictRead.mockClear();
+      redundantRead.mockClear();
       expect((await provider.readActive(session.sessionId)).messages).toEqual([]);
       expect(strictRead).not.toHaveBeenCalled();
       const committed = await provider.append({
@@ -254,6 +354,7 @@ describe('committed history read reuse', () => {
       });
       expect(committed.messages).toHaveLength(1);
       expect(strictRead).toHaveBeenCalledTimes(1);
+      expect(redundantRead).not.toHaveBeenCalled();
       const paths = resolveSessionHistoryPaths(dataDir, session);
       const external = createCanonicalHistoryFileAdapter();
       await external.replace(paths.messages, [
@@ -268,6 +369,92 @@ describe('committed history read reuse', () => {
       });
       await writeFile(paths.messages, '{invalid json}\n');
       await expect(provider.readActive(session.sessionId)).rejects.toThrow();
+      await expect(
+        provider.append({
+          sessionId: session.sessionId,
+          turnId: 'turn-3',
+          reason: 'messageDelta',
+          messages: [{ role: 'user', content: 'must not append', timestamp: 3 }],
+          operation: { id: 'append-3', kind: 'append' },
+        }),
+      ).rejects.toThrow();
+    } finally {
+      redundantRead.mockRestore();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+  it('checks migration target existence without reparsing and preserves legacy adapter fallback', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'mcode-materialized-'));
+    try {
+      const sessionId = 'synthetic-session';
+      const paths = resolveSessionHistoryPaths(dataDir, {
+        sessionId,
+        createdAtMs: 0,
+      });
+      const files = createCanonicalHistoryFileAdapter();
+      const read = vi.spyOn(files, 'readTarget');
+      const options = { sessionId, paths, files, nowMs: () => 0 };
+      await ensureCanonicalHistoryMaterialized(options);
+      const legacyHistory = {
+        sources: {
+          readLedgerSnapshot: vi.fn(async () => undefined),
+          readSqliteRows: vi.fn(async () => []),
+          readSqliteBlob: vi.fn(async () => []),
+        },
+        checkpoints: {
+          getCheckpoint: async () => ({
+            sessionId,
+            migratedAtMs: 0,
+            source: 'empty' as const,
+            messageCount: 0,
+            targetRevision: 'recorded',
+          }),
+          upsertCheckpoint: vi.fn(async () => {}),
+        },
+      };
+      await ensureCanonicalHistoryMaterialized({ ...options, legacyHistory });
+      expect(read).not.toHaveBeenCalled();
+      expect(legacyHistory.sources.readLedgerSnapshot).not.toHaveBeenCalled();
+      Object.defineProperty(files, 'targetExists', { value: undefined });
+      await ensureCanonicalHistoryMaterialized({ ...options, legacyHistory });
+      expect(read).toHaveBeenCalledTimes(1);
+      await rm(paths.messages);
+      await expect(
+        ensureCanonicalHistoryMaterialized({ ...options, legacyHistory }),
+      ).rejects.toThrow('missing after migration');
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+  it('retains disk reads for standalone appends and validates supplied prefix identities', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'mcode-append-prefix-'));
+    try {
+      const source = new CanonicalHistoryJsonlDataSource({
+        activePath: join(dataDir, 'messages.jsonl'),
+      });
+      await source.publishInitial([]);
+      const first = {
+        message_id: 'msg-first',
+        turn_id: 'turn-first',
+        message: { role: 'user', content: 'first', timestamp: 1 },
+      };
+      const second = {
+        message_id: 'msg-second',
+        turn_id: 'turn-second',
+        message: { role: 'user', content: 'second', timestamp: 2 },
+      };
+      const read = vi.spyOn(source, 'readActive');
+      await source.append([first]);
+      expect(read).toHaveBeenCalledTimes(1);
+      const verified = await source.readActiveStrict();
+      read.mockClear();
+      await expect(source.append([first], verified)).rejects.toThrow();
+      await source.append([second], verified);
+      expect(read).not.toHaveBeenCalled();
+      expect((await source.readActiveStrict()).map((row) => row.message_id)).toEqual([
+        'msg-first',
+        'msg-second',
+      ]);
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

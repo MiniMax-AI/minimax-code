@@ -47,6 +47,7 @@
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { countTokens as countO200kBase } from 'gpt-tokenizer/model/gpt-4o';
 import type { ContextCompactionSummaryMessage } from './types.js';
 
@@ -199,15 +200,14 @@ function getLastAssistantUsageInfo(
   return undefined;
 }
 
-const MAX_CACHED_TEXT_UNITS = 1_048_576;
+const MAX_INLINE_CACHE_KEY_UNITS = 256;
 const MAX_CACHED_TEXT_ENTRIES = 2_048;
 
 export class BpeTokenEstimator implements TokenEstimator {
   private readonly countExactTokens: (text: string) => number;
-  // Content keys remain valid across detached histories, edits and model
-  // projections. Bound retained UTF-16 text as well as entry count.
+  // Bounded content keys survive detached histories without retaining long
+  // message bodies. Hash UTF-16 units so lone surrogates stay distinct.
   private readonly textTokens = new Map<string, number>();
-  private cachedTextUnits = 0;
 
   /**
    * @param encoder Override the default o200k_base tokenizer. Tests inject
@@ -229,10 +229,14 @@ export class BpeTokenEstimator implements TokenEstimator {
 
   estimateTextTokens(text: string): number {
     if (!text) return 0;
-    const cached = this.textTokens.get(text);
+    const key =
+      text.length <= MAX_INLINE_CACHE_KEY_UNITS
+        ? `text:${text}`
+        : `sha256:${createHash('sha256').update(text, 'utf16le').digest('hex')}`;
+    const cached = this.textTokens.get(key);
     if (cached !== undefined) {
-      this.textTokens.delete(text);
-      this.textTokens.set(text, cached);
+      this.textTokens.delete(key);
+      this.textTokens.set(key, cached);
       return cached;
     }
     try {
@@ -241,16 +245,11 @@ export class BpeTokenEstimator implements TokenEstimator {
       }
       const tokens = this.countExactTokens(text);
       if (!Number.isFinite(tokens) || tokens < 0) return estimateTextTokensUpperBound(text);
-      if (text.length <= MAX_CACHED_TEXT_UNITS) {
-        while (this.textTokens.size >= MAX_CACHED_TEXT_ENTRIES || this.cachedTextUnits + text.length > MAX_CACHED_TEXT_UNITS) {
-          const oldest = this.textTokens.keys().next().value;
-          if (oldest === undefined) break;
-          this.textTokens.delete(oldest);
-          this.cachedTextUnits -= oldest.length;
-        }
-        this.textTokens.set(text, tokens);
-        this.cachedTextUnits += text.length;
+      if (this.textTokens.size >= MAX_CACHED_TEXT_ENTRIES) {
+        const oldest = this.textTokens.keys().next().value;
+        if (oldest !== undefined) this.textTokens.delete(oldest);
       }
+      this.textTokens.set(key, tokens);
       return tokens;
     } catch {
       return estimateTextTokensUpperBound(text);
@@ -314,7 +313,10 @@ export class BpeTokenEstimator implements TokenEstimator {
         return tokens;
       }
       case 'bashExecution': {
-        const m = message as AgentMessage & { command?: string; output?: string };
+        const m = message as AgentMessage & {
+          command?: string;
+          output?: string;
+        };
         tokens += this.estimateTextTokens(m.command ?? '');
         tokens += this.estimateTextTokens(m.output ?? '');
         return tokens;
