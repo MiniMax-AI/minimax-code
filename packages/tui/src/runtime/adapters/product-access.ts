@@ -1,4 +1,8 @@
-import { isLegacyManagedMinimaxProvider } from "@mavis/config";
+import {
+  isLegacyManagedMinimaxProvider,
+  type EffectiveSandboxMode,
+  type SandboxMode,
+} from "@mavis/config";
 import {
   normalizeTuiPermissionMode,
   type TuiPermissionMode,
@@ -88,6 +92,21 @@ export class TuiProductAccess {
           .setPermissionMode({ mode }),
       ) ?? mode
     );
+  }
+
+  async getSandboxMode(): Promise<EffectiveSandboxMode | undefined> {
+    try {
+      return await this.context.service("config.sandbox.read").getSandboxMode();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Writes propagate failures so a rejected restriction is never reported as active. */
+  setSandboxMode(mode: SandboxMode): Promise<EffectiveSandboxMode> {
+    return this.context
+      .service("config.sandbox.write")
+      .setSandboxMode({ mode });
   }
 
   async listModels(sessionId?: string): Promise<TuiModel[]> {

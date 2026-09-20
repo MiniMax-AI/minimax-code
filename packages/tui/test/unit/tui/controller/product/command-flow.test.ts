@@ -39,6 +39,11 @@ function createReadinessCommandFlow(options: {
   reloadTui?: () => Promise<void>;
   append?: (text: string, kind?: "info" | "warning" | "error") => void;
   queuedCount?: number;
+  sandboxModeFlow?: {
+    refresh(): Promise<void>;
+    showStatus(): void;
+    set(mode: "read-only" | "workspace-write" | "danger-full-access"): Promise<void>;
+  };
 }) {
   return new TuiCommandFlow({
     workspaceDir: "/workspace",
@@ -90,6 +95,9 @@ function createReadinessCommandFlow(options: {
     append: options.append ?? vi.fn(),
     setHint: options.setHint ?? vi.fn(),
     onChanged: vi.fn(),
+    ...(options.sandboxModeFlow
+      ? { sandboxModeFlow: options.sandboxModeFlow as never }
+      : {}),
   });
 }
 
@@ -1670,5 +1678,56 @@ describe("TuiCommandFlow", () => {
     );
     expect(showPending).toHaveBeenCalledTimes(1);
     expect(activeRunFlow.handle).not.toHaveBeenCalled();
+  });
+
+  describe("/sandbox", () => {
+    function sandboxFlowStub() {
+      return {
+        refresh: vi.fn(async () => undefined),
+        showStatus: vi.fn(),
+        set: vi.fn(async () => undefined),
+      };
+    }
+
+    it("reports status without changing mode for bare /sandbox", async () => {
+      const sandboxModeFlow = sandboxFlowStub();
+      const flow = createReadinessCommandFlow({
+        whenReady: async () => undefined,
+        sandboxModeFlow,
+      });
+      await expect(flow.submit("/sandbox")).resolves.toBe("consumed");
+      expect(sandboxModeFlow.refresh).toHaveBeenCalledOnce();
+      expect(sandboxModeFlow.showStatus).toHaveBeenCalledOnce();
+      expect(sandboxModeFlow.set).not.toHaveBeenCalled();
+    });
+
+    it.each(["read-only", "workspace-write", "danger-full-access"] as const)(
+      "selects %s through the shared sandbox flow",
+      async (mode) => {
+        const sandboxModeFlow = sandboxFlowStub();
+        const flow = createReadinessCommandFlow({
+          whenReady: async () => undefined,
+          sandboxModeFlow,
+        });
+        await expect(flow.submit(`/sandbox ${mode}`)).resolves.toBe("consumed");
+        expect(sandboxModeFlow.set).toHaveBeenCalledWith(mode);
+      },
+    );
+
+    it("rejects an invalid mode without applying it", async () => {
+      const append = vi.fn();
+      const sandboxModeFlow = sandboxFlowStub();
+      const flow = createReadinessCommandFlow({
+        whenReady: async () => undefined,
+        sandboxModeFlow,
+        append,
+      });
+      await expect(flow.submit("/sandbox full")).resolves.toBe("retained");
+      expect(sandboxModeFlow.set).not.toHaveBeenCalled();
+      expect(append).toHaveBeenCalledWith(
+        "Usage: /sandbox [status | read-only | workspace-write | danger-full-access]",
+        "warning",
+      );
+    });
   });
 });

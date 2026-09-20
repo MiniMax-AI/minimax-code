@@ -1,4 +1,5 @@
 import type { SlashCommand } from '../widgets/autocomplete.js';
+import { SANDBOX_MODE_DESCRIPTIONS } from '@mavis/config';
 import { fuzzyFilter } from '../engine/public.js';
 import { TuiContributionRegistry } from '../../contributions/index.js';
 import { TUI_COMMAND_DESCRIPTORS } from '../../application/command-descriptors.js';
@@ -301,6 +302,18 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
       ['full', 'Use Full Access mode'],
     ]),
     shortcut: 'Alt+M',
+  },
+  {
+    name: 'sandbox',
+    description: 'Choose or inspect the Runtime sandbox mode',
+    category: 'Runtime',
+    argumentHint: '[status | read-only | workspace-write | danger-full-access]',
+    getArgumentCompletions: argumentCompleter([
+      ['status', 'Show the current sandbox mode'],
+      ['read-only', SANDBOX_MODE_DESCRIPTIONS['read-only']],
+      ['workspace-write', SANDBOX_MODE_DESCRIPTIONS['workspace-write']],
+      ['danger-full-access', SANDBOX_MODE_DESCRIPTIONS['danger-full-access']],
+    ]),
   },
   {
     name: 'login',

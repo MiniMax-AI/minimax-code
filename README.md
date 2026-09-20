@@ -137,6 +137,23 @@ mcode --session
 
 Inside the TUI, use `/sessions` to find previous sessions and `/help` to see all commands and shortcuts.
 
+### Control shell sandbox access
+
+Use `/sandbox` in the TUI to inspect the effective mode, or select one explicitly with
+`/sandbox read-only`, `/sandbox workspace-write`, or `/sandbox danger-full-access`.
+Headless runs accept the same three values:
+
+```bash
+mcode exec --sandbox read-only "Summarize this repository."
+mcode exec --sandbox workspace-write "Fix the failing test."
+```
+
+`read-only` blocks workspace writes, `workspace-write` permits writes inside the workspace, and
+`danger-full-access` disables the managed sandbox. Sandbox access is independent from the
+permission/approval mode. Omitting `--sandbox` preserves the resolved configuration for that run;
+an explicit headless value is process-only and is not saved. Unsupported restricted modes and
+invalid values fail instead of silently running with full access.
+
 | Action | Shortcut |
 | --- | --- |
 | Send a message or steer the running task | `Enter` |

@@ -165,6 +165,18 @@ export type {
   SandboxNetworkPolicy,
 } from './sandbox-config.js';
 export {
+  applySandboxMode,
+  describeSandboxMode,
+  InvalidSandboxModeError,
+  isSandboxMode,
+  parseSandboxMode,
+  resolveSandboxMode,
+  sandboxModeFilesystemLevel,
+  SANDBOX_MODE_DESCRIPTIONS,
+  SANDBOX_MODES,
+} from './sandbox-mode.js';
+export type { EffectiveSandboxMode, SandboxMode } from './sandbox-mode.js';
+export {
   AGENT_BUILTIN_MCP_TOOL_IDS,
   AGENT_BUILTIN_SKILL_IDS,
   AGENT_BUILTIN_TOOL_IDS,

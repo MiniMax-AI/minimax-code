@@ -74,6 +74,7 @@ export async function runTuiExecCommand(
         surface: 'headless',
         promptMode: invocation.promptMode ?? 'tui',
         permissionMode: runtimePermissionMode(invocation.permission),
+        ...(invocation.sandboxMode ? { sandboxMode: invocation.sandboxMode } : {}),
         ...(commandOptions.lane ? { lane: commandOptions.lane } : {}),
       },
       explicitConfig

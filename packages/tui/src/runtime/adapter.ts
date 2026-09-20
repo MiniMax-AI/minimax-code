@@ -72,6 +72,7 @@ import type {
   WatchTuiSessionTurnOptions,
 } from "./port.js";
 import type { TuiPermissionMode } from "../application/permission-mode.js";
+import type { EffectiveSandboxMode, SandboxMode } from "@mavis/config";
 import { resolveTuiEffortChoice } from "../application/model-effort.js";
 import type { TuiObservability } from "../observability/index.js";
 import type { TuiTokenPlanAccountStatus } from "../account/matrix-account-client.js";
@@ -433,6 +434,12 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   }
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode> {
     return this.productAccess.setPermissionMode(mode);
+  }
+  getSandboxMode(): Promise<EffectiveSandboxMode | undefined> {
+    return this.productAccess.getSandboxMode();
+  }
+  setSandboxMode(mode: SandboxMode): Promise<EffectiveSandboxMode> {
+    return this.productAccess.setSandboxMode(mode);
   }
   listModels(sessionId?: string): Promise<TuiModel[]> {
     return this.productAccess.listModels(sessionId);
