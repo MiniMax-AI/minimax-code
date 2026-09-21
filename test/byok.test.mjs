@@ -297,6 +297,25 @@ test(
     assert.equal(selected.models[0].contextLimit, undefined);
     assert.equal(selected.models[0].maxOutputTokens, undefined);
 
+    // The selected plan path must survive YAML persistence and actual inference.
+    const codingUrl = `${new URL(baseUrl).origin}/api/coding/paas/v4`;
+    const beforeCoding = requests.length;
+    await run([
+      "provider", "add", "--name", "Coding", "--base-url", codingUrl,
+      "--api-format", "openai-completions", "--model", "glm-5.3", "--use",
+    ]);
+    assert.equal(savedConfig().custom_provider.coding.options.baseURL, codingUrl);
+    assert.equal(savedConfig().defaultModel, "custom_provider:coding/glm-5.3");
+    assert.match(await run([
+      "exec", "CODING_ENDPOINT_TEST", "--timeout", "20s", "--max-steps", "1",
+    ]), /LOCAL_BYOK_OK/);
+    const codingRequests = requests.slice(beforeCoding);
+    assert.ok(codingRequests.some(({ body }) => body.stream === true && body.model === "glm-5.3"));
+    // Loopback hosts may also receive a separate Responses token-count probe.
+    const chatRequests = codingRequests.filter(({ body }) => Array.isArray(body.messages));
+    assert.ok(chatRequests.length >= 2, "Both the connection test and inference must use Chat");
+    assert.ok(chatRequests.every(({ url }) => url === "/api/coding/paas/v4/chat/completions"));
+
     const addArgs = [
       "provider", "add", "--name", "Limited", "--base-url", baseUrl,
       "--api-format", "openai-completions", "--model", "fixture-model",

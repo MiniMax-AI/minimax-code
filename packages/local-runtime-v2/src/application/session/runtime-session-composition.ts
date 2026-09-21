@@ -5,7 +5,7 @@ import type { GlobalEventInput } from '@mavis/shared/global-events';
 import type { V1SessionCompatibility } from '../../compat/v1/session.js';
 import { AgentServiceError, type LocalAgentService } from '../../service/agent/index.js';
 import type { BrowserUseService } from '../../service/browser-use/index.js';
-import { SAFETY_SCENE, type ContentSafetyService } from '../../service/content-safety/index.js';
+import type { ContentSafetyService } from '../../service/content-safety/index.js';
 import type { CronMetricsClient } from '../../service/cron/index.js';
 import type { ComposedInspector } from '../../service/llm-context-inspector/index.js';
 import {
@@ -54,6 +54,7 @@ import { ModelProviderApplication } from './model-provider-application.js';
 import { createRuntimeCompactionFactSink } from './runtime-compaction-facts.js';
 import { describeError } from './turn-message-delivery.js';
 import { queryCollapseSteeringProjection } from '../conversation/index.js';
+import { createSessionTitlePolicy } from './session-title-policy.js';
 
 export interface ProductionSessionComposition {
   readonly product: ProductionAgentProductCapabilities;
@@ -162,9 +163,13 @@ export function createProductionSessionComposition(
     agents: input.agentSessionPorts.directory,
     rootAgents: input.agentSessionPorts.roots,
     defaultWorkspaceDir: input.compatibility.workspace.defaultDirectory,
-    titlePolicy: {
-      blocks: (title) => input.safety.blocks(title, SAFETY_SCENE.ConfigField),
-    },
+    titlePolicy: createSessionTitlePolicy({
+      runtimeOwnerKind: input.runtimeOwnerKind,
+      config: input.modelConfig.read,
+      safety: input.safety,
+      readDefinition: (sessionId) =>
+        sessionSystem.repositories.sessions.getSessionAgentDefinition(sessionId),
+    }),
     resolveRequestedModel: (model) => resolveRequestedSessionModel(input.modelConfig.read(), model),
     backfillDiagnostics: createSessionBackfillDiagnostics({
       logger: input.logger,

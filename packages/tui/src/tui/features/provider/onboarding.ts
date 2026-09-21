@@ -7,7 +7,7 @@ import type {
 } from '../../../provider/contract.js';
 import { additiveProviderModels, matchesProviderTemplate } from './connections.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
-import { getKeybindings, Input } from '../../engine/public.js';
+import { getKeybindings, Input, matchesKey } from '../../engine/public.js';
 import type { Component, Focusable } from '../../rendering/component.js';
 import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
 import { sanitizeTerminalText } from '../../rendering/terminal-text.js';
@@ -35,6 +35,7 @@ type OnboardingMode =
   | 'alias'
   | 'model'
   | 'custom-name'
+  | 'preset-url'
   | 'custom-url'
   | 'custom-format'
   | 'custom-model'
@@ -74,6 +75,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
   private modelFocus: ModelFocus = 'models';
   private editingModelApiKey = false;
   private modelApiKeyDraft = '';
+  private presetBaseUrl = '';
   private customName = '';
   private customBaseUrl = '';
   private customApiFormat: McodeProviderApiFormat = 'openai-completions';
@@ -189,6 +191,13 @@ export class TuiProviderOnboarding implements Component, Focusable {
       this.options.requestRender();
       return;
     }
+    if (matchesKey(data, 'ctrl+e')) {
+      this.enterTextMode(
+        'preset-url',
+        this.presetBaseUrl || this.connection?.baseUrl || this.template?.baseUrl || '',
+      );
+      return;
+    }
     if (
       this.modelFocus === 'models' &&
       keybindings.matches(data, 'tui.select.up') &&
@@ -242,6 +251,10 @@ export class TuiProviderOnboarding implements Component, Focusable {
       const prompt = chalk.hex(colors.muted)('Search: ');
       const input = this.searchInput.render(Math.max(1, width - visibleWidth(prompt)))[0] ?? '';
       return [
+        chalk.hex(colors.text)(
+          `Base URL: ${sanitizeTerminalText(this.presetBaseUrl || this.connection?.baseUrl || this.template?.baseUrl || '')}`,
+        ),
+        chalk.hex(colors.dim)('ctrl+e edit URL · match the endpoint to your API plan'),
         ...this.renderModelApiKey(width),
         '',
         `${prompt}${input}`,
@@ -487,9 +500,18 @@ export class TuiProviderOnboarding implements Component, Focusable {
       this.enterTextMode('custom-url', this.customBaseUrl);
       return;
     }
-    if (this.mode === 'custom-url') {
+    if (this.mode === 'custom-url' || this.mode === 'preset-url') {
       if (!isHttpUrl(trimmed)) {
         this.status = 'Base URL must use http or https.';
+        this.options.requestRender();
+        return;
+      }
+      if (this.mode === 'preset-url') {
+        this.presetBaseUrl = trimmed;
+        // Return without rebuilding the model list or discarding the key/model draft.
+        this.mode = 'model';
+        this.status = '';
+        this.syncFocus();
         this.options.requestRender();
         return;
       }
@@ -522,7 +544,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
     try {
       const result = await this.options.onSave(input);
       if (!result.success) {
-        this.status = result.status?.lastErrorMessage ?? 'Connection test failed.';
+        this.status = `Changes were not saved. ${result.status?.lastErrorMessage ?? 'Connection test failed.'}`;
         return;
       }
       await this.options.onComplete({
@@ -555,7 +577,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
             }
           : {}),
         name: this.connection?.name ?? (this.alias || this.template.name),
-        baseUrl: this.connection?.baseUrl ?? this.template.baseUrl,
+        baseUrl: this.presetBaseUrl || this.connection?.baseUrl || this.template.baseUrl,
         ...(apiKey ? { apiKey } : {}),
         apiFormat: this.template.apiFormat,
         models: this.connection
@@ -605,7 +627,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
   }
 
   private enterTextMode(
-    mode: 'custom-name' | 'custom-url' | 'custom-model' | 'alias',
+    mode: 'custom-name' | 'custom-url' | 'custom-model' | 'alias' | 'preset-url',
     value: string,
   ): void {
     this.mode = mode;
@@ -637,6 +659,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
   }
 
   private resetKnownProviderDraft(): void {
+    this.presetBaseUrl = '';
     this.connection = undefined;
     this.alias = '';
     this.selectedModelId = '';
@@ -647,6 +670,13 @@ export class TuiProviderOnboarding implements Component, Focusable {
   }
 
   private back(): void {
+    if (this.mode === 'preset-url') {
+      this.mode = 'model';
+      this.status = '';
+      this.syncFocus();
+      this.options.requestRender();
+      return;
+    }
     if (this.mode === 'provider') {
       this.resetKnownProviderDraft();
       return this.options.onCancel();
@@ -668,6 +698,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
   private subtitle(): string {
     if (this.mode === 'connection')
       return 'This provider is already configured. Use the saved connection or add another account.';
+    if (this.mode === 'preset-url') return 'Confirm the endpoint before testing with your API key';
     if (this.mode === 'alias') return 'Give the additional account a recognizable name';
     if (this.mode === 'provider') return 'Choose a known provider or enter a custom endpoint';
     if (this.mode === 'model')
@@ -679,7 +710,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
   private inputLabel(): string {
     if (this.mode === 'alias') return 'Account alias';
     if (this.mode === 'custom-name') return 'Provider name';
-    if (this.mode === 'custom-url') return 'Base URL';
+    if (this.mode === 'custom-url' || this.mode === 'preset-url') return 'Base URL';
     if (this.mode === 'custom-model') return 'Model ID';
     return 'API Key';
   }
@@ -695,6 +726,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
     }
     if (this.mode === 'api-key') return 'enter test, save, and use · esc back';
     if (
+      this.mode === 'preset-url' ||
       this.mode === 'custom-name' ||
       this.mode === 'custom-url' ||
       this.mode === 'custom-model' ||
@@ -712,7 +744,8 @@ export class TuiProviderOnboarding implements Component, Focusable {
         (this.mode === 'model' && this.modelFocus === 'models' && !this.editingModelApiKey));
     this.textInput.focused =
       this._focused &&
-      (this.mode === 'custom-name' ||
+      (this.mode === 'preset-url' ||
+        this.mode === 'custom-name' ||
         this.mode === 'custom-url' ||
         this.mode === 'custom-model' ||
         this.mode === 'alias');

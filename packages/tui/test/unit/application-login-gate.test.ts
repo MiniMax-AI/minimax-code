@@ -5,6 +5,7 @@ import {
   TuiLoginRequiredError,
   requireTuiAccountLogin,
   requireTuiAgentAccess,
+  tuiAccountNeedsLoginPrompt,
 } from '../../src/application/login-gate.js';
 
 describe('MiniMax login gate', () => {
@@ -24,6 +25,7 @@ describe('MiniMax login gate', () => {
       account,
     );
     expect(getAccountStatus).toHaveBeenCalledWith('session-1', undefined);
+    expect(tuiAccountNeedsLoginPrompt(account)).toBe(false);
   });
 
   it('accepts a shared managed token for a managed model', async () => {
@@ -52,6 +54,7 @@ describe('MiniMax login gate', () => {
       warnings: [],
     };
 
+    expect(tuiAccountNeedsLoginPrompt(account)).toBe(true);
     await expect(
       requireTuiAgentAccess({ getAccountStatus: async () => account }),
     ).rejects.toMatchObject({

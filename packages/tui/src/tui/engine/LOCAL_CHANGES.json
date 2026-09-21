@@ -126,10 +126,10 @@
     },
     {
       "path": "stdin-buffer.ts",
-      "currentSha256": "95e18c6c702fee39289c2221ddb54dfe7269812fa2f80223025d6a6df05d7e10",
-      "changeIds": ["L005"],
-      "reason": "Make the length-guarded final byte access explicit under the shared MCode strict TypeScript contract.",
-      "behaviorImpact": "none_intended"
+      "currentSha256": "1aca0d7fb7dacaf16a28ede79f52fcf7bea651d8a263777ee327fdaeb2dcaa28",
+      "changeIds": ["L005", "L036"],
+      "reason": "Keep strict TypeScript guards and preserve unframed multiline text chunks before key splitting.",
+      "behaviorImpact": "Plain-text chunks with internal line endings use the existing paste path; standalone Enter and control sequences retain key semantics."
     },
     {
       "path": "terminal-colors.ts",
@@ -164,7 +164,7 @@
     {
       "path": "tui-main-screen.ts",
       "currentSha256": "9fbbaf8b430423c80bd1abff87a4618a15dcc1253934dbf3b3fdab476e86e584",
-      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L036"],
+      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037"],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
       "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
       "behaviorImpact": "Regular updates preserve native scrollback. When document shrink reveals previously scrolled rows, replay the complete current session to fill the viewport and avoid duplicate history. Rebuilding clears pre-launch shell scrollback. Resize retains the existing delayed history replay."

@@ -2356,6 +2356,31 @@ describe("runtime services agent profile composition", () => {
   });
 });
 
+describe("production Session title policy wiring", () => {
+  it("skips the signed-out gateway only for the selected BYOK Session", async () => {
+    const compatibility = defaultCompatibility();
+    const review = vi.mocked(compatibility.safety.review);
+    review.mockResolvedValue({ pass: false, errorKind: "auth_error" });
+    await createRuntimeServices({
+      db: {} as AppDb, dataDir: "/data", logger: noopLogger,
+      eventBus: new EventBus<GlobalEvent>(), compatibility,
+      agentService: localAgentService, runtimeOwnerKind: "tui", capabilityProfile: "cli",
+    });
+    const policy = mocked.sessionOptions?.["titlePolicy"] as import("./service/session-system/index.js").SessionRecordServiceDeps["titlePolicy"];
+    const session: import("./service/session-system/index.js").SessionRecord = {
+      sessionId: "rename", agentName: "test", workspaceDir: "/data",
+      runtime: "pi-agent", sessionType: "branch", sessionKind: "conversation",
+      archived: false, status: "idle", createdAtMs: 1, updatedAtMs: 1,
+      effectiveModel: "custom_provider:openai-work/test-model",
+    };
+    review.mockClear();
+    await expect(policy.blocks("Local rename", session)).resolves.toBe(false);
+    expect(review).not.toHaveBeenCalled();
+    await expect(policy.blocks("Managed rename", { ...session, effectiveModel: "minimax/MiniMax-M3" })).resolves.toBe(true);
+    expect(review).toHaveBeenCalledWith("Managed rename", 205);
+  });
+});
+
 describe("runtime startup preserves Session model selections", () => {
   it.each(["tui", "electron"] as const)(
     "does not scan or rewrite shared Sessions for %s",
