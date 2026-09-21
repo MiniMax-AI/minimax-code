@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto';
-import { CanonicalHistoryJsonlDataSource } from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
+import {
+  canonicalActiveHistoryRevision,
+  canonicalHistoryRevision,
+  CanonicalHistoryJsonlDataSource,
+  decodeCanonicalHistoryEnvelope,
+} from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
+import { canonicalJson } from '../packages/local-runtime-v2/src/infra/file/canonical-history-json-value.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,6 +43,63 @@ describe('native incremental semantic hashing', () => {
     expect(hash.digestHex()).toBe(
       createHash('sha256').update('\ud83d').update('\ude42').digest('hex'),
     );
+  });
+  it('matches native updates across repeated batches and split surrogate pairs', () => {
+    const actual = new IncrementalSha256();
+    const expected = createHash('sha256');
+    const parts = ['key', ':', '', '\ud83d', '\ude42', '中文🙂', 'x'.repeat(8191), '🙂tail'];
+    for (let index = 0; index < 257; index += 1) {
+      for (const part of parts) {
+        actual.update(part);
+        expected.update(part, 'utf8');
+      }
+    }
+    expect(actual.digestHex()).toBe(expected.digest('hex'));
+  });
+});
+
+describe('streamed canonical history revisions', () => {
+  it.each([0, 1, 100])('preserves the canonical JSON digest for %i records', (length) => {
+    const records = Array.from({ length }, (_, index) => ({
+      message_id: `msg-${index}`,
+      turn_id: `turn-${index}`,
+      message: {
+        role: 'user',
+        timestamp: index,
+        content: '中文🙂\ud800'.repeat(2048),
+        metadata: { z: [null, true, -0], '10': 'ten', '2': 'two', a: { b: '"\\\n' } },
+      },
+    }));
+    const expected = `sha256:${createHash('sha256')
+      .update(canonicalJson(records.map(decodeCanonicalHistoryEnvelope)), 'utf8')
+      .digest('hex')}`;
+    expect(canonicalHistoryRevision(records)).toBe(expected);
+    expect(canonicalActiveHistoryRevision(records)).toBe(expected);
+    if (records.length > 0) {
+      records[0]!.message.content = 'edited';
+      expect(canonicalHistoryRevision(records)).not.toBe(expected);
+    }
+  });
+  it('keeps active and settled sequence validation distinct', () => {
+    const pending = [
+      {
+        message_id: 'msg-assistant',
+        turn_id: 'turn-1',
+        message: {
+          role: 'assistant',
+          timestamp: 1,
+          content: [
+            { type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'pwd' } },
+          ],
+        },
+      },
+    ];
+    const expected = `sha256:${createHash('sha256')
+      .update(canonicalJson(pending.map(decodeCanonicalHistoryEnvelope)), 'utf8')
+      .digest('hex')}`;
+    expect(canonicalActiveHistoryRevision(pending)).toBe(expected);
+    expect(() => canonicalHistoryRevision(pending)).toThrow('tool results');
+    expect(() => canonicalActiveHistoryRevision([pending[0]!, pending[0]!])).toThrow();
   });
 });
 

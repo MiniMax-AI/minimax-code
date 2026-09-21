@@ -564,7 +564,14 @@ function decodeRecords(records: readonly CanonicalHistoryEnvelope[]): CanonicalH
 }
 
 function revisionOfNormalized(records: readonly CanonicalHistoryEnvelope[]): string {
-  return `sha256:${createHash('sha256').update(canonicalJson(records), 'utf8').digest('hex')}`;
+  // Preserve the canonical JSON array bytes without building a sorted copy and
+  // serialized string of the entire history at once.
+  const hash = createHash('sha256').update('[');
+  for (let index = 0; index < records.length; index += 1) {
+    if (index > 0) hash.update(',');
+    hash.update(canonicalJson(records[index]), 'utf8');
+  }
+  return `sha256:${hash.update(']').digest('hex')}`;
 }
 
 function decodeMessage(value: unknown): CanonicalHistoryMessage {
