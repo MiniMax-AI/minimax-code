@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { redactTuiSensitiveText } from '../user-facing-failure.js';
 
 export type TuiObservabilitySurface = 'tui' | 'headless' | 'acp' | 'inspection';
 export type TuiRuntimeAccessSource = 'process-local';
@@ -125,7 +126,15 @@ export interface TuiObservabilitySnapshot {
   readonly terminal?: TuiTerminalObservation;
 }
 
+export interface TuiSideSessionFailureObservation {
+  readonly stage: 'create' | 'activate';
+  readonly parentSessionId: string;
+  readonly sideSessionId?: string;
+  readonly error: unknown;
+}
+
 export interface TuiObservability {
+  recordSideSessionFailure?(observation: TuiSideSessionFailureObservation): void;
   recordStartup(observation: TuiStartupObservation): void;
   recordAccess(observation: TuiRuntimeAccessObservation): void;
   recordEventStream(observation: TuiEventStreamObservation): void;
@@ -237,6 +246,11 @@ class LocalTuiObservability implements TuiObservability {
     this.ready = ensureDirectory(directory)
       .then(() => prune(directory, startedAtMs - OBSERVABILITY_RETENTION_MS))
       .catch(() => undefined);
+  }
+
+  recordSideSessionFailure(observation: TuiSideSessionFailureObservation): void {
+    const { error, ...context } = observation;
+    this.record('session.side.failed', { ...context, errors: describeSideSessionErrors(error) });
   }
 
   recordStartup(observation: TuiStartupObservation): void {
@@ -394,4 +408,25 @@ function percentile(values: readonly number[], quantile: number): number {
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.max(0, Math.ceil(sorted.length * quantile) - 1);
   return sorted[index] ?? 0;
+}
+
+/** Keep diagnostic causes bounded and redact text before it enters the uploadable local log. */
+function describeSideSessionErrors(error: unknown): readonly TuiProcessErrorObservation[] {
+  const errors: TuiProcessErrorObservation[] = [];
+  let current = error;
+  for (let depth = 0; current !== undefined && depth < 3; depth += 1) {
+    if (!(current instanceof Error)) {
+      errors.push({ message: redactTuiSensitiveText(String(current)).slice(0, 1_024) });
+      break;
+    }
+    const code: unknown = Reflect.get(current, 'code');
+    errors.push({
+      name: redactTuiSensitiveText(current.name).slice(0, 128),
+      message: redactTuiSensitiveText(current.message).slice(0, 1_024),
+      ...(typeof code === 'string' ? { code: redactTuiSensitiveText(code).slice(0, 128) } : {}),
+      ...(current.stack ? { stack: redactTuiSensitiveText(current.stack).slice(0, 2_048) } : {}),
+    });
+    current = current.cause;
+  }
+  return errors;
 }

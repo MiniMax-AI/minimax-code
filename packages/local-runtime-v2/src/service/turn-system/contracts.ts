@@ -413,6 +413,8 @@ export interface HistoryForkInput {
   readonly sourceSessionId: string;
   readonly targetSessionId: string;
   readonly targetWorkspaceDir: string;
+  /** Frozen inclusive complete-prefix boundary used by side conversations. */
+  readonly throughMessageId?: string;
   /** Preferred inclusive canonical Assistant boundary. */
   readonly throughAssistantMessageId?: string;
   /** Compatibility boundary for legacy Display rows without an Assistant identity. */

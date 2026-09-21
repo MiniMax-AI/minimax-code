@@ -122,6 +122,9 @@ export class ForkService {
     const boundary = await this.readBoundary(
       source.sessionId,
       input.manifest.request.assistantDisplayMessageId,
+      input.manifest.request.sidePresentation
+        ? { throughMessageId: input.manifest.request.sideHistoryMessageId }
+        : undefined,
     );
     this.assertForkBoundary(source, boundary, input.manifest.request);
     const worktree = await this.recoverWorktree(
@@ -449,9 +452,11 @@ export class ForkService {
   private async readBoundary(
     sessionId: string,
     assistantDisplayMessageId?: string,
+    sideHistory?: { readonly throughMessageId?: string },
   ): Promise<ForkBoundary> {
     const resolved = await this.deps.boundary.resolve({
       sessionId,
+      ...(sideHistory ? { sideHistory } : {}),
       ...(assistantDisplayMessageId === undefined ? {} : { assistantDisplayMessageId }),
     });
     if (!resolved) {
@@ -541,7 +546,11 @@ export class ForkService {
 
   private async startForkOwned(input: ForkRequest): Promise<ForkResult> {
     const source = await this.requireSupportedSource(input.sourceSessionId, 'Fork');
-    const boundary = await this.readBoundary(source.sessionId, input.assistantDisplayMessageId);
+    const boundary = await this.readBoundary(
+      source.sessionId,
+      input.assistantDisplayMessageId,
+      input.sidePresentation ? {} : undefined,
+    );
     const resolvedRequest = resolveForkRequest(input, boundary);
     this.assertForkBoundary(source, boundary, resolvedRequest);
     const progress = createStartProgress(this.deps.operations, resolvedRequest);
@@ -775,6 +784,9 @@ function historyForkInput(context: ResumeContext) {
 }
 
 function canonicalHistoryBoundaryInput(boundary: ForkBoundary) {
+  if (boundary.sideHistoryMessageId) {
+    return { throughMessageId: boundary.sideHistoryMessageId };
+  }
   if (boundary.assistantCanonicalMessageId) {
     return { throughAssistantMessageId: boundary.assistantCanonicalMessageId };
   }
@@ -785,7 +797,11 @@ function canonicalHistoryBoundaryInput(boundary: ForkBoundary) {
 }
 
 function hasCanonicalForkBoundary(boundary: ForkBoundary): boolean {
-  return Boolean(boundary.assistantCanonicalMessageId ?? boundary.beforeUserMessageId);
+  return Boolean(
+    boundary.sideHistoryMessageId ??
+    boundary.assistantCanonicalMessageId ??
+    boundary.beforeUserMessageId,
+  );
 }
 
 function isHistoricalCanonicalForkBoundary(boundary: ForkBoundary): boolean {
@@ -949,6 +965,9 @@ function resolveForkRequest(request: ForkRequest, boundary: ForkBoundary): Resol
   return {
     ...request,
     assistantDisplayMessageId,
+    ...(boundary.sideHistoryMessageId
+      ? { sideHistoryMessageId: boundary.sideHistoryMessageId }
+      : {}),
   };
 }
 
