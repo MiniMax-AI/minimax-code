@@ -394,24 +394,66 @@ export function applyEditsToNormalizedContent(
 	return { baseContent: normalizedContent, newContent };
 }
 
-/** Generate a standard unified patch. */
-export function generateUnifiedPatch(path: string, oldContent: string, newContent: string, contextLines = 4): string {
+/**
+ * Bounds for the post-edit diff. The diff is a receipt computed after the file
+ * has already been written (and, for the TUI preview, a courtesy rendering), so
+ * giving it up never changes what lands on disk.
+ *
+ * Myers runs in O((N+M)·D) where D is the edit-script length. A whole-file
+ * replacement that touches tens of thousands of lines therefore takes minutes
+ * and hundreds of MB unbounded, and produces a multi-MB diff nothing can
+ * render. `maxEditLength` caps D deterministically (the same input always
+ * aborts at the same point, so the behavior is unit-testable); `timeout` is a
+ * wall-clock safety net for slow machines and pathological inputs.
+ */
+export const DIFF_MAX_EDIT_LENGTH = 1000;
+export const DIFF_TIMEOUT_MS = 5_000;
+
+/** Why no diff was produced: the edit script exceeded DIFF_MAX_EDIT_LENGTH, or DIFF_TIMEOUT_MS elapsed first. */
+export type DiffOmittedReason = "too_many_changes" | "timeout";
+
+const DIFF_BOUNDS = { maxEditLength: DIFF_MAX_EDIT_LENGTH, timeout: DIFF_TIMEOUT_MS } as const;
+
+/**
+ * Generate a standard unified patch.
+ * Returns `undefined` when the diff exceeds DIFF_MAX_EDIT_LENGTH or DIFF_TIMEOUT_MS.
+ */
+export function generateUnifiedPatch(
+	path: string,
+	oldContent: string,
+	newContent: string,
+	contextLines = 4,
+): string | undefined {
 	return Diff.createTwoFilesPatch(path, path, oldContent, newContent, undefined, undefined, {
 		context: contextLines,
 		headerOptions: Diff.FILE_HEADERS_ONLY,
+		...DIFF_BOUNDS,
 	});
 }
 
 /**
  * Generate a display-oriented diff string with line numbers and context.
  * Returns both the diff string and the first changed line number (in the new file).
+ *
+ * When the diff exceeds DIFF_MAX_EDIT_LENGTH or DIFF_TIMEOUT_MS, `diff` is a
+ * single notice line (so every renderer still has something to show) and
+ * `omitted` names the reason.
  */
-export function generateDiffString(
-	oldContent: string,
-	newContent: string,
-	contextLines = 4,
-): { diff: string; firstChangedLine: number | undefined } {
-	const parts = Diff.diffLines(oldContent, newContent);
+export function generateDiffString(oldContent: string, newContent: string, contextLines = 4): EditDiffResult {
+	const startedAt = Date.now();
+	const parts = Diff.diffLines(oldContent, newContent, DIFF_BOUNDS);
+	if (parts === undefined) {
+		// jsdiff stops on whichever bound trips first; only the clock tells them apart.
+		const omitted: DiffOmittedReason = Date.now() - startedAt >= DIFF_TIMEOUT_MS ? "timeout" : "too_many_changes";
+		return {
+			diff:
+				omitted === "timeout"
+					? `(diff omitted: computing it exceeded ${DIFF_TIMEOUT_MS} ms)`
+					: `(diff omitted: more than ${DIFF_MAX_EDIT_LENGTH} lines changed)`,
+			firstChangedLine: undefined,
+			omitted,
+		};
+	}
 	const output: string[] = [];
 
 	const oldLines = oldContent.split("\n");
@@ -534,6 +576,8 @@ export function generateDiffString(
 export interface EditDiffResult {
 	diff: string;
 	firstChangedLine: number | undefined;
+	/** Set when the diff was not computed; `diff` then holds a one-line notice. */
+	omitted?: DiffOmittedReason;
 }
 
 export interface EditDiffError {

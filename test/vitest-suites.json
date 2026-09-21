@@ -5,6 +5,8 @@
       "packages/agent-core/test/unit/bash-subprocess-env.test.ts",
       "packages/agent-modules/permission/test/unit/permission/bash-policy-regressions.test.ts",
       "packages/agent-tools/src/shared/replace-all-edit.test.ts",
+      "packages/agent-tools/src/desktop/edit-diff-bounds.test.ts",
+      "packages/tui/test/unit/tui-tool-preview-diff-omitted.test.ts",
       "packages/local-runtime-v2/test/unit/agent/agent-import.test.ts",
       "packages/tui/test/unit/auth-application.test.ts",
       "packages/tui/test/unit/tui-assistant-content.test.ts",

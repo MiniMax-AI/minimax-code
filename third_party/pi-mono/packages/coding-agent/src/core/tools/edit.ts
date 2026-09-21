@@ -10,6 +10,7 @@ import {
 	applyEditsToNormalizedContent,
 	computeEditsDiff,
 	detectLineEnding,
+	type DiffOmittedReason,
 	type Edit,
 	type EditDiffError,
 	type EditDiffResult,
@@ -59,12 +60,14 @@ type LegacyEditToolInput = EditToolInput & {
 };
 
 export interface EditToolDetails {
-	/** Display-oriented diff of the changes made */
+	/** Display-oriented diff of the changes made (a one-line notice when `diffOmitted` is set) */
 	diff: string;
-	/** Standard unified patch of the changes made */
-	patch: string;
+	/** Standard unified patch of the changes made; absent when the diff hit its bounds */
+	patch?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
+	/** Set when the diff exceeded DIFF_MAX_EDIT_LENGTH / DIFF_TIMEOUT_MS. The file was still written. */
+	diffOmitted?: DiffOmittedReason;
 }
 
 /**
@@ -347,8 +350,11 @@ export function createEditToolDefinition(
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
+				// The file is already on disk, so both diffs below are receipts. When the
+				// display diff was abandoned the patch would abort on the same bounds, so
+				// skip it rather than paying for a second Myers run that cannot finish.
 				const diffResult = generateDiffString(baseContent, newContent);
-				const patch = generateUnifiedPatch(path, baseContent, newContent);
+				const patch = diffResult.omitted ? undefined : generateUnifiedPatch(path, baseContent, newContent);
 				return {
 					content: [
 						{
@@ -356,7 +362,12 @@ export function createEditToolDefinition(
 							text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
 						},
 					],
-					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+					details: {
+						diff: diffResult.diff,
+						patch,
+						firstChangedLine: diffResult.firstChangedLine,
+						diffOmitted: diffResult.omitted,
+					},
 				};
 			});
 		},

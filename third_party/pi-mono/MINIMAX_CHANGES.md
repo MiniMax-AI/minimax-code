@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-21 — bound the post-edit diff of the edit tool
+
+- Reason: `edit` computed its display diff and its unified patch with unbounded Myers, which costs O((N+M)·D) in the length D of the edit script. A whole-file rewrite therefore scaled quadratically in the number of changed lines: rewriting every line of a 20 000-line file blocked the tool for over two minutes and produced a multi-megabyte patch that no renderer displays. The sibling `write` path already caps the same work (`packages/agent-tools/src/shared/write-capture.ts`); `edit` had no cap.
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), edit tool diff generation.
+- Change type: generic, upstreamable performance fix. Pass jsdiff's `maxEditLength` (1000 edits) and `timeout` (5 s) to `diffLines` and `createTwoFilesPatch`. `maxEditLength` is the primary bound because it is deterministic and therefore testable; `timeout` only backstops slow machines. When a bound trips, `details.diff` carries a one-line notice so every renderer still has something to show, `details.patch` is omitted, and the new `details.diffOmitted` names the reason. The unified patch is skipped once the display diff was abandoned rather than repeating a second Myers run that aborts on the same bound. The file is written before any diff runs, so a dropped diff never changes what lands on disk.
+- Upstream PR: not opened.
+- Validation: `packages/agent-tools/src/desktop/edit-diff-bounds.test.ts` (registered in the `capability` suite) covers an ordinary edit, a large block replacement that stays under the bound, and a whole-file rewrite that keeps the write while dropping the diff; `pnpm verify --profile platform` on macOS. Measured end to end through `createEditTool` on a 20 000-line whole-file rewrite: 120 s / 138 s / 139 s before, 60 ms / 60 ms / 58 ms after (three runs each, same machine).
+
 ### 2026-09-19 — preserve the system role for Mistral Chat Completions
 
 - Reason: thinking-enabled custom OpenAI-compatible connections to `api.mistral.ai` emitted `developer`, which is absent from the [Mistral Chat Completions message contract](https://docs.mistral.ai/api/endpoint/chat). [OpenClaw's compatibility defaults](https://github.com/openclaw/openclaw/blob/e2bcb1614de060927121bd72de850cee3a08d308/packages/ai/src/transports/openai-completions-compat.ts#L184-L210) also disable this role for the Mistral public endpoint.
