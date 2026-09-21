@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { and, desc, eq, gt, inArray } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import {
   sessionLocks,
@@ -491,11 +491,29 @@ async function completeTurnSessionDeletion(
   );
 }
 
+const receiptQueries = new WeakMap<
+  TurnRepositoryOptions['db'],
+  ReturnType<typeof prepareReceiptQuery>
+>();
+
+function prepareReceiptQuery(db: TurnRepositoryOptions['db']) {
+  return db
+    .select()
+    .from(turnIngress)
+    .where(eq(turnIngress.turnId, sql.placeholder('turnId')))
+    .prepare();
+}
+
 async function findTurnReceipt(
   options: TurnRepositoryOptions,
   turnId: string,
 ): ReturnType<TurnRepository['findReceipt']> {
-  const receipt = options.db.select().from(turnIngress).where(eq(turnIngress.turnId, turnId)).get();
+  let query = receiptQueries.get(options.db);
+  if (!query) {
+    query = prepareReceiptQuery(options.db);
+    receiptQueries.set(options.db, query);
+  }
+  const receipt = query.get({ turnId });
   if (!receipt) return undefined;
   if (
     !storedBusyReason(receipt.busyReason) ||

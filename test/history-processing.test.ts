@@ -10,6 +10,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { DatabaseClient } from '../packages/local-runtime-v2/src/infra/db/client.js';
+import { initializeDatabase } from '../packages/local-runtime-v2/src/infra/db/initialize.js';
+import { queryCollapseViewStates } from '../packages/local-runtime-v2/src/infra/db/schema/query-collapse.js';
+import { turnIngress } from '../packages/local-runtime-v2/src/infra/db/schema/turn.js';
+import { createQueryCollapseState } from '../packages/local-runtime-v2/src/service/session-system/query-collapse-state.js';
+import { createQueueTurnAdmissionPriorityFence } from '../packages/local-runtime-v2/src/service/session-system/index.js';
+import { createTurnRepository } from '../packages/local-runtime-v2/src/service/turn-system/persistence/turn.repository.js';
 import { IncrementalSha256 } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/incremental-sha256.js';
 import { captureSemanticSnapshot } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/semantic-identity.js';
 import { DurableCanonicalHistoryStore } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/durable-canonical-history-store.js';
@@ -23,6 +31,106 @@ import {
   utcSessionHistoryRelativeDir,
 } from '../packages/local-runtime-v2/src/service/session-system/messages/history/session-history-paths.js';
 import type { SessionRecord } from '../packages/local-runtime-v2/src/service/session-system/sessions/repo/contract.js';
+
+describe('prepared runtime reads', () => {
+  async function withDatabase(
+    run: (client: DatabaseClient, writer: DatabaseClient) => Promise<void>,
+  ) {
+    const dataDir = await mkdtemp(join(tmpdir(), 'mcode-prepared-reads-'));
+    const client = new DatabaseClient({ dataDir });
+    const writer = new DatabaseClient({ dataDir });
+    try {
+      await initializeDatabase({ database: client, dataDir });
+      await run(client, writer);
+    } finally {
+      writer.close();
+      client.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  it('keeps processing reads fresh across sessions, completion and another connection', async () => {
+    await withDatabase(async (client, writer) => {
+      const state = createQueryCollapseState({ db: client.db, nowMs: () => 1 });
+      expect(await state.findProcessingByCurrentTurn('s1', 't1')).toBeUndefined();
+      await state.start({ sessionId: 's1', currentTurnId: 't1', queryKey: 'a' });
+      await state.start({ sessionId: 's1', currentTurnId: 't1', queryKey: 'b' });
+      await state.start({ sessionId: 's2', currentTurnId: 't1', queryKey: 'other' });
+      expect((await state.findProcessingByCurrentTurn('s1', 't1'))?.queryKey).toBe('b');
+      expect((await state.findProcessingByCurrentTurn('s2', 't1'))?.queryKey).toBe('other');
+      expect(await state.findProcessingByCurrentTurn('s1', 'missing')).toBeUndefined();
+      await state.finish({
+        sessionId: 's1',
+        currentTurnId: 't1',
+        queryKey: 'b',
+        forceExpanded: false,
+      });
+      expect((await state.findProcessingByCurrentTurn('s1', 't1'))?.queryKey).toBe('a');
+      writer.db
+        .update(queryCollapseViewStates)
+        .set({ processingFinishedAtMs: 2 })
+        .where(eq(queryCollapseViewStates.sessionId, 's1'))
+        .run();
+      expect(await state.findProcessingByCurrentTurn('s1', 't1')).toBeUndefined();
+      expect((await state.findProcessingByCurrentTurn('s2', 't1'))?.queryKey).toBe('other');
+      client.close();
+      const reopened = createQueryCollapseState({ db: client.db });
+      expect((await reopened.findProcessingByCurrentTurn('s2', 't1'))?.queryKey).toBe('other');
+    });
+  });
+
+  it('rereads receipts and validates corruption after a previous successful lookup', async () => {
+    await withDatabase(async (client, writer) => {
+      const repository = createTurnRepository({
+        db: client.db,
+        priorityFence: createQueueTurnAdmissionPriorityFence(),
+        sessionAdmission: { rejectionInTransaction: () => undefined },
+      });
+      expect(await repository.findReceipt('turn-1')).toBeUndefined();
+      for (let i = 1; i <= 2; i += 1) {
+        writer.db
+          .insert(turnIngress)
+          .values({
+            turnId: `turn-${i}`,
+            sessionId: `s${i}`,
+            busyReason: 'turn',
+            inputJson: '{}',
+            status: 'accepted',
+            acceptedAtMs: 1,
+            acceptedSequence: i,
+            inputDigest: `digest-${i}`,
+          })
+          .run();
+      }
+      expect(await repository.findReceipt('turn-1')).toMatchObject({
+        sessionId: 's1',
+        acceptedSequence: 1,
+      });
+      expect(await repository.findReceipt('turn-2')).toMatchObject({
+        sessionId: 's2',
+        acceptedSequence: 2,
+      });
+      writer.db
+        .update(turnIngress)
+        .set({ inputDigest: '' })
+        .where(eq(turnIngress.turnId, 'turn-1'))
+        .run();
+      await expect(repository.findReceipt('turn-1')).rejects.toThrow('malformed');
+      writer.db
+        .update(turnIngress)
+        .set({ inputDigest: 'edited', acceptedSequence: 3 })
+        .where(eq(turnIngress.turnId, 'turn-1'))
+        .run();
+      expect(await repository.findReceipt('turn-1')).toMatchObject({
+        inputDigest: 'edited',
+        acceptedSequence: 3,
+      });
+      writer.db.delete(turnIngress).where(eq(turnIngress.turnId, 'turn-1')).run();
+      expect(await repository.findReceipt('turn-1')).toBeUndefined();
+      expect(await repository.findReceipt("turn-2' OR 1=1 --")).toBeUndefined();
+    });
+  });
+});
 
 describe('native incremental semantic hashing', () => {
   const inputs = ['', 'abc', '中文🙂', '\ud800', '\udc00', 'a'.repeat(8191) + '🙂tail'];
