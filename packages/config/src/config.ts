@@ -1649,11 +1649,28 @@ function syncManagedPresetBaseUrl(configPath: string): void {
   )
     return;
 
+  const originalContent = fs.readFileSync(configPath);
   (options as Record<string, unknown>).baseURL = presetBaseURL;
-  writePrivateConfigFileSync(
-    configPath,
-    yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }),
-  );
+  try {
+    writePrivateConfigFileSync(
+      configPath,
+      yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }),
+    );
+  } catch (error) {
+    // This on-disk sync is optional, but a failure after truncation is not safe
+    // to hide. Only continue when the original document is still intact.
+    let unchanged = false;
+    try {
+      unchanged = fs.readFileSync(configPath).equals(originalContent);
+    } catch {
+      // Preserve the original write error if integrity cannot be verified.
+    }
+    if (!unchanged) throw error;
+    // Do not include the error message: config errors may contain credentials.
+    console.warn(
+      "[config] managed preset baseURL sync skipped; config file unchanged, using runtime provider settings",
+    );
+  }
 }
 
 function buildPresetEntry(key: PresetKey) {

@@ -468,6 +468,8 @@
     "packages/config/src/tui-status-line-write.ts",
     "packages/config/test/config-file-permissions.test.ts",
     "packages/config/test/config-update-preservation.test.ts",
+    "packages/config/test/managed-preset-sync.test.ts",
+    "packages/config/test/private-config-file.test.ts",
     "packages/local-runtime-v2/assets/agents/_default/prompt-base-all.md",
     "packages/local-runtime-v2/assets/agents/_default/prompt-base-all.md.hbs",
     "packages/local-runtime-v2/assets/agents/_default/prompt-base-windows.md",
