@@ -503,16 +503,17 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
-		// Native scrollback is not addressable. If its text changed, retaining the old prefix
-		// would splice stale rows onto the new document, even when its total height grew.
-		// Style-only changes can still repaint the viewport without replaying history.
+		// Native scrollback is not addressable. A full clear/replay resets the terminal viewport
+		// when the user is reading older output, so changed prefix text gets a viewport-only
+		// redraw and the native scrollback remains a stable snapshot. Style-only changes follow
+		// the same viewport-preserving path.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
 			for (let i = firstChanged; i < prevViewportTop; i++) {
 				const oldLine = this.previousLines[i] ?? "";
 				const newLine = newLines[i] ?? "";
 				if (oldLine !== newLine && stripTerminalSequences(oldLine) !== stripTerminalSequences(newLine)) {
-					fullRender(true);
+					fullRender(true, true);
 					return;
 				}
 			}

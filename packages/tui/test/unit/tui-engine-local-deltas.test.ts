@@ -184,7 +184,7 @@ describe('MCode Pi Engine local deltas', () => {
     expect(terminal.getScrollBuffer()).toEqual([...answer, ...more, 'composer']);
   });
 
-  it.each([0, 30])('rebuilds changed scrollback text even when the document grows by %i rows', async (growth) => {
+  it.each([0, 30])('does not reset native scrollback when history text changes by %i rows', async (growth) => {
     const terminal = new RecordingVirtualTerminal(67, 24);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -194,6 +194,7 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
     terminal.takeWrites();
+    const viewportBeforeUpdate = terminal.getViewport();
 
     component.lines = [
       'Recovered context',
@@ -205,20 +206,37 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
 
-    const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
-    expect(terminal.takeWrites()).toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer()).toEqual(expected);
-    expect(terminal.getViewport()).toEqual(expected.slice(-terminal.rows));
-    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 22 });
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(terminal.getViewport()).toEqual(viewportBeforeUpdate);
+  });
 
-    // Subsequent streaming must overwrite the current footer, not append a second one.
-    component.lines.splice(-2, 0, 'Next response');
+  it('preserves the native viewport when a historical row changes after mouse scrolling', async () => {
+    const terminal = new RecordingVirtualTerminal(67, 24);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    component.lines = [
+      ...Array.from({ length: 40 }, (_, index) => `Answer ${index}`),
+      `composer${CURSOR_MARKER}`,
+      'status',
+    ];
+    tui.addChild(component);
     tui.renderNow();
     await terminal.flush();
+
+    const nativeTerminal = (terminal as unknown as {
+      xterm: { scrollLines: (lines: number) => void };
+    }).xterm;
+    nativeTerminal.scrollLines(-3);
+    await terminal.flush();
+    const viewportBeforeUpdate = terminal.getViewport();
+    expect(viewportBeforeUpdate[0]).toBe('Answer 15');
+
+    component.lines[0] = 'Changed historical answer';
+    tui.renderNow();
+    await terminal.flush();
+
     expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer()).toEqual([
-      ...expected.slice(0, -2), 'Next response', 'composer', 'status',
-    ]);
+    expect(terminal.getViewport()).toEqual(viewportBeforeUpdate);
   });
 
   it('rebuilds the document when shrinking leaves no rows in the previous viewport', async () => {
