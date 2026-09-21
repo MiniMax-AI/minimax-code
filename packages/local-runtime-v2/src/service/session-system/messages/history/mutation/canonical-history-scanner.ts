@@ -74,8 +74,8 @@ export type HistoryScannerErrorCode =
 
 export async function scanCanonicalHistoryArtifacts(
   paths: CanonicalHistoryScannerPaths,
+  files = createCanonicalHistoryFileAdapter(),
 ): Promise<CanonicalHistoryScannerResult> {
-  const files = createCanonicalHistoryFileAdapter();
   const activeBase = await readArtifact(
     files.readActiveStrict(paths.activePath),
     paths.activePath,

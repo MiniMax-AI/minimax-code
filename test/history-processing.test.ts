@@ -917,6 +917,43 @@ describe('owned decoded history rows', () => {
     });
   });
 
+  it('does not let mutations of a returned array poison the cached prefix', async () => {
+    await withReaders(async (path, reader) => {
+      await writeFile(path, encode([row('a'), row('b')]));
+      const first = await reader.readActiveStrict();
+      first.pop();
+      first[0] = row('replacement');
+      expect((await reader.readActiveStrict()).map(value => value.message_id)).toEqual(['msg-a', 'msg-b']);
+    });
+  });
+
+  it('reparses an unterminated final line and preserves the absolute error line', async () => {
+    await withReaders(async (path, reader) => {
+      const text = JSON.stringify(row('a'));
+      await writeFile(path, text);
+      await reader.readActiveStrict();
+      await writeFile(path, text + 'broken');
+      await expect(reader.readActiveStrict()).rejects.toThrow('line 1');
+      await writeFile(path, text + '\n' + JSON.stringify(row('b')) + '\n');
+      await reader.readActiveStrict();
+      await writeFile(path, text + '\n' + JSON.stringify(row('b')) + '\n{broken}\n');
+      await expect(reader.readActiveStrict()).rejects.toThrow('line 3');
+    });
+  });
+
+  it('keeps a reusable complete prefix when the history exceeds the cache budget', async () => {
+    await withReaders(async (path, reader) => {
+      const entries = [row('a', 'a'.repeat(2 * 1024 * 1024)), row('b', 'b'.repeat(2 * 1024 * 1024)), row('c')];
+      await writeFile(path, encode(entries));
+      const first = await reader.readActiveStrict();
+      const next = await reader.readActiveStrict();
+      expect(next[0]).toBe(first[0]);
+      expect(next).toEqual(first);
+      await writeFile(path, encode([entries[0], entries[1], row('d')]));
+      expect((await reader.readActiveStrict())[2]!.message_id).toBe('msg-d');
+    });
+  });
+
   it('observes same-length edits, truncation, deletion and recreation', async () => {
     await withReaders(async (path, reader) => {
       await writeFile(path, encode([row('a', 'first')]));

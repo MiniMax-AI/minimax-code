@@ -32,56 +32,53 @@ export class JsonlAppendCommitUncertainError extends Error {
   }
 }
 
-export interface JsonlDecodedLine<T> {
-  readonly text: string;
-  readonly value: T;
+export interface JsonlReadCache<T> {
+  text: string;
+  records: readonly T[];
 }
 
 export async function readJsonl<T>(
   filePath: string,
   decode: (value: unknown) => T,
   onMalformedLine?: (line: JsonlMalformedLine) => void,
-  /** Only supply a cache when decoded values are immutable and privately owned. */
-  decodedLines?: Map<string, JsonlDecodedLine<T>>,
+  /** Only reuse privately owned immutable values from strict reads. */
+  readCache?: JsonlReadCache<T>,
 ): Promise<T[]> {
   const contents = await readFile(filePath, 'utf-8');
-  if (contents.length === 0) {
-    decodedLines?.clear();
-    return [];
-  }
-
-  const lines = contents.split('\n');
+  // Tolerant readers must still report every malformed line on every read.
+  const cache = onMalformedLine ? undefined : readCache;
+  const reuse = cache && (contents === cache.text ||
+    (cache.text.endsWith('\n') && contents.startsWith(cache.text)));
+  const records: T[] = reuse ? [...cache.records] : [];
+  const prefixLength = reuse ? cache.text.length : 0;
+  const firstLine = records.length;
+  const lines = contents.slice(prefixLength).split('\n');
   if (lines.at(-1) === '') lines.pop();
-  const records: T[] = [];
-  const nextLines = decodedLines ? new Map<string, JsonlDecodedLine<T>>() : undefined;
-  let cachedTextUnits = 0;
   for (const [index, line] of lines.entries()) {
     try {
       if (line.trim().length === 0) throw new Error('blank line');
-      const cached = decodedLines?.get(line);
-      // File slices can keep the entire read buffer alive. Both the retained key
-      // and parsed values must originate from an independently stored string.
-      const text = cached?.text ?? (decodedLines ? Buffer.from(line, 'utf8').toString('utf8') : line);
-      const record = cached ? cached.value : decode(parseJsonLine(text));
-      records.push(record);
-      // Retain only this read's rows, with a bounded text budget per reader.
-      if (nextLines && !nextLines.has(line) && cachedTextUnits + line.length <= 4 * 1024 * 1024) {
-        nextLines.set(text, cached ?? { text, value: record });
-        cachedTextUnits += line.length;
-      }
+      // Parsed values must not retain a slice of an older whole-file string.
+      const text = cache ? Buffer.from(line, 'utf8').toString('utf8') : line;
+      records.push(decode(parseJsonLine(text)));
     } catch (error) {
-      const malformed = {
-        path: filePath,
-        lineNo: index + 1,
-        reason: errorReason(error),
-      };
+      const malformed = { path: filePath, lineNo: firstLine + index + 1, reason: errorReason(error) };
       if (!onMalformedLine) throw malformedLineError(malformed);
       onMalformedLine(malformed);
     }
   }
-  if (decodedLines && nextLines) {
-    decodedLines.clear();
-    for (const [line, record] of nextLines) decodedLines.set(line, record);
+  if (cache) {
+    const limit = 4 * 1024 * 1024;
+    if (contents.length <= limit) {
+      cache.text = contents;
+      cache.records = records.slice();
+    } else {
+      // Keep a bounded complete-line prefix. It remains reusable when the file
+      // grows beyond the budget, without cycling through and evicting every row.
+      const end = contents.lastIndexOf('\n', limit - 1) + 1;
+      const text = Buffer.from(contents.slice(0, end), 'utf8').toString('utf8');
+      cache.text = text;
+      cache.records = records.slice(0, text.split('\n').length - 1);
+    }
   }
   return records;
 }

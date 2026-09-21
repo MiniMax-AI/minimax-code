@@ -384,7 +384,9 @@ export function createSessionSystemCanonicalHistoryProvider(
           activeGeneration: activeGeneration(active),
           activeRevision: canonicalActiveHistoryRevision(active),
         },
-        (scannerPaths) => scanCanonicalHistoryArtifacts(scannerPaths),
+        // Only the default reader owns reusable immutable records. Preserve the
+        // independent on-disk scanner for externally supplied adapters.
+        (scannerPaths) => scanCanonicalHistoryArtifacts(scannerPaths, options.files ? undefined : files),
         { activePath: paths.messages, snapshotsPath: paths.snapshots, sessionId },
       );
     } catch (error) {

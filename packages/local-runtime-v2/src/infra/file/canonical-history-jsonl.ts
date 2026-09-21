@@ -6,7 +6,7 @@ import {
   readJsonl,
   writeJsonlAtomically,
   type JsonlMalformedLine,
-  type JsonlDecodedLine,
+  type JsonlReadCache,
 } from './jsonl.js';
 import {
   decodeCanonicalHistoryArtifact,
@@ -398,7 +398,7 @@ export function inspectCanonicalHistorySequence(
  * not provide a cross-process writer lock.
  */
 export class CanonicalHistoryJsonlDataSource {
-  private readonly decodedLines = new Map<string, JsonlDecodedLine<CanonicalHistoryEnvelope>>();
+  private readonly readCache: JsonlReadCache<CanonicalHistoryEnvelope> = { text: '', records: [] };
 
   constructor(private readonly options: CanonicalHistoryJsonlDataSourceOptions) {}
 
@@ -419,7 +419,7 @@ export class CanonicalHistoryJsonlDataSource {
     filePath = this.options.activePath,
   ): Promise<CanonicalHistoryEnvelope[]> {
     if (!this.options.reuseDecodedRecords) return readStrictEnvelopeFile(filePath);
-    return readJsonl(filePath, decodeOwnedEnvelope, undefined, this.decodedLines);
+    return readJsonl(filePath, decodeOwnedEnvelope, undefined, this.readCache);
   }
 
   async readStrict(filePath = this.options.activePath): Promise<CanonicalHistoryEnvelope[]> {
