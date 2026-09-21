@@ -195,6 +195,16 @@ export function withCompatibleGrepToolResponse(
   });
 }
 
+interface CompatibleStructuredPatchHunk {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly lines: readonly string[];
+}
+
+const NO_NEWLINE_MARKER = '\\ No newline at end of file';
+
 export function withCompatibleEditToolResponse(
   result: ToolResult,
   input: {
@@ -202,34 +212,89 @@ export function withCompatibleEditToolResponse(
     readonly oldString: string;
     readonly newString: string;
     readonly originalFile: string;
+    readonly updatedFile: string;
     readonly replaceAll: boolean;
     readonly userModified: boolean;
   },
 ): ToolResult {
-  const patch = typeof result.details?.patch === 'string' ? result.details.patch : undefined;
-  if (!patch) return result;
+  const structuredPatch =
+    parseStructuredPatch(result.details?.patch) ??
+    wholeFileStructuredPatch(input.originalFile, input.updatedFile);
+  if (!structuredPatch) return result;
+  return withPluginHookCompatibleToolResponse(result, {
+    filePath: input.filePath,
+    oldString: input.oldString,
+    newString: input.newString,
+    originalFile: input.originalFile,
+    structuredPatch,
+    userModified: input.userModified,
+    replaceAll: input.replaceAll,
+  });
+}
+
+function parseStructuredPatch(patch: unknown): CompatibleStructuredPatchHunk[] | undefined {
+  if (typeof patch !== 'string') return undefined;
   let parsed: ReturnType<typeof parsePatch>[number] | undefined;
   try {
     parsed = parsePatch(patch)[0];
   } catch {
     // Hook compatibility is an enhancement; malformed vendor metadata must
     // never turn a successful edit into a failed tool call.
-    return result;
+    return undefined;
   }
-  if (!parsed) return result;
-  return withPluginHookCompatibleToolResponse(result, {
-    filePath: input.filePath,
-    oldString: input.oldString,
-    newString: input.newString,
-    originalFile: input.originalFile,
-    structuredPatch: parsed.hunks.map((hunk) => ({
-      oldStart: hunk.oldStart,
-      oldLines: hunk.oldLines,
-      newStart: hunk.newStart,
-      newLines: hunk.newLines,
-      lines: hunk.lines,
-    })),
-    userModified: input.userModified,
-    replaceAll: input.replaceAll,
-  });
+  if (!parsed) return undefined;
+  return parsed.hunks.map((hunk) => ({
+    oldStart: hunk.oldStart,
+    oldLines: hunk.oldLines,
+    newStart: hunk.newStart,
+    newLines: hunk.newLines,
+    lines: hunk.lines,
+  }));
+}
+
+/**
+ * Rebuild the single hunk jsdiff emits for a whole-file replacement, without
+ * running Myers.
+ *
+ * `details.patch` is dropped whenever the bounded diff gives up, and a
+ * Compatible PostToolUse handler is skipped outright when `structuredPatch` is
+ * missing, so the hook contract cannot be allowed to depend on the unified
+ * patch surviving that bound. Replacing every old line with every new line is
+ * a correct but deliberately imprecise description of the edit: it is the
+ * coarsest hunk that still round-trips, and it costs one pass over the two
+ * strings instead of O((N+M)·D). Payload stays O(N), the same order as
+ * `originalFile`, which this response already carries in full.
+ */
+function wholeFileStructuredPatch(
+  originalFile: string,
+  updatedFile: string,
+): CompatibleStructuredPatchHunk[] | undefined {
+  const oldLines = splitPatchLines(originalFile);
+  const newLines = splitPatchLines(updatedFile);
+  if (oldLines.length === 0 && newLines.length === 0) return undefined;
+  return [
+    {
+      oldStart: 1,
+      oldLines: oldLines.length,
+      newStart: 1,
+      newLines: newLines.length,
+      lines: [
+        ...oldLines.map((line) => `-${line}`),
+        ...(endsWithoutNewline(originalFile) ? [NO_NEWLINE_MARKER] : []),
+        ...newLines.map((line) => `+${line}`),
+        ...(endsWithoutNewline(updatedFile) ? [NO_NEWLINE_MARKER] : []),
+      ],
+    },
+  ];
+}
+
+function splitPatchLines(text: string): string[] {
+  if (text === '') return [];
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+function endsWithoutNewline(text: string): boolean {
+  return text !== '' && !text.endsWith('\n');
 }

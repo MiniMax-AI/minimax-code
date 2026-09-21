@@ -4,7 +4,16 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { readPluginHookCompatibleToolResponse } from '../plugin-hooks/vendor-tool-response.js';
 import { LocalEditTool } from './local-pi-tools.js';
+
+interface CompatibleHunk {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly lines: readonly string[];
+}
 
 const context = { sessionId: 'edit-diff-bounds-session', turnId: 'edit-diff-bounds-turn' };
 
@@ -86,9 +95,65 @@ describe('edit diff bounds', () => {
     expect(result.isError).toBeFalsy();
 
     expect(result.details?.diffOmitted).toBe('too_many_changes');
-    // No partial or misleading patch is emitted, and the compatibility hook
-    // that reads `details.patch` tolerates its absence.
     expect(result.details?.patch).toBeUndefined();
     expect(result.details?.diff).toContain('diff omitted');
+  });
+
+  // A Compatible PostToolUse handler is skipped with HOOK_INVALID_INPUT when
+  // `structuredPatch` is missing, so dropping `details.patch` silently disabled
+  // every such hook on exactly the edits this bound targets.
+  it('still hands the Compatible hook a structured patch when the patch is omitted', async () => {
+    const original = body(wholeFileRewriteLines, (index) => `const value${index} = ${index};`);
+    const rewritten = body(wholeFileRewriteLines, (index) => `let renamed${index} = ${index * 2};`);
+    await writeFile(file, original);
+
+    const result = await new LocalEditTool(directory).execute(context, {
+      file_path: 'subject.ts',
+      old_string: original,
+      new_string: rewritten,
+    });
+
+    expect(result.details?.patch).toBeUndefined();
+    const response = readPluginHookCompatibleToolResponse(result);
+    expect(response).toBeDefined();
+    expect(response?.originalFile).toBe(original);
+    const hunks = response?.structuredPatch as readonly CompatibleHunk[] | undefined;
+    expect(hunks).toHaveLength(1);
+    const hunk = hunks?.[0];
+    expect(hunk?.oldStart).toBe(1);
+    expect(hunk?.newStart).toBe(1);
+    expect(hunk?.oldLines).toBe(wholeFileRewriteLines);
+    expect(hunk?.newLines).toBe(wholeFileRewriteLines);
+    // Every old line is removed and every new line added, in that order.
+    expect(hunk?.lines).toHaveLength(wholeFileRewriteLines * 2);
+    expect(hunk?.lines[0]).toBe('-const value0 = 0;');
+    expect(hunk?.lines[wholeFileRewriteLines - 1]).toBe(
+      `-const value${wholeFileRewriteLines - 1} = ${wholeFileRewriteLines - 1};`,
+    );
+    expect(hunk?.lines[wholeFileRewriteLines]).toBe('+let renamed0 = 0;');
+  });
+
+  it('marks a missing trailing newline in the synthesized hunk', async () => {
+    const original = body(wholeFileRewriteLines, (index) => `const value${index} = ${index};`);
+    const rewritten = body(
+      wholeFileRewriteLines,
+      (index) => `let renamed${index} = ${index * 2};`,
+    ).slice(0, -1);
+    await writeFile(file, original);
+
+    const result = await new LocalEditTool(directory).execute(context, {
+      file_path: 'subject.ts',
+      old_string: original,
+      new_string: rewritten,
+    });
+
+    expect(await readFile(file, 'utf8')).toBe(rewritten);
+    const hunks = readPluginHookCompatibleToolResponse(result)?.structuredPatch as
+      | readonly CompatibleHunk[]
+      | undefined;
+    // jsdiff emits the marker after the side that lacks the newline; only the
+    // new side does here, so it lands last.
+    expect(hunks?.[0]?.lines.at(-1)).toBe('\\ No newline at end of file');
+    expect(hunks?.[0]?.lines.filter((line) => line.startsWith('\\'))).toHaveLength(1);
   });
 });
