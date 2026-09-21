@@ -13,7 +13,10 @@ import {
   type AppDb,
 } from '../packages/local-runtime-v2/src/infra/db/client.js';
 import { initializeDatabase } from '../packages/local-runtime-v2/src/infra/db/initialize.js';
-import { runWithWriteLock } from '../packages/local-runtime-v2/src/infra/db/write-transaction.js';
+import {
+  runWithWriteLock,
+  WriteLockWaitAbortedError,
+} from '../packages/local-runtime-v2/src/infra/db/write-transaction.js';
 import { createSessionSystemAgentProjection } from '../packages/local-runtime-v2/src/service/session-system/agent-projection.js';
 import { createMessageRepository } from '../packages/local-runtime-v2/src/service/session-system/messages/repo/drizzle.js';
 import { RequiredAgentEventDelivery } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/events/required-agent-event-delivery.js';
@@ -138,14 +141,19 @@ it('does not start an already cancelled message write', async () => {
       { sessionId: 'synthetic', message: { msg_id: 'cancelled', role: 'assistant' } },
       { signal: controller.signal },
     ),
-  ).rejects.toBe(controller.signal.reason);
+  ).rejects.toMatchObject({
+    name: 'WriteLockWaitAbortedError',
+    signal: controller.signal,
+    cause: controller.signal.reason,
+  });
   expect((await messages.list('synthetic')).messages.map((message) => message.msg_id)).toEqual([
     'seed',
   ]);
 });
 
-it('cancels a blocked write through the turn event pipeline without persisting it later', async () => {
-  const { client, dataDir, messages } = await fixture();
+async function pipelineFixture() {
+  const storage = await fixture();
+  const { messages } = storage;
   const controller = new AbortController();
   const context = { sessionId: 'synthetic', turnId: 'turn', turnSequence: 1 };
   const projection = createSessionSystemAgentProjection({
@@ -182,26 +190,16 @@ it('cancels a blocked write through the turn event pipeline without persisting i
     }),
     isRuntimeErrorRetryable: () => false,
   });
+  return { ...storage, controller, pipeline, stream };
+}
+
+it('cancels a blocked write through the turn event pipeline without persisting it later', async () => {
+  const { client, dataDir, messages, controller, pipeline, stream } = await pipelineFixture();
   const { exited } = await holdWriter(dataDir, 1_500);
   const started = performance.now();
   const timer = setTimeout(() => controller.abort(), 100);
   try {
-    await expect(
-      pipeline.onRuntimeEvent({
-        schema: RUNTIME_EVENT_SCHEMA,
-        event_id: 'blocked-message',
-        session_id: 'synthetic',
-        turn_id: 'turn',
-        runtime_seq: 1,
-        type: RuntimeEventType.STREAM_RESP,
-        payload: {
-          stream_resp: JSON.stringify({
-            type: RespDataType.AgentMessage,
-            agent_message: { msg_id: 'cancelled', role: 'assistant' },
-          }),
-        },
-      }),
-    ).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(pipeline.onRuntimeEvent(messageEvent())).resolves.toBeUndefined();
     expect(performance.now() - started).toBeLessThan(1_000);
   } finally {
     clearTimeout(timer);
@@ -212,5 +210,53 @@ it('cancels a blocked write through the turn event pipeline without persisting i
   expect((await messages.list('synthetic')).messages.map((message) => message.msg_id)).toEqual([
     'seed',
   ]);
-  await expect(pipeline.drain()).rejects.toMatchObject({ name: 'AbortError' });
+  await expect(pipeline.drain()).resolves.toBeUndefined();
 });
+
+function messageEvent() {
+  return {
+    schema: RUNTIME_EVENT_SCHEMA,
+    event_id: 'blocked-message',
+    session_id: 'synthetic',
+    turn_id: 'turn',
+    runtime_seq: 1,
+    type: RuntimeEventType.STREAM_RESP,
+    payload: {
+      stream_resp: JSON.stringify({
+        type: RespDataType.AgentMessage,
+        agent_message: { msg_id: 'cancelled', role: 'assistant' },
+      }),
+    },
+  };
+}
+
+it.each(['unrelated-abort', 'different-lease', 'mutation-failure'])(
+  'preserves fail-closed delivery for %s even when the current lease is cancelled',
+  async (kind) => {
+    const { client, messages, controller, pipeline } = await pipelineFixture();
+    const other = new AbortController();
+    other.abort();
+    const error =
+      kind === 'different-lease'
+        ? new WriteLockWaitAbortedError(other.signal)
+        : new DOMException('Synthetic unrelated failure', 'AbortError');
+    vi.spyOn(messages, 'upsert').mockImplementation(async () => {
+      if (kind === 'mutation-failure') {
+        // Cancellation during a callback must not reclassify its error as an
+        // abandoned admission: the transaction started and must fail closed.
+        return runWithWriteLock(
+          client.db,
+          () => {
+            controller.abort(error);
+            throw error;
+          },
+          { signal: controller.signal },
+        );
+      }
+      controller.abort(error);
+      throw error;
+    });
+    await expect(pipeline.onRuntimeEvent(messageEvent())).rejects.toBe(error);
+    await expect(pipeline.drain()).rejects.toBe(error);
+  },
+);

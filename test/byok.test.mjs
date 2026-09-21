@@ -2,12 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createRequire } from "node:module";
 import {
   mkdtempSync,
   mkdirSync,
   rmSync,
   existsSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -522,5 +525,228 @@ test(
     } finally {
       verificationDb.close();
     }
+  },
+);
+
+test(
+  "cancelling a contended message write persists an aborted turn rather than a failure",
+  // Node terminates children on Windows SIGINT instead of invoking their handler.
+  { timeout: 45000, skip: process.platform === "win32" },
+  async (t) => {
+    const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-cancel-write-"));
+    const dataDir = path.join(fixtureDir, "data");
+    const workspaceDir = path.join(fixtureDir, "workspace");
+    const homeDir = path.join(fixtureDir, "home");
+    for (const dir of [dataDir, workspaceDir, homeDir]) mkdirSync(dir);
+    const dbPath = path.join(dataDir, "v2", "sqlite", "runtime-state.sqlite");
+    const networkAudit = path.join(fixtureDir, "network-audit.log");
+    let child, holder, holderClosed, cancelTimer, deadline;
+    let serverError;
+    let cancelledWhileLocked = false;
+    let holderReleased = false;
+    const server = createServer(async (req, res) => {
+      try {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        const body = JSON.parse(raw);
+        if (req.url?.endsWith("/responses/input_tokens")) {
+          res
+            .writeHead(200, { "content-type": "application/json" })
+            .end(JSON.stringify({ input_tokens: 1 }));
+          return;
+        }
+        const content = "SYNTHETIC_CANCELLED_ANSWER";
+        if (!body.stream) {
+          res.writeHead(200, { "content-type": "application/json" }).end(
+            JSON.stringify({
+              id: "fixture",
+              object: "chat.completion",
+              model: "fixture",
+              choices: [
+                { index: 0, message: { role: "assistant", content }, finish_reason: "stop" },
+              ],
+            }),
+          );
+          return;
+        }
+        // A separate process releases the lock even when the CLI blocks its event loop.
+        holder = spawn(
+          process.execPath,
+          [
+            "-e",
+            `
+          const Database = require(process.argv[1]);
+          const db = new Database(process.argv[2]);
+          db.exec('BEGIN IMMEDIATE');
+          process.send('locked');
+          setTimeout(() => {
+            db.exec('COMMIT'); db.close(); process.disconnect();
+          }, 1500);
+        `,
+            createRequire(import.meta.url).resolve("better-sqlite3"),
+            dbPath,
+          ],
+          {
+            stdio: ["ignore", "ignore", "inherit", "ipc"],
+          },
+        );
+        holderClosed = once(holder, "close").then(() => {
+          holderReleased = true;
+        });
+        await Promise.race([
+          once(holder, "message"),
+          holderClosed.then(() => {
+            throw new Error("Writer exited before acquiring the lock");
+          }),
+        ]);
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        for (const chunk of [
+          {
+            choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+          },
+          {
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          },
+        ])
+          res.write(
+            `data: ${JSON.stringify({
+              id: "fixture",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "fixture",
+              ...chunk,
+            })}\n\n`,
+          );
+        res.end("data: [DONE]\n\n");
+        cancelTimer = setTimeout(() => {
+          cancelledWhileLocked = !holderReleased;
+          child.kill("SIGINT");
+        }, 200);
+      } catch (error) {
+        serverError = error;
+        res.writeHead(500).end();
+      }
+    });
+    t.after(async () => {
+      clearTimeout(cancelTimer);
+      clearTimeout(deadline);
+      for (const childProcess of [child, holder]) {
+        if (
+          childProcess &&
+          childProcess.exitCode === null &&
+          childProcess.signalCode === null
+        ) {
+          const closed = once(childProcess, "close");
+          childProcess.kill("SIGKILL");
+          await closed;
+        }
+      }
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(fixtureDir, { recursive: true, force: true });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    writeFileSync(
+      path.join(dataDir, "config.yaml"),
+      stringifyYaml({
+        custom_provider: {
+          fixture: {
+            name: "fixture",
+            kind: "custom",
+            enabled: true,
+            api: "openai-completions",
+            options: { apiKey: "synthetic-key", baseURL: `${origin}/v1`, authMode: "api-key" },
+            models: { fixture: { limit: { context: 32768, output: 4096 } } },
+          },
+        },
+      }),
+    );
+    child = spawn(
+      process.execPath,
+      [
+        cli,
+        "exec",
+        "Reply with the synthetic fixture response.",
+        "--model",
+        "custom_provider:fixture/fixture",
+        "--permission",
+        "off",
+        "--cwd",
+        workspaceDir,
+        "--timeout",
+        "30s",
+        "--max-steps",
+        "1",
+      ],
+      {
+        cwd: workspaceDir,
+        env: {
+          ...withoutProxyEnvironment(process.env),
+          HOME: homeDir,
+          XDG_CONFIG_HOME: path.join(homeDir, "config"),
+          XDG_DATA_HOME: path.join(homeDir, "data"),
+          MINIMAX_DATA_DIR: dataDir,
+          MAVIS_DATA_DIR: dataDir,
+          MCODE_TEST_ALLOWED_ORIGIN: origin,
+          MCODE_TEST_NETWORK_AUDIT: networkAudit,
+          MCODE_TEST_MANAGED_OFFLINE: "1",
+          NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "",
+      stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    deadline = setTimeout(() => child.kill("SIGKILL"), 35000);
+    const [code] = await once(child, "close");
+    clearTimeout(deadline);
+    if (holderClosed) await holderClosed;
+    assert.equal(serverError, undefined);
+    assert.equal(
+      cancelledWhileLocked,
+      true,
+      "SIGINT must arrive while the foreign writer holds its lock",
+    );
+    assert.equal(code, 130, `${stdout}\n${stderr}`);
+    assert.equal(existsSync(networkAudit), false, "No external requests are allowed");
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      assert.deepEqual(db.prepare("SELECT status FROM local_runtime_turn_ingress").all(), [
+        { status: "aborted" },
+      ]);
+      assert.deepEqual(
+        db.prepare("SELECT status, error_message FROM local_runtime_sessions").all(),
+        [{ status: "aborted", error_message: null }],
+      );
+      assert.deepEqual(
+        db.prepare("SELECT terminal_outcome FROM local_runtime_session_agent_state").all(),
+        [{ terminal_outcome: "aborted" }],
+      );
+    } finally {
+      db.close();
+    }
+    const sessionsDir = path.join(dataDir, "v2", "sessions");
+    const histories = readdirSync(sessionsDir, { recursive: true }).filter((file) =>
+      file.endsWith("messages.jsonl"),
+    );
+    assert.equal(histories.length, 1);
+    const roles = readFileSync(path.join(sessionsDir, histories[0]), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).message?.role);
+    assert.deepEqual(
+      roles,
+      ["user"],
+      "Abort reconciliation must not retain the cancelled answer",
+    );
   },
 );

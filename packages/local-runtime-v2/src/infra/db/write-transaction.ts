@@ -5,6 +5,15 @@ import type { AppDb } from './client.js';
 const WRITE_LOCK_BUDGET_MS = 10_000;
 const WRITE_LOCK_ATTEMPT_MS = 50;
 
+/** Cancellation before the mutation callback starts; no write needs to be replayed. */
+export class WriteLockWaitAbortedError extends Error {
+  override readonly name = 'WriteLockWaitAbortedError';
+
+  constructor(readonly signal: AbortSignal) {
+    super('SQLite write lock wait was cancelled', { cause: signal.reason });
+  }
+}
+
 /** Retry only transaction admission: a callback that has started is never replayed. */
 export async function runWithWriteLock<T>(
   db: AppDb,
@@ -18,7 +27,7 @@ export async function runWithWriteLock<T>(
   let attempt = 0;
   let lastBusy: unknown = new Error('SQLite write lock wait exceeded its deadline');
   for (;;) {
-    options.signal?.throwIfAborted();
+    throwIfWaitAborted(options.signal);
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw lastBusy;
     const previous = db.get<{ timeout: number }>(sql`PRAGMA busy_timeout`).timeout;
@@ -35,7 +44,7 @@ export async function runWithWriteLock<T>(
           // Only lock acquisition gets a short timeout. Restore the connection's
           // policy before callbacks (including nested transactions) can use it.
           db.run(sql.raw(`PRAGMA busy_timeout = ${previous}`));
-          options.signal?.throwIfAborted();
+          throwIfWaitAborted(options.signal);
           return mutation(tx);
         },
         { behavior: 'immediate' },
@@ -52,8 +61,19 @@ export async function runWithWriteLock<T>(
       25 * 2 ** Math.min(attempt++, 3) + Math.random() * 25,
     );
     if (wait <= 0) throw lastBusy;
-    await delay(wait, undefined, { signal: options.signal });
+    try {
+      await delay(wait, undefined, { signal: options.signal });
+    } catch (error) {
+      if (options.signal?.aborted && error instanceof Error && error.name === 'AbortError') {
+        throw new WriteLockWaitAbortedError(options.signal);
+      }
+      throw error;
+    }
   }
+}
+
+function throwIfWaitAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new WriteLockWaitAbortedError(signal);
 }
 
 function isBusy(error: unknown): boolean {

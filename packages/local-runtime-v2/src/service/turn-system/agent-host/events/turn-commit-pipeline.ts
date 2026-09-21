@@ -34,6 +34,7 @@ import { TurnCommittedHistoryState } from '../history/turn-committed-history-sta
 import { CanonicalUserMessageIdentityLane } from '../history/canonical-user-message-identities.js';
 import { AgentEventAssociationError } from '../preparation/turn-preflight.js';
 import type { UserMessageId } from '../../../session-system/index.js';
+import { WriteLockWaitAbortedError } from '../../../../infra/db/write-transaction.js';
 
 export class AgentTerminalConfirmationError extends Error {
   override readonly name = 'AgentTerminalConfirmationError';
@@ -147,12 +148,26 @@ export class TurnCommitPipeline {
     }
     await this.lane.enqueue(async () => {
       validateRuntimeAssociation(this.dependencies.context, event);
-      const result = await this.dependencies.events.handleRuntimeEvent(
-        this.dependencies.context,
-        event,
-        this.dependencies.lease.signal,
-      );
-      new TerminalConfirmation().observe(event, result);
+      const signal = this.dependencies.lease.signal;
+      try {
+        const result = await this.dependencies.events.handleRuntimeEvent(
+          this.dependencies.context,
+          event,
+          signal,
+        );
+        new TerminalConfirmation().observe(event, result);
+      } catch (error) {
+        if (
+          error instanceof WriteLockWaitAbortedError &&
+          error.signal === signal &&
+          signal.aborted
+        ) {
+          // This lease cancelled a projection before its write began. Keep the
+          // lane available for the runner's abort reconciliation and terminal.
+          return;
+        }
+        throw error;
+      }
     });
   };
 
