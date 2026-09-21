@@ -1,100 +1,451 @@
 name: Performance
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       base:
-        description: Baseline commit or branch
-        required: true
-        default: main
         type: string
+        default: main
       suite:
-        description: Performance suite (full includes startup and long history)
-        required: true
+        type: string
         default: full
-        type: choice
-        options: [full, basic]
 permissions:
   contents: read
 jobs:
-  performance:
-    # Unrelated label events must not replace the actual performance check.
-    name: ${{ contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'perf:full' && 'performance (label ignored)' || 'performance' }}
-    if: ${{ !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) || github.event.label.name == 'perf:full' }}
-    strategy:
-      matrix:
-        suite: ${{ fromJSON((inputs.suite == 'full' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'perf:full'))) && '["full"]' || '["basic"]') }}
-    concurrency:
-      group: performance-${{ github.event_name }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && matrix.suite || 'auto' }}
-      cancel-in-progress: true
-    runs-on: macos-15
-    timeout-minutes: ${{ matrix.suite == 'full' && 45 || 15 }}
+  upstream-ranking:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: benchmark
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout candidate
+        uses: actions/checkout@v4
         with:
           path: candidate
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          path: baseline
-          ref: ${{ github.event.pull_request.base.sha || inputs.base }}
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Checkout unchanged upstream benchmark
+        uses: actions/checkout@v4
         with:
           repository: KonghaYao/harness-perf-benchmark
-          ref: 8ad1e09f7653d7e97b83b4f5b4d347ca2fa129c7
+          ref: 5494a20048bcdb634aae55f782643ff15650a6ba
           path: benchmark
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: 装 Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: 装 Node（ZCode 包内 CLI 实测版本）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26.9.0
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
         with:
           version: 9.12.0
           package_json_file: candidate/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.23.2
-          package-manager-cache: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.4.2
-      - name: Build baseline
-        working-directory: baseline
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
-      - name: Build candidate
+      - name: Build candidate and verify edit tests
         working-directory: candidate
-        run: |
+        run: >-
           pnpm install --frozen-lockfile
+
           pnpm build
-      - name: Install pinned benchmark
-        working-directory: benchmark
+
+          pnpm exec vitest run --config vitest.oss.config.mjs
+          packages/agent-tools/src/desktop/edit-diff-bounds.test.ts
+          packages/tui/test/unit/tui-tool-preview-diff-omitted.test.ts
+
+          mkdir -p "$RUNNER_TEMP/mcode-bin"
+
+          printf '#!/bin/sh\nexec "%s" "%s/dist/cli.js" "$@"\n' "$(command -v
+          node)" "$PWD" > "$RUNNER_TEMP/mcode-bin/mcode"
+
+          chmod +x "$RUNNER_TEMP/mcode-bin/mcode"
+
+          echo "$RUNNER_TEMP/mcode-bin" >> "$GITHUB_PATH"
+      - name: 依赖
         run: bun install --frozen-lockfile
-      - name: Compare on this runner
+      - name: 装 harness（peri + 七家 npm CLI + agy / hermes 官方脚本）
         env:
-          PERF_SUITE: ${{ matrix.suite }}
-        # Exit 2 means INCONCLUSIVE: persistent runner noise, no confirmed
-        # regression. Basic runs warn without blocking unrelated changes;
-        # full runs still fail because performance work requires a real PASS.
-        run: |
-          status=0
-          node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --suite "$PERF_SUITE" --out "$RUNNER_TEMP/performance" || status=$?
-          if [ "$status" -eq 2 ]; then
-            if [ "$PERF_SUITE" = "full" ]; then
-              echo "::error title=Full performance check inconclusive::The full suite stayed too noisy to conclude after confirmation pairs. Performance changes require a real PASS; see the job summary and artifact, then rerun."
-              exit 2
-            fi
-            echo "::warning title=Performance check inconclusive::Runner noise exceeded stability limits even after confirmation pairs; no regression was confirmed. This is not evidence of a pass; see the job summary and artifact before relying on performance results."
-            exit 0
+          PERI_INSTALL_VERSION: agent-v3.17.7
+          PERI_NO_PATH_HINT: "1"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >
+          set -euo pipefail
+
+          # peri 走官方安装脚本（从 GitHub release 取本平台的包，解到 $HOME/.peri）。
+
+          # 不 curl | bash：先落盘再执行，出问题时日志里能看到脚本本身。
+
+          # 它在「没装过旧版本」时不会去读 /dev/tty 提问，runner 每次都是干净的 HOME。
+
+          curl -fsSL -o /tmp/peri-install.sh \
+            https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh
+          # 它自己有个 bug（3.17.2 实测）：脚本结尾那句提示用的 BIN_LINK 只在「写 PATH 提示」
+
+          # 那个分支里赋值，于是 PERI_NO_PATH_HINT=1 时 set -u 会以 unbound variable 收尾——
+
+          # 而那时二进制与 $HOME/.peri/peri 软链早就装好了。所以不拿它的退出码当成败，
+
+          # 改由下面自查：真有下载/解包问题，那两句会先失败。
+
+          if ! bash /tmp/peri-install.sh; then
+            echo "::warning::peri 安装脚本非 0 退出（已知上游 bug：PERI_NO_PATH_HINT=1 时结尾 BIN_LINK 未定义）；下面自查二进制，装不上就失败"
           fi
-          exit "$status"
-      - name: Upload performance evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+
+          "$HOME/.peri/peri" --version
+
+          echo "${HOME}/.peri" >> "${GITHUB_PATH}"
+
+          # 其余七家都在 npm 上。注意 `@opencode/cli` 是 opencode **v2**，它的 bin 里同时有
+
+          # `opencode` 与 `opencode2` 两个名字；v1 已退出排名、这里不装，所以那个 `opencode`
+
+          # 不会被谁用到（真要复测 v1，playground/opencode 的 demo 认版本号，不是 1.x 会直接报错）。
+
+          npm i -g \
+            @anthropic-ai/claude-code@2.1.278 \
+            @openai/codex@0.155.1 \
+            @earendil-works/pi-coding-agent@0.86.1 \
+            @deepseek-ai/dsh@0.1.5-rc.2 \
+            @opencode/cli@2.0.11 \
+            cline@3.0.62
+      - name: 装 Antigravity CLI（agy：官方脚本装到 ~/.local/bin）
+        run: >
+          set -euo pipefail
+
+          # 与 peri 那步同一条纪律：先落盘再执行，脚本本身能进日志。
+
+          curl -fsSL -o /tmp/agy-install.sh
+          https://antigravity.google/cli/install.sh
+
+          bash /tmp/agy-install.sh
+
+          # 自查：脚本自己会校验 sha512，这里再确认二进制确实能跑（真倒在下载/校验上，这步失败）。
+
+          "$HOME/.local/bin/agy" --version
+
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+      - name: 装 Hermes Agent（hermes：官方脚本装到 ~/.local/bin）
+        run: >
+          set -euo pipefail
+
+          # 与 peri / agy 那两步同一条纪律：先落盘再执行，脚本本身能进日志。
+
+          curl -fsSL -o /tmp/hermes-install.sh
+          https://hermes-agent.nousresearch.com/install.sh
+
+          bash /tmp/hermes-install.sh --skip-setup --skip-browser
+          --skip-computer-use --non-interactive
+
+          # 自查：装完确认壳能跑（真倒在下载/建 venv/装依赖上，这步会先失败）。
+
+          "$HOME/.local/bin/hermes" --version
+
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+      - name: 装 ZCode（官方安装包内的 headless CLI）
+        run: >
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            arm64|aarch64) arch=arm64 ;;
+            x86_64) arch=x64 ;;
+            *) echo "不支持的 ZCode 架构" >&2; exit 1 ;;
+          esac
+
+          install_dir="${RUNNER_TEMP}/zcode"
+
+          mkdir -p "${install_dir}"
+
+          # URL 取自官网 https://zcode.z.ai/en 的平台下载清单，不用第三方同名 npm 包。
+
+          base="https://cdn-zcode.z.ai/zcode/electron/releases/3.14.1"
+
+          case "$(uname -s)" in
+            Darwin)
+              curl -fSL --retry 3 -o "${install_dir}/ZCode.dmg" \
+                "${base}/macos-${arch}/ZCode-3.14.1-mac-${arch}.dmg"
+              mount="${install_dir}/mount"
+              hdiutil attach "${install_dir}/ZCode.dmg" -readonly -nobrowse -mountpoint "${mount}"
+              trap 'hdiutil detach "${mount}"' EXIT
+              resources="${install_dir}/Resources"
+              ditto "${mount}/ZCode.app/Contents/Resources" "${resources}"
+              hdiutil detach "${mount}"
+              trap - EXIT
+              ;;
+            Linux)
+              curl -fSL --retry 3 -o "${install_dir}/ZCode.deb" \
+                "${base}/linux-${arch}/ZCode-3.14.1-linux-${arch}.deb"
+              dpkg-deb -x "${install_dir}/ZCode.deb" "${install_dir}/unpacked"
+              entry=$(find "${install_dir}/unpacked" -type f -path '*/resources/glm/zcode.cjs')
+              test -n "${entry}" && test -f "${entry}"
+              resources="$(dirname "$(dirname "${entry}")")"
+              ;;
+            *) echo "ZCode 压测只支持 macOS / Linux runner" >&2; exit 1 ;;
+          esac
+
+          test -f "${resources}/config/provider/zcode-builtin.json"
+
+          HOME="${install_dir}" node "${resources}/glm/zcode.cjs" --version
+
+          echo "ZCODE_RESOURCES=${resources}" >> "${GITHUB_ENV}"
+      - name: 装 Kimi Code CLI（官方 install.sh，装到 ~/.kimi-code）
+        run: >
+          set -euo pipefail
+
+          # 与 peri / agy / hermes 那几步同一条纪律：先落盘再执行，脚本本身能进日志。
+
+          curl -fsSL -o /tmp/kimi-install.sh
+          https://code.kimi.com/kimi-code/install.sh
+
+          KIMI_NO_MODIFY_PATH=1 KIMI_VERSION=2.0.0 bash /tmp/kimi-install.sh
+
+          # 自查：装完确认二进制确实能跑（真倒在下载/解包上，这步失败）。
+
+          "$HOME/.kimi-code/bin/kimi" --version
+
+          echo "${HOME}/.kimi-code/bin" >> "${GITHUB_PATH}"
+      - name: 报一下装到了什么版本
+        run: >
+          for bin in peri agy claude codex pi dsh mcode opencode2 hermes cline
+          kimi; do
+            printf '%-8s %s\n' "${bin}" "$(command -v "${bin}" || echo '（不在 PATH 里）')"
+          done
+
+          peri --version || true
+
+          agy --version || true
+
+          claude --version || true
+
+          codex --version || true
+
+          pi --version || true
+
+          dsh --version || true
+
+          mcode --version || true
+
+          # v2 的版本号自己带名字（实测 `opencode v2.0.10`），打印出来正好当「装的是 v2 不是 v1」
+
+          # 的现场证据——v1 只输出一个裸的 `1.17.12`。
+
+          opencode2 --version || true
+
+          hermes --version || true
+
+          cline --version || true
+
+          kimi --version || true
+      - name: 生成剧本（按各家工具形状，含 ZCode）
+        env:
+          TURNS: "100"
+        run: >
+          set -euo pipefail
+
+          gen() { bun run scripts/perf/gen-long-run.ts "$@"; }
+
+          # peri / claude-code 共用 Bash + command 形状的那份；其余各家参数不一样，见 CLAUDE.md。
+
+          gen --turns "${TURNS}" --out data/scenarios/long-run.json
+
+          # ZCode 3.14.1：Bash + command，100 轮实测 101 请求，无辅助请求插队。
+
+          gen --turns "${TURNS}" --out data/scenarios/long-run-zcode.json
+
+          gen --turns "${TURNS}" --args exec --out
+          data/scenarios/long-run-codex.json
+
+          # pi 从约 140 条消息起自动压缩，压缩期每轮多一条 messages=2 的总结请求：
+
+          # 100 轮实测要 135 条（--turns 133），131 条只有 99 轮。
+
+          gen --turns "$((TURNS + 33))" --tool bash --out
+          data/scenarios/long-run-pi.json
+
+          gen --turns "${TURNS}" --tool bash --args command+description \
+            --out data/scenarios/long-run-dsh.json
+          gen --turns "${TURNS}" --tool bash --out
+          data/scenarios/long-run-minimax-code.json
+
+          # agy：shell 工具是 run_command、五项大驼峰参数都必填；它还有两笔自己的开销——
+
+          # 序列**第一条**是会话标题生成，另有一条「每约 32 个请求一次」的上下文压缩摘要。
+
+          # 实测 100 轮要 104 条（104 = 100 轮 + 标题 1 + 压缩 3），故 +4。
+
+          gen --turns "$((TURNS + 4))" --args commandline \
+            --out data/scenarios/long-run-antigravity.json
+          # opencode2：shell 工具改名叫 shell（v1 的 bash 没了）、参数只要 {command}；它开局先发
+
+          # 一条会话标题生成请求（比主流程还早），同样吃条目，所以 +1（100 轮实测 102 条请求
+
+          # = 标题 1 + 工具轮 100 + 收尾 1）。它不像 pi 那样压缩、也没有 peri 的预测请求。
+
+          gen --turns "$((TURNS + 1))" --tool shell \
+            --out data/scenarios/long-run-opencode2.json
+          # hermes：shell 工具叫 terminal、参数 {command}；它有两笔自己的开销，都要留出条目——
+
+          # 会话标题生成（stream=false、无 tools；与主请求几乎同时发出、谁先不定）与途中一次
+
+          # 上下文压缩（约 170 条消息时那条 "You are a summarization agent creating a context
+
+          # checkpoint."，压完历史剩 21 条、紧接着一条重述主请求，前后两条都取号）。
+
+          # 实测 100 轮要 102 轮剧本（104 条 = 102 + 2 条收尾），故 +2。
+
+          gen --turns "$((TURNS + 2))" --tool terminal \
+            --out data/scenarios/long-run-hermes.json
+          # cline：shell 工具叫 run_commands、参数是**字符串数组** {commands: [...]}（唯一的数组
+
+          # 形状）。它的**上下文压缩会吃掉一条剧本**——默认 --compaction agentic，长到阈值时把
+
+          # 当轮换成一条 "Summarize this session for continuation…"
+          请求（messages=2），响应被当
+
+          # 摘要用掉、当轮的工具调用不再执行。实测标准剧本（每轮 4KB）每约 90 轮触发一次：
+
+          # --turns 101（103 条）实测 102 条请求 = 1 条初始 + 99 条带工具结果的续跑 + 1 条压缩 +
+
+          # 1 条压缩后续跑 = **100 个工具轮**；200 轮实测压缩 2 次。所以按「每 100 轮 +1、
+
+          # 向上取整」留条目。
+
+          gen --turns "$((TURNS + (TURNS + 99) / 100))" --args commands \
+            --out data/scenarios/long-run-cline.json
+          # Kimi Code CLI（kimi）：Bash + command，与 peri / Claude Code 同形；100 轮实测
+
+          # 101 条请求（1 条初始 + 100 个工具轮 + 1 条收尾），没有标题生成、没有上下文压缩、
+
+          # 没有预测请求，所以轮数不用加（与 mcode 同一档）。
+
+          gen --turns "${TURNS}" --out data/scenarios/long-run-kimi.json
+      - name: Record test machine and source revisions
+        run: >-
+          mkdir -p data
+
+          { sw_vers; uname -a; sysctl -n machdep.cpu.brand_string; sysctl -n
+          hw.logicalcpu; sysctl -n hw.memsize; node --version; bun --version;
+          git rev-parse HEAD; git -C ../candidate rev-parse HEAD; git -C
+          ../candidate log -3 --oneline; } > data/environment.txt
+
+          npm list -g --depth=0 > data/npm-versions.txt
+
+          command -v mcode >> data/environment.txt
+
+          mcode --version >> data/environment.txt
+
+          git diff --exit-code
+
+          cat data/environment.txt
+      - name: 跑批次（十二家串行，每家 repeats 次）
+        env:
+          REPEATS: "3"
+        run: >
+          set -euo pipefail
+
+          label="ci-$(date -u +%Y%m%d-%H%M)"
+
+          echo "批次标签：${label}（写进每次运行的 run.json，便于按批筛）"
+
+          # 一次没跑成（harness 崩了 / 端口被占）就再试一次：gen-chart-data 按「最近 window 次」
+
+          # 取中位，补上一条能让它落回正常的 3 条里。
+
+          run_one() {
+            local dir="playground/$1" attempt
+            for attempt in 1 2; do
+              if (cd "${dir}" && bun perf-demo.ts --timeout-ms 240000 --label "${label}"); then
+                return 0
+              fi
+              echo "::warning::$1 第 ${attempt} 次运行非 0 退出"
+            done
+            echo "::warning::$1 这一轮两次都没跑成，图表会少一条读数"
+            return 0
+          }
+
+          for round in $(seq 1 "${REPEATS}"); do
+            for harness in peri claude-code codex pi deepseek minimax-code antigravity opencode2 hermes cline zcode kimi; do
+              echo "::group::第 ${round} 轮 · ${harness}"
+              run_one "${harness}"
+              echo "::endgroup::"
+            done
+          done
+
+          ls -R data/runs | head -40
+      - name: 汇总出图表数据
+        env:
+          REPEATS: "3"
+        run: |
+          set -euo pipefail
+          bun run scripts/perf/gen-chart-data.ts \
+            --dir data/runs --window "${REPEATS}" --out data/perf-chart.json
+      - name: Require complete comparable evidence
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const expected=['peri','claude-code','codex','pi','dsh','minimax-code','antigravity','opencode2','hermes','cline','zcode','kimi'];
+          const chart=JSON.parse(fs.readFileSync('data/perf-chart.json','utf8'));
+          assert.deepEqual(chart.runs.map(r=>r.id).sort(),[...expected].sort(),'Incomplete harness ranking');
+          const expectedRequests={'peri':101,'claude-code':101,'codex':101,'pi':135,'dsh':101,'minimax-code':101,'antigravity':105,'opencode2':102,'hermes':104,'cline':102,'zcode':101,'kimi':101};
+          const evidence=[];
+          for(const id of expected){
+           const runs=fs.readdirSync('data/runs/'+id).map(dir=>{const p='data/runs/'+id+'/'+dir+'/run.json';return fs.existsSync(p)?JSON.parse(fs.readFileSync(p,'utf8')):null}).filter(Boolean);
+           const ok=runs.filter(r=>r.status==='ok');
+           assert.ok(ok.length>=3,id+': fewer than three completed runs');
+           for(const r of ok){assert.equal(r.sampling.backend,'rusage',id+': degraded sampler');assert.equal(r.sampling.withTree,true,id+': no process-tree sampling');assert.equal(r.exit.code,0,id+': nonzero exit');
+           assert.equal(r.mock.requests,expectedRequests[id],id+': workload differs from published reference');
+           assert.equal(r.mock.cursor.index,expectedRequests[id],id+': script consumption mismatch');
+           const csv=fs.readFileSync('data/runs/'+id+'/'+r.runId+'/samples.csv','utf8').trim().split('\n');
+           assert.ok(csv.length>=4,id+': insufficient raw samples');
+           assert.ok(Number.isFinite(r.duration.endToEndMs)&&r.duration.endToEndMs>0,id+': invalid duration');}
+           evidence.push({id,total:runs.length,completed:ok.length,runs:ok.map(r=>({runId:r.runId,sampling:r.sampling,mock:r.mock,duration:r.duration}))});
+          }
+          fs.writeFileSync('data/completeness.json',JSON.stringify(evidence,null,2));
+          console.log('All 12 harnesses have at least three successful process-tree rusage runs.');
+          NODE
+          git diff --exit-code
+      - name: 结果摘要
+        run: >
+          set -euo pipefail
+
+          # 采样后端自检：rusage 不可用时 run.ts 会静默退到 ps，读数会偏低而页面看不出来。
+
+          # 「只发布」那一趟没有 data/runs（直接沿用缓存里的结果），这里的 grep 必须容得下空目录，
+
+          # 否则 set -e + pipefail 会把整步判失败。
+
+          degraded=$( { grep -rl '"backend": "ps"' data/runs/*/*/run.json
+          2>/dev/null || true; } \
+            | wc -l | tr -d ' ')
+          echo "退到 ps 后端的运行次数：${degraded}"
+
+          [ "${degraded}" = "0" ] || echo "::warning::有 ${degraded} 次运行退到了 ps
+          采样后端，这一批的 CU 是下界"
+
+          node -e '
+            const fs = require("node:fs");
+            const data = JSON.parse(fs.readFileSync("data/perf-chart.json", "utf8"));
+            const rows = data.runs.filter((run) => run.score).sort((a, b) => a.score.cu - b.score.cu);
+            const num = (value, digits) => (value === undefined ? "n/a" : value.toFixed(digits));
+            const lines = [
+              "",
+              `数据生成于 ${data.generatedAt} · 产物 ${data.sourceDir}`,
+              "",
+              "| harness | CU | 分数 | 峰值 CPU % | 峰值 RSS MB |",
+              "| --- | --- | --- | --- | --- |",
+              ...rows.map((run) => {
+                const peaks = run.score.peaks ?? {};
+                return `| ${run.name} | ${run.score.cu.toFixed(3)} | ${num(run.score.score, 1)} | ${num(peaks.treeCpuPercent, 1)} | ${num(peaks.treeRssMb, 1)} |`;
+              }),
+            ];
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+      - name: Upload raw benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: performance-${{ matrix.suite }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/performance/
+          name: upstream-ranking-main-plus-284
+          path: benchmark/data/
           include-hidden-files: true
           retention-days: 14
-          if-no-files-found: warn
