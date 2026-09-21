@@ -126,10 +126,10 @@
     },
     {
       "path": "stdin-buffer.ts",
-      "currentSha256": "95e18c6c702fee39289c2221ddb54dfe7269812fa2f80223025d6a6df05d7e10",
-      "changeIds": ["L005"],
-      "reason": "Make the length-guarded final byte access explicit under the shared MCode strict TypeScript contract.",
-      "behaviorImpact": "none_intended"
+      "currentSha256": "1aca0d7fb7dacaf16a28ede79f52fcf7bea651d8a263777ee327fdaeb2dcaa28",
+      "changeIds": ["L005", "L036"],
+      "reason": "Keep strict TypeScript guards and preserve unframed multiline text chunks before key splitting.",
+      "behaviorImpact": "Plain-text chunks with internal line endings use the existing paste path; standalone Enter and control sequences retain key semantics."
     },
     {
       "path": "terminal-colors.ts",
