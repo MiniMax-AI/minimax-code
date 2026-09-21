@@ -414,7 +414,7 @@ function copyInspection(value: CanonicalHistorySequenceInspection): CanonicalHis
  * not provide a cross-process writer lock.
  */
 export class CanonicalHistoryJsonlDataSource {
-  private readonly readCache: JsonlReadCache<CanonicalHistoryEnvelope> = { text: '', records: [] };
+  private readonly readCache: JsonlReadCache<CanonicalHistoryEnvelope> = { bytes: Buffer.alloc(0), records: [] };
 
   constructor(private readonly options: CanonicalHistoryJsonlDataSourceOptions) {}
 

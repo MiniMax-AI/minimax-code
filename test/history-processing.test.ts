@@ -918,6 +918,23 @@ describe('owned decoded history rows', () => {
     });
   });
 
+  it('matches uncached UTF-8 replacement and CRLF decoding across appended rows', async () => {
+    await withReaders(async (path, reader) => {
+      const first = Buffer.from(JSON.stringify(row('a', '中文🙂X')) + '\r\n');
+      first[first.indexOf(Buffer.from('X'))] = 0xff;
+      await writeFile(path, first);
+      const initial = await reader.readActiveStrict();
+      const next = Buffer.concat([first, Buffer.from(JSON.stringify(row('b', '尾部🙂')))]);
+      await writeFile(path, next);
+      const cached = await reader.readActiveStrict();
+      const plain = await new CanonicalHistoryJsonlDataSource({ activePath: path }).readActiveStrict();
+      expect(cached[0]).toBe(initial[0]);
+      expect(cached).toEqual(plain);
+      expect(canonicalActiveHistoryRevision(cached)).toBe(canonicalActiveHistoryRevision(plain));
+      expect(cached[0]!.message.content).toBe('中文🙂\ufffd');
+    });
+  });
+
   it('keeps private cached arrays immutable without exposing their state', async () => {
     await withReaders(async (path, reader) => {
       await writeFile(path, encode([row('a'), row('b')]));

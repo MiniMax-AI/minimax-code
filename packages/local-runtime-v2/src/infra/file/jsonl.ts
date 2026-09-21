@@ -33,7 +33,7 @@ export class JsonlAppendCommitUncertainError extends Error {
 }
 
 export interface JsonlReadCache<T> {
-  text: string;
+  bytes: Buffer;
   records: readonly T[];
 }
 
@@ -44,45 +44,71 @@ export async function readJsonl<T>(
   /** Strict private reads return immutable arrays when a cache is supplied. */
   readCache?: JsonlReadCache<T>,
 ): Promise<T[]> {
-  const contents = await readFile(filePath, 'utf-8');
   // Tolerant readers must still report every malformed line on every read.
-  const cache = onMalformedLine ? undefined : readCache;
-  if (cache && contents === cache.text) return cache.records as T[];
-  const reuse = cache && (contents === cache.text ||
-    (cache.text.endsWith('\n') && contents.startsWith(cache.text)));
-  const records: T[] = reuse ? [...cache.records] : [];
-  const prefixLength = reuse ? cache.text.length : 0;
-  const firstLine = records.length;
-  const lines = contents.slice(prefixLength).split('\n');
+  if (readCache && !onMalformedLine) return readCachedJsonl(filePath, decode, readCache);
+  const contents = await readFile(filePath, 'utf-8');
+  const records: T[] = [];
+  const lines = contents.split('\n');
   if (lines.at(-1) === '') lines.pop();
   for (const [index, line] of lines.entries()) {
     try {
       if (line.trim().length === 0) throw new Error('blank line');
-      // Parsed values must not retain a slice of an older whole-file string.
-      const text = cache ? Buffer.from(line, 'utf8').toString('utf8') : line;
-      records.push(decode(parseJsonLine(text)));
+      records.push(decode(parseJsonLine(line)));
     } catch (error) {
-      const malformed = { path: filePath, lineNo: firstLine + index + 1, reason: errorReason(error) };
+      const malformed = { path: filePath, lineNo: index + 1, reason: errorReason(error) };
       if (!onMalformedLine) throw malformedLineError(malformed);
       onMalformedLine(malformed);
     }
   }
-  if (cache) {
-    const limit = 4 * 1024 * 1024;
-    if (contents.length <= limit) {
-      cache.text = contents;
-      cache.records = Object.freeze(records);
-    } else {
-      // Keep a bounded complete-line prefix. It remains reusable when the file
-      // grows beyond the budget, without cycling through and evicting every row.
-      const end = contents.lastIndexOf('\n', limit - 1) + 1;
-      const text = Buffer.from(contents.slice(0, end), 'utf8').toString('utf8');
-      cache.text = text;
-      cache.records = Object.freeze(records.slice(0, text.split('\n').length - 1));
+  return records;
+}
+
+async function readCachedJsonl<T>(
+  filePath: string,
+  decode: (value: unknown) => T,
+  cache: JsonlReadCache<T>,
+): Promise<T[]> {
+  // Always read fresh bytes: timestamps and file size cannot prove an unchanged
+  // prefix. Compare before decoding to avoid allocating a whole-history string.
+  const bytes = await readFile(filePath);
+  if (bytes.equals(cache.bytes)) return cache.records as T[];
+  const reuse = cache.bytes.at(-1) === 10 &&
+    bytes.length >= cache.bytes.length &&
+    bytes.subarray(0, cache.bytes.length).equals(cache.bytes);
+  const records: T[] = reuse ? [...cache.records] : [];
+  let offset = reuse ? cache.bytes.length : 0;
+  const limit = 4 * 1024 * 1024;
+  let retainedEnd = offset;
+  let retainedRecords = records.length;
+  while (offset < bytes.length) {
+    const newline = bytes.indexOf(10, offset);
+    const end = newline === -1 ? bytes.length : newline;
+    try {
+      // Decode each line separately so parsed values cannot retain a string
+      // slice of an older whole file.
+      const line = bytes.toString('utf8', offset, end);
+      if (line.trim().length === 0) throw new Error('blank line');
+      records.push(decode(parseJsonLine(line)));
+    } catch (error) {
+      throw malformedLineError({
+        path: filePath, lineNo: records.length + 1, reason: errorReason(error),
+      });
+    }
+    offset = newline === -1 ? bytes.length : newline + 1;
+    if (newline !== -1 && offset <= limit) {
+      retainedEnd = offset;
+      retainedRecords = records.length;
     }
   }
-  if (cache) Object.freeze(records);
-  return records;
+  if (bytes.length <= limit) {
+    cache.bytes = bytes;
+    cache.records = Object.freeze(records);
+  } else {
+    // Copy the bounded prefix so it cannot retain the entire file's buffer.
+    cache.bytes = Buffer.from(bytes.subarray(0, retainedEnd));
+    cache.records = Object.freeze(records.slice(0, retainedRecords));
+  }
+  return Object.freeze(records) as T[];
 }
 
 function parseJsonLine(line: string): unknown {
