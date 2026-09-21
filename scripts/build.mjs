@@ -90,6 +90,7 @@ const result = await build({
   format: "esm",
   platform: "node",
   minifyIdentifiers: true,
+  minifyWhitespace: true,
   target: "node22",
   chunkNames: "chunks/[name]-[hash]",
   banner: { js: location.banner },
