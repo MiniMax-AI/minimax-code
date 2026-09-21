@@ -24,6 +24,9 @@ export type {
 } from './canonical-history-source.js';
 export type { CanonicalHistoryArtifact } from './canonical-history-artifact.js';
 
+// Only records decoded from file contents and recursively frozen here are trusted.
+const ownedEnvelopeJson = new WeakMap<CanonicalHistoryEnvelope, string | undefined>();
+
 const ENVELOPE_KEYS = new Set([
   'message_id',
   'turn_id',
@@ -268,6 +271,8 @@ export interface CanonicalHistoryEnvelope {
 
 export interface CanonicalHistoryJsonlDataSourceOptions {
   readonly activePath: string;
+  /** Internal readers may share frozen records; public readers retain detached values. */
+  readonly reuseDecodedRecords?: boolean;
   readonly onMalformedLine?: (line: JsonlMalformedLine) => void;
 }
 
@@ -294,6 +299,9 @@ export type CanonicalHistorySequenceInspection =
     };
 
 export function decodeCanonicalHistoryEnvelope(value: unknown): CanonicalHistoryEnvelope {
+  if (ownedEnvelopeJson.has(value as CanonicalHistoryEnvelope)) {
+    return value as CanonicalHistoryEnvelope;
+  }
   const envelope = requirePlainRecord(value, 'envelope');
   assertExactKeys(envelope, ENVELOPE_KEYS, ['message_id', 'turn_id', 'message'], 'envelope');
   assertJsonCompatible(envelope, 'envelope');
@@ -389,6 +397,8 @@ export function inspectCanonicalHistorySequence(
  * not provide a cross-process writer lock.
  */
 export class CanonicalHistoryJsonlDataSource {
+  private readonly decodedLines = new Map<string, CanonicalHistoryEnvelope>();
+
   constructor(private readonly options: CanonicalHistoryJsonlDataSourceOptions) {}
 
   async readActive(): Promise<CanonicalHistoryEnvelope[]> {
@@ -398,7 +408,7 @@ export class CanonicalHistoryJsonlDataSource {
   }
 
   async readActiveStrict(filePath = this.options.activePath): Promise<CanonicalHistoryEnvelope[]> {
-    const records = await readStrictEnvelopeFile(filePath);
+    const records = await this.readEnvelopesStrict(filePath);
     inspectCanonicalHistorySequence(records);
     return records;
   }
@@ -407,7 +417,8 @@ export class CanonicalHistoryJsonlDataSource {
   async readEnvelopesStrict(
     filePath = this.options.activePath,
   ): Promise<CanonicalHistoryEnvelope[]> {
-    return readStrictEnvelopeFile(filePath);
+    if (!this.options.reuseDecodedRecords) return readStrictEnvelopeFile(filePath);
+    return readJsonl(filePath, decodeOwnedEnvelope, undefined, this.decodedLines);
   }
 
   async readStrict(filePath = this.options.activePath): Promise<CanonicalHistoryEnvelope[]> {
@@ -569,9 +580,28 @@ function revisionOfNormalized(records: readonly CanonicalHistoryEnvelope[]): str
   const hash = createHash('sha256').update('[');
   for (let index = 0; index < records.length; index += 1) {
     if (index > 0) hash.update(',');
-    hash.update(canonicalJson(records[index]), 'utf8');
+    const record = records[index]!;
+    let serialized = ownedEnvelopeJson.get(record);
+    if (serialized === undefined) {
+      serialized = canonicalJson(record);
+      if (ownedEnvelopeJson.has(record)) ownedEnvelopeJson.set(record, serialized);
+    }
+    hash.update(serialized, 'utf8');
   }
   return `sha256:${hash.update(']').digest('hex')}`;
+}
+
+function decodeOwnedEnvelope(value: unknown): CanonicalHistoryEnvelope {
+  const record = decodeCanonicalHistoryEnvelope(value);
+  freezeDecodedJson(record);
+  ownedEnvelopeJson.set(record, undefined);
+  return record;
+}
+
+function freezeDecodedJson(value: unknown): void {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) freezeDecodedJson(child);
+  Object.freeze(value);
 }
 
 function decodeMessage(value: unknown): CanonicalHistoryMessage {

@@ -36,17 +36,32 @@ export async function readJsonl<T>(
   filePath: string,
   decode: (value: unknown) => T,
   onMalformedLine?: (line: JsonlMalformedLine) => void,
+  /** Only supply a cache when decoded values are immutable and privately owned. */
+  decodedLines?: Map<string, T>,
 ): Promise<T[]> {
   const contents = await readFile(filePath, 'utf-8');
-  if (contents.length === 0) return [];
+  if (contents.length === 0) {
+    decodedLines?.clear();
+    return [];
+  }
 
   const lines = contents.split('\n');
   if (lines.at(-1) === '') lines.pop();
   const records: T[] = [];
+  const nextLines = decodedLines ? new Map<string, T>() : undefined;
+  let cachedTextUnits = 0;
   for (const [index, line] of lines.entries()) {
     try {
       if (line.trim().length === 0) throw new Error('blank line');
-      records.push(decode(parseJsonLine(line)));
+      const record = decodedLines?.has(line)
+        ? decodedLines.get(line)!
+        : decode(parseJsonLine(line));
+      records.push(record);
+      // Retain only this read's rows, with a bounded text budget per reader.
+      if (nextLines && !nextLines.has(line) && cachedTextUnits + line.length <= 4 * 1024 * 1024) {
+        nextLines.set(line, record);
+        cachedTextUnits += line.length;
+      }
     } catch (error) {
       const malformed = {
         path: filePath,
@@ -56,6 +71,10 @@ export async function readJsonl<T>(
       if (!onMalformedLine) throw malformedLineError(malformed);
       onMalformedLine(malformed);
     }
+  }
+  if (decodedLines && nextLines) {
+    decodedLines.clear();
+    for (const [line, record] of nextLines) decodedLines.set(line, record);
   }
   return records;
 }

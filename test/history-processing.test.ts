@@ -871,3 +871,181 @@ describe('committed history read reuse', () => {
     expect(readActive).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('owned decoded history rows', () => {
+  async function withReaders(
+    run: (path: string, reader: CanonicalHistoryJsonlDataSource) => Promise<void>,
+  ) {
+    const dir = await mkdtemp(join(tmpdir(), 'mcode-owned-rows-'));
+    const path = join(dir, 'messages.jsonl');
+    try {
+      await run(
+        path,
+        new CanonicalHistoryJsonlDataSource({
+          activePath: path,
+          reuseDecodedRecords: true,
+        }),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+  const row = (id: string, content: unknown = '中文🙂\ud800') => ({
+    message_id: `msg-${id}`,
+    turn_id: `turn-${id}`,
+    message: { role: 'user', timestamp: 1, content },
+  });
+  const encode = (rows: unknown[]) => rows.map((value) => JSON.stringify(value)).join('\n') + '\n';
+
+  it('reuses unchanged rows across append while matching uncached revisions', async () => {
+    await withReaders(async (path, reader) => {
+      const records = [row('a'), row('b', { '2': 'two', z: [-0, null, true], __proto__: null })];
+      await writeFile(path, encode(records.slice(0, 1)));
+      const first = await reader.readActiveStrict();
+      const firstRevision = canonicalActiveHistoryRevision(first);
+      await reader.append([records[1]!], first);
+      const second = await reader.readActiveStrict();
+      expect(second[0]).toBe(first[0]);
+      const plain = await new CanonicalHistoryJsonlDataSource({
+        activePath: path,
+      }).readActiveStrict();
+      expect(second).toEqual(plain);
+      expect(canonicalActiveHistoryRevision(second)).toBe(canonicalActiveHistoryRevision(plain));
+      expect(canonicalHistoryRevision(second)).toBe(canonicalHistoryRevision(plain));
+      expect(canonicalActiveHistoryRevision(first)).toBe(firstRevision);
+      expect(Object.isFrozen(second[1]!.message.content)).toBe(true);
+    });
+  });
+
+  it('observes same-length edits, truncation, deletion and recreation', async () => {
+    await withReaders(async (path, reader) => {
+      await writeFile(path, encode([row('a', 'first')]));
+      const first = await reader.readActiveStrict();
+      const revision = canonicalActiveHistoryRevision(first);
+      await writeFile(path, encode([row('a', 'other')]));
+      const edited = await reader.readActiveStrict();
+      expect(edited[0]!.message.content).toBe('other');
+      expect(canonicalActiveHistoryRevision(edited)).not.toBe(revision);
+      await writeFile(path, '');
+      expect(await reader.readActiveStrict()).toEqual([]);
+      await rm(path);
+      await expect(reader.readActiveStrict()).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await writeFile(path, encode([row('b')]));
+      expect((await reader.readActiveStrict())[0]!.message_id).toBe('msg-b');
+    });
+  });
+
+  it('still rejects corrupt and duplicate rows after warming the cache', async () => {
+    await withReaders(async (path, reader) => {
+      const valid = row('a');
+      await writeFile(path, encode([valid]));
+      await reader.readActiveStrict();
+      await writeFile(path, encode([valid, valid]));
+      await expect(reader.readActiveStrict()).rejects.toThrow('duplicate');
+      await writeFile(path, encode([valid]) + '{"message_id":"private-payload"\n');
+      await expect(reader.readActiveStrict()).rejects.toThrow('invalid JSON');
+      await writeFile(path, encode([valid]) + '\n');
+      await expect(reader.readActiveStrict()).rejects.toThrow('blank line');
+      await writeFile(path, encode([{ ...valid, message: { ...valid.message, timestamp: null } }]));
+      await expect(reader.readActiveStrict()).rejects.toThrow('timestamp');
+    });
+  });
+
+  it('checks pending and settled sequence rules on every cached read', async () => {
+    await withReaders(async (path, reader) => {
+      const pending = {
+        message_id: 'msg-assistant',
+        turn_id: 'turn-a',
+        message: {
+          role: 'assistant',
+          timestamp: 1,
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call-a',
+              name: 'bash',
+              arguments: { command: 'pwd' },
+            },
+          ],
+        },
+      };
+      await writeFile(path, encode([pending]));
+      const records = await reader.readActiveStrict();
+      canonicalActiveHistoryRevision(records);
+      expect(() => canonicalHistoryRevision(records)).toThrow('tool results');
+      await expect(reader.readStrict()).rejects.toThrow('tool results');
+      expect((await reader.readActiveStrict())[0]).toBe(records[0]);
+      await writeFile(path, encode([pending, row('b')]));
+      await expect(reader.readActiveStrict()).rejects.toThrow();
+    });
+  });
+
+  it('does not trust caller-frozen records or leak mutable state from ordinary readers', async () => {
+    await withReaders(async (path) => {
+      const input = Object.freeze(row('a', { nested: ['original'] }));
+      const before = canonicalHistoryRevision([input]);
+      (input.message.content as { nested: string[] }).nested[0] = 'changed';
+      expect(canonicalHistoryRevision([input])).not.toBe(before);
+      await writeFile(path, encode([input]));
+      const ordinary = new CanonicalHistoryJsonlDataSource({
+        activePath: path,
+      });
+      const first = await ordinary.readActiveStrict();
+      (first[0]!.message.content as { nested: string[] }).nested[0] = 'caller edit';
+      expect((await ordinary.readActiveStrict())[0]!.message.content).toEqual({
+        nested: ['changed'],
+      });
+    });
+  });
+
+  it('keeps default provider snapshots mutable and detached from its private rows', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'mcode-owned-provider-'));
+    try {
+      const session: SessionRecord = {
+        sessionId: 'owned-session',
+        agentName: 'test',
+        workspaceDir: dataDir,
+        runtime: 'pi-agent',
+        sessionType: 'root',
+        sessionKind: 'conversation',
+        archived: false,
+        status: 'idle',
+        createdAtMs: 0,
+        updatedAtMs: 0,
+        historyRelativeDir: utcSessionHistoryRelativeDir('owned-session', 0),
+      };
+      const provider = createSessionSystemCanonicalHistoryProvider({
+        dataDir,
+        sessions: { get: async () => session },
+      });
+      const input = {
+        role: 'user',
+        timestamp: 1,
+        content: [{ type: 'text', text: 'original' }],
+      };
+      const committed = await provider.append({
+        sessionId: session.sessionId,
+        turnId: 't1',
+        reason: 'messageDelta',
+        messages: [input],
+        operation: { id: 'a1', kind: 'append' },
+      });
+      input.content[0]!.text = 'caller input edit';
+      (committed.messages[0] as typeof input).content[0]!.text = 'caller output edit';
+      const next = await provider.readActive(session.sessionId);
+      expect((next.messages[0] as typeof input).content[0]!.text).toBe('original');
+      expect(next.revision).toBe(committed.revision);
+      const path = resolveSessionHistoryPaths(dataDir, session).messages;
+      await writeFile(path, encode([row('external', 'outside')]));
+      expect((await provider.readActive(session.sessionId)).messages[0]).toMatchObject({
+        content: 'outside',
+      });
+      await writeFile(path, '{bad}\n');
+      await expect(provider.readActive(session.sessionId)).rejects.toThrow();
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});

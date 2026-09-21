@@ -8,6 +8,8 @@ import type {
 import type { CanonicalHistoryFileAdapter } from './canonical-history-contract.js';
 
 export interface CreateCanonicalHistoryFileAdapterOptions {
+  /** Internal provider only: returned records remain private and immutable. */
+  readonly reuseDecodedRecords?: boolean;
   readonly onMalformedLine?: CanonicalHistoryJsonlDataSourceOptions['onMalformedLine'];
 }
 
@@ -18,6 +20,11 @@ export function createCanonicalHistoryFileAdapter(
 }
 
 class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
+  private cachedSource?: {
+    path: string;
+    source: CanonicalHistoryJsonlDataSource;
+  };
+
   constructor(private readonly options: CreateCanonicalHistoryFileAdapterOptions) {}
 
   async targetExists(path: string) {
@@ -63,10 +70,16 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
     return this.source(snapshotPath).publishSnapshot(snapshotPath, records);
   }
   private source(path: string) {
-    return new CanonicalHistoryJsonlDataSource({
+    if (this.options.reuseDecodedRecords && this.cachedSource?.path === path) {
+      return this.cachedSource.source;
+    }
+    const source = new CanonicalHistoryJsonlDataSource({
       activePath: path,
+      reuseDecodedRecords: this.options.reuseDecodedRecords,
       ...(this.options.onMalformedLine ? { onMalformedLine: this.options.onMalformedLine } : {}),
     });
+    if (this.options.reuseDecodedRecords) this.cachedSource = { path, source };
+    return source;
   }
 }
 async function exists(path: string) {

@@ -204,7 +204,7 @@ async function scanCompactionLineageAllowingMissingParent(
 export function createSessionSystemCanonicalHistoryProvider(
   options: SessionSystemCanonicalHistoryProviderOptions,
 ): SessionSystemCanonicalHistoryProvider {
-  const files = options.files ?? createCanonicalHistoryFileAdapter();
+  const files = options.files ?? createCanonicalHistoryFileAdapter({ reuseDecodedRecords: true });
   const inspectionFiles = options.files ?? createCanonicalHistoryFileAdapter();
   const nowMs = options.nowMs ?? Date.now;
   const retryDelay = options.retryDelay ?? ((delayMs: number) => delay(delayMs));
