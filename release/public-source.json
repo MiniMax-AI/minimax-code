@@ -331,6 +331,7 @@
     "packages/agent-tools/src/desktop/builtin-defs.ts",
     "packages/agent-tools/src/desktop/canonical-tool-policy.ts",
     "packages/agent-tools/src/desktop/cloud-session-reader.ts",
+    "packages/agent-tools/src/desktop/edit-diff-bounds.test.ts",
     "packages/agent-tools/src/desktop/host-trash-executor.ts",
     "packages/agent-tools/src/desktop/index.ts",
     "packages/agent-tools/src/desktop/local-ask-user.ts",
