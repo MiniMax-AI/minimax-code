@@ -6,6 +6,7 @@ import {
   readJsonl,
   writeJsonlAtomically,
   type JsonlMalformedLine,
+  type JsonlDecodedLine,
 } from './jsonl.js';
 import {
   decodeCanonicalHistoryArtifact,
@@ -397,7 +398,7 @@ export function inspectCanonicalHistorySequence(
  * not provide a cross-process writer lock.
  */
 export class CanonicalHistoryJsonlDataSource {
-  private readonly decodedLines = new Map<string, CanonicalHistoryEnvelope>();
+  private readonly decodedLines = new Map<string, JsonlDecodedLine<CanonicalHistoryEnvelope>>();
 
   constructor(private readonly options: CanonicalHistoryJsonlDataSourceOptions) {}
 

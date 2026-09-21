@@ -32,12 +32,17 @@ export class JsonlAppendCommitUncertainError extends Error {
   }
 }
 
+export interface JsonlDecodedLine<T> {
+  readonly text: string;
+  readonly value: T;
+}
+
 export async function readJsonl<T>(
   filePath: string,
   decode: (value: unknown) => T,
   onMalformedLine?: (line: JsonlMalformedLine) => void,
   /** Only supply a cache when decoded values are immutable and privately owned. */
-  decodedLines?: Map<string, T>,
+  decodedLines?: Map<string, JsonlDecodedLine<T>>,
 ): Promise<T[]> {
   const contents = await readFile(filePath, 'utf-8');
   if (contents.length === 0) {
@@ -48,18 +53,20 @@ export async function readJsonl<T>(
   const lines = contents.split('\n');
   if (lines.at(-1) === '') lines.pop();
   const records: T[] = [];
-  const nextLines = decodedLines ? new Map<string, T>() : undefined;
+  const nextLines = decodedLines ? new Map<string, JsonlDecodedLine<T>>() : undefined;
   let cachedTextUnits = 0;
   for (const [index, line] of lines.entries()) {
     try {
       if (line.trim().length === 0) throw new Error('blank line');
-      const record = decodedLines?.has(line)
-        ? decodedLines.get(line)!
-        : decode(parseJsonLine(line));
+      const cached = decodedLines?.get(line);
+      // File slices can keep the entire read buffer alive. Both the retained key
+      // and parsed values must originate from an independently stored string.
+      const text = cached?.text ?? (decodedLines ? Buffer.from(line, 'utf8').toString('utf8') : line);
+      const record = cached ? cached.value : decode(parseJsonLine(text));
       records.push(record);
       // Retain only this read's rows, with a bounded text budget per reader.
       if (nextLines && !nextLines.has(line) && cachedTextUnits + line.length <= 4 * 1024 * 1024) {
-        nextLines.set(line, record);
+        nextLines.set(text, cached ?? { text, value: record });
         cachedTextUnits += line.length;
       }
     } catch (error) {
