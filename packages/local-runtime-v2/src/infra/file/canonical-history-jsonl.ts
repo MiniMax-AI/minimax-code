@@ -27,6 +27,12 @@ export type { CanonicalHistoryArtifact } from './canonical-history-artifact.js';
 
 // Only records decoded from file contents and recursively frozen here are trusted.
 const ownedEnvelopeJson = new WeakMap<CanonicalHistoryEnvelope, string | undefined>();
+const ownedRecordArrays = new WeakSet<readonly CanonicalHistoryEnvelope[]>();
+const ownedRevisions = new WeakMap<readonly CanonicalHistoryEnvelope[], string>();
+const ownedSequences = new WeakMap<
+  readonly CanonicalHistoryEnvelope[],
+  CanonicalHistorySequenceInspection
+>();
 
 const ENVELOPE_KEYS = new Set([
   'message_id',
@@ -367,6 +373,8 @@ export function assertCanonicalHistorySequence(records: readonly CanonicalHistor
 export function inspectCanonicalHistorySequence(
   records: readonly CanonicalHistoryEnvelope[],
 ): CanonicalHistorySequenceInspection {
+  const cached = ownedSequences.get(records);
+  if (cached) return copyInspection(cached);
   const state: HistorySequenceState = {
     messageIds: new Set(),
     toolCallIds: new Set(),
@@ -380,14 +388,22 @@ export function inspectCanonicalHistorySequence(
     validateSequenceRecord(envelope, index, state);
   }
 
-  if (state.pendingToolCallIds && state.pendingToolCallIds.size > 0) {
-    return {
-      status: 'pending-tool-results',
-      settledPrefixLength: state.pendingToolCallStartIndex ?? records.length,
-      pendingToolCallIds: [...state.pendingToolCallIds],
-    };
-  }
-  return { status: 'settled' };
+  const inspection: CanonicalHistorySequenceInspection =
+    state.pendingToolCallIds && state.pendingToolCallIds.size > 0
+      ? {
+          status: 'pending-tool-results',
+          settledPrefixLength: state.pendingToolCallStartIndex ?? records.length,
+          pendingToolCallIds: [...state.pendingToolCallIds],
+        }
+      : { status: 'settled' };
+  if (ownedRecordArrays.has(records)) ownedSequences.set(records, copyInspection(inspection));
+  return inspection;
+}
+
+function copyInspection(value: CanonicalHistorySequenceInspection): CanonicalHistorySequenceInspection {
+  return value.status === 'settled'
+    ? { status: 'settled' }
+    : { ...value, pendingToolCallIds: [...value.pendingToolCallIds] };
 }
 
 /**
@@ -419,7 +435,10 @@ export class CanonicalHistoryJsonlDataSource {
     filePath = this.options.activePath,
   ): Promise<CanonicalHistoryEnvelope[]> {
     if (!this.options.reuseDecodedRecords) return readStrictEnvelopeFile(filePath);
-    return readJsonl(filePath, decodeOwnedEnvelope, undefined, this.readCache);
+    const records = await readJsonl(filePath, decodeOwnedEnvelope, undefined, this.readCache);
+    Object.freeze(records);
+    ownedRecordArrays.add(records);
+    return records;
   }
 
   async readStrict(filePath = this.options.activePath): Promise<CanonicalHistoryEnvelope[]> {
@@ -567,6 +586,7 @@ function normalizeActiveRecords(
 }
 
 function decodeRecords(records: readonly CanonicalHistoryEnvelope[]): CanonicalHistoryEnvelope[] {
+  if (ownedRecordArrays.has(records)) return records as CanonicalHistoryEnvelope[];
   const decoded: CanonicalHistoryEnvelope[] = [];
   for (let index = 0; index < records.length; index += 1) {
     if (!Object.hasOwn(records, index)) invalidEnvelope(`records[${String(index)}] is sparse`);
@@ -576,6 +596,8 @@ function decodeRecords(records: readonly CanonicalHistoryEnvelope[]): CanonicalH
 }
 
 function revisionOfNormalized(records: readonly CanonicalHistoryEnvelope[]): string {
+  const cached = ownedRevisions.get(records);
+  if (cached !== undefined) return cached;
   // Preserve the canonical JSON array bytes without building a sorted copy and
   // serialized string of the entire history at once.
   const hash = createHash('sha256').update('[');
@@ -589,7 +611,9 @@ function revisionOfNormalized(records: readonly CanonicalHistoryEnvelope[]): str
     }
     hash.update(serialized, 'utf8');
   }
-  return `sha256:${hash.update(']').digest('hex')}`;
+  const revision = `sha256:${hash.update(']').digest('hex')}`;
+  if (ownedRecordArrays.has(records)) ownedRevisions.set(records, revision);
+  return revision;
 }
 
 function decodeOwnedEnvelope(value: unknown): CanonicalHistoryEnvelope {

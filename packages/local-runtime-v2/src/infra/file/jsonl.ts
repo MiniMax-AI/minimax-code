@@ -41,12 +41,13 @@ export async function readJsonl<T>(
   filePath: string,
   decode: (value: unknown) => T,
   onMalformedLine?: (line: JsonlMalformedLine) => void,
-  /** Only reuse privately owned immutable values from strict reads. */
+  /** Strict private reads return immutable arrays when a cache is supplied. */
   readCache?: JsonlReadCache<T>,
 ): Promise<T[]> {
   const contents = await readFile(filePath, 'utf-8');
   // Tolerant readers must still report every malformed line on every read.
   const cache = onMalformedLine ? undefined : readCache;
+  if (cache && contents === cache.text) return cache.records as T[];
   const reuse = cache && (contents === cache.text ||
     (cache.text.endsWith('\n') && contents.startsWith(cache.text)));
   const records: T[] = reuse ? [...cache.records] : [];
@@ -70,16 +71,17 @@ export async function readJsonl<T>(
     const limit = 4 * 1024 * 1024;
     if (contents.length <= limit) {
       cache.text = contents;
-      cache.records = records.slice();
+      cache.records = Object.freeze(records);
     } else {
       // Keep a bounded complete-line prefix. It remains reusable when the file
       // grows beyond the budget, without cycling through and evicting every row.
       const end = contents.lastIndexOf('\n', limit - 1) + 1;
       const text = Buffer.from(contents.slice(0, end), 'utf8').toString('utf8');
       cache.text = text;
-      cache.records = records.slice(0, text.split('\n').length - 1);
+      cache.records = Object.freeze(records.slice(0, text.split('\n').length - 1));
     }
   }
+  if (cache) Object.freeze(records);
   return records;
 }
 

@@ -4,6 +4,7 @@ import {
   canonicalHistoryRevision,
   CanonicalHistoryJsonlDataSource,
   decodeCanonicalHistoryEnvelope,
+  inspectCanonicalHistorySequence,
 } from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
 import { canonicalJson } from '../packages/local-runtime-v2/src/infra/file/canonical-history-json-value.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -917,12 +918,12 @@ describe('owned decoded history rows', () => {
     });
   });
 
-  it('does not let mutations of a returned array poison the cached prefix', async () => {
+  it('keeps private cached arrays immutable without exposing their state', async () => {
     await withReaders(async (path, reader) => {
       await writeFile(path, encode([row('a'), row('b')]));
       const first = await reader.readActiveStrict();
-      first.pop();
-      first[0] = row('replacement');
+      expect(() => first.pop()).toThrow();
+      expect(() => { first[0] = row('replacement'); }).toThrow();
       expect((await reader.readActiveStrict()).map(value => value.message_id)).toEqual(['msg-a', 'msg-b']);
     });
   });
@@ -1011,6 +1012,11 @@ describe('owned decoded history rows', () => {
       await writeFile(path, encode([pending]));
       const records = await reader.readActiveStrict();
       canonicalActiveHistoryRevision(records);
+      const inspection = inspectCanonicalHistorySequence(records);
+      if (inspection.status === 'pending-tool-results') {
+        (inspection.pendingToolCallIds as string[]).pop();
+      }
+      expect(inspectCanonicalHistorySequence(records)).toMatchObject({ pendingToolCallIds: ['call-a'] });
       expect(() => canonicalHistoryRevision(records)).toThrow('tool results');
       await expect(reader.readStrict()).rejects.toThrow('tool results');
       expect((await reader.readActiveStrict())[0]).toBe(records[0]);
@@ -1022,9 +1028,10 @@ describe('owned decoded history rows', () => {
   it('does not trust caller-frozen records or leak mutable state from ordinary readers', async () => {
     await withReaders(async (path) => {
       const input = Object.freeze(row('a', { nested: ['original'] }));
-      const before = canonicalHistoryRevision([input]);
+      const externallyFrozenArray = Object.freeze([input]);
+      const before = canonicalHistoryRevision(externallyFrozenArray);
       (input.message.content as { nested: string[] }).nested[0] = 'changed';
-      expect(canonicalHistoryRevision([input])).not.toBe(before);
+      expect(canonicalHistoryRevision(externallyFrozenArray)).not.toBe(before);
       await writeFile(path, encode([input]));
       const ordinary = new CanonicalHistoryJsonlDataSource({
         activePath: path,

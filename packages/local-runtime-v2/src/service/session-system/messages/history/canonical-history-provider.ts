@@ -213,6 +213,7 @@ export function createSessionSystemCanonicalHistoryProvider(
     options.locations ??
     createSessionHistoryLocationResolver({ dataDir: options.dataDir, sessions: options.sessions });
   const indexes = new Map<string, CanonicalHistoryIndexAdapter>();
+  const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
 
   return {
     read: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, false)),
@@ -323,17 +324,29 @@ export function createSessionSystemCanonicalHistoryProvider(
   ): Promise<SessionCanonicalHistorySnapshot> {
     const paths = await ensureInitialized(sessionId);
     const decoded = await files.readEnvelopesStrict(paths.messages);
-    const recovery = repairCanonicalHistory(decoded, { allowPendingToolCallTail });
-    let records = recovery.records;
-    if (recovery.issues.length > 0) {
-      if (allowPendingToolCallTail) {
-        await files.replaceActive(paths.messages, records);
-        records = await files.readActiveStrict(paths.messages);
+    const recoveryMode = allowPendingToolCallTail ? 2 : 1;
+    const reusable = options.files === undefined;
+    const verifiedModes = reusable ? (verifiedRecovery.get(decoded) ?? 0) : 0;
+    let records = decoded;
+    if ((verifiedModes & recoveryMode) === 0) {
+      const recovery = repairCanonicalHistory(decoded, { allowPendingToolCallTail });
+      if (recovery.issues.length > 0) {
+        records = recovery.records;
+        if (allowPendingToolCallTail) {
+          await files.replaceActive(paths.messages, records);
+          records = await files.readActiveStrict(paths.messages);
+        } else {
+          await files.replace(paths.messages, records);
+          records = await files.readStrict(paths.messages);
+        }
+        options.activity?.notify(sessionId);
+      } else if (reusable) {
+        // Only the private reader produces immutable arrays. The two recovery
+        // modes remain independent, so a pending tail is never treated as settled.
+        verifiedRecovery.set(decoded, verifiedModes | recoveryMode);
       } else {
-        await files.replace(paths.messages, records);
-        records = await files.readStrict(paths.messages);
+        records = recovery.records;
       }
-      options.activity?.notify(sessionId);
     }
     await syncIndex(sessionId, paths, true, records);
     return historySnapshot(records, allowPendingToolCallTail);
