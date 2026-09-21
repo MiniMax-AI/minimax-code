@@ -3270,6 +3270,7 @@
     "packages/tui/test/unit/tui-terminal-image-paste.test.ts",
     "packages/tui/test/unit/tui-terminal-text-paste.test.ts",
     "packages/tui/test/unit/tui-thinking-preview.test.ts",
+    "packages/tui/test/unit/tui-tool-preview-diff-omitted.test.ts",
     "packages/tui/test/unit/tui-transcript-presentation.test.ts",
     "packages/tui/test/unit/tui-transcript-view.test.ts",
     "packages/tui/test/unit/tui-workspace-status-line.test.ts",
