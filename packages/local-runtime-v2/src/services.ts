@@ -1208,7 +1208,13 @@ async function initializeSessionApplications(
         failure,
       ),
   });
-  const agentApplication = createRuntimeAgentApplication(input, applications);
+  const agentApplication = createRuntimeAgentApplication(
+    {
+      ...input,
+      config: input.options.compatibility.agentHost.preparation.configBuilder.config,
+    },
+    applications,
+  );
   const runtimeConversation = composeV1Conversation({
     attachmentRegistration: input.options.compatibility.attachmentRegistration,
     rootAgents: input.agentSessionPorts.roots,

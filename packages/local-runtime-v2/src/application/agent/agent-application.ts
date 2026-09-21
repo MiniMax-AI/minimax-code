@@ -27,6 +27,20 @@ import {
 import { SAFETY_SCENE, type ContentSafetyService } from '../../service/content-safety/index.js';
 import { type GlobalEventPublisher, publishBestEffort } from '../events.js';
 import type { PinService } from '../../service/pin/index.js';
+import {
+  previewAgentModelSelection,
+  type LocalRuntimeConfig,
+} from '../../service/model-system/index.js';
+import { parseCanonicalAgentMarkdown } from '../../service/agent/storage/canonical-agent-config.js';
+import { asAgentConfigServiceError } from '../../service/agent/application/agent-profile.js';
+import { isUnmanagedConfigModel } from '../config-field-review-policy.js';
+import { isCommandLineRuntimeOwner } from './profile-source.js';
+
+/** The Agent being saved owns this selection; the active Session is irrelevant. */
+type AgentConfigReviewTarget =
+  | { readonly kind: 'definition'; readonly model?: string }
+  | { readonly kind: 'document'; readonly content: string; readonly requestRef: string }
+  | { readonly kind: 'existing'; readonly requestRef: string };
 
 /** The only Session-facing Agent read/write surface assembled by V2. */
 export interface AgentSessionPorts {
@@ -49,7 +63,10 @@ export interface AgentApplicationOptions {
   readonly deleteAgentCronTasks?: (agentName: string) => Promise<void>;
   readonly removeAgentPin?: (agentName: string) => Promise<void>;
   /** Compatibility content-safety gate for persisted, user-controlled fields. */
-  readonly reviewConfigFields?: (values: ReadonlyArray<string | null | undefined>) => Promise<void>;
+  readonly reviewConfigFields?: (
+    values: ReadonlyArray<string | null | undefined>,
+    target: AgentConfigReviewTarget,
+  ) => Promise<void>;
   readonly greeting?: {
     readonly enabled: boolean;
     readonly canSend?: () => boolean;
@@ -69,12 +86,14 @@ interface RuntimeAgentApplicationCompositionInput {
   readonly pinService: Pick<PinService, 'removeAgent'>;
   readonly agentService: LocalAgentService;
   readonly safety: ContentSafetyService;
+  readonly config: () => LocalRuntimeConfig;
   readonly writeGlobalEvent: GlobalEventPublisher;
   readonly internalTurnPromptReads: InternalTurnPromptReadRegistry;
   readonly product: {
     readonly promptSnapshots?: PromptSnapshotSource;
   };
   readonly options: {
+    readonly runtimeOwnerKind?: string;
     readonly greetingEnabled?: boolean;
     readonly compatibility: {
       readonly cron: {
@@ -108,7 +127,29 @@ export function createRuntimeAgentApplication(
     publish: input.writeGlobalEvent,
     deleteAgentCronTasks: (agentName) => options.compatibility.cron.deleteAgentTasks(agentName),
     removeAgentPin: (agentName) => input.pinService.removeAgent(agentName),
-    reviewConfigFields: (values) => reviewAgentConfigFields(safety, values),
+    reviewConfigFields: async (values, target) => {
+      if (
+        isCommandLineRuntimeOwner(options.runtimeOwnerKind) &&
+        values.some((value) => value?.trim())
+      ) {
+        const configuredModel = await agentConfigReviewModel(input.agentService, target);
+        const config = input.config();
+        const model = previewAgentModelSelection({
+          config,
+          sources: configuredModel === undefined ? [] : [
+            {
+              source: 'agent-config-review',
+              selection: { model: configuredModel },
+              requireCatalog: true,
+              allowCustomProviderPrefixFallback: true,
+              defaultMissingEffortOff: true,
+            },
+          ],
+        });
+        if (model && isUnmanagedConfigModel(config, `${model.providerId}/${model.modelId}`)) return;
+      }
+      await reviewAgentConfigFields(safety, values);
+    },
     greeting: {
       enabled: options.greetingEnabled === true,
       canSend: () => options.compatibility.greeting.canSend(),
@@ -166,7 +207,11 @@ export class AgentApplication {
   async putConfigDocument(
     input: Parameters<LocalAgentService['putConfigDocument']>[0],
   ): ReturnType<LocalAgentService['putConfigDocument']> {
-    await this.reviewConfigFields([input.content]);
+    await this.reviewConfigFields([input.content], {
+      kind: 'document',
+      content: input.content,
+      requestRef: input.requestRef,
+    });
     return this.options.service.putConfigDocument(input);
   }
 
@@ -188,7 +233,10 @@ export class AgentApplication {
    * chooses Chat.
    */
   async createDefinition(input: AgentCreateInput): Promise<AgentView> {
-    await this.reviewConfigFields(createDefinitionReviewFields(input));
+    await this.reviewConfigFields(createDefinitionReviewFields(input), {
+      kind: 'definition',
+      model: input.initialDefinition?.model,
+    });
     const created = await this.options.service.create(input);
     publishBestEffort(this.options.publish ?? (() => undefined), {
       type: 'agent.created',
@@ -210,7 +258,10 @@ export class AgentApplication {
     readonly acceptedIssueIds?: readonly string[];
   }): Promise<{ readonly agent: AgentView; readonly config: AgentConfigDocument }> {
     const preview = new AgentImportService().create(input);
-    await this.reviewConfigFields([preview.canonicalContent]);
+    await this.reviewConfigFields([preview.canonicalContent], {
+      kind: 'definition',
+      model: preview.candidate.model,
+    });
     const created = await this.options.service.create({
       name: preview.proposedName,
       displayName: preview.candidate.name,
@@ -247,13 +298,16 @@ export class AgentApplication {
   }
 
   async update(input: AgentUpdateInput): Promise<AgentView> {
-    await this.reviewConfigFields([
-      input.displayName,
-      input.description,
-      input.persona,
-      input.systemPrompt,
-      ...(isNonTextAgentAvatar(input.avatar) ? [] : [input.avatar]),
-    ]);
+    await this.reviewConfigFields(
+      [
+        input.displayName,
+        input.description,
+        input.persona,
+        input.systemPrompt,
+        ...(isNonTextAgentAvatar(input.avatar) ? [] : [input.avatar]),
+      ],
+      { kind: 'existing', requestRef: input.requestRef },
+    );
     return this.options.service.update(input);
   }
 
@@ -366,8 +420,9 @@ export class AgentApplication {
 
   private async reviewConfigFields(
     values: ReadonlyArray<string | null | undefined>,
+    target: AgentConfigReviewTarget,
   ): Promise<void> {
-    await this.options.reviewConfigFields?.(values);
+    await this.options.reviewConfigFields?.(values, target);
   }
 
   private async scheduleGreeting(agent: AgentView): Promise<void> {
@@ -529,6 +584,23 @@ function reviewableAvatar(
 }
 
 class GreetingDispatchClosedError extends Error {}
+
+async function agentConfigReviewModel(
+  service: LocalAgentService,
+  target: AgentConfigReviewTarget,
+): Promise<string | undefined> {
+  if (target.kind === 'definition') return target.model;
+  if (target.kind === 'existing') {
+    return (await service.getConfigDocument(target.requestRef)).configured.model;
+  }
+  try {
+    // Review the candidate, including model changes/removal, rather than the
+    // persisted definition or its cached effective-model preview.
+    return parseCanonicalAgentMarkdown(target.content, target.requestRef).model;
+  } catch (error) {
+    throw asAgentConfigServiceError(error);
+  }
+}
 
 async function reviewAgentConfigFields(
   safety: ContentSafetyService,

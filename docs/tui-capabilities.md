@@ -21,6 +21,22 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | Files, shell, subagents, sessions, headless, ACP | Actual runtime retained | BYOK, file reads, session resume, ACP, sandbox, and status protocol tests |
 | Built-in skills, MCP, plugin tools | Original TUI assets and activation conditions retained | Asset build, plugin, and MCP tests; no claim that every skill has passed a real task |
 
+## Agent configuration review
+
+In CLI/TUI runtimes, Agent creation, import, identity updates and full configuration
+saves do not require MiniMax account review when the target Agent resolves to a
+known unmanaged provider. The Agent's configured model takes precedence; an omitted
+model inherits the current runtime default. This decision does not use the active
+conversation's model. Changing a configuration to a managed model reviews the
+candidate document before saving. Managed, unresolved and non-CLI contexts retain
+the existing review policy.
+
+Custom Agent persona/system instructions are edited through the canonical
+`agent.md` configuration. Legacy persona/system-prompt field patches remain
+unsupported. Model validation and configuration revision/owner checks still apply.
+Offline application tests cover real SQLite/file persistence with synthetic review
+verdicts; they do not establish live-gateway or native-terminal acceptance.
+
 ## ACP Skill commands
 
 ACP clients receive enabled Skills alongside built-in slash commands when a session
