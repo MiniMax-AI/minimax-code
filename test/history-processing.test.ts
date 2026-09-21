@@ -657,6 +657,49 @@ describe('committed history read reuse', () => {
     expect(readActive).not.toHaveBeenCalled();
     expect((await store.read('synthetic-session')).revision).toBe('r2');
   });
+  it('preserves owned history through the store and the next commit snapshot', async () => {
+    const original = {
+      revision: ' r1 ',
+      messages: [{ role: 'user', timestamp: 1, content: 'original'.repeat(4096) }],
+      identityVector: ['msg-1'],
+    };
+    const store = new DurableCanonicalHistoryStore({
+      read: async () => original,
+      readActive: async () => original,
+      append: async () => original,
+      replace: async () => original,
+    });
+    const committed = await store.append(change);
+    const expectedContent = original.messages[0]!.content;
+    original.messages[0]!.content = 'changed';
+    original.identityVector[0] = 'changed';
+    expect(committed.revision).toBe('r1');
+    expect(committed.messages).toEqual([{ role: 'user', timestamp: 1, content: expectedContent }]);
+    expect(committed.identityVector).toEqual(['msg-1']);
+    expect(Object.isFrozen(committed.messages[0])).toBe(true);
+    expect(Object.isFrozen(committed.messages)).toBe(true);
+    expect(Object.isFrozen(committed.identityVector)).toBe(true);
+    const clone = vi.spyOn(globalThis, 'structuredClone');
+    try {
+      expect(captureSemanticSnapshot(committed).value).toBe(committed);
+      expect(
+        captureSemanticSnapshot({ committedMessages: committed.messages }).value.committedMessages,
+      ).toBe(committed.messages);
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+    const sharedEmpty: never[] = [];
+    const emptyStore = new DurableCanonicalHistoryStore({
+      read: async () => ({ revision: 'r2', messages: sharedEmpty, identityVector: sharedEmpty }),
+      readActive: async () => original,
+      append: async () => original,
+      replace: async () => original,
+    });
+    const empty = await emptyStore.read('synthetic-session');
+    expect(empty.messages).not.toBe(empty.identityVector);
+    expect(empty.messages).toEqual([]);
+  });
   it('retains legacy rereads and rejects invalid commits or write failures', async () => {
     const readActive = vi.fn(async () => ({
       revision: 'r1',

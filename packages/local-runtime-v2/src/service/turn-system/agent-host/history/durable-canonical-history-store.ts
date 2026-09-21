@@ -146,11 +146,12 @@ export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
     const detached = captureSemanticSnapshot(snapshot).value;
     validateCanonicalHistorySnapshot(detached);
     assertCanonicalIdentityVector(detached);
-    return Object.freeze({
+    return captureSemanticSnapshot({
       revision: detached.revision.trim(),
-      messages: Object.freeze([...detached.messages]),
-      identityVector: Object.freeze([...detached.identityVector]),
-    });
+      // Keep the separately owned arrays reusable at the next snapshot boundary.
+      messages: captureSemanticSnapshot([...detached.messages]).value,
+      identityVector: captureSemanticSnapshot([...detached.identityVector]).value,
+    }).value;
   }
 }
 
