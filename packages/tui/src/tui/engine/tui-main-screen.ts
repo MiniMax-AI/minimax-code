@@ -341,8 +341,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				}
 				output.append(line);
 			}
-			output.append("\x1b[?2026l"); // End synchronized output
-			output.flush();
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -352,7 +350,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
 			}
 			this.previousViewportTop = Math.max(start, newLines.length - height);
-			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.positionHardwareCursor(cursorPos, newLines.length, output);
+			output.append("\x1b[?2026l"); // Present only after restoring the input cursor.
+			output.flush();
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -489,12 +489,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				if (moveBack > 0) {
 					output.append(`\x1b[${moveBack}A`);
 				}
-				output.append("\x1b[?2026l");
-				output.flush();
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
+				this.positionHardwareCursor(cursorPos, newLines.length, output);
+				output.append("\x1b[?2026l");
+				output.flush();
 			}
-			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -620,8 +620,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			output.append(`\x1b[${extraLines}A`);
 		}
 
-		output.append("\x1b[?2026l"); // End synchronized output
-
 		if (process.env.PI_TUI_DEBUG === "1") {
 			const debugDir = "/tmp/tui";
 			fs.mkdirSync(debugDir, { recursive: true });
@@ -651,8 +649,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			fs.writeFileSync(debugPath, debugData);
 		}
 
-		output.flush();
-
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)
 		// hardwareCursorRow tracks actual terminal cursor position (for movement)
@@ -662,8 +658,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
 		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
 
-		// Position hardware cursor for IME
-		this.positionHardwareCursor(cursorPos, newLines.length);
+		// Restore the IME anchor before presenting the frame, including cursor visibility.
+		this.positionHardwareCursor(cursorPos, newLines.length, output);
+		output.append("\x1b[?2026l");
+		output.flush();
 
 		this.previousLines = newLines;
 		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
@@ -676,9 +674,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	 * @param cursorPos The cursor position extracted from rendered output, or null
 	 * @param totalLines Total number of rendered lines
 	 */
-	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): void {
+	private positionHardwareCursor(
+		cursorPos: { row: number; col: number } | null,
+		totalLines: number,
+		output?: BoundedTerminalWriter,
+	): void {
 		if (!cursorPos || totalLines <= 0) {
-			this.terminal.hideCursor();
+			if (output) output.append("\x1b[?25l");
+			else this.terminal.hideCursor();
 			return;
 		}
 
@@ -698,11 +701,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		buffer += `\x1b[${targetCol + 1}G`;
 
 		if (buffer) {
-			this.terminal.write(buffer);
+			if (output) output.append(buffer);
+			else this.terminal.write(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;
-		if (this.getShowHardwareCursor()) {
+		if (output) {
+			output.append(this.getShowHardwareCursor() ? "\x1b[?25h" : "\x1b[?25l");
+		} else if (this.getShowHardwareCursor()) {
 			this.terminal.showCursor();
 		} else {
 			this.terminal.hideCursor();

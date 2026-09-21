@@ -3245,6 +3245,7 @@
     "packages/tui/test/unit/tui-feature-viewport-contract.test.ts",
     "packages/tui/test/unit/tui-goal-banner.test.ts",
     "packages/tui/test/unit/tui-image-preview.test.ts",
+    "packages/tui/test/unit/tui-ime-cursor.test.ts",
     "packages/tui/test/unit/tui-keybindings.test.ts",
     "packages/tui/test/unit/tui-model-picker.test.ts",
     "packages/tui/test/unit/tui-plugin-manager.test.ts",
