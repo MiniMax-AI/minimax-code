@@ -56,14 +56,14 @@ describe('buildTuiToolPreview edit diff bounds', () => {
 
   it('renders a summary block instead of a misleading +0 -0 diff when the diff is omitted', () => {
     const preview = editPreview({
-      diff: '(diff omitted: more than 1000 lines changed)',
+      diff: '(diff omitted: more than 2000 added or removed lines)',
       diffOmitted: 'too_many_changes',
     });
 
     const block = preview?.blocks[0];
     if (block?.kind !== 'summary') throw new Error(`expected a summary block, got ${block?.kind}`);
     expect(block.reason).toBe('too-large');
-    expect(block.message).toBe('(diff omitted: more than 1000 lines changed)');
+    expect(block.message).toBe('(diff omitted: more than 2000 added or removed lines)');
     expect(block.path).toBe(PATH);
     expect(block).not.toHaveProperty('addedLines');
     expect(block).not.toHaveProperty('removedLines');
@@ -92,14 +92,14 @@ describe('TuiAcpUpdateProjector edit diff bounds', () => {
 
   it('projects an omitted diff as text instead of a diff block with a parsed-notice body', () => {
     const content = acpToolContent({
-      diff: '(diff omitted: more than 1000 lines changed)',
+      diff: '(diff omitted: more than 2000 added or removed lines)',
       diffOmitted: 'too_many_changes',
     });
 
     expect(content).toEqual([
       {
         type: 'content',
-        content: { type: 'text', text: '(diff omitted: more than 1000 lines changed)' },
+        content: { type: 'text', text: '(diff omitted: more than 2000 added or removed lines)' },
       },
     ]);
   });

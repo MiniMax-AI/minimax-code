@@ -20,10 +20,14 @@ const context = { sessionId: 'edit-diff-bounds-session', turnId: 'edit-diff-boun
 // Myers costs O((N+M)·D) in the length D of the edit script, so a whole-file
 // rewrite is quadratic in the number of changed lines. Rewriting every line of
 // this file took 120-139 s unbounded (the tool diffed the same input twice) and
-// produced a ~1.3 MB diff no renderer displays; bounded it settles in ~60 ms.
+// produced a ~1.3 MB diff no renderer displays; bounded it settles in ~220 ms.
 // Vitest's default 5 s timeout therefore also guards the bound: if it is ever
 // removed, the whole-file case stops finishing in time.
 const wholeFileRewriteLines = 20_000;
+
+// Replacing a line costs 2 edits, so DIFF_MAX_EDIT_LENGTH (2000) admits a full
+// rewrite of a file this long and omits anything longer.
+const boundedRewriteLines = 1_000;
 
 function body(lines: number, render: (index: number) => string): string {
   return `${Array.from({ length: lines }, (_, index) => render(index)).join('\n')}\n`;
@@ -77,6 +81,26 @@ describe('edit diff bounds', () => {
     expect(await readFile(file, 'utf8')).toBe(`${newBlock}${original.slice(oldBlock.length)}`);
     expect(result.details?.diffOmitted).toBeUndefined();
     expect(result.details?.patch).toContain('@@');
+  });
+
+  // Rewriting a few hundred lines is an ordinary edit, not the pathological
+  // case this bound targets: a reported 501-line whole-file replacement lost
+  // its diff under the first bound this test pins.
+  it('keeps the diff for a whole-file rewrite that fits the bound', async () => {
+    const original = body(boundedRewriteLines, (index) => `const value${index} = ${index};`);
+    const rewritten = body(boundedRewriteLines, (index) => `let renamed${index} = ${index * 2};`);
+    await writeFile(file, original);
+
+    const result = await new LocalEditTool(directory).execute(context, {
+      file_path: 'subject.ts',
+      old_string: original,
+      new_string: rewritten,
+    });
+
+    expect(await readFile(file, 'utf8')).toBe(rewritten);
+    expect(result.details?.diffOmitted).toBeUndefined();
+    expect(result.details?.patchOmitted).toBeUndefined();
+    expect(result.details?.patch).toContain('+let renamed0 = 0;');
   });
 
   it('omits the diff for a whole-file rewrite but still writes the file', async () => {

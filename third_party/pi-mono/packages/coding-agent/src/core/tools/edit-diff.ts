@@ -405,8 +405,14 @@ export function applyEditsToNormalizedContent(
  * render. `maxEditLength` caps D deterministically (the same input always
  * aborts at the same point, so the behavior is unit-testable); `timeout` is a
  * wall-clock safety net for slow machines and pathological inputs.
+ *
+ * D is sized so that a full rewrite of an ordinary source file keeps its diff:
+ * replacing every line costs 2 edits per line, so 2000 covers files up to 1000
+ * lines. Measured end to end on an M-series laptop, rewriting every line costs
+ * 49 ms at 500 lines and 177 ms at 1000; a 20 000-line rewrite gives up after
+ * 193 ms, against about 170 s unbounded.
  */
-export const DIFF_MAX_EDIT_LENGTH = 1000;
+export const DIFF_MAX_EDIT_LENGTH = 2000;
 export const DIFF_TIMEOUT_MS = 5_000;
 
 /** Why no diff was produced: the edit script exceeded DIFF_MAX_EDIT_LENGTH, or DIFF_TIMEOUT_MS elapsed first. */
@@ -449,7 +455,7 @@ export function generateDiffString(oldContent: string, newContent: string, conte
 			diff:
 				omitted === "timeout"
 					? `(diff omitted: computing it exceeded ${DIFF_TIMEOUT_MS} ms)`
-					: `(diff omitted: more than ${DIFF_MAX_EDIT_LENGTH} lines changed)`,
+					: `(diff omitted: more than ${DIFF_MAX_EDIT_LENGTH} added or removed lines)`,
 			firstChangedLine: undefined,
 			omitted,
 		};
