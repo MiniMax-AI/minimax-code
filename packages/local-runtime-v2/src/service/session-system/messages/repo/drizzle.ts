@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, gt, gte, inArray, lt, lte, sql } from 'drizzle-orm';
 
 import type { AppDb } from '../../../../infra/db/client.js';
+import { runWithWriteLock } from '../../../../infra/db/write-transaction.js';
 import {
   legacyMessages,
   messageRowMigrations,
@@ -22,6 +23,7 @@ import type {
   MessageRewindInclusiveInput,
   MessageRewindInclusiveResult,
   MessageUpsertInput,
+  MessageWriteOptions,
   DisplayMessageRecord,
   NormalizedDisplayMessage,
   UserMessageCommitInput,
@@ -205,14 +207,18 @@ class DrizzleMessageRepository implements MessageRepository {
     );
   }
 
-  async upsert(input: MessageUpsertInput): Promise<NormalizedDisplayMessage> {
-    const [result] = await this.upsertMany([input]);
+  async upsert(
+    input: MessageUpsertInput,
+    options?: MessageWriteOptions,
+  ): Promise<NormalizedDisplayMessage> {
+    const [result] = await this.upsertMany([input], options);
     if (!result) throw new Error('Message upsert returned no row');
     return result;
   }
 
   async upsertMany(
     inputs: readonly MessageUpsertInput[],
+    options?: MessageWriteOptions,
   ): Promise<readonly NormalizedDisplayMessage[]> {
     const sessionId = inputs[0]?.sessionId;
     if (!sessionId) return [];
@@ -229,11 +235,16 @@ class DrizzleMessageRepository implements MessageRepository {
       }),
       replaceProvenance: hasMessageProvenance(input),
     }));
-    this.mutationTransaction(sessionId, (tx) => {
-      normalized.forEach(({ message, replaceProvenance }) =>
-        this.write(tx, sessionId, message, replaceProvenance),
-      );
-    });
+    await runWithWriteLock(
+      this.options.db,
+      (tx) => {
+        this.ensureReadyInTransaction(tx, sessionId);
+        normalized.forEach(({ message, replaceProvenance }) =>
+          this.write(tx, sessionId, message, replaceProvenance),
+        );
+      },
+      options,
+    );
     return normalized.map(({ message }) => message);
   }
 

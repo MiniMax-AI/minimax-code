@@ -37,6 +37,7 @@ export interface SessionAgentEventContext {
 export interface SessionAgentProjectionInput {
   readonly context: SessionAgentEventContext;
   readonly event: RuntimeEvent;
+  readonly signal?: AbortSignal;
 }
 
 export interface SessionSystemAgentProjectionOptions {
@@ -76,19 +77,22 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
         const message = displayMessage(input.event);
         if (message && !isTerminalAssistantDisplayError(message)) {
           const queryKey = await queryKeyForTurn(options, input.context);
-          await options.messages.upsert({
-            sessionId: input.context.sessionId,
-            turnId: input.context.turnId,
-            message: {
-              ...message,
-              turn_id: input.context.turnId,
-              ...(queryKey ? { query_key: queryKey } : {}),
+          await options.messages.upsert(
+            {
+              sessionId: input.context.sessionId,
+              turnId: input.context.turnId,
+              message: {
+                ...message,
+                turn_id: input.context.turnId,
+                ...(queryKey ? { query_key: queryKey } : {}),
+              },
+              source: input.context.provenance?.source ?? 'agent',
+              ...(input.context.provenance?.sourceContext
+                ? { sourceContext: input.context.provenance.sourceContext }
+                : {}),
             },
-            source: input.context.provenance?.source ?? 'agent',
-            ...(input.context.provenance?.sourceContext
-              ? { sourceContext: input.context.provenance.sourceContext }
-              : {}),
-          });
+            { signal: input.signal },
+          );
         }
         await projectQueryCollapse(() => options.queryCollapse?.projectRuntimeEvent(input));
       },

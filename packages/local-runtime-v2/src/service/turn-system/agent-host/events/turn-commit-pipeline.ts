@@ -150,6 +150,7 @@ export class TurnCommitPipeline {
       const result = await this.dependencies.events.handleRuntimeEvent(
         this.dependencies.context,
         event,
+        this.dependencies.lease.signal,
       );
       new TerminalConfirmation().observe(event, result);
     });

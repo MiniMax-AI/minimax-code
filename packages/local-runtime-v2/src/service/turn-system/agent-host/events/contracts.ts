@@ -30,6 +30,10 @@ export type AgentEventResult =
     };
 
 export interface AgentEventDelivery {
-  handleRuntimeEvent(context: AgentEventContext, event: RuntimeEvent): Promise<AgentEventResult>;
+  handleRuntimeEvent(
+    context: AgentEventContext,
+    event: RuntimeEvent,
+    signal?: AbortSignal,
+  ): Promise<AgentEventResult>;
   handleHistoryCommitted(context: AgentEventContext, change: CommittedHistoryChange): Promise<void>;
 }

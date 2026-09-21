@@ -23,6 +23,8 @@ type ObservationStage = 'runtime-event' | 'history-committed' | 'history-failure
 interface RuntimeProjectionInput {
   readonly context: AgentEventContext;
   readonly event: RuntimeEvent;
+  /** Process-local control; excluded from semantic snapshots and replay identities. */
+  readonly signal?: AbortSignal;
 }
 
 interface HistoryProjectionInput {
@@ -156,7 +158,11 @@ export class RequiredAgentEventDelivery implements AgentEventDelivery, AgentHost
     this.historyReplays = new SemanticReplayRegistry(maximum);
   }
 
-  handleRuntimeEvent(context: AgentEventContext, event: RuntimeEvent): Promise<AgentEventResult> {
+  handleRuntimeEvent(
+    context: AgentEventContext,
+    event: RuntimeEvent,
+    signal?: AbortSignal,
+  ): Promise<AgentEventResult> {
     try {
       const snapshot = captureSemanticSnapshot({ context, event });
       validateRuntimeInput(snapshot.value.context, snapshot.value.event);
@@ -167,7 +173,7 @@ export class RequiredAgentEventDelivery implements AgentEventDelivery, AgentHost
         conflict: () => new AgentEventIdentityConflictError('runtime-event', identity),
         execute: () =>
           this.lane.run(snapshot.value.context.sessionId, () =>
-            this.projectRuntime(snapshot.value.context, snapshot.value.event),
+            this.projectRuntime(snapshot.value.context, snapshot.value.event, signal),
           ),
       });
     } catch (error) {
@@ -223,6 +229,7 @@ export class RequiredAgentEventDelivery implements AgentEventDelivery, AgentHost
   private async projectRuntime(
     context: AgentEventContext,
     event: RuntimeEvent,
+    signal?: AbortSignal,
   ): Promise<AgentEventResult> {
     const runtimeSequence = this.validateSequence(context, event);
     const authoritative = await this.options.projectors.session.projectRuntimeEvent({
@@ -233,7 +240,11 @@ export class RequiredAgentEventDelivery implements AgentEventDelivery, AgentHost
       throw new AgentEventAcknowledgementError(terminalOutcome(event) ?? 'non-terminal', 'missing');
     }
     validateAcknowledgement(event, authoritative);
-    await this.options.projectors.messages.projectRuntimeEvent({ context, event });
+    await this.options.projectors.messages.projectRuntimeEvent({
+      context,
+      event,
+      ...(signal ? { signal } : {}),
+    });
     await this.options.projectors.stream.projectRuntimeEvent({ context, event });
     await this.options.projectors.turnFacts.projectRuntimeEvent({ context, event });
     this.commitSequence(context, runtimeSequence);
