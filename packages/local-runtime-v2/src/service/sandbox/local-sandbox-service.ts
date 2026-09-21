@@ -175,6 +175,11 @@ export class LocalSandboxService {
     return this.#lifecycle;
   }
 
+  /** Current committed product configuration. Cloned so callers cannot mutate policy state. */
+  config(): SandboxConfig {
+    return structuredClone(this.#config);
+  }
+
   currentEffectiveState(): CurrentEffectiveState {
     return this.#effectiveState.load();
   }

@@ -93,6 +93,7 @@ import type {
 } from "../application/conversation/conversation-application.js";
 import type { RuntimeApplications } from "../application/initialize.js";
 import type { LocalRuntimeApplication } from "../application/session/process-local-application-contract.js";
+import type { SandboxMode } from "@mavis/config";
 
 export interface CliServiceOptions {
   readonly applications: RuntimeApplications;
@@ -639,6 +640,33 @@ export class CliService {
       "configuration",
       "Configuration",
     ).setPermissionMode(input);
+  }
+
+  getSandboxMode() {
+    return this.requireSandboxModeConfiguration().getSandboxMode();
+  }
+
+  setSandboxMode(input: { mode: SandboxMode }) {
+    return this.requireSandboxModeConfiguration().setSandboxMode(input);
+  }
+
+  private requireSandboxModeConfiguration(): Required<
+    Pick<
+      NonNullable<LocalRuntimeApplication["configuration"]>,
+      "getSandboxMode" | "setSandboxMode"
+    >
+  > {
+    const configuration = this.requireCapability(
+      "configuration",
+      "Configuration",
+    );
+    if (!configuration.getSandboxMode || !configuration.setSandboxMode) {
+      throw new Error("Sandbox mode capability is unavailable in this Runtime.");
+    }
+    return {
+      getSandboxMode: configuration.getSandboxMode.bind(configuration),
+      setSandboxMode: configuration.setSandboxMode.bind(configuration),
+    };
   }
 
   listModels(

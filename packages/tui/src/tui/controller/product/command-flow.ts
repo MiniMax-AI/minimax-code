@@ -28,7 +28,8 @@ import type { TuiUpdateFlow } from './update-flow.js';
 import type { TuiGoalFlow } from './goal-flow.js';
 import type { TuiPlanModeFlow } from '../interaction/plan-mode-flow.js';
 import type { TuiPermissionModeFlow } from '../interaction/permission-mode-flow.js';
-import type { MavisRegion } from '@mavis/config';
+import type { TuiSandboxModeFlow } from '../interaction/sandbox-mode-flow.js';
+import { isSandboxMode, SANDBOX_MODES, type MavisRegion } from '@mavis/config';
 import type { McodeAuthPort } from '../../../auth/application.js';
 import { markTuiAuthorizationUrl } from '../../../auth/authorization-url.js';
 import type { TuiMode } from '../../engine/public.js';
@@ -76,6 +77,7 @@ export interface TuiCommandFlowOptions {
   readonly goalFlow?: Pick<TuiGoalFlow, 'execute' | 'resumeBlocked'>;
   readonly planModeFlow?: TuiPlanModeFlow;
   readonly permissionModeFlow?: TuiPermissionModeFlow;
+  readonly sandboxModeFlow?: TuiSandboxModeFlow;
   readonly auth?: McodeAuthPort;
   readonly openExternalTarget?: TuiExternalTargetOpener;
   readonly interactionFlow: TuiInteractionFlow;
@@ -1166,6 +1168,24 @@ export class TuiCommandFlow {
           return 'retained';
         }
         await this.options.permissionModeFlow.set(mode);
+      },
+      sandbox: async ({ args }) => {
+        const flow = this.options.sandboxModeFlow;
+        if (!flow) {
+          this.options.append('Sandbox mode is unavailable in this host.', 'warning');
+          return;
+        }
+        const action = args.trim().toLocaleLowerCase();
+        if (!action || action === 'status') {
+          await flow.refresh();
+          flow.showStatus();
+          return;
+        }
+        if (!isSandboxMode(action)) {
+          this.options.append(`Usage: /sandbox [status | ${SANDBOX_MODES.join(' | ')}]`, 'warning');
+          return 'retained';
+        }
+        await flow.set(action);
       },
       login: () => {
         this.pendingLoginContinuation = undefined;

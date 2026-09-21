@@ -1,5 +1,6 @@
 import type { TuiAttachment, TuiTransportAttachment } from '../types/invocation.js';
 import type { GlobalThreadGoal } from '@mavis/shared/global-events';
+import type { EffectiveSandboxMode, SandboxMode } from '@mavis/config';
 import type {
   TuiCompactionResult,
   TuiMcpServer,
@@ -270,6 +271,9 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   ): Promise<TuiAccountStatus>;
   getPermissionMode(): Promise<TuiPermissionMode | undefined>;
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode>;
+  /** `undefined` means the current host does not own sandbox policy. */
+  getSandboxMode(): Promise<EffectiveSandboxMode | undefined>;
+  setSandboxMode(mode: SandboxMode): Promise<EffectiveSandboxMode>;
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;

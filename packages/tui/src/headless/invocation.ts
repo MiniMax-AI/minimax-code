@@ -2,6 +2,8 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 
+import { parseSandboxMode, type SandboxMode } from '@mavis/config';
+
 import type { TuiAttachment } from '../application/invocation.js';
 import { assertValidOutputSchema } from './contract.js';
 import { prepareDiagnosticsDirectory } from './diagnostics.js';
@@ -30,6 +32,7 @@ export interface RawTuiExecOptions {
   continue?: boolean;
   config?: string;
   permission?: string;
+  sandbox?: string;
   timeout?: string;
   maxSteps?: string;
   outputFormat?: string;
@@ -50,6 +53,8 @@ export interface ResolvedTuiExecInvocation {
   continueSession: boolean;
   configPath?: string;
   permission: TuiPermissionPolicy;
+  /** Present only for an explicit `--sandbox`; omission preserves configured policy. */
+  sandboxMode?: SandboxMode;
   timeoutMs?: number;
   maxSteps?: number;
   format: TuiExecFormat;
@@ -122,6 +127,7 @@ export async function resolveTuiExecInvocation(
     );
   }
   const permission: TuiPermissionPolicy = requestedPermission;
+  const sandboxMode = readSandboxModeOption(options);
   const effort = readEffortOption(options);
   const workspaceDir = await resolveDirectory(options.cwd ?? process.cwd(), '--cwd');
   throwIfAborted(signal);
@@ -183,6 +189,7 @@ export async function resolveTuiExecInvocation(
     continueSession: options.continue === true,
     ...(configPath ? { configPath } : {}),
     permission,
+    ...(sandboxMode === undefined ? {} : { sandboxMode }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxSteps === undefined ? {} : { maxSteps }),
     format,
@@ -213,6 +220,7 @@ async function resolveTuiExecReviewInvocation(
     );
   }
   const effort = readEffortOption(options);
+  const sandboxMode = readSandboxModeOption(options);
   const workspaceDir = await resolveDirectory(options.cwd ?? process.cwd(), '--cwd');
   throwIfAborted(signal);
   const timeoutMs =
@@ -238,12 +246,22 @@ async function resolveTuiExecReviewInvocation(
     continueSession: false,
     ...(configPath ? { configPath } : {}),
     permission: requestedPermission,
+    ...(sandboxMode === undefined ? {} : { sandboxMode }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(maxSteps === undefined ? {} : { maxSteps }),
     format,
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     reviewRequest: { scope: 'local_changes' },
   };
+}
+
+function readSandboxModeOption(options: RawTuiExecOptions): SandboxMode | undefined {
+  if (options.sandbox === undefined) return undefined;
+  try {
+    return parseSandboxMode(options.sandbox);
+  } catch (error) {
+    throw invocationError(`--sandbox is invalid: ${errorMessage(error)}`, error);
+  }
 }
 
 async function resolveOutputSchema(

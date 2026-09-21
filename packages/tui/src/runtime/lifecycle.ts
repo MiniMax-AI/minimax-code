@@ -5,9 +5,12 @@ import type {
 } from '@mavis/local-runtime-v2/process-local';
 import { getDefaultLocalRuntimeConfig } from '@mavis/local-runtime-v2';
 import {
+  applySandboxMode,
   getRuntimeBuildEnv,
   getRuntimeRegion,
   readExplicitBetaFeatureFromFile,
+  SANDBOX_CONFIG_DEFAULTS,
+  type SandboxMode,
 } from '@mavis/config';
 import {
   AuthSessionChangedError,
@@ -81,6 +84,8 @@ export interface CreateTuiRuntimeOptions {
   surface?: TuiObservabilitySurface;
   observability?: TuiObservability;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
+  /** Explicit process-only override supplied by headless `exec --sandbox`. */
+  sandboxMode?: SandboxMode;
   lane?: string;
 }
 
@@ -384,6 +389,14 @@ export async function createTuiRuntime(
         ...config,
         dataDir: options.dataDir,
         ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+        ...(options.sandboxMode
+          ? {
+              sandbox: applySandboxMode(
+                config.sandbox ?? SANDBOX_CONFIG_DEFAULTS,
+                options.sandboxMode,
+              ),
+            }
+          : {}),
         beta: {
           ...config.beta,
           mcodeTools: effectiveMcodeTools,

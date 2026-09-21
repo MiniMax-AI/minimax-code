@@ -1,4 +1,5 @@
 import { InvalidArgumentError, Option, type Command } from 'commander';
+import { SANDBOX_MODES } from '@mavis/config';
 import { parseHeadlessModelOverride } from '../headless/model-selection.js';
 import type { TuiMode } from '../tui/engine/public.js';
 import { parseTuiStartupEnvironment } from './environment.js';
@@ -128,6 +129,7 @@ export function applyExecCliContract(command: Command): Command {
         'permission policy: smart, full, or off (ask requires TUI/ACP)',
       ).default('smart'),
     )
+    .addOption(sandboxCliOption())
     .addOption(new Option('--timeout <duration>', 'Run timeout, for example 30s or 2m'))
     .addOption(new Option('--max-steps <count>', 'maximum assistant steps'))
     .addOption(new Option('--output-format <format>', 'output format: text, json, or stream-json'))
@@ -162,6 +164,7 @@ export function applyExecReviewCliContract(command: Command): Command {
         'permission policy: smart, full, or off (ask requires TUI/ACP)',
       ).default('smart'),
     )
+    .addOption(sandboxCliOption())
     .addOption(new Option('--timeout <duration>', 'Run timeout, for example 30s or 2m'))
     .addOption(new Option('--max-steps <count>', 'maximum assistant steps'))
     .addOption(new Option('--output-format <format>', 'output format: text, json, or stream-json'))
@@ -170,6 +173,14 @@ export function applyExecReviewCliContract(command: Command): Command {
     )
     .allowExcessArguments(false)
     .showHelpAfterError();
+}
+
+/** Omission preserves the resolved configuration; only an explicit flag overrides it. */
+function sandboxCliOption(): Option {
+  return new Option(
+    '--sandbox <mode>',
+    `sandbox mode: ${SANDBOX_MODES.join(', ')} (defaults to the configured sandbox)`,
+  ).choices([...SANDBOX_MODES]);
 }
 
 function parseTuiMode(value: string): TuiMode {

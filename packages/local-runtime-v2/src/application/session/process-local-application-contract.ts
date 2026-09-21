@@ -3,6 +3,7 @@ import type {
   GlobalThreadGoal,
 } from "@mavis/shared/global-events";
 import type { ThreadGoalAttachment, ThreadGoalPatchInput } from "@mavis/goal";
+import type { EffectiveSandboxMode, SandboxMode } from "@mavis/config";
 import type {
   AskQuestionnaireReplyAnswer,
   AskQuestionnaireRequest,
@@ -235,6 +236,8 @@ export interface LocalRuntimeApplication {
     setPermissionMode(input: {
       mode: "default" | "acceptEdits" | "bypassPermissions" | "auto" | "off";
     }): Promise<unknown>;
+    getSandboxMode?(): Promise<EffectiveSandboxMode>;
+    setSandboxMode?(input: { mode: SandboxMode }): Promise<EffectiveSandboxMode>;
   };
   readonly models?: {
     list(input?: { sessionId?: string }): Promise<readonly unknown[]>;

@@ -36,6 +36,7 @@ import { TuiSessionFlow } from './controller/session-flow.js';
 import { TuiCommandFlow } from './controller/product/command-flow.js';
 import { TuiInputFlow } from './controller/interaction/input-flow.js';
 import { TuiPermissionModeFlow } from './controller/interaction/permission-mode-flow.js';
+import { TuiSandboxModeFlow } from './controller/interaction/sandbox-mode-flow.js';
 import { TuiPlanModeFlow } from './controller/interaction/plan-mode-flow.js';
 import { createTuiAbortLiveTurn } from './controller/run/abort-live-turn.js';
 import { createTuiUpdateFlow } from './controller/product/update-flow.js';
@@ -479,6 +480,16 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     },
     isStopped: () => stopped,
   });
+  const sandboxModeFlow = new TuiSandboxModeFlow({
+    runtime: options.runtime,
+    append: appendLocalCell,
+    setHint: (message) => chromeFlow?.setHint(message),
+    onChanged: () => {
+      updateChrome(controller.snapshot());
+      tui.requestRender();
+    },
+    isStopped: () => stopped,
+  });
   commandFlow = new TuiCommandFlow({
     bashFlow,
     workspaceDir: options.workspaceDir,
@@ -492,6 +503,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     goalFlow,
     planModeFlow,
     permissionModeFlow,
+    sandboxModeFlow,
     ...(options.auth ? { auth: options.auth } : {}),
     openExternalTarget: options.openExternalTarget,
     interactionFlow,
@@ -690,6 +702,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     await featureFlow.refreshSelectedModel();
     await Promise.all([
       permissionModeFlow.refresh().catch(() => undefined),
+      sandboxModeFlow.refresh().catch(() => undefined),
       planModeFlow.refreshCapabilities().catch(() => undefined),
     ]);
     await goalFlow?.refresh();
@@ -714,6 +727,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     delegationFlow.stop();
     activeRunFlow.stop();
     permissionModeFlow.stop();
+    sandboxModeFlow.stop();
     planModeFlow.stop();
     feedbackFlow.stop();
     updateFlow.stop();

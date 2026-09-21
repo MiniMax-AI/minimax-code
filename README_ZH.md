@@ -137,6 +137,21 @@ mcode --session
 
 在 TUI 中输入 `/sessions` 查找历史会话，输入 `/help` 查看完整命令与快捷键。
 
+### 控制 Shell 沙箱访问
+
+在 TUI 中使用 `/sandbox` 查看当前生效等级，或通过 `/sandbox read-only`、
+`/sandbox workspace-write`、`/sandbox danger-full-access` 明确选择。Headless 使用相同的三个值：
+
+```bash
+mcode exec --sandbox read-only "Summarize this repository."
+mcode exec --sandbox workspace-write "Fix the failing test."
+```
+
+`read-only` 禁止写入工作区，`workspace-write` 允许写入工作区内，`danger-full-access`
+关闭受管沙箱。沙箱访问范围与 permission/approval 模式彼此独立。未传 `--sandbox`
+时保留本次运行解析到的配置；显式传入的 Headless 值仅对当前进程生效，不会写回配置。
+不支持的受限模式和非法值都会失败，不会悄悄改成完全访问。
+
 | 操作 | 快捷键 |
 | --- | --- |
 | 发送消息，或在任务运行中调整当前响应 | `Enter` |

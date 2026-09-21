@@ -525,6 +525,7 @@ export async function createRuntimeServices(
         readLocalInstructionSources({ ...input, dataDir: options.dataDir }),
     },
     mcp: owners.mcp.public,
+    sandbox,
     modelProvider: {
       application: modelProviderApplication,
       providers: modelSystem.providers,

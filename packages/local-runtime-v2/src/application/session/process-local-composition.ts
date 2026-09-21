@@ -1,6 +1,10 @@
 import type { V1ServiceCompatibility } from '../../compat/v1/runtime.js';
 import { createProcessLocalApplication } from '../index.js';
 import { createProcessLocalMiniAppApplication } from './process-local-miniapp-application.js';
+import {
+  createSandboxModeCapability,
+  type SandboxModeCapabilityService,
+} from './sandbox-mode-capability.js';
 
 type ProcessLocalApplicationOptions = Parameters<typeof createProcessLocalApplication>[0];
 type ProcessLocalMiniAppArgs = Parameters<typeof createProcessLocalMiniAppApplication>;
@@ -22,6 +26,7 @@ export function composeProcessLocalApplication(input: {
   readonly instructions?: ProcessLocalApplicationOptions['instructions'];
   readonly mcp: ProcessLocalApplicationOptions['peripherals']['mcp'];
   readonly modelProvider: ProcessLocalApplicationOptions['modelProvider'];
+  readonly sandbox: SandboxModeCapabilityService;
 }): ReturnType<typeof createProcessLocalApplication> {
   return createProcessLocalApplication({
     eventBus: input.eventBus,
@@ -36,7 +41,14 @@ export function composeProcessLocalApplication(input: {
     plan: { isEntryEnabled: input.planEntryEnabled },
     ...(input.sessionReports ? { sessionReports: input.sessionReports } : {}),
     instructions: input.instructions,
-    peripherals: { ...input.compatibility.peripherals, mcp: input.mcp },
+    peripherals: {
+      ...input.compatibility.peripherals,
+      mcp: input.mcp,
+      configuration: {
+        ...input.compatibility.peripherals.configuration,
+        ...createSandboxModeCapability(input.sandbox),
+      },
+    },
     modelProvider: input.modelProvider,
   });
 }
