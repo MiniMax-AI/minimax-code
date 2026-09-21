@@ -91,7 +91,10 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
                 ? { sourceContext: input.context.provenance.sourceContext }
                 : {}),
             },
-            { signal: input.signal },
+            // Complete tool messages describe work already executed, including
+            // abort cleanup. Persist these facts within the write-lock budget
+            // even when the lease is cancelled; text-only waits may stop early.
+            message.tool_calls?.length ? undefined : { signal: input.signal },
           );
         }
         await projectQueryCollapse(() => options.queryCollapse?.projectRuntimeEvent(input));

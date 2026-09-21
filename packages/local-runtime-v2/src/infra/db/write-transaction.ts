@@ -14,7 +14,11 @@ export class WriteLockWaitAbortedError extends Error {
   }
 }
 
-/** Retry only transaction admission: a callback that has started is never replayed. */
+/**
+ * Retry only transaction admission: a callback that has started is never replayed.
+ * The signal cancels contention waits, not an immediately available write. This
+ * lets post-cancellation tool completion and cleanup messages remain durable.
+ */
 export async function runWithWriteLock<T>(
   db: AppDb,
   mutation: (tx: AppDb) => T,
@@ -25,26 +29,25 @@ export async function runWithWriteLock<T>(
     throw new RangeError('Invalid write lock budget');
   const deadline = performance.now() + budget;
   let attempt = 0;
+  let hasContended = false;
   let lastBusy: unknown = new Error('SQLite write lock wait exceeded its deadline');
   for (;;) {
-    throwIfWaitAborted(options.signal);
+    if (hasContended) throwIfWaitAborted(options.signal);
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw lastBusy;
     const previous = db.get<{ timeout: number }>(sql`PRAGMA busy_timeout`).timeout;
     let entered = false;
     try {
-      db.run(
-        sql.raw(
-          `PRAGMA busy_timeout = ${Math.ceil(Math.min(WRITE_LOCK_ATTEMPT_MS, remaining))}`,
-        ),
-      );
+      const nativeWaitMs = options.signal?.aborted
+        ? 0
+        : Math.ceil(Math.min(WRITE_LOCK_ATTEMPT_MS, remaining));
+      db.run(sql.raw(`PRAGMA busy_timeout = ${nativeWaitMs}`));
       return db.transaction(
         (tx) => {
           entered = true;
           // Only lock acquisition gets a short timeout. Restore the connection's
           // policy before callbacks (including nested transactions) can use it.
           db.run(sql.raw(`PRAGMA busy_timeout = ${previous}`));
-          throwIfWaitAborted(options.signal);
           return mutation(tx);
         },
         { behavior: 'immediate' },
@@ -56,6 +59,8 @@ export async function runWithWriteLock<T>(
       // No await occurs while the shared connection has a temporary timeout.
       db.run(sql.raw(`PRAGMA busy_timeout = ${previous}`));
     }
+    hasContended = true;
+    throwIfWaitAborted(options.signal);
     const wait = Math.min(
       deadline - performance.now(),
       25 * 2 ** Math.min(attempt++, 3) + Math.random() * 25,

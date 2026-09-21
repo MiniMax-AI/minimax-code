@@ -38,6 +38,7 @@ export interface MessageUpsertInput {
   readonly sourceContext?: Record<string, unknown>;
 }
 export interface MessageWriteOptions {
+  /** Cancels lock contention waits; immediately available cleanup writes still commit. */
   readonly signal?: AbortSignal;
 }
 export interface UserMessageCommitInput extends MessageUpsertInput {

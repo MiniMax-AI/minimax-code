@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { RUNTIME_EVENT_SCHEMA, RuntimeEventType } from '@mavis/agent-core/protocol';
-import { RespDataType } from '@mavis/agent-core/protocol/agent-message';
+import { RespDataType, type AgentMessage } from '@mavis/agent-core/protocol/agent-message';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   DatabaseClient,
@@ -132,10 +132,26 @@ it.each(['SQLITE_BUSY', 'SQLITE_CONSTRAINT_UNIQUE'])(
   },
 );
 
-it('does not start an already cancelled message write', async () => {
+it('persists uncontended cleanup messages after the lease is cancelled', async () => {
   const { messages } = await fixture();
   const controller = new AbortController();
   controller.abort(new Error('Synthetic cancellation'));
+  await messages.upsert(
+    { sessionId: 'synthetic', message: { msg_id: 'tool-completion', role: 'assistant' } },
+    { signal: controller.signal },
+  );
+  expect((await messages.list('synthetic')).messages.map((message) => message.msg_id)).toEqual([
+    'seed',
+    'tool-completion',
+  ]);
+});
+
+it('does not wait for a contended cleanup write when its lease is already cancelled', async () => {
+  const { client, dataDir, messages } = await fixture();
+  const controller = new AbortController();
+  controller.abort(new Error('Synthetic cancellation'));
+  const { exited } = await holdWriter(dataDir, 1_500);
+  const started = performance.now();
   await expect(
     messages.upsert(
       { sessionId: 'synthetic', message: { msg_id: 'cancelled', role: 'assistant' } },
@@ -146,6 +162,9 @@ it('does not start an already cancelled message write', async () => {
     signal: controller.signal,
     cause: controller.signal.reason,
   });
+  expect(performance.now() - started).toBeLessThan(500);
+  expect(client.db.get(sql`PRAGMA busy_timeout`)).toEqual({ timeout: 5000 });
+  await exited;
   expect((await messages.list('synthetic')).messages.map((message) => message.msg_id)).toEqual([
     'seed',
   ]);
@@ -213,7 +232,43 @@ it('cancels a blocked write through the turn event pipeline without persisting i
   await expect(pipeline.drain()).resolves.toBeUndefined();
 });
 
-function messageEvent() {
+it.each(['before', 'during'])(
+  'preserves completed tool facts when the lease is cancelled %s contention',
+  async (timing) => {
+    const { dataDir, messages, controller, pipeline, stream } = await pipelineFixture();
+    const completedTool: AgentMessage = {
+      msg_id: 'completed-tool',
+      role: 'assistant',
+      tool_calls: [
+        {
+          tool_call_id: 'executed-tool',
+          tool_name: 'bash',
+          tool_call_status: 2,
+          tool_call_args: '{"command":"echo synthetic"}',
+          tool_call_result_data: '{"output":"synthetic","exitCode":0}',
+        },
+      ],
+    };
+    const { exited } = await holdWriter(dataDir, 1_500);
+    if (timing === 'before') controller.abort();
+    const timer = timing === 'during' ? setTimeout(() => controller.abort(), 100) : undefined;
+    try {
+      await pipeline.onRuntimeEvent(messageEvent(completedTool));
+    } finally {
+      clearTimeout(timer);
+    }
+    await exited;
+    expect(controller.signal.aborted).toBe(true);
+    const persisted = (await messages.list('synthetic')).messages;
+    expect(
+      persisted.find((message) => message.msg_id === 'completed-tool')?.tool_calls,
+    ).toEqual(completedTool.tool_calls);
+    expect(stream.projectRuntimeEvent).toHaveBeenCalledTimes(1);
+    await expect(pipeline.drain()).resolves.toBeUndefined();
+  },
+);
+
+function messageEvent(message: AgentMessage = { msg_id: 'cancelled', role: 'assistant' }) {
   return {
     schema: RUNTIME_EVENT_SCHEMA,
     event_id: 'blocked-message',
@@ -224,7 +279,7 @@ function messageEvent() {
     payload: {
       stream_resp: JSON.stringify({
         type: RespDataType.AgentMessage,
-        agent_message: { msg_id: 'cancelled', role: 'assistant' },
+        agent_message: message,
       }),
     },
   };

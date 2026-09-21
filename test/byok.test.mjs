@@ -532,7 +532,17 @@ test(
   "cancelling a contended message write persists an aborted turn rather than a failure",
   // Node terminates children on Windows SIGINT instead of invoking their handler.
   { timeout: 45000, skip: process.platform === "win32" },
-  async (t) => {
+  cancellationTest("lock"),
+);
+
+test(
+  "cancelling a running tool preserves its completed display message",
+  { timeout: 45000, skip: process.platform === "win32" },
+  cancellationTest("tool"),
+);
+
+function cancellationTest(cancellation) {
+  return async (t) => {
     const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-cancel-write-"));
     const dataDir = path.join(fixtureDir, "data");
     const workspaceDir = path.join(fixtureDir, "workspace");
@@ -543,6 +553,8 @@ test(
     let child, holder, holderClosed, cancelTimer, deadline;
     let serverError;
     let cancelledWhileLocked = false;
+    let cancelledDuringTool = false;
+    const marker = path.join(workspaceDir, "cancel-tool.marker");
     let holderReleased = false;
     const server = createServer(async (req, res) => {
       try {
@@ -569,43 +581,70 @@ test(
           );
           return;
         }
-        // A separate process releases the lock even when the CLI blocks its event loop.
-        holder = spawn(
-          process.execPath,
-          [
-            "-e",
-            `
-          const Database = require(process.argv[1]);
-          const db = new Database(process.argv[2]);
-          db.exec('BEGIN IMMEDIATE');
-          process.send('locked');
-          setTimeout(() => {
-            db.exec('COMMIT'); db.close(); process.disconnect();
-          }, 1500);
-        `,
-            createRequire(import.meta.url).resolve("better-sqlite3"),
-            dbPath,
-          ],
-          {
-            stdio: ["ignore", "ignore", "inherit", "ipc"],
-          },
-        );
-        holderClosed = once(holder, "close").then(() => {
-          holderReleased = true;
-        });
-        await Promise.race([
-          once(holder, "message"),
-          holderClosed.then(() => {
-            throw new Error("Writer exited before acquiring the lock");
-          }),
-        ]);
+        if (cancellation === "lock") {
+          // A separate process releases the lock even when the CLI blocks its event loop.
+          holder = spawn(
+            process.execPath,
+            [
+              "-e",
+              `
+        const Database = require(process.argv[1]);
+        const db = new Database(process.argv[2]);
+        db.exec('BEGIN IMMEDIATE');
+        process.send('locked');
+        setTimeout(() => {
+          db.exec('COMMIT'); db.close(); process.disconnect();
+        }, 1500);
+      `,
+              createRequire(import.meta.url).resolve("better-sqlite3"),
+              dbPath,
+            ],
+            {
+              stdio: ["ignore", "ignore", "inherit", "ipc"],
+            },
+          );
+          holderClosed = once(holder, "close").then(() => {
+            holderReleased = true;
+          });
+          await Promise.race([
+            once(holder, "message"),
+            holderClosed.then(() => {
+              throw new Error("Writer exited before acquiring the lock");
+            }),
+          ]);
+        }
+        const delta =
+          cancellation === "tool"
+            ? {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "cancel-tool-call",
+                    type: "function",
+                    function: {
+                      name: "bash",
+                      arguments: JSON.stringify({
+                        command: "printf started > cancel-tool.marker; sleep 30",
+                      }),
+                    },
+                  },
+                ],
+              }
+            : { role: "assistant", content };
         res.writeHead(200, { "content-type": "text/event-stream" });
         for (const chunk of [
           {
-            choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+            choices: [{ index: 0, delta, finish_reason: null }],
           },
           {
-            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: cancellation === "tool" ? "tool_calls" : "stop",
+              },
+            ],
             usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
           },
         ])
@@ -619,10 +658,19 @@ test(
             })}\n\n`,
           );
         res.end("data: [DONE]\n\n");
-        cancelTimer = setTimeout(() => {
-          cancelledWhileLocked = !holderReleased;
-          child.kill("SIGINT");
-        }, 200);
+        if (cancellation === "tool") {
+          cancelTimer = setInterval(() => {
+            if (!existsSync(marker)) return;
+            clearInterval(cancelTimer);
+            cancelledDuringTool = true;
+            child.kill("SIGINT");
+          }, 20);
+        } else {
+          cancelTimer = setTimeout(() => {
+            cancelledWhileLocked = !holderReleased;
+            child.kill("SIGINT");
+          }, 200);
+        }
       } catch (error) {
         serverError = error;
         res.writeHead(500).end();
@@ -657,7 +705,11 @@ test(
             kind: "custom",
             enabled: true,
             api: "openai-completions",
-            options: { apiKey: "synthetic-key", baseURL: `${origin}/v1`, authMode: "api-key" },
+            options: {
+              apiKey: "synthetic-key",
+              baseURL: `${origin}/v1`,
+              authMode: "api-key",
+            },
             models: { fixture: { limit: { context: 32768, output: 4096 } } },
           },
         },
@@ -710,11 +762,16 @@ test(
     clearTimeout(deadline);
     if (holderClosed) await holderClosed;
     assert.equal(serverError, undefined);
-    assert.equal(
-      cancelledWhileLocked,
-      true,
-      "SIGINT must arrive while the foreign writer holds its lock",
-    );
+    if (cancellation === "tool") {
+      assert.equal(cancelledDuringTool, true, "SIGINT must follow actual Bash execution");
+      assert.equal(holder, undefined, "Tool cancellation must not involve a foreign writer");
+    } else {
+      assert.equal(
+        cancelledWhileLocked,
+        true,
+        "SIGINT must arrive while the foreign writer holds its lock",
+      );
+    }
     assert.equal(code, 130, `${stdout}\n${stderr}`);
     assert.equal(existsSync(networkAudit), false, "No external requests are allowed");
     const db = new Database(dbPath, { readonly: true });
@@ -730,6 +787,27 @@ test(
         db.prepare("SELECT terminal_outcome FROM local_runtime_session_agent_state").all(),
         [{ terminal_outcome: "aborted" }],
       );
+      if (cancellation === "tool") {
+        const display = db
+          .prepare(
+            "SELECT data_json FROM local_runtime_message_rows WHERE role = 'assistant'",
+          )
+          .all()
+          .map((row) => JSON.parse(row.data_json));
+        assert.equal(
+          display.length,
+          1,
+          "Tool completion must survive reopening display history",
+        );
+        const calls = display[0].tool_calls ?? [];
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].tool_call_id, "cancel-tool-call");
+        assert.equal(calls[0].tool_name, "bash");
+        assert.ok(
+          calls[0].tool_call_result_data,
+          "Persist the completed tool result as well as its call",
+        );
+      }
     } finally {
       db.close();
     }
@@ -745,8 +823,8 @@ test(
       .map((line) => JSON.parse(line).message?.role);
     assert.deepEqual(
       roles,
-      ["user"],
-      "Abort reconciliation must not retain the cancelled answer",
+      cancellation === "tool" ? ["user", "assistant", "toolResult"] : ["user"],
+      "Abort reconciliation must preserve executed tools without retaining cancelled text output",
     );
-  },
-);
+  };
+}
