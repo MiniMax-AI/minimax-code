@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
-import { compareRuns, renderReport, selectScenarios } from './report.mjs';
+import { compareRuns, exitCodeForStatus, renderReport, selectScenarios } from './report.mjs';
 
 const control = fileURLToPath(new URL('../../', import.meta.url));
 const config = JSON.parse(readFileSync(new URL('./config.json', import.meta.url), 'utf8'));
@@ -77,7 +77,7 @@ try {
       result.warmups.push({ side, ...run(directory, scenario, script, `${side}-warmup-${i}`) });
       save();
     }
-    for (let pair = 0; pair < config.repetitions; pair++) {
+    const measurePair = pair => {
       const item = { pair, order: pair % 2 ? ['head', 'base'] : ['base', 'head'] };
       result.pairs.push(item);
       for (const side of item.order) {
@@ -85,8 +85,16 @@ try {
         item[side] = run(side === 'base' ? base : head, scenario, script, `${side}-${pair}`);
         save();
       }
+    };
+    const compare = () => compareRuns(result.pairs.map(p => p.base.metrics), result.pairs.map(p => p.head.metrics), config);
+    for (let pair = 0; pair < config.repetitions; pair++) measurePair(pair);
+    result.comparison = compare();
+    if (result.comparison.some(row => row.status === 'NEEDS_CONFIRMATION')) {
+      result.preliminaryComparison = result.comparison;
+      console.log(`[perf] ${scenario.id}: first pairs unsettled; measuring confirmation pairs`);
+      for (let pair = config.repetitions; pair < config.repetitions + config.confirmPairs; pair++) measurePair(pair);
+      result.comparison = compare();
     }
-    result.comparison = compareRuns(result.pairs.map(p => p.base.metrics), result.pairs.map(p => p.head.metrics), config);
     save();
     if (result.comparison.some(row => row.status === 'REGRESSION')) {
       console.log(`[perf] ${scenario.id}: separate diagnostic CPU profile`);
@@ -96,12 +104,13 @@ try {
     }
   }
   const statuses = report.results.flatMap(r => r.comparison.map(row => row.status));
+  if (statuses.includes('NEEDS_CONFIRMATION')) throw new Error('Confirmation pairs missing from final comparison');
   report.status = statuses.includes('REGRESSION') ? 'REGRESSION' : statuses.includes('INCONCLUSIVE') ? 'INCONCLUSIVE' : 'PASS';
-  process.exitCode = report.status === 'PASS' ? 0 : report.status === 'REGRESSION' ? 1 : 2;
+  process.exitCode = exitCodeForStatus(report.status);
 } catch (error) {
   report.status = 'ERROR';
   report.error = error.message;
-  process.exitCode = 1;
+  process.exitCode = exitCodeForStatus('ERROR');
 } finally {
   save();
   const markdown = readFileSync(join(out, 'comparison.md'), 'utf8');

@@ -3,6 +3,7 @@
   "benchmarkRevision": "8ad1e09f7653d7e97b83b4f5b4d347ca2fa129c7",
   "warmups": 1,
   "repetitions": 3,
+  "confirmPairs": 2,
   "intervalMs": 100,
   "maxSpread": 0.3,
   "suites": {

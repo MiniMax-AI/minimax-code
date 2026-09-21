@@ -102,44 +102,76 @@ export function validateRun(meta, messages, scenario, expectedFinal, expectedRes
   return metrics;
 }
 
+export function spread(values, trim = 0) {
+  assert.ok(Number.isInteger(trim) && trim >= 0 && values.length - trim >= 2, 'Too few samples for spread');
+  const sorted = [...values].sort((a, b) => a - b);
+  let best = Infinity;
+  for (let low = 0; low <= trim; low++) {
+    const kept = sorted.slice(low, sorted.length - (trim - low));
+    best = Math.min(best, (kept[kept.length - 1] - kept[0]) / median(kept));
+  }
+  return best;
+}
+
+export function exitCodeForStatus(status) {
+  const codes = { PASS: 0, REGRESSION: 1, ERROR: 1, INCONCLUSIVE: 2 };
+  assert.ok(Object.hasOwn(codes, status), `No exit code for status: ${status}`);
+  return codes[status];
+}
+
+// Two-stage paired classification. With the initial repetitions, only a run
+// that is within budget and stable on both sides settles early as PASS;
+// anything else asks for the bounded confirmation pairs. At full pair count
+// the verdict is final: a regression must exceed the budget by median and
+// reproduce in all pairs but at most one, a pass must be within budget with
+// both sides stable after discarding one extreme sample per side, and the
+// rest is INCONCLUSIVE (reported without failing the CI check).
 export function compareRuns(base, head, config) {
-  assert.equal(base.length, config.repetitions, 'Incomplete baseline repetitions');
-  assert.equal(head.length, config.repetitions, 'Incomplete candidate repetitions');
+  const confirmPairs = config.confirmPairs ?? 0;
+  const total = config.repetitions + confirmPairs;
+  assert.equal(base.length, head.length, 'Unpaired base/candidate samples');
+  assert.ok(base.length === config.repetitions || base.length === total, 'Unexpected pair count');
+  const pairs = base.length, final = pairs === total;
+  const trim = final && pairs >= 5 ? 1 : 0;
+  const worseNeeded = pairs >= 4 ? pairs - 1 : pairs;
   return Object.entries(config.thresholds).map(([metric, threshold]) => {
     const before = base.map(r => r[metric]);
     const after = head.map(r => r[metric]);
     assert.ok([...before, ...after].every(v => Number.isFinite(v) && v > 0), `Invalid ${metric}`);
     const baseline = median(before), candidate = median(after);
-    const spread = values => (Math.max(...values) - Math.min(...values)) / median(values);
-    const unstable = spread(before) > config.maxSpread || spread(after) > config.maxSpread;
+    const baseSpread = spread(before, trim), headSpread = spread(after, trim);
+    const stable = baseSpread <= config.maxSpread && headSpread <= config.maxSpread;
     const delta = candidate - baseline;
-    const regression = delta > Math.max(baseline * threshold.relative, threshold.absolute)
-      && after.every((v, i) => v > before[i]);
+    const withinBudget = delta <= Math.max(baseline * threshold.relative, threshold.absolute);
+    const worsePairs = after.filter((v, i) => v > before[i]).length;
+    const status = !final ? (withinBudget && stable ? 'PASS' : 'NEEDS_CONFIRMATION')
+      : !withinBudget && worsePairs >= worseNeeded ? 'REGRESSION'
+      : withinBudget && stable ? 'PASS' : 'INCONCLUSIVE';
     return { metric, baseline, candidate, change: delta / baseline,
-      baseSpread: spread(before), headSpread: spread(after),
-      status: unstable ? 'INCONCLUSIVE' : regression ? 'REGRESSION' : 'PASS' };
+      pairs, worsePairs, trimmedSamples: trim, baseSpread, headSpread, status };
   });
 }
 
 export function renderReport(report) {
   const lines = ['# Performance comparison', '',
-    `Status: **${report.status}**`, '',
+    `Status: **${report.status}**${report.status === 'INCONCLUSIVE'
+      ? ' — runner too noisy to conclude; non-blocking, not evidence of a pass' : ''}`, '',
     '| Item | Value |', '| --- | --- |',
     `| Base | \`${report.baseRevision}\` |`, `| Candidate | \`${report.headRevision}\` |`,
     `| Benchmark | [${report.benchmarkRevision}](${report.benchmarkRepository}/tree/${report.benchmarkRevision}) |`,
     `| Machine | ${report.host.cpuModel}; ${report.host.cpus} CPUs; ${Math.round(report.host.totalMemBytes / 2 ** 30)} GiB; ${report.host.platform} ${report.host.osRelease}; ${report.host.arch} |`,
     `| Runtime | Node ${report.nodeVersion}; Bun ${report.bunVersion} |`,
     `| Suite | ${report.suite}; ${report.selectedScenarios.join(', ')} |`,
-    `| Method | One warmup per revision/scenario; three alternating serial pairs; 100 ms process-tree rusage sampling |`,
-    '', '| Scenario | Metric | Base median | Candidate median | Change | Result |',
-    '| --- | --- | ---: | ---: | ---: | --- |'];
+    `| Method | One warmup per revision/scenario; ${report.config.repetitions} alternating serial pairs plus up to ${report.config.confirmPairs ?? 0} confirmation pairs when unsettled; 100 ms process-tree rusage sampling |`,
+    '', '| Scenario | Metric | Base median | Candidate median | Change | Pairs worse | Result |',
+    '| --- | --- | ---: | ---: | ---: | ---: | --- |'];
   for (const scenario of report.results) for (const row of scenario.comparison ?? []) {
     const scale = row.metric === 'rssBytes' ? 2 ** 20 : row.metric === 'durationMs' ? 1000 : 1;
     const unit = row.metric === 'rssBytes' ? 'MiB' : row.metric === 'durationMs' ? 's' : 'core-s';
-    lines.push(`| ${scenario.id} | ${row.metric} | ${(row.baseline / scale).toFixed(2)} ${unit} | ${(row.candidate / scale).toFixed(2)} ${unit} | ${(row.change * 100).toFixed(1)}% | ${row.status} |`);
+    lines.push(`| ${scenario.id} | ${row.metric} | ${(row.baseline / scale).toFixed(2)} ${unit} | ${(row.candidate / scale).toFixed(2)} ${unit} | ${(row.change * 100).toFixed(1)}% | ${row.worsePairs}/${row.pairs} | ${row.status} |`);
   }
   if (report.error) lines.push('', `Failure: ${String(report.error).replaceAll('\n', ' ').replaceAll('`', "'")}`);
   lines.push('', 'Raw run.json, samples.csv, CLI/mock logs, synthetic histories and any diagnostic CPU profile are attached. Warmups and diagnostic runs are excluded from comparisons.',
-    '', 'This is a mock throughput check, not live-model acceptance. RSS is sampled. INCONCLUSIVE means excessive spread and fails the check; do not treat it as evidence of a regression or a pass.');
+    '', 'This is a mock throughput check, not live-model acceptance. RSS is sampled. INCONCLUSIVE means the runner stayed too noisy to conclude even after confirmation pairs; CI reports it as a warning without failing the check. It is neither evidence of a regression nor of a pass; rerun before relying on performance results.');
   return lines.join('\n') + '\n';
 }

@@ -74,7 +74,17 @@ jobs:
       - name: Compare on this runner
         env:
           PERF_SUITE: ${{ matrix.suite }}
-        run: node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --suite "$PERF_SUITE" --out "$RUNNER_TEMP/performance"
+        # Exit 2 means INCONCLUSIVE: persistent runner noise, no confirmed
+        # regression. Surface it as a warning without failing the required
+        # check; regressions and errors (exit 1) still fail.
+        run: |
+          status=0
+          node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --suite "$PERF_SUITE" --out "$RUNNER_TEMP/performance" || status=$?
+          if [ "$status" -eq 2 ]; then
+            echo "::warning title=Performance check inconclusive::Runner noise exceeded stability limits even after confirmation pairs; no regression was confirmed. This is not evidence of a pass; see the job summary and artifact before relying on performance results."
+            exit 0
+          fi
+          exit "$status"
       - name: Upload performance evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

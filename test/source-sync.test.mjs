@@ -18,7 +18,7 @@ import { cliBuildVersion, cliExternalModules, cliReleaseTargets, versionFromTag 
 import { releaseManifest } from '../scripts/package-cli-release.mjs';
 import { validateReleaseReports } from '../scripts/publish-cli-release.mjs';
 import { compareVersions, releaseCli } from '../scripts/release-cli.mjs';
-import { compareRuns, validateRun, validateRequest, validateToolOutput, median, selectScenarios } from '../scripts/perf/report.mjs';
+import { compareRuns, exitCodeForStatus, renderReport, spread, validateRun, validateRequest, validateToolOutput, median, selectScenarios } from '../scripts/perf/report.mjs';
 import { copyMcodeToolsArtifact, downloadMcodeToolsArtifact, MCODE_TOOLS_ARTIFACT } from '../scripts/lib/mcode-tools-artifact.mjs';
 
 test('artifact download recovers from TLS reset and interrupted response bodies', async () => {
@@ -160,17 +160,82 @@ test('performance request audit rejects truncated wire history and empty tool re
   assert.doesNotThrow(() => validateToolOutput(realpathSync(process.cwd()) + '\n', 'pwd', process.cwd()));
 });
 
-test('performance comparison rejects incomplete, invalid and unstable samples', () => {
-  const config = { repetitions: 3, maxSpread: 0.3, thresholds: { cpuSeconds: { relative: 0.2, absolute: 0.5 } } };
-  const runs = values => values.map(cpuSeconds => ({ cpuSeconds }));
+const perfConfig = { repetitions: 3, confirmPairs: 2, maxSpread: 0.3, thresholds: { cpuSeconds: { relative: 0.2, absolute: 0.5 } } };
+const perfRuns = values => values.map(cpuSeconds => ({ cpuSeconds }));
+
+test('performance comparison settles clean first pairs and rejects incomplete or invalid samples', () => {
   assert.equal(median([3, 1, 2]), 2);
-  assert.equal(compareRuns(runs([10, 10, 10]), runs([10, 10, 10]), config)[0].status, 'PASS');
-  assert.equal(compareRuns(runs([10, 10, 10]), runs([13, 13, 13]), config)[0].status, 'REGRESSION');
-  assert.equal(compareRuns(runs([1, 1, 1]), runs([1.4, 1.4, 1.4]), config)[0].status, 'PASS');
-  assert.equal(compareRuns(runs([10, 10, 10]), runs([10, 10, 20]), config)[0].status, 'INCONCLUSIVE');
-  assert.throws(() => compareRuns(runs([10, 10]), runs([10, 10, 10]), config));
-  assert.throws(() => compareRuns(runs([10, NaN, 10]), runs([10, 10, 10]), config));
-  assert.throws(() => compareRuns(runs([0, 0, 0]), runs([10, 10, 10]), config));
+  assert.equal(compareRuns(perfRuns([10, 10, 10]), perfRuns([10, 10, 10]), perfConfig)[0].status, 'PASS');
+  assert.equal(compareRuns(perfRuns([1, 1, 1]), perfRuns([1.4, 1.4, 1.4]), perfConfig)[0].status, 'PASS');
+  // Over budget or noisy on either side: escalate to confirmation pairs instead of a verdict.
+  assert.equal(compareRuns(perfRuns([10, 10, 10]), perfRuns([13, 13, 13]), perfConfig)[0].status, 'NEEDS_CONFIRMATION');
+  assert.equal(compareRuns(perfRuns([10, 10, 10]), perfRuns([10, 10, 14]), perfConfig)[0].status, 'NEEDS_CONFIRMATION');
+  assert.equal(compareRuns(perfRuns([10, 10, 14]), perfRuns([10, 10, 10]), perfConfig)[0].status, 'NEEDS_CONFIRMATION');
+  // Without confirmation pairs configured, the first pairs are final and never escalate.
+  const single = { ...perfConfig, confirmPairs: 0 };
+  assert.equal(compareRuns(perfRuns([10, 10, 10]), perfRuns([13, 13, 13]), single)[0].status, 'REGRESSION');
+  assert.equal(compareRuns(perfRuns([10, 10, 10]), perfRuns([10, 10, 14]), single)[0].status, 'INCONCLUSIVE');
+  assert.throws(() => compareRuns(perfRuns([10, 10]), perfRuns([10, 10, 10]), perfConfig));
+  assert.throws(() => compareRuns(perfRuns([10, 10, 10, 10]), perfRuns([10, 10, 10, 10]), perfConfig));
+  assert.throws(() => compareRuns(perfRuns([10, NaN, 10]), perfRuns([10, 10, 10]), perfConfig));
+  assert.throws(() => compareRuns(perfRuns([0, 0, 0]), perfRuns([10, 10, 10]), perfConfig));
+});
+
+test('performance confirmation pairs fail confirmed regressions and absorb single outliers', () => {
+  const five = (before, after) => compareRuns(perfRuns(before), perfRuns(after), perfConfig)[0];
+  // Consistently worse beyond budget: confirmed regression.
+  assert.equal(five([10, 10, 10, 10, 10], [13, 13, 13, 13, 13]).status, 'REGRESSION');
+  // One corrupted pair cannot veto a confirmed regression.
+  assert.equal(five([10, 10, 10, 10, 20], [13, 13, 13, 13, 13]).status, 'REGRESSION');
+  // Unanimous paired evidence outranks side dispersion.
+  assert.equal(five([10, 10, 10, 10, 10], [13, 13, 18, 13, 20]).status, 'REGRESSION');
+  // One slow candidate sample no longer blocks a faster candidate.
+  const outlier = five([10, 10, 10, 10, 10], [9.5, 9.6, 9.7, 9.6, 13.5]);
+  assert.deepEqual([outlier.status, outlier.pairs, outlier.worsePairs, outlier.trimmedSamples], ['PASS', 5, 1, 1]);
+  assert.ok(outlier.headSpread <= 0.3);
+  // Persistent noise stays inconclusive: neither a block nor a pass.
+  assert.equal(five([10, 10, 10, 10, 10], [9, 9.5, 10, 14, 15]).status, 'INCONCLUSIVE');
+  // An over-budget median that pairs do not reproduce is inconclusive, not a regression.
+  assert.equal(five([10, 14, 10, 14, 10], [13, 13, 13, 13, 13]).status, 'INCONCLUSIVE');
+  assert.equal(spread([10, 10, 14]), 0.4);
+  assert.equal(spread([10, 10, 14], 1), 0);
+  assert.throws(() => spread([10, 10], 1));
+});
+
+test('performance exit codes fail regressions and errors but not inconclusive noise', () => {
+  assert.equal(exitCodeForStatus('PASS'), 0);
+  assert.equal(exitCodeForStatus('REGRESSION'), 1);
+  assert.equal(exitCodeForStatus('ERROR'), 1);
+  assert.equal(exitCodeForStatus('INCONCLUSIVE'), 2);
+  assert.throws(() => exitCodeForStatus('NEEDS_CONFIRMATION'));
+});
+
+test('performance workflow warns on inconclusive runs without failing the required check', () => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/performance.yml', import.meta.url), 'utf8'));
+  const compare = workflow.jobs.performance.steps.find(s => s.name === 'Compare on this runner');
+  assert.match(compare.run, /\|\| status=\$\?/);
+  assert.match(compare.run, /if \[ "\$status" -eq 2 \]/);
+  assert.match(compare.run, /::warning title=Performance check inconclusive::/);
+  assert.match(compare.run, /exit 0/);
+  assert.match(compare.run, /exit "\$status"/);
+  const config = JSON.parse(readFileSync(new URL('../scripts/perf/config.json', import.meta.url), 'utf8'));
+  assert.equal(config.confirmPairs, 2);
+});
+
+test('performance report states that inconclusive runs are non-blocking', () => {
+  const row = { metric: 'durationMs', baseline: 17820, candidate: 17530, change: -0.016,
+    pairs: 5, worsePairs: 1, trimmedSamples: 1, baseSpread: 0.05, headSpread: 0.34, status: 'INCONCLUSIVE' };
+  const report = { status: 'INCONCLUSIVE', baseRevision: 'base-sha', headRevision: 'head-sha',
+    benchmarkRepository: 'https://example.invalid/bench', benchmarkRevision: 'bench-sha',
+    nodeVersion: 'v22.0.0', bunVersion: '1.0.0',
+    host: { cpuModel: 'test', cpus: 3, totalMemBytes: 2 ** 33, platform: 'darwin', osRelease: '24.0.0', arch: 'arm64' },
+    config: { repetitions: 3, confirmPairs: 2 }, suite: 'basic', selectedScenarios: ['upstream-100'],
+    results: [{ id: 'upstream-100', comparison: [row] }] };
+  const markdown = renderReport(report);
+  assert.match(markdown, /Status: \*\*INCONCLUSIVE\*\* — runner too noisy to conclude; non-blocking/);
+  assert.match(markdown, /\| 1\/5 \| INCONCLUSIVE \|/);
+  assert.match(markdown, /warning without failing the check/);
+  assert.match(markdown, /confirmation pairs when unsettled/);
 });
 
 test('performance measurements require complete successful tool execution', () => {
