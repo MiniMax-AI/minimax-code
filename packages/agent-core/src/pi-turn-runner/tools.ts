@@ -11,7 +11,7 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
-} from '@earendil-works/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent/tools';
 import { createBashEnvSpawnHook, resolveBashEnvPolicy } from '../bash-subprocess-env.js';
 import type { TSchema } from '@sinclair/typebox';
 import type { RuntimeTool, ToolExecutionContext } from '../tools/index.js';

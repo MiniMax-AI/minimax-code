@@ -49,6 +49,24 @@
       "@earendil-works/pi-coding-agent": [
         "./third_party/pi-mono/packages/coding-agent/src/index.ts"
       ],
+      "@earendil-works/pi-coding-agent/auth-storage": [
+        "./third_party/pi-mono/packages/coding-agent/src/core/auth-storage.ts"
+      ],
+      "@earendil-works/pi-coding-agent/compaction": [
+        "./third_party/pi-mono/packages/coding-agent/src/core/compaction/compaction.ts"
+      ],
+      "@earendil-works/pi-coding-agent/image-resize": [
+        "./third_party/pi-mono/packages/coding-agent/src/utils/image-resize.ts"
+      ],
+      "@earendil-works/pi-coding-agent/messages": [
+        "./third_party/pi-mono/packages/coding-agent/src/core/messages.ts"
+      ],
+      "@earendil-works/pi-coding-agent/shell": [
+        "./third_party/pi-mono/packages/coding-agent/src/utils/shell.ts"
+      ],
+      "@earendil-works/pi-coding-agent/tools": [
+        "./third_party/pi-mono/packages/coding-agent/src/core/tools/index.ts"
+      ],
       "@earendil-works/pi-tui": [
         "./third_party/pi-mono/packages/tui/src/index.ts"
       ],

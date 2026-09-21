@@ -1,6 +1,6 @@
 import { StringDecoder } from 'node:string_decoder';
 
-import { createBashTool, type BashOperations } from '@earendil-works/pi-coding-agent';
+import { createBashTool, type BashOperations } from '@earendil-works/pi-coding-agent/tools';
 import {
   createBashEnvSpawnHook,
   type BashEnvPolicy,

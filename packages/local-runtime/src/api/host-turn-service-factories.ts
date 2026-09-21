@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { AuthStorage } from '@earendil-works/pi-coding-agent';
+import { AuthStorage } from '@earendil-works/pi-coding-agent/auth-storage';
 import type { LocalRuntimeConfig } from '../config/types.js';
 import {
   LocalModelResolver,

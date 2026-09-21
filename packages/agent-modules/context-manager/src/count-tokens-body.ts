@@ -17,7 +17,7 @@
  * absorbed by the manager's `safetyMarginTokens` / `reserveTokens` headroom.
  */
 
-import { convertToLlm } from '@earendil-works/pi-coding-agent';
+import { convertToLlm } from '@earendil-works/pi-coding-agent/messages';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model, Tool } from '@earendil-works/pi-ai';
 

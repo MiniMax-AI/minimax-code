@@ -1,6 +1,6 @@
 import type { AgentMessage as PiAgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { calculateContextTokens } from '@earendil-works/pi-coding-agent';
+import { calculateContextTokens } from '@earendil-works/pi-coding-agent/compaction';
 import {
   computeCompactionTriggerAt as computeSharedCompactionTriggerAt,
   createDefaultTokenEstimator,

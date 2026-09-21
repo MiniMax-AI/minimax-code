@@ -13,8 +13,8 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
-  getShellConfig,
-} from '@earendil-works/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent/tools';
+import { getShellConfig } from '@earendil-works/pi-coding-agent/shell';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { access } from 'node:fs/promises';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
