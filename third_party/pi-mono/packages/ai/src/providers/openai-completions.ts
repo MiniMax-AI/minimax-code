@@ -40,25 +40,6 @@ import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
-/**
- * Check if conversation messages contain tool calls or tool results.
- * This is needed because Anthropic (via proxy) requires the tools param
- * to be present when messages include tool_calls or tool role messages.
- */
-function hasToolHistory(messages: Message[]): boolean {
-	for (const msg of messages) {
-		if (msg.role === "toolResult") {
-			return true;
-		}
-		if (msg.role === "assistant") {
-			if (msg.content.some((block) => block.type === "toolCall")) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
 function isTextContentBlock(block: { type: string }): block is TextContent {
 	return block.type === "text";
 }
@@ -545,9 +526,6 @@ function buildParams(
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
-	} else if (hasToolHistory(context.messages)) {
-		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
-		params.tools = [];
 	}
 
 	if (cacheControl) {

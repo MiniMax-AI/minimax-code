@@ -1450,6 +1450,7 @@
     "packages/local-runtime-v2/src/services.ts",
     "packages/local-runtime-v2/test/helpers/agent-service.ts",
     "packages/local-runtime-v2/test/helpers/plugin-database.ts",
+    "packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts",
     "packages/local-runtime-v2/test/integration/mcp/local-mcp-public-facade.integration.test.ts",
     "packages/local-runtime-v2/test/integration/mcp/project-mcp.integration.test.ts",
     "packages/local-runtime-v2/test/integration/session-system-queue-repository.integration.test.ts",
