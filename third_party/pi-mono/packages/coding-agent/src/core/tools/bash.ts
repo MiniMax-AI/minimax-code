@@ -413,7 +413,9 @@ function wrapConstrainedWindowsPowerShellCommand(): {
 	const source = `$__mavis${nonce}Source`;
 	return {
 		environmentVariable,
-		launcher: `${source} = $env:${environmentVariable}; Remove-Item -LiteralPath 'Env:${environmentVariable}'; Invoke-Expression ${source}`,
+		// Windows PowerShell 5.1 exits 0 after Invoke-Expression regardless of the
+		// native command's exit code; propagate it explicitly or failures report success.
+		launcher: `${source} = $env:${environmentVariable}; Remove-Item -LiteralPath 'Env:${environmentVariable}'; Invoke-Expression ${source}; exit $LASTEXITCODE`,
 	};
 }
 
@@ -458,6 +460,9 @@ function wrapWindowsPowerShellStdinCommand(): string {
 		"  }",
 		"}",
 		`& ([ScriptBlock]::Create(${source}))`,
+		// Windows PowerShell 5.1 exits 0 after a scriptblock invocation regardless of
+		// the native command's exit code; propagate it explicitly or failures report success.
+		"exit $LASTEXITCODE",
 	].join("; ");
 }
 

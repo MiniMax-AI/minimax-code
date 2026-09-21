@@ -330,3 +330,12 @@ For future changes, add one entry per MiniMax patch with:
 - Reason: immediately submitted local user batches must be consumed in one provider hop while retaining each message identity.
 - Affected package: `Agent.steerBatch` added to `@earendil-works/pi-agent-core`; individual `steer` / `followUp` and default modes remain compatible.
 - Validation: `pnpm --filter @earendil-works/pi-agent-core build`; `node scripts/test/focused-vitest.mjs --package @earendil-works/pi-agent-core --skip-workspace-build third_party/pi-mono/packages/agent/test/agent.test.ts` (19 tests); agent-core focused `pi-turn-runner.test.ts` covers local batches and machine-only individual consumption.
+
+## 2026-09-21: Propagate native exit codes through Windows PowerShell 5.1 wrappers
+
+- Reason: `wrapWindowsPowerShellStdinCommand` ends with `& ([ScriptBlock]::Create($source))` and `wrapConstrainedWindowsPowerShellCommand` ends with `Invoke-Expression $source`. On Windows PowerShell 5.1, a `-Command` session whose final statement is a scriptblock invocation exits 0 regardless of `$LASTEXITCODE` set by native commands inside it, so every failing native command was reported as success (foreground tool result and background task status) on hosts without pwsh 7. Reproduced before the fix: a `node -e "…;process.exit(7)"` command produced its stderr yet the shell process exited 0.
+- Affected package: `@earendil-works/pi-coding-agent` local bash operations, PowerShell 5.1 transport only (`src/core/tools/bash.ts`). pwsh 7 (native `-Command` path) and POSIX shells are untouched. PowerShell-internal terminating errors still exit non-zero via `throw` before the appended statement.
+- Type: generic, upstreamable Windows fix using the same `exit $LASTEXITCODE` idiom already used by the first-party `packages/tui/src/update/versioned-prefix.ts` launchers.
+- Change: append `exit $LASTEXITCODE` after the scriptblock invocation (stdin transport) and after `Invoke-Expression` (ConstrainedLanguage transport).
+- Upstream PR: not opened.
+- Validation (Windows 11 x64 build 26200, PowerShell 5.1 default, Node 24.18.0): `packages/local-runtime/test/unit/child-bash-lifecycle.test.ts` 'failure' mode fails before the fix (`expected 'succeeded' to be 'failed'`) and passes after; 'timeout' and 'cancel' modes unaffected. Focused re-run of the affected suites and full `pnpm test:capabilities` show no new failures. Not run: pwsh 7 host validation, ConstrainedLanguage host validation (launcher covered by structure assertions only), macOS/Linux regression runs.
