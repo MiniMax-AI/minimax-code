@@ -11,6 +11,7 @@ import type {
   ModelDiscoveryResult,
   ModelDiscoveryTarget,
 } from '../contracts.js';
+import { planCustomProviderResolution } from '../resolution/model-resolver-byok.js';
 import { LocalModelCache } from '../catalog/model-cache.js';
 import { MINIMAX_API_DEFAULT_BASE_URL, minimaxApiModels } from '../catalog/minimax-api.js';
 import { listLocalRuntimeModels } from '../catalog/catalog.js';
@@ -1020,6 +1021,63 @@ describe('custom provider candidate persistence implicit thinking default', () =
 });
 
 describe('custom provider candidate persistence', () => {
+  it.each(['https://api.z.ai', 'https://open.bigmodel.cn'])(
+    'persists and resolves only the explicitly retried Coding Plan endpoint on %s',
+    async (origin) => {
+      const h = makeHarness();
+      const generalUrl = `${origin}/api/paas/v4`;
+      const codingUrl = `${origin}/api/coding/paas/v4`;
+      const candidate = {
+        name: 'GLM plan',
+        apiKey: CUSTOM_KEY,
+        baseUrl: generalUrl,
+        apiFormat: 'openai-completions',
+        models: [{ modelId: 'glm-5.3', toolCall: true }],
+      };
+      h.setTestResult({
+        ok: false,
+        errorCode: 'http_429',
+        errorMessage: 'Insufficient balance',
+      });
+      const failed = await h.service.saveUserModelProviderCandidate({
+        candidate,
+        modelId: 'glm-5.3',
+        saveAndUse: true,
+      });
+      expect(failed.ok).toBe(false);
+      expect(h.config.custom_provider).toBeUndefined();
+      expect(h.config.defaultModel).toBe('minimax/MiniMax-M3');
+      expect(h.testCalls.map(({ target }) => target.baseUrl)).toEqual([generalUrl]);
+
+      h.setTestResult({ ok: true });
+      const saved = await h.service.saveUserModelProviderCandidate({
+        candidate: { ...candidate, baseUrl: codingUrl },
+        modelId: 'glm-5.3',
+        saveAndUse: true,
+      });
+      expect(saved.ok).toBe(true);
+      const provider = saved.provider!.providerId;
+      const providerKey = provider.replace('custom_provider:', '');
+      expect(h.config.custom_provider?.[providerKey]?.options?.baseURL).toBe(codingUrl);
+      expect(h.config.defaultModel).toBe(`${provider}/glm-5.3`);
+      expect(h.testCalls.map(({ target }) => target.baseUrl)).toEqual([generalUrl, codingUrl]);
+      // Custom provider resolution must use the persisted URL, not a similarly
+      // named provider in the bundled inference registry.
+      expect(
+        planCustomProviderResolution({
+          byok: h.config,
+          provider,
+          providerKey,
+          modelId: 'glm-5.3',
+        }),
+      ).toMatchObject({
+        baseUrl: codingUrl,
+        api: 'openai-completions',
+        apiKey: CUSTOM_KEY,
+      });
+    },
+  );
+
   it('saves every preset model without testing or switching the active model', async () => {
     const h = makeHarness();
 

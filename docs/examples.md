@@ -24,7 +24,11 @@ node /absolute/path/to/minimax-code/dist/cli.js --continue
 
 ## 2. Choose your own model
 
-Use `/provider` in the interactive TUI to select a configured model. Before adding a custom provider, set a key in your current shell rather than putting it in command arguments or source:
+Use `/model` in the interactive TUI to select a model or choose **+ Add 3rd-party provider…**; `/provider` manages saved connections. The known-provider picker labels Z.AI and Zhipu plans separately as **Coding Plan** and **API**. The regional default order puts Coding Plan first; remotely configured pinning can override that order. Choose the plan matching your key. On the model screen, review the Base URL or press **Ctrl+E** to edit it before testing. If the test fails, changes are not saved; the model and key draft remain available for editing and retry. Changing the URL requires another explicit test/save action and never triggers an automatic endpoint fallback.
+
+Preset IDs come from models.dev and do not select entries in the bundled inference registry. Onboarding saves the chosen URL under `custom_provider`; subsequent requests use that saved URL.
+
+Before adding a custom provider, set a key in your current shell rather than putting it in command arguments or source:
 
 ```bash
 # POSIX shell: read the key interactively without echoing it.

@@ -479,3 +479,114 @@ describe("existing connection onboarding", () => {
     }
   });
 });
+
+describe("preset endpoint editing", () => {
+  const template: McodeProviderTemplate = {
+    providerId: "zai",
+    name: "Z.AI API",
+    baseUrl: "https://api.z.ai/api/paas/v4",
+    apiFormat: "openai-completions",
+    models: [{ modelId: "glm-5.3", toolCall: true }],
+  };
+
+  it("keeps the key and model after failure and tests only an explicitly confirmed endpoint", async () => {
+    const onSave = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: false,
+        status: { lastErrorMessage: "429 insufficient balance synthetic-key" },
+      })
+      .mockResolvedValueOnce({ success: true });
+    const onComplete = vi.fn();
+    const onboarding = new TuiProviderOnboarding({
+      templates: [template],
+      onSave,
+      onComplete,
+      onCancel: vi.fn(),
+      requestRender: vi.fn(),
+    });
+    onboarding.handleInput("\r");
+    expect(stripAnsi(onboarding.render(140).join("\n"))).toContain(
+      template.baseUrl,
+    );
+    onboarding.handleInput("\r");
+    onboarding.handleInput("\r");
+    onboarding.handleInput("synthetic-key");
+    onboarding.handleInput("\r");
+    onboarding.handleInput("\r");
+    await vi.waitFor(() =>
+      expect(stripAnsi(onboarding.render(180).join("\n"))).toContain(
+        "Changes were not saved",
+      ),
+    );
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(stripAnsi(onboarding.render(180).join("\n"))).not.toContain(
+      "synthetic-key",
+    );
+
+    onboarding.handleInput("\u0005");
+    onboarding.handleInput("\u0001");
+    onboarding.handleInput("\u000b");
+    onboarding.handleInput("ftp://invalid");
+    onboarding.handleInput("\r");
+    expect(stripAnsi(onboarding.render(140).join("\n"))).toContain(
+      "Base URL must use http or https",
+    );
+    onboarding.handleInput("\u0001");
+    onboarding.handleInput("\u000b");
+    const codingUrl = "https://api.z.ai/api/coding/paas/v4";
+    onboarding.handleInput(codingUrl);
+    onboarding.handleInput("\r");
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const view = stripAnsi(onboarding.render(140).join("\n"));
+    expect(view).toContain(codingUrl);
+    expect(view).toContain("Model ID: glm-5.3");
+    expect(view).toContain("API Key: Ready for test");
+    onboarding.handleInput("\r");
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+    expect(onSave.mock.calls.map(([input]) => input.baseUrl)).toEqual([
+      template.baseUrl,
+      codingUrl,
+    ]);
+    expect(onSave.mock.calls[1]?.[0]).toMatchObject({
+      apiKey: "synthetic-key",
+      modelId: "glm-5.3",
+      models: template.models,
+      saveAndUse: true,
+    });
+  });
+
+  it("cancels endpoint editing and clears the override when another preset is selected", async () => {
+    const onSave = vi.fn(async () => ({ success: true }));
+    const onboarding = new TuiProviderOnboarding({
+      templates: [template, knownTemplate],
+      onSave,
+      onComplete: vi.fn(),
+      onCancel: vi.fn(),
+      requestRender: vi.fn(),
+    });
+    onboarding.handleInput("\r");
+    onboarding.handleInput("\u0005");
+    onboarding.handleInput("discarded");
+    onboarding.handleInput("\u001b");
+    expect(stripAnsi(onboarding.render(140).join("\n"))).not.toContain(
+      "discarded",
+    );
+    onboarding.handleInput("\u0005");
+    onboarding.handleInput("\u0001");
+    onboarding.handleInput("\u000b");
+    onboarding.handleInput("https://explicit.example/v1");
+    onboarding.handleInput("\r");
+    onboarding.handleInput("\u001b");
+    onboarding.handleInput("\u001b[B");
+    onboarding.handleInput("\r");
+    expect(stripAnsi(onboarding.render(140).join("\n"))).toContain(
+      knownTemplate.baseUrl,
+    );
+    expect(stripAnsi(onboarding.render(140).join("\n"))).not.toContain(
+      "explicit.example",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+});
