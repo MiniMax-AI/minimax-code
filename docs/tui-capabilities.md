@@ -85,13 +85,12 @@ and initial prompt are not applied.
 
 In regular mode, independent feature panels occupy the complete visible terminal
 area, including short Rewind previews and scope pickers. Closing a panel restores
-the current conversation. When running content shrinks across the native scrolling
-boundary, the renderer reconstructs the current session to fill the viewport and keep
-its history unique. This reconstruction clears earlier shell scrollback. A history
-refresh that changes text already in native scrollback uses a viewport-only redraw, so
-mouse navigation stays at the same place instead of jumping to the top; the native
-scrollback remains a stable snapshot until a later structural rebuild. Ordinary updates
-keep native scrolling and selection behavior.
+the current conversation. Turn completion receipts are append-only so a finished
+run never rewrites or removes an earlier receipt already present in native scrollback.
+When running content shrinks across the native scrolling boundary, the renderer
+reconstructs the current session to fill the viewport and keep its history unique.
+This reconstruction clears earlier shell scrollback; ordinary updates keep native
+scrolling and selection behavior.
 
 Rewind and Fork history-loading hints disappear as soon as their lists are ready.
 Returning from a cancelled operation must not leave a stale loading message in the

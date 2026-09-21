@@ -12,6 +12,8 @@ import {
   visibleWidth,
 } from '../../src/tui/engine/public.js';
 import { VirtualTerminal } from '../pi-084-upstream/virtual-terminal.js';
+import { TuiTurnProjection } from '../../src/tui/controller/projection/turn-projection.js';
+import { TranscriptStore } from '../../src/tui/transcript/store.js';
 
 const passthrough = (value: string): string => value;
 const selectListTheme = {
@@ -48,6 +50,63 @@ class MutableLines implements Component {
 }
 
 describe('MCode Pi Engine local deltas', () => {
+  it('preserves native scrollback when a later turn appends a completion receipt', async () => {
+    const terminal = new RecordingVirtualTerminal(40, 8);
+    const tui = new TuiMainScreen(terminal);
+    const transcript = new TranscriptStore();
+    let now = 1;
+    const projection = new TuiTurnProjection({
+      transcript,
+      now: () => now++,
+      onChange: () => undefined,
+    });
+    transcript.upsert({
+      id: 'assistant:turn-a',
+      kind: 'assistant',
+      status: 'succeeded',
+      content: 'Answer A',
+      turnId: 'turn-a',
+      createdAtMs: now++,
+    });
+    projection.markTurn('turn-a', 'succeeded', 0);
+    for (let index = 0; index < 30; index++) {
+      transcript.upsert({
+        id: `assistant:turn-b-${index}`,
+        kind: 'assistant',
+        status: 'succeeded',
+        content: `Answer B ${index}`,
+        turnId: 'turn-b',
+        createdAtMs: now++,
+      });
+    }
+    const component = {
+      render: () => transcript.snapshot().map((cell) => `${cell.id}:${cell.content}`),
+      invalidate: () => undefined,
+    };
+    tui.addChild(component);
+    tui.renderNow();
+    await terminal.flush();
+
+    const nativeTerminal = (terminal as unknown as {
+      xterm: {
+        scrollLines(lines: number): void;
+        buffer: { active: { viewportY: number } };
+      };
+    }).xterm;
+    nativeTerminal.scrollLines(-3);
+    await terminal.flush();
+    const viewportBefore = terminal.getViewport();
+    const viewportYBefore = nativeTerminal.buffer.active.viewportY;
+
+    projection.markTurn('turn-b', 'succeeded', 3_000);
+    tui.renderNow();
+    await terminal.flush();
+
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(nativeTerminal.buffer.active.viewportY).toBe(viewportYBefore);
+    expect(terminal.getViewport()).toEqual(viewportBefore);
+  });
+
   it('fits Text padding within narrow terminal widths', () => {
     const text = new Text('content', 2, 0);
 
@@ -184,7 +243,7 @@ describe('MCode Pi Engine local deltas', () => {
     expect(terminal.getScrollBuffer()).toEqual([...answer, ...more, 'composer']);
   });
 
-  it.each([0, 30])('does not reset native scrollback when history text changes by %i rows', async (growth) => {
+  it.each([0, 30])('rebuilds changed scrollback text even when the document grows by %i rows', async (growth) => {
     const terminal = new RecordingVirtualTerminal(67, 24);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -194,7 +253,6 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
     terminal.takeWrites();
-    const viewportBeforeUpdate = terminal.getViewport();
 
     component.lines = [
       'Recovered context',
@@ -206,37 +264,20 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
 
-    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-    expect(terminal.getViewport()).toEqual(viewportBeforeUpdate);
-  });
+    const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
+    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).toEqual(expected);
+    expect(terminal.getViewport()).toEqual(expected.slice(-terminal.rows));
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 22 });
 
-  it('preserves the native viewport when a historical row changes after mouse scrolling', async () => {
-    const terminal = new RecordingVirtualTerminal(67, 24);
-    const tui = new TuiMainScreen(terminal);
-    const component = new MutableLines();
-    component.lines = [
-      ...Array.from({ length: 40 }, (_, index) => `Answer ${index}`),
-      `composer${CURSOR_MARKER}`,
-      'status',
-    ];
-    tui.addChild(component);
+    // Subsequent streaming must overwrite the current footer, not append a second one.
+    component.lines.splice(-2, 0, 'Next response');
     tui.renderNow();
     await terminal.flush();
-
-    const nativeTerminal = (terminal as unknown as {
-      xterm: { scrollLines: (lines: number) => void };
-    }).xterm;
-    nativeTerminal.scrollLines(-3);
-    await terminal.flush();
-    const viewportBeforeUpdate = terminal.getViewport();
-    expect(viewportBeforeUpdate[0]).toBe('Answer 15');
-
-    component.lines[0] = 'Changed historical answer';
-    tui.renderNow();
-    await terminal.flush();
-
     expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-    expect(terminal.getViewport()).toEqual(viewportBeforeUpdate);
+    expect(terminal.getScrollBuffer()).toEqual([
+      ...expected.slice(0, -2), 'Next response', 'composer', 'status',
+    ]);
   });
 
   it('rebuilds the document when shrinking leaves no rows in the previous viewport', async () => {

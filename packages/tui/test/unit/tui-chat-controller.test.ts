@@ -12,6 +12,7 @@ import { TuiRunCoordinator, type TuiRunRuntime } from '../../src/application/run
 import { resolveTuiVisiblePresentation } from '../../src/tui/controller/projection/visible-presentation.js';
 import { TuiActivityLine } from '../../src/tui/shell/activity-line.js';
 import { isQuestionnaireTool } from '../../src/tui/controller/projection/turn-tool-projection.js';
+import { TuiTurnProjection } from '../../src/tui/controller/projection/turn-projection.js';
 
 class TuiChatController extends ProductionTuiChatController {
   constructor(options: CreateTuiChatControllerOptions) {
@@ -20,6 +21,30 @@ class TuiChatController extends ProductionTuiChatController {
 }
 
 describe('TuiChatController', () => {
+  it('keeps terminal duration receipts append-only', () => {
+    const transcript = new TranscriptStore();
+    let now = 1;
+    const projection = new TuiTurnProjection({
+      transcript,
+      now: () => now++,
+      onChange: vi.fn(),
+    });
+
+    projection.markTurn('turn-a', 'succeeded', 0);
+    projection.markTurn('turn-b', 'succeeded', 3_000);
+    projection.recordTerminalDuration('turn-a', 'succeeded', 9_000);
+
+    expect(
+      transcript
+        .snapshot()
+        .filter((cell) => cell.kind === 'turn-duration')
+        .map((cell) => [cell.id, cell.durationMs]),
+    ).toEqual([
+      ['turn-duration:turn-a', 0],
+      ['turn-duration:turn-b', 3_000],
+    ]);
+  });
+
   it('hides plain and namespaced AskUser protocol tools from the transcript', () => {
     expect(isQuestionnaireTool('ask_user')).toBe(true);
     expect(isQuestionnaireTool('functions.AskUser')).toBe(true);

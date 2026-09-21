@@ -218,15 +218,10 @@ export class TuiTurnProjection {
     if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) return false;
     const timestamp = this.now();
     const id = `turn-duration:${turnId}`;
-    // The duration note is a footer for the run that just ended, not per-turn
-    // history. Its cell is `ephemeral`, and `replaceDurableProjection` retains
-    // ephemeral cells across reprojection, so without pruning here every
-    // finished turn would leave its own note behind and they would stack up
-    // ("Completed in 37s / 4m 02s / 8m 44s"). Drop older notes so only the
-    // most recent one survives.
-    for (const cell of this.transcript.snapshot()) {
-      if (cell.kind === 'turn-duration' && cell.id !== id) this.transcript.remove(cell.id);
-    }
+    // A terminal duration is an immutable receipt. Once a turn has committed its
+    // receipt, later projection refreshes must not rewrite or remove it: regular
+    // mode keeps that row in the terminal's native scrollback.
+    if (this.transcript.get(id)) return false;
     this.transcript.upsert({
       id,
       kind: 'turn-duration',

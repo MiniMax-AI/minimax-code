@@ -163,11 +163,11 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "10f32153424186d992da8413f299a1d86396c4763eaef89f9fe414ab49de606b",
-      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037", "L038"],
+      "currentSha256": "f22abd4d0e88d818c9c923721047948c2a6d56df2d57f5bb633cccd5efd3c56d",
+      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037"],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
-      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域；历史前缀变化不清除原生 scrollback，避免鼠标浏览位置跳回顶部。",
-      "behaviorImpact": "Regular updates preserve native scrollback. Document shrink still rebuilds the complete current session when necessary, while changed text in native scrollback uses a viewport-only redraw so mouse navigation remains stable; the native scrollback is a stable snapshot until a later structural rebuild. Style-only changes preserve native scrollback. Rebuilding clears pre-launch shell scrollback. Resize retains the existing delayed history replay."
+      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
+      "behaviorImpact": "Regular updates preserve native scrollback. When document shrink reveals previously scrolled rows or visible text in scrollback changes, replay the complete current session to fill the viewport and avoid stale or duplicate history. Style-only changes preserve native scrollback. Rebuilding clears pre-launch shell scrollback. Resize retains the existing delayed history replay."
     },
     {
       "path": "tui.ts",
