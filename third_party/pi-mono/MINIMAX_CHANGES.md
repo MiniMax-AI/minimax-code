@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-21 — report why the edit unified patch was omitted
+
+- Reason: the unified patch is a second, independently timed Myers run over the same input as the display diff. When only that run ran out of time, `details` held a diff, no patch, and no `diffOmitted` — consumers could not tell an omitted patch apart from a tool that never produces one.
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), edit tool details assembly.
+- Change type: generic, upstreamable correctness fix. Add `details.patchOmitted`, set to `diffOmitted` when the display diff was abandoned and to `timeout` when only the patch was, so `details.patch` is absent exactly when `patchOmitted` is set. jsdiff routes `createTwoFilesPatch` through the same bounded `diffLines`, so `maxEditLength` is deterministic across both runs and can never trip for the patch alone; only its separately measured wall clock can. `diffOmitted` keeps its meaning and is unchanged.
+- Upstream PR: not opened.
+- Validation: `packages/agent-tools/src/desktop/edit-diff-bounds.test.ts` pins the invariant on both reachable paths (an ordinary edit and a bounded-out whole-file rewrite). The patch-only timeout is not unit-testable: it needs the two runs to land on opposite sides of a 5 s wall clock, which no deterministic input can force.
+
 ### 2026-09-21 — bound the post-edit diff of the edit tool
 
 - Reason: `edit` computed its display diff and its unified patch with unbounded Myers, which costs O((N+M)·D) in the length D of the edit script. A whole-file rewrite therefore scaled quadratically in the number of changed lines: rewriting every line of a 20 000-line file blocked the tool for over two minutes and produced a multi-megabyte patch that no renderer displays. The sibling `write` path already caps the same work (`packages/agent-tools/src/shared/write-capture.ts`); `edit` had no cap.

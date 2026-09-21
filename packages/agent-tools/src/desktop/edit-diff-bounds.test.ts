@@ -53,6 +53,7 @@ describe('edit diff bounds', () => {
 
     expect(await readFile(file, 'utf8')).toBe('const value = 42;\nconst other = 2;\n');
     expect(result.details?.diffOmitted).toBeUndefined();
+    expect(result.details?.patchOmitted).toBeUndefined();
     expect(result.details?.diff).toContain('const value = 42;');
     expect(result.details?.patch).toContain('@@');
     expect(result.details?.patch).toContain('+const value = 42;');
@@ -95,6 +96,7 @@ describe('edit diff bounds', () => {
     expect(result.isError).toBeFalsy();
 
     expect(result.details?.diffOmitted).toBe('too_many_changes');
+    expect(result.details?.patchOmitted).toBe('too_many_changes');
     expect(result.details?.patch).toBeUndefined();
     expect(result.details?.diff).toContain('diff omitted');
   });

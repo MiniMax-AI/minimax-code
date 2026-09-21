@@ -62,12 +62,14 @@ type LegacyEditToolInput = EditToolInput & {
 export interface EditToolDetails {
 	/** Display-oriented diff of the changes made (a one-line notice when `diffOmitted` is set) */
 	diff: string;
-	/** Standard unified patch of the changes made; absent when the diff hit its bounds */
+	/** Standard unified patch of the changes made; absent exactly when `patchOmitted` is set */
 	patch?: string;
 	/** Line number of the first change in the new file (for editor navigation) */
 	firstChangedLine?: number;
 	/** Set when the diff exceeded DIFF_MAX_EDIT_LENGTH / DIFF_TIMEOUT_MS. The file was still written. */
 	diffOmitted?: DiffOmittedReason;
+	/** Why `patch` is absent. Mirrors `diffOmitted`, and also covers the patch timing out on its own. */
+	patchOmitted?: DiffOmittedReason;
 }
 
 /**
@@ -355,6 +357,11 @@ export function createEditToolDefinition(
 				// skip it rather than paying for a second Myers run that cannot finish.
 				const diffResult = generateDiffString(baseContent, newContent);
 				const patch = diffResult.omitted ? undefined : generateUnifiedPatch(path, baseContent, newContent);
+				// jsdiff routes createTwoFilesPatch through the same bounded diffLines, so
+				// maxEditLength is deterministic across both runs and can never trip for
+				// the patch alone; only its separately measured wall clock can.
+				const patchOmitted: DiffOmittedReason | undefined =
+					diffResult.omitted ?? (patch === undefined ? "timeout" : undefined);
 				return {
 					content: [
 						{
@@ -367,6 +374,7 @@ export function createEditToolDefinition(
 						patch,
 						firstChangedLine: diffResult.firstChangedLine,
 						diffOmitted: diffResult.omitted,
+						patchOmitted,
 					},
 				};
 			});
