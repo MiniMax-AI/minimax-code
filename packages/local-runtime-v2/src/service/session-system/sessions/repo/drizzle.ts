@@ -14,6 +14,7 @@ import {
   ne,
   notInArray,
   or,
+  placeholder,
   sql,
   type SQL,
 } from 'drizzle-orm';
@@ -118,6 +119,16 @@ const DEFAULT_TREE_FILTER: SessionChildrenOptions = {
   excludeInternalTreeSessions: true,
 };
 
+function prepareSessionRead(db: AppDb) {
+  return db
+    .select()
+    .from(sessions)
+    .where(and(eq(sessions.sessionId, placeholder('sessionId')), eq(sessions.columnarVersion, 3)))
+    .prepare();
+}
+
+const sessionReads = new WeakMap<AppDb, ReturnType<typeof prepareSessionRead>>();
+
 export function createSessionRepository(options: SessionRepositoryOptions): SessionRepository {
   return new DrizzleSessionRepository(options);
 }
@@ -214,11 +225,13 @@ class DrizzleSessionRepository implements SessionRepository {
   }
 
   async get(sessionId: string): Promise<SessionRecord | undefined> {
-    const row = this.options.db
-      .select()
-      .from(sessions)
-      .where(and(eq(sessions.sessionId, sessionId), eq(sessions.columnarVersion, 3)))
-      .get();
+    const db = this.options.db;
+    let query = sessionReads.get(db);
+    if (!query) {
+      query = prepareSessionRead(db);
+      sessionReads.set(db, query);
+    }
+    const row = query.get({ sessionId });
     return row ? decodeSessionRow(row) : undefined;
   }
 

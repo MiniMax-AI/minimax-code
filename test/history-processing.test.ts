@@ -15,11 +15,18 @@ import { DatabaseClient } from '../packages/local-runtime-v2/src/infra/db/client
 import { initializeDatabase } from '../packages/local-runtime-v2/src/infra/db/initialize.js';
 import { queryCollapseViewStates } from '../packages/local-runtime-v2/src/infra/db/schema/query-collapse.js';
 import { turnIngress } from '../packages/local-runtime-v2/src/infra/db/schema/turn.js';
+import { sessions } from '../packages/local-runtime-v2/src/infra/db/schema/sessions.js';
+import { messageRows } from '../packages/local-runtime-v2/src/infra/db/schema/messages.js';
+import { createSessionRepository } from '../packages/local-runtime-v2/src/service/session-system/sessions/repo/drizzle.js';
+import { createMessageRepository } from '../packages/local-runtime-v2/src/service/session-system/messages/repo/drizzle.js';
 import { createQueryCollapseState } from '../packages/local-runtime-v2/src/service/session-system/query-collapse-state.js';
 import { createQueueTurnAdmissionPriorityFence } from '../packages/local-runtime-v2/src/service/session-system/index.js';
 import { createTurnRepository } from '../packages/local-runtime-v2/src/service/turn-system/persistence/turn.repository.js';
 import { IncrementalSha256 } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/incremental-sha256.js';
-import { captureSemanticSnapshot } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/semantic-identity.js';
+import {
+  captureSemanticSnapshot,
+  estimateSemanticValueSize,
+} from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/semantic-identity.js';
 import { DurableCanonicalHistoryStore } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/durable-canonical-history-store.js';
 import type { CanonicalHistoryChange } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/history/contracts.js';
 import { BpeTokenEstimator } from '../packages/agent-modules/context-manager/src/token-estimator.js';
@@ -48,6 +55,105 @@ describe('prepared runtime reads', () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   }
+
+  it('keeps session lookups fresh and enforces the columnar version after reuse', async () => {
+    await withDatabase(async (client, writer) => {
+      const repository = createSessionRepository({ db: client.db });
+      expect(await repository.get('s1')).toBeUndefined();
+      for (const sessionId of ['s1', 's2']) {
+        await repository.create({
+          sessionId,
+          agentName: 'test',
+          workspaceDir: '/tmp',
+          runtime: 'pi-agent',
+          title: sessionId,
+        });
+      }
+      expect((await repository.get('s1'))?.title).toBe('s1');
+      expect((await repository.get('s2'))?.title).toBe('s2');
+      writer.db
+        .update(sessions)
+        .set({ title: 'updated' })
+        .where(eq(sessions.sessionId, 's1'))
+        .run();
+      expect((await repository.get('s1'))?.title).toBe('updated');
+      writer.db
+        .update(sessions)
+        .set({ columnarVersion: 2 })
+        .where(eq(sessions.sessionId, 's1'))
+        .run();
+      expect(await repository.get('s1')).toBeUndefined();
+      writer.db
+        .update(sessions)
+        .set({ columnarVersion: 3 })
+        .where(eq(sessions.sessionId, 's1'))
+        .run();
+      client.close();
+      const reopened = createSessionRepository({ db: client.db });
+      expect((await reopened.get('s1'))?.title).toBe('updated');
+      writer.db.delete(sessions).where(eq(sessions.sessionId, 's1')).run();
+      expect(await reopened.get('s1')).toBeUndefined();
+      expect(await reopened.get("s2' OR 1=1 --")).toBeUndefined();
+    });
+  });
+
+  it('keeps message and turn reads fresh, isolated and ordered after reuse', async () => {
+    await withDatabase(async (client, writer) => {
+      const sessionRepository = createSessionRepository({ db: client.db });
+      for (const sessionId of ['s1', 's2']) {
+        await sessionRepository.create({
+          sessionId,
+          agentName: 'test',
+          workspaceDir: '/tmp',
+          runtime: 'pi-agent',
+        });
+      }
+      const repository = createMessageRepository({ db: client.db });
+      const writerRepository = createMessageRepository({ db: writer.db });
+      expect(await repository.get('s1', 'm1')).toBeUndefined();
+      expect(await repository.listTurn('s1', 't1')).toEqual([]);
+      for (const [sessionId, turnId, msgId] of [
+        ['s1', 't1', 'm2'],
+        ['s1', 't1', 'm1'],
+        ['s1', 't2', 'm3'],
+        ['s2', 't1', 'm1'],
+      ]) {
+        await writerRepository.upsert({
+          sessionId: sessionId!,
+          turnId,
+          message: {
+            msg_id: msgId,
+            role: 'assistant',
+            text: `${sessionId}/${msgId}`,
+            timestamp: 1,
+          },
+        });
+      }
+      expect((await repository.listTurn('s1', 't1')).map((m) => m.msg_id)).toEqual(['m2', 'm1']);
+      expect((await repository.listTurn('s1', 't2')).map((m) => m.msg_id)).toEqual(['m3']);
+      expect((await repository.get('s2', 'm1'))?.text).toBe('s2/m1');
+      await writerRepository.upsert({
+        sessionId: 's1',
+        turnId: 't2',
+        message: {
+          msg_id: 'm1',
+          role: 'assistant',
+          text: 'updated',
+          timestamp: 2,
+        },
+      });
+      expect((await repository.get('s1', 'm1'))?.text).toBe('updated');
+      expect((await repository.listTurn('s1', 't1')).map((m) => m.msg_id)).toEqual(['m2']);
+      client.close();
+      const reopened = createMessageRepository({ db: client.db });
+      expect((await reopened.listTurn('s1', 't2')).map((m) => m.msg_id)).toEqual(['m1', 'm3']);
+      writer.db.delete(messageRows).where(eq(messageRows.sessionId, 's1')).run();
+      expect(await reopened.get('s1', 'm1')).toBeUndefined();
+      expect(await reopened.listTurn('s1', 't2')).toEqual([]);
+      expect(await reopened.get("s2' OR 1=1 --", 'm1')).toBeUndefined();
+      expect(await reopened.listTurn('s2', "t1' OR 1=1 --")).toEqual([]);
+    });
+  });
 
   it('keeps processing reads fresh across sessions, completion and another connection', async () => {
     await withDatabase(async (client, writer) => {
@@ -212,6 +318,43 @@ describe('streamed canonical history revisions', () => {
 });
 
 describe('semantic snapshots', () => {
+  it('preserves baseline digest bytes and replay byte counts for Unicode and special values', () => {
+    const sparse = new Array(12);
+    sparse[2] = undefined;
+    sparse[10] = '\ud800🙂';
+    Object.defineProperty(sparse, 'extra', {
+      value: '中文\udc00',
+      enumerable: true,
+    });
+    // Golden values from the pre-optimization encoder, including its framing.
+    const cases = [
+      {
+        value: {
+          z: '中文🙂\ud800',
+          a: [null, undefined, true, false, NaN, Infinity, -Infinity, -0, 0, 1.25],
+          ['\ud800']: 'tail\udc00',
+          ['__proto__']: { '10': true, '2': null },
+        },
+        fingerprint: 'f4961c05ea68951c93239df0af388afe47951d7e293f9982597bb9313723a1c8',
+        bytes: 436,
+      },
+      {
+        value: sparse,
+        fingerprint: 'b29cce838437e6e8aee783feba4a57bc3c58edd363e5b8abd51525bd07bc1df8',
+        bytes: 116,
+      },
+      {
+        value: 'a'.repeat(8191) + '🙂中\ud800' + 'b'.repeat(16385) + '\udc00',
+        fingerprint: 'b9a02642e610f3591d56337e788f7214c7d9ccbd51edf447bfd5539438b3c11f',
+        bytes: 24603,
+      },
+    ];
+    for (const { value, fingerprint, bytes } of cases) {
+      const snapshot = captureSemanticSnapshot(value);
+      expect(snapshot.fingerprint).toBe(fingerprint);
+      expect(estimateSemanticValueSize(snapshot.value)).toBe(bytes);
+    }
+  });
   it('detaches and freezes eagerly but hashes only when identity is requested', () => {
     const hash = vi.spyOn(IncrementalSha256.prototype, 'update');
     try {

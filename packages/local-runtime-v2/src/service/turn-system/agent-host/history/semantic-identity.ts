@@ -118,26 +118,43 @@ export function estimateSemanticValueSize(value: unknown): number {
   return encoder.byteSize;
 }
 
+const SEMANTIC_TAGS = [
+  'null',
+  'undefined',
+  'string',
+  'boolean',
+  'number',
+  'begin',
+  'length',
+  'end',
+  'key',
+] as const;
+type SemanticTag = (typeof SEMANTIC_TAGS)[number];
+const FRAME_PREFIXES = Object.fromEntries(
+  SEMANTIC_TAGS.map((tag) => [tag, `${tag.length}:${tag}`]),
+) as Record<SemanticTag, string>;
+
 class SemanticIdentityEncoder {
   byteSize = 0;
 
   constructor(private readonly hash?: IncrementalSha256) {}
 
-  frame(tag: string, payload: string): void {
-    this.write(`${Buffer.byteLength(tag)}:`);
-    this.write(tag);
-    this.write(`${Buffer.byteLength(payload)}:`);
-    this.write(payload);
+  frame(tag: SemanticTag, payload: string): void {
+    // Only string values and object/array keys can contain non-ASCII text.
+    const payloadBytes =
+      tag === 'string' || tag === 'key' ? Buffer.byteLength(payload) : payload.length;
+    const prefix = FRAME_PREFIXES[tag];
+    const payloadLength = `${payloadBytes}:`;
+    this.byteSize += prefix.length + payloadLength.length + payloadBytes;
+    // Tags and length fields are ASCII. Keep the payload in its own update so
+    // UTF-8 surrogate handling remains identical at each frame boundary.
+    this.hash?.update(`${prefix}${payloadLength}`);
+    this.hash?.update(payload);
   }
 
   digest(): string {
     if (!this.hash) throw new Error('Semantic identity digest was not requested.');
     return this.hash.digestHex();
-  }
-
-  private write(value: string): void {
-    this.byteSize += Buffer.byteLength(value);
-    this.hash?.update(value);
   }
 }
 
