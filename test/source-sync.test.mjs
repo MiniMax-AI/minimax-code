@@ -191,12 +191,15 @@ test('performance confirmation pairs fail confirmed regressions and absorb singl
   assert.equal(five([10, 10, 10, 10, 10], [13, 13, 18, 13, 20]).status, 'REGRESSION');
   // One slow candidate sample no longer blocks a faster candidate.
   const outlier = five([10, 10, 10, 10, 10], [9.5, 9.6, 9.7, 9.6, 13.5]);
-  assert.deepEqual([outlier.status, outlier.pairs, outlier.worsePairs, outlier.trimmedSamples], ['PASS', 5, 1, 1]);
+  assert.deepEqual([outlier.status, outlier.pairs, outlier.overBudgetPairs, outlier.trimmedSamples], ['PASS', 5, 1, 1]);
   assert.ok(outlier.headSpread <= 0.3);
   // Persistent noise stays inconclusive: neither a block nor a pass.
   assert.equal(five([10, 10, 10, 10, 10], [9, 9.5, 10, 14, 15]).status, 'INCONCLUSIVE');
   // An over-budget median that pairs do not reproduce is inconclusive, not a regression.
   assert.equal(five([10, 14, 10, 14, 10], [13, 13, 13, 13, 13]).status, 'INCONCLUSIVE');
+  // Separate medians must not turn one over-budget paired delta into a regression.
+  const shifted = five([10, 10, 10, 20, 20], [10.1, 10.1, 20.1, 20.1, 20.1]);
+  assert.deepEqual([shifted.status, shifted.overBudgetPairs], ['INCONCLUSIVE', 1]);
   assert.equal(spread([10, 10, 14]), 0.4);
   assert.equal(spread([10, 10, 14], 1), 0);
   assert.throws(() => spread([10, 10], 1));
@@ -210,11 +213,14 @@ test('performance exit codes fail regressions and errors but not inconclusive no
   assert.throws(() => exitCodeForStatus('NEEDS_CONFIRMATION'));
 });
 
-test('performance workflow warns on inconclusive runs without failing the required check', () => {
+test('performance workflow warns on basic inconclusive runs but fails full inconclusive runs', () => {
   const workflow = parseYaml(readFileSync(new URL('../.github/workflows/performance.yml', import.meta.url), 'utf8'));
   const compare = workflow.jobs.performance.steps.find(s => s.name === 'Compare on this runner');
   assert.match(compare.run, /\|\| status=\$\?/);
   assert.match(compare.run, /if \[ "\$status" -eq 2 \]/);
+  assert.match(compare.run, /if \[ "\$PERF_SUITE" = "full" \]/);
+  assert.match(compare.run, /::error title=Full performance check inconclusive::/);
+  assert.match(compare.run, /exit 2/);
   assert.match(compare.run, /::warning title=Performance check inconclusive::/);
   assert.match(compare.run, /exit 0/);
   assert.match(compare.run, /exit "\$status"/);
@@ -222,9 +228,9 @@ test('performance workflow warns on inconclusive runs without failing the requir
   assert.equal(config.confirmPairs, 2);
 });
 
-test('performance report states that inconclusive runs are non-blocking', () => {
+test('performance report states suite-specific inconclusive behavior', () => {
   const row = { metric: 'durationMs', baseline: 17820, candidate: 17530, change: -0.016,
-    pairs: 5, worsePairs: 1, trimmedSamples: 1, baseSpread: 0.05, headSpread: 0.34, status: 'INCONCLUSIVE' };
+    pairs: 5, overBudgetPairs: 1, trimmedSamples: 1, baseSpread: 0.05, headSpread: 0.34, status: 'INCONCLUSIVE' };
   const report = { status: 'INCONCLUSIVE', baseRevision: 'base-sha', headRevision: 'head-sha',
     benchmarkRepository: 'https://example.invalid/bench', benchmarkRevision: 'bench-sha',
     nodeVersion: 'v22.0.0', bunVersion: '1.0.0',
@@ -232,10 +238,13 @@ test('performance report states that inconclusive runs are non-blocking', () => 
     config: { repetitions: 3, confirmPairs: 2 }, suite: 'basic', selectedScenarios: ['upstream-100'],
     results: [{ id: 'upstream-100', comparison: [row] }] };
   const markdown = renderReport(report);
-  assert.match(markdown, /Status: \*\*INCONCLUSIVE\*\* — runner too noisy to conclude; non-blocking/);
+  assert.match(markdown, /Status: \*\*INCONCLUSIVE\*\* — runner too noisy to conclude; non-blocking for the basic suite/);
   assert.match(markdown, /\| 1\/5 \| INCONCLUSIVE \|/);
-  assert.match(markdown, /warning without failing the check/);
+  assert.match(markdown, /basic-suite result as a non-blocking warning/);
   assert.match(markdown, /confirmation pairs when unsettled/);
+  const full = renderReport({ ...report, suite: 'full' });
+  assert.match(full, /Status: \*\*INCONCLUSIVE\*\* — runner too noisy to conclude; blocking for the full suite/);
+  assert.match(full, /full-suite result fails the check/);
 });
 
 test('performance measurements require complete successful tool execution', () => {

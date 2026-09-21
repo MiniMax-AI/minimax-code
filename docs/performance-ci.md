@@ -37,10 +37,10 @@ latency, compaction acceptance or other products' rankings.
 | Rule | Initial setting |
 | --- | --- |
 | Repetitions | One excluded warmup per revision/scenario; three measured pairs, alternating base/head order; up to two more alternating confirmation pairs when the first three are not conclusively clean |
-| Duration regression | Median increases by more than both 25% and 1 second |
-| CPU regression | Median increases by more than both 20% and 0.5 core-seconds |
-| Sampled peak RSS regression | Median increases by more than both 20% and 32 MiB |
-| Pair confirmation | Candidate is worse in every measured pair, or in at least four of five once confirmation pairs ran |
+| Duration pair over budget | Paired candidate duration exceeds its base by more than both 25% and 1 second |
+| CPU pair over budget | Paired candidate CPU exceeds its base by more than both 20% and 0.5 core-seconds |
+| Sampled peak RSS pair over budget | Paired candidate RSS exceeds its base by more than both 20% and 32 MiB |
+| Regression confirmation | A pair is over its metric budget in every measured pair, or in at least four of five once confirmation pairs ran |
 | Noise limit | Range exceeds 30% of median on either revision; after five pairs the single most extreme sample per revision is discarded before measuring the range |
 | Correctness | Exit 0; N+1 requests with complete wire history; N matched bash commands/results; expected echo, pwd and listing output; complete stored bodies; expected final response |
 | Invalid evidence | Missing samples, wrong sampler, bad metrics, incomplete runs or changed fixture: fail |
@@ -48,24 +48,27 @@ latency, compaction acceptance or other products' rankings.
 The first three pairs settle a scenario only when every metric is within
 budget and both revisions are within the noise limit. Any other first result
 measures the confirmation pairs, and the verdict comes from all five:
-`REGRESSION` needs the median over budget and the candidate worse in at least
-four of the five pairs, so one sample corrupted by the runner can neither
-create nor veto it, and consistent paired evidence fails the check even when
-per-revision spread is high. `PASS` needs the median within budget and both
-revisions within the noise limit after discarding one extreme sample per side,
-so a single slow sample no longer blocks an otherwise faster candidate.
+`REGRESSION` needs the candidate to exceed the configured relative and absolute
+budget against its matched base in at least four of the five pairs, so one
+sample corrupted by the runner can neither create nor veto it, and consistent
+paired evidence fails the check even when per-revision spread is high. `PASS`
+needs the median within budget and both revisions within the noise limit after
+discarding one extreme sample per side, so a single slow sample no longer
+blocks an otherwise faster candidate.
 Everything else is `INCONCLUSIVE`: persistent runner noise, or an over-budget
 median that the pairs do not reproduce.
 
 These are initial regression budgets, not service-level targets or statistical
 confidence intervals. Locally, `PASS` exits 0, `REGRESSION` and execution
 errors exit 1, and `INCONCLUSIVE` exits 2. In CI the workflow converts exit 2
-into a passing `performance` check with a warning annotation, so persistent
-hosted-runner noise cannot block unrelated pull requests; the annotation, job
-summary and report all state that the run is inconclusive. An inconclusive run
-is neither a confirmed regression nor a pass and does not satisfy the
-[full-coverage requirement](../CONTRIBUTING.md#performance-checks) for labeled
-performance PRs; rerun for a clean measurement before relying on the result.
+for the basic suite into a passing `performance` check with a warning annotation,
+so persistent hosted-runner noise cannot block unrelated pull requests. The
+full suite keeps exit 2 as a failed check because labeled performance work must
+produce a real `PASS`. The annotation, job summary and report all state that
+the run is inconclusive. An inconclusive run is neither a confirmed regression
+nor a pass and does not satisfy the [full-coverage requirement](../CONTRIBUTING.md#performance-checks)
+for labeled performance PRs; rerun for a clean measurement before relying on
+the result.
 Tune budgets from repeated same-revision measurements. Review changes to
 scenarios, comparison logic or limits as changes to the performance contract.
 The workflow does not change branch protection; maintainers can add

@@ -75,12 +75,16 @@ jobs:
         env:
           PERF_SUITE: ${{ matrix.suite }}
         # Exit 2 means INCONCLUSIVE: persistent runner noise, no confirmed
-        # regression. Surface it as a warning without failing the required
-        # check; regressions and errors (exit 1) still fail.
+        # regression. Basic runs warn without blocking unrelated changes;
+        # full runs still fail because performance work requires a real PASS.
         run: |
           status=0
           node candidate/scripts/perf/run.mjs --base baseline --head candidate --benchmark benchmark --suite "$PERF_SUITE" --out "$RUNNER_TEMP/performance" || status=$?
           if [ "$status" -eq 2 ]; then
+            if [ "$PERF_SUITE" = "full" ]; then
+              echo "::error title=Full performance check inconclusive::The full suite stayed too noisy to conclude after confirmation pairs. Performance changes require a real PASS; see the job summary and artifact, then rerun."
+              exit 2
+            fi
             echo "::warning title=Performance check inconclusive::Runner noise exceeded stability limits even after confirmation pairs; no regression was confirmed. This is not evidence of a pass; see the job summary and artifact before relying on performance results."
             exit 0
           fi
