@@ -144,7 +144,7 @@ pnpm mcode exec "Describe this UI screenshot's layout and suggest three improvem
 
 The image is sent as input to the selected model service. Use content suitable for sending and a model that supports images. This is an executable usage example, not a live-service acceptance result from this review. Search, image understanding, and media generation are separate capabilities; mcode-tools generation also requires the relevant account permissions and credits.
 
-See [capability coverage](tui-capabilities.md) for custom MCP, managed connectors, and media tools.
+See [capability coverage](tui-capabilities.md) for custom MCP, managed connectors, and media tools, and the [authenticated project MCP walkthrough](#5-connect-an-authenticated-project-mcp-server) below for your own remote server.
 
 ## 4. Manage plugins
 
@@ -186,3 +186,75 @@ mcode plugin remove <name>@local
 ```
 
 `mcode plugin add <name>@local` is not a local import command and is unsupported. Neither `plugin add` nor `/plugins` currently accepts a GitHub URL, local path, or arbitrary third-party marketplace registration. Compatible package readers and a GitHub importer exist in the runtime, but the CLI/TUI do not expose that importer. Managing arbitrary marketplaces from the panel remains a separate feature request; the current source selectors are only `official` and `local`.
+
+## 5. Connect an authenticated project MCP server
+
+Choose a service you trust and review what you will send before starting a task.
+Enabled project servers connect automatically during tool discovery or calls;
+connecting exposes the canonical workspace root through MCP `roots/list`, even
+to a remote server. Tool calls send their arguments to that service. A tool
+permission prompt happens after connection and does not prevent this initial
+contact. This optional configuration leaves built-in search unchanged.
+
+Create `.mcp.json` in the workspace root you will launch MCode from:
+
+```json
+{
+  "mcpServers": {
+    "research": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${RESEARCH_MCP_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace the placeholder URL with your service's exact MCP endpoint, including
+its path. Keep the API key out of the file and URL: `${RESEARCH_MCP_API_KEY}` is
+a literal environment-variable reference, expanded by the runtime. Set the
+variable in the shell that will launch MCode, for example in Bash:
+
+```bash
+read -r -s -p 'Research MCP API key: ' RESEARCH_MCP_API_KEY
+export RESEARCH_MCP_API_KEY
+cd /absolute/path/to/your-project
+node /absolute/path/to/minimax-code/dist/cli.js
+```
+
+For PowerShell, use `Read-Host -AsSecureString` as in the [provider example](#2-choose-your-own-model), assigning the result to `$env:RESEARCH_MCP_API_KEY`.
+Only the session's main workspace directory is checked for `.mcp.json`; MCode
+does not search parent directories or `/add-dir` locations. No plugin import or
+MCP-specific approval command is needed.
+
+Inside the TUI, enter `/mcp` (or `/mcp research` to filter). The **Project ·
+.mcp.json** section lists the server as `configured` before connection. Listing
+configuration does not contact the server or prove authentication. Close the
+panel with `Esc`, then ask MCode to use a tool offered by your selected service
+with a small, non-sensitive input. Inspect the actual tool call and result with
+`Ctrl+O`; a prose answer alone does not prove a tool ran. After successful
+discovery or a call, `/mcp` shows `available`, which still does not establish that
+a research task succeeded.
+
+To troubleshoot or change the configuration:
+
+- A missing `RESEARCH_MCP_API_KEY` produces `error`, names the missing variable,
+  and prevents that server from connecting. Export it and restart MCode from
+  that shell; `/mcp reload` cannot import environment changes from another shell.
+- Set `"enabled": false` inside the `research` entry to stop using it. A valid
+  disabled entry shows `disabled`; invalid fields or missing variables still
+  show `error`.
+- After editing `.mcp.json`, close the panel and enter `/mcp reload` to reread
+  and display the configuration. It is not a connection or authentication test.
+  Discovery and calls also reread the file automatically; a changed configuration
+  retires the old connection and is used on the next discovery or call.
+- For a server that has already connected, exit MCode before editing and restart
+  afterward. Local CLI validation found that reloading a changed HTTP entry after
+  a successful call can stop the TUI with `This operation was aborted.`
+- If connection fails, check the endpoint, key and service availability. An
+  `error` does not by itself identify an authentication failure.
+
+For transport options, environment defaults and configuration precedence, see
+the [detailed project MCP reference (Chinese)](../packages/local-runtime-v2/docs/project-mcp.md).
