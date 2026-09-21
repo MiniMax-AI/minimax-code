@@ -184,6 +184,43 @@ describe('MCode Pi Engine local deltas', () => {
     expect(terminal.getScrollBuffer()).toEqual([...answer, ...more, 'composer']);
   });
 
+  it.each([0, 30])('rebuilds changed scrollback text even when the document grows by %i rows', async (growth) => {
+    const terminal = new RecordingVirtualTerminal(67, 24);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    const input = Array.from({ length: 80 }, (_, index) => `Queued input ${index}`);
+    component.lines = [...input, `composer${CURSOR_MARKER}`, 'status'];
+    tui.addChild(component);
+    tui.renderNow();
+    await terminal.flush();
+    terminal.takeWrites();
+
+    component.lines = [
+      'Recovered context',
+      ...Array.from({ length: growth }, (_, index) => `Recovered row ${index}`),
+      ...input.slice(1),
+      `composer${CURSOR_MARKER}`,
+      'status',
+    ];
+    tui.renderNow();
+    await terminal.flush();
+
+    const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
+    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).toEqual(expected);
+    expect(terminal.getViewport()).toEqual(expected.slice(-terminal.rows));
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 22 });
+
+    // Subsequent streaming must overwrite the current footer, not append a second one.
+    component.lines.splice(-2, 0, 'Next response');
+    tui.renderNow();
+    await terminal.flush();
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).toEqual([
+      ...expected.slice(0, -2), 'Next response', 'composer', 'status',
+    ]);
+  });
+
   it('rebuilds the document when shrinking leaves no rows in the previous viewport', async () => {
     const terminal = new RecordingVirtualTerminal(67, 44);
     const tui = new TuiMainScreen(terminal);

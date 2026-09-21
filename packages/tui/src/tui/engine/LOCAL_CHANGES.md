@@ -116,12 +116,12 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Evidence: `test/unit/tui-scrollbar-interaction.test.ts` drives SGR press, motion, release and wheel events through VirtualTerminal, covering track jumps, thumb grabs, narrow terminals, content routing, selection, overlays and the actual fullscreen ChatLayout.
 - Removal condition: the selected Pi baseline provides equivalent reserved-gutter track and drag interaction and MCode migrates to it.
 
-## L034: Regular viewport reconstruction after document shrink
+## L034: Regular viewport reconstruction after document changes
 
 - Product contract: after running content or a feature panel closes, show the complete current chat viewport with its Composer and status line. Every current-session row must occur once in native history.
-- Minimal difference: when a shorter document would move the viewport origin backwards, clear and replay the complete current projection. Other updates retain differential rendering and resize retains the existing delayed history replay.
+- Minimal difference: when a shorter document would move the viewport origin backwards, or changed visible text is already in scrollback, clear and replay the complete current projection. Compare changed historical rows without terminal sequences so style-only updates preserve scrollback. Other updates retain differential rendering and resize retains the existing delayed history replay.
 - Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement.
-- Evidence: local-delta tests assert every visible row and the complete history, while real Tasks and feature lifecycle tests cover short/long content, background growth, paging, resize, nested panels and return to chat. Virtual terminals do not establish native iTerm2 touchpad acceptance.
+- Evidence: local-delta tests assert every visible row and the complete history, while real Tasks and feature lifecycle tests cover short/long content, background growth, paging, resize, nested panels and return to chat. Queue lifecycle tests replay bracketed CJK paste, Alt+Enter, auto-drain, and history refresh through Ghostty; equal-height and growing historical edits are also covered by xterm. Virtual terminals do not establish native Windows Terminal or iTerm2 touchpad acceptance.
 - Removal condition: the selected Pi baseline provides equivalent complete viewport and unique-history behavior.
 
 ## L036: Unframed multiline paste chunks

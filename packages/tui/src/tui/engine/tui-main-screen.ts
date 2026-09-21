@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.js";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
-import { visibleWidth } from "./utils.js";
+import { stripTerminalSequences, visibleWidth } from "./utils.js";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
@@ -503,11 +503,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible. A historical row cannot
-		// be rewritten in native scrollback. Redraw only the visible viewport so a session-state
-		// update does not clear the user's native scrollback or move Windows Terminal to its start.
+		// Native scrollback is not addressable. If its text changed, retaining the old prefix
+		// would splice stale rows onto the new document, even when its total height grew.
+		// Style-only changes can still repaint the viewport without replaying history.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+			for (let i = firstChanged; i < prevViewportTop; i++) {
+				const oldLine = this.previousLines[i] ?? "";
+				const newLine = newLines[i] ?? "";
+				if (oldLine !== newLine && stripTerminalSequences(oldLine) !== stripTerminalSequences(newLine)) {
+					fullRender(true);
+					return;
+				}
+			}
 			fullRender(true, true);
 			return;
 		}

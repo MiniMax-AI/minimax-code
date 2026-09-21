@@ -12741,181 +12741,235 @@ describe("createTuiApp", () => {
     }
   });
 
-  it("settles an auto-drained follow-up once and replaces waiting state with run duration", async () => {
-    const terminal = new FakeTerminal();
-    const runtime = createRuntime();
-    const busEvents: TuiRuntimeEvent[] = [];
-    const queuedItems: TuiQueuedMessage[] = [];
-    let wakeBus: (() => void) | undefined;
-    let finishFirstTurn: (() => void) | undefined;
-    let finishQueuedStream: (() => void) | undefined;
-    const queuedStreamClosed = vi.fn();
-    let durableMessages: Awaited<ReturnType<TuiRuntime["getMessages"]>> = [];
-    const waitForNextBusEvent = (signal: AbortSignal) =>
-      new Promise<void>((resolve) => {
-        wakeBus = resolve;
-        signal.addEventListener("abort", resolve, { once: true });
-      });
-    vi.mocked(runtime.sendMessage).mockImplementation(
-      async function* sendMessage() {
-        await new Promise<void>((resolve) => {
-          finishFirstTurn = resolve;
+  it.each([1, 100])(
+    "settles an auto-drained follow-up of %i lines with unique terminal history",
+    async (lineCount) => {
+      const queuedText = Array.from(
+        { length: lineCount },
+        (_, i) => `Queue line ${i}: 合成测试文字`,
+      ).join("\n");
+      const terminal = new FakeTerminal();
+      const runtime = createRuntime();
+      const busEvents: TuiRuntimeEvent[] = [];
+      const queuedItems: TuiQueuedMessage[] = [];
+      let wakeBus: (() => void) | undefined;
+      let finishFirstTurn: (() => void) | undefined;
+      let finishQueuedStream: (() => void) | undefined;
+      const queuedStreamClosed = vi.fn();
+      let durableMessages: Awaited<ReturnType<TuiRuntime["getMessages"]>> = [];
+      const waitForNextBusEvent = (signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          wakeBus = resolve;
+          signal.addEventListener("abort", resolve, { once: true });
         });
-        yield { type: "delta", content: "First answer" };
-        yield { type: "done" };
-      },
-    );
-    vi.mocked(runtime.watchSessionTurn).mockImplementation(
-      async function* watchSessionTurn() {
-        try {
+      vi.mocked(runtime.sendMessage).mockImplementation(
+        async function* sendMessage() {
           await new Promise<void>((resolve) => {
-            finishQueuedStream = resolve;
+            finishFirstTurn = resolve;
           });
-          yield { type: "delta", content: "Queued answer" };
+          yield { type: "delta", content: "First answer" };
           yield { type: "done" };
-        } finally {
-          queuedStreamClosed();
-        }
-      },
-    );
-    vi.mocked(runtime.enqueueMessage).mockImplementation(
-      async (sessionId, content) => {
-        const item: TuiQueuedMessage = {
-          itemId: "queue-b",
-          sessionId,
-          status: "queued",
-          content,
-        };
-        queuedItems.push(item);
-        return { itemId: item.itemId, status: item.status, position: 1 };
-      },
-    );
-    vi.mocked(runtime.listQueuedMessages).mockImplementation(async () => [
-      ...queuedItems,
-    ]);
-    vi.mocked(runtime.getMessages).mockImplementation(
-      async () => durableMessages,
-    );
-    vi.mocked(runtime.watchEvents).mockImplementation(
-      async function* watchEvents(signal) {
-        while (!signal.aborted) {
-          if (busEvents.length === 0) await waitForNextBusEvent(signal);
-          if (signal.aborted) return;
-          const event = busEvents.shift();
-          if (event) yield event;
-        }
-      },
-    );
-    const emit = (event: RawTuiRuntimeEvent) => {
-      busEvents.push(runtimeEvent(event));
-      wakeBus?.();
-      wakeBus = undefined;
-    };
-    const app = createTuiApp({
-      runtime,
-      terminal,
-      version: "0.1.0",
-      workspaceDir: "/workspace",
-      productFeatures: { queue: true },
-    });
+        },
+      );
+      vi.mocked(runtime.watchSessionTurn).mockImplementation(
+        async function* watchSessionTurn() {
+          try {
+            await new Promise<void>((resolve) => {
+              finishQueuedStream = resolve;
+            });
+            yield { type: "delta", content: "Queued answer" };
+            yield { type: "done" };
+          } finally {
+            queuedStreamClosed();
+          }
+        },
+      );
+      vi.mocked(runtime.enqueueMessage).mockImplementation(
+        async (sessionId, content) => {
+          const item: TuiQueuedMessage = {
+            itemId: "queue-b",
+            sessionId,
+            status: "queued",
+            content,
+          };
+          queuedItems.push(item);
+          return { itemId: item.itemId, status: item.status, position: 1 };
+        },
+      );
+      vi.mocked(runtime.listQueuedMessages).mockImplementation(async () => [
+        ...queuedItems,
+      ]);
+      vi.mocked(runtime.getMessages).mockImplementation(
+        async () => durableMessages,
+      );
+      vi.mocked(runtime.watchEvents).mockImplementation(
+        async function* watchEvents(signal) {
+          while (!signal.aborted) {
+            if (busEvents.length === 0) await waitForNextBusEvent(signal);
+            if (signal.aborted) return;
+            const event = busEvents.shift();
+            if (event) yield event;
+          }
+        },
+      );
+      const emit = (event: RawTuiRuntimeEvent) => {
+        busEvents.push(runtimeEvent(event));
+        wakeBus?.();
+        wakeBus = undefined;
+      };
+      const app = createTuiApp({
+        runtime,
+        terminal,
+        version: "0.1.0",
+        workspaceDir: "/workspace",
+        productFeatures: { queue: true },
+      });
 
-    app.start();
-    await app.ready;
-    const first = app.submit("A");
-    await vi.waitFor(() =>
-      expect(app.controller.snapshot().activeTurnId).toBeDefined(),
-    );
-    await app.submit("B");
-    expect(app.tui.render(80).join("\n")).toContain(
-      "Next · after current response",
-    );
-    expect(app.tui.render(80).join("\n")).toContain("B");
+      const screen = new VirtualTerminalScreen(terminal.columns, terminal.rows);
+      let writeIndex = 0;
+      const assertScreen = () => {
+        app.tui.renderNow();
+        for (; writeIndex < terminal.writes.length; writeIndex++)
+          screen.feed(terminal.writes[writeIndex]!);
+        const expected = stripAnsi(app.tui.render(terminal.columns).join("\n"))
+          .split("\n")
+          .map((line) => line.trimEnd())
+          .join("\n")
+          .trimEnd();
+        expect(screen.text()).toBe(expected);
+      };
+      app.start();
+      try {
+        await app.ready;
+        const first = app.submit("A");
+        await vi.waitFor(() =>
+          expect(app.controller.snapshot().activeTurnId).toBeDefined(),
+        );
+        terminal.input?.(`\x1b[200~${queuedText}\x1b[201~`);
+        assertScreen();
+        terminal.input?.("\x1b\r");
+        await vi.waitFor(() =>
+          expect(runtime.enqueueMessage).toHaveBeenCalledOnce(),
+        );
+        await vi.waitFor(() => expect(app.editor.getText()).toBe(""));
+        expect(vi.mocked(runtime.enqueueMessage).mock.calls[0]?.[1]).toBe(queuedText);
+        expect(app.tui.render(80).join("\n")).toContain(
+          "Next · after current response",
+        );
+        expect(app.tui.render(80).join("\n")).toContain("Queue line 0:");
 
-    finishFirstTurn?.();
-    await first;
-    const queuedItem = queuedItems[0];
-    expect(queuedItem).toBeDefined();
-    if (!queuedItem) throw new Error("Expected B to be queued.");
-    queuedItems[0] = { ...queuedItem, status: "running" };
-    emit({
-      type: "session.queue.updated",
-      timestamp: 200,
-      source: "runtime",
-      payload: {
-        sessionId: "session-1",
-        itemId: "queue-b",
-        status: "running",
-        queuedCount: 0,
-      },
-    });
-    emit({
-      type: "session.start",
-      timestamp: 201,
-      source: "runtime",
-      payload: {
-        sessionId: "session-1",
-        turnId: "turn_queue_b",
-        source: "queued-drain",
-        queueItemIds: ["queue-b"],
-      },
-    });
-    await vi.waitFor(() =>
-      expect(app.tui.render(80).join("\n")).toContain("Loading"),
-    );
-    expect(app.tui.render(80).join("\n")).not.toContain("Loading · 0s");
+        assertScreen();
+        finishFirstTurn?.();
+        await first;
+        const queuedItem = queuedItems[0];
+        expect(queuedItem).toBeDefined();
+        if (!queuedItem) throw new Error("Expected B to be queued.");
+        queuedItems[0] = { ...queuedItem, status: "running" };
+        emit({
+          type: "session.queue.updated",
+          timestamp: 200,
+          source: "runtime",
+          payload: {
+            sessionId: "session-1",
+            itemId: "queue-b",
+            status: "running",
+            queuedCount: 0,
+          },
+        });
+        emit({
+          type: "session.start",
+          timestamp: 201,
+          source: "runtime",
+          payload: {
+            sessionId: "session-1",
+            turnId: "turn_queue_b",
+            source: "queued-drain",
+            queueItemIds: ["queue-b"],
+          },
+        });
+        await vi.waitFor(() =>
+          expect(app.tui.render(80).join("\n")).toContain("Loading"),
+        );
+        expect(app.tui.render(80).join("\n")).not.toContain("Loading · 0s");
 
-    queuedItems.length = 0;
-    durableMessages = [
-      {
-        id: "history-user-b",
-        turnId: "turn_queue_b",
-        role: "user",
-        content: "B",
-        timestamp: 202,
-      },
-      {
-        id: "history-assistant-b",
-        turnId: "turn_queue_b",
-        role: "assistant",
-        content: "Queued answer",
-        timestamp: 203,
-      },
-    ];
-    finishQueuedStream?.();
-    await vi.waitFor(() => expect(queuedStreamClosed).toHaveBeenCalledOnce());
-    emit({
-      type: "session.finish",
-      timestamp: 3_201,
-      source: "runtime",
-      payload: {
-        sessionId: "session-1",
-        turnId: "turn_queue_b",
-        status: "finished",
-      },
-    });
+        assertScreen();
+        queuedItems.length = 0;
+        durableMessages = [
+          {
+            id: "history-user-a",
+            turnId: "turn_a",
+            role: "user",
+            content: "A",
+            timestamp: 100,
+          },
+          {
+            id: "history-assistant-a",
+            turnId: "turn_a",
+            role: "assistant",
+            content: "First answer",
+            timestamp: 101,
+          },
+          {
+            id: "history-user-b",
+            turnId: "turn_queue_b",
+            role: "user",
+            content: queuedText,
+            timestamp: 202,
+          },
+          {
+            id: "history-assistant-b",
+            turnId: "turn_queue_b",
+            role: "assistant",
+            content: "Queued answer",
+            timestamp: 203,
+          },
+        ];
+        finishQueuedStream?.();
+        await vi.waitFor(() =>
+          expect(queuedStreamClosed).toHaveBeenCalledOnce(),
+        );
+        emit({
+          type: "session.finish",
+          timestamp: 3_201,
+          source: "runtime",
+          payload: {
+            sessionId: "session-1",
+            turnId: "turn_queue_b",
+            status: "finished",
+          },
+        });
 
-    await vi.waitFor(() =>
-      expect(
-        app.transcript
-          .snapshot()
-          .filter((cell) => cell.content === "Queued answer"),
-      ).toHaveLength(1),
-    );
-    await vi.waitFor(() =>
-      expect(app.transcript.get("turn-duration:turn_queue_b")).toMatchObject({
-        status: "succeeded",
-        durationMs: 3_000,
-      }),
-    );
-    const settledUi = app.tui.render(80).join("\n");
-    expect(settledUi).toContain("Completed in 3s");
-    expect(settledUi.indexOf("Completed in 3s")).toBeGreaterThan(
-      settledUi.indexOf("Queued answer"),
-    );
-    expect(settledUi).not.toContain("message waiting");
-    expect(settledUi).not.toContain("Next · after current response");
-    await app.stop();
-  });
+        await vi.waitFor(() =>
+          expect(
+            app.transcript
+              .snapshot()
+              .filter((cell) => cell.content === "Queued answer"),
+          ).toHaveLength(1),
+        );
+        await vi.waitFor(() =>
+          expect(
+            app.transcript.get("turn-duration:turn_queue_b"),
+          ).toMatchObject({
+            status: "succeeded",
+            durationMs: 3_000,
+          }),
+        );
+        const settledUi = app.tui.render(80).join("\n");
+        expect(settledUi).toContain("Completed in 3s");
+        expect(settledUi.indexOf("Completed in 3s")).toBeGreaterThan(
+          settledUi.indexOf("Queued answer"),
+        );
+        expect(settledUi).not.toContain("message waiting");
+        expect(settledUi).not.toContain("Next · after current response");
+        assertScreen();
+      } finally {
+        finishFirstTurn?.();
+        finishQueuedStream?.();
+        await app.stop();
+        screen.dispose();
+      }
+    },
+  );
 
   it("records submitted drafts in editor history", async () => {
     const terminal = new FakeTerminal();
