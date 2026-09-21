@@ -382,6 +382,57 @@ describe('semantic snapshots', () => {
       hash.mockRestore();
     }
   });
+  it('shares unchanged plain descendants without changing values, fingerprints or byte accounting', () => {
+    const before = captureSemanticSnapshot({ messages: [{ text: 'old', nested: [-0, undefined] }] });
+    const input = { messages: [{ text: 'old', nested: [-0, undefined] }, { text: 'new', nested: [1] }] };
+    const shared = captureSemanticSnapshot(input, before.value);
+    const independent = captureSemanticSnapshot(input);
+    expect(shared.value).toEqual(independent.value);
+    expect(shared.fingerprint).toBe(independent.fingerprint);
+    expect(estimateSemanticValueSize(shared.value)).toBe(estimateSemanticValueSize(independent.value));
+    expect(shared.value.messages[0]).toBe(before.value.messages[0]);
+    expect(shared.value.messages).not.toBe(before.value.messages);
+    input.messages[0]!.text = 'edited';
+    expect(shared.value.messages[0]!.text).toBe('old');
+    const edited = captureSemanticSnapshot(input, shared.value);
+    expect(edited.value.messages[0]).not.toBe(shared.value.messages[0]);
+    expect(edited.value.messages[1]).toBe(shared.value.messages[1]);
+  });
+  it('preserves split and merged aliases when sharing a previous snapshot', () => {
+    const alias = { text: 'same' };
+    const prior = captureSemanticSnapshot({ a: alias, b: alias }).value;
+    const split = captureSemanticSnapshot({ a: { text: 'same' }, b: { text: 'same' } }, prior).value;
+    expect(split.a).not.toBe(split.b);
+    const merged = captureSemanticSnapshot({ a: alias, b: alias }, split).value;
+    expect(merged.a).toBe(merged.b);
+    const mixed = captureSemanticSnapshot({ a: { text: 'same' }, b: prior.a }, prior).value;
+    expect(mixed.a).not.toBe(mixed.b);
+    expect(mixed.b).toBe(prior.a);
+    const mixedFirst = captureSemanticSnapshot({ a: prior.a, b: { text: 'same' } }, prior).value;
+    expect(mixedFirst.a).not.toBe(mixedFirst.b);
+  });
+  it('preserves key order, sparse arrays, negative zero and native accessor behavior during reuse', () => {
+    const prior = captureSemanticSnapshot({ a: 1, b: 2 }).value;
+    const reordered = captureSemanticSnapshot({ b: 2, a: 1 }, prior).value;
+    expect(Object.keys(reordered)).toEqual(['b', 'a']);
+    const sparse = new Array(3);
+    sparse[2] = -0;
+    const oldArray = captureSemanticSnapshot(sparse).value;
+    const nextArray = captureSemanticSnapshot([undefined, undefined, 0], oldArray).value;
+    expect(0 in nextArray).toBe(true);
+    expect(Object.is(nextArray[2], -0)).toBe(false);
+    expect(0 in oldArray).toBe(false);
+    const getter = vi.fn(() => 1);
+    expect(captureSemanticSnapshot({ get a() { return getter(); }, b: 2 }, prior).value).toEqual(prior);
+    expect(getter).toHaveBeenCalledTimes(1);
+    const trap = vi.fn();
+    expect(() => captureSemanticSnapshot(new Proxy({}, { ownKeys: trap }), prior)).toThrow();
+    expect(trap).not.toHaveBeenCalled();
+    const unsafe = Object.freeze({ nested: { text: 'old' } });
+    const snapshot = captureSemanticSnapshot({ nested: { text: 'old' } }, unsafe).value;
+    unsafe.nested.text = 'changed';
+    expect(snapshot.nested.text).toBe('old');
+  });
   it('shares owned history through delivery wrappers and detaches other branches', () => {
     const history = captureSemanticSnapshot({
       messages: [{ text: 'body' }],
@@ -843,6 +894,28 @@ describe('committed history read reuse', () => {
     const empty = await emptyStore.read('synthetic-session');
     expect(empty.messages).not.toBe(empty.identityVector);
     expect(empty.messages).toEqual([]);
+  });
+  it('shares immutable messages across fresh provider snapshots while observing edits and replacement', async () => {
+    let current = {
+      revision: 'r1',
+      messages: [{ role: 'user', timestamp: 1, content: 'old' }],
+      identityVector: ['msg-1'],
+    };
+    const read = async () => structuredClone(current);
+    const store = new DurableCanonicalHistoryStore({ read, readActive: read, append: read, replace: read });
+    const first = await store.read('synthetic-session');
+    current = { revision: 'r2', messages: [...current.messages, { role: 'user', timestamp: 2, content: 'new' }], identityVector: ['msg-1', 'msg-2'] };
+    const second = await store.read('synthetic-session');
+    expect(second.messages[0]).toBe(first.messages[0]);
+    expect(second.messages).toHaveLength(2);
+    current.messages[0]!.content = 'edited';
+    const third = await store.read('synthetic-session');
+    expect(third.messages[0]).not.toBe(second.messages[0]);
+    expect(third.messages[1]).toBe(second.messages[1]);
+    expect(second.messages[0]).toMatchObject({ content: 'old' });
+    current = { revision: 'r3', messages: [], identityVector: [] };
+    expect((await store.read('synthetic-session')).messages).toEqual([]);
+    expect(first.messages).toHaveLength(1);
   });
   it('retains legacy rereads and rejects invalid commits or write failures', async () => {
     const readActive = vi.fn(async () => ({

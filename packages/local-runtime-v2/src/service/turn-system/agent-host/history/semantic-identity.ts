@@ -13,16 +13,17 @@ const fingerprints = new WeakMap<object, string>();
  * Detach callback-owned History/event data before it becomes an in-run
  * identity or deferred delivery payload. Unsupported or cyclic values fail
  * closed. The digest is streamed so identity memory does not scale with the
- * encoded payload size.
+ * encoded payload size. An optional previously owned snapshot lets fresh plain
+ * data share unchanged immutable descendants while preserving input aliases.
  */
-export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
+export function captureSemanticSnapshot<T>(value: T, previous?: T): SemanticSnapshot<T> {
   // Native cloning preserves external getters and aliases. Data-only wrappers
   // can instead share descendants already detached and frozen by this module.
   const snapshot =
     typeof value === 'object' && value !== null && ownedValues.has(value)
       ? value
       : freezeSemanticValue(
-          cloneOwnedWrapper(value) ?? structuredClone(value),
+          cloneOwnedWrapper(value, previous) ?? structuredClone(value),
           new WeakSet<object>(),
         );
   let fingerprint: string | undefined;
@@ -46,6 +47,7 @@ export function captureSemanticSnapshot<T>(value: T): SemanticSnapshot<T> {
 }
 
 const NATIVE_CLONE_REQUIRED = Symbol('native-clone-required');
+const PREVIOUS_SHARING_UNAVAILABLE = Symbol('previous-sharing-unavailable');
 
 function plainDataDescriptors(value: object): PropertyDescriptorMap | undefined {
   // Inspecting a Proxy would invoke traps that native structuredClone rejects.
@@ -62,47 +64,78 @@ function plainDataDescriptors(value: object): PropertyDescriptorMap | undefined 
   return descriptors;
 }
 
-function cloneOwnedWrapper<T>(value: T): T | undefined {
+function cloneOwnedWrapper<T>(value: T, previous?: T): T | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const descriptors = plainDataDescriptors(value);
+  const reusePrevious =
+    typeof previous === 'object' && previous !== null && ownedValues.has(previous);
   if (
     !descriptors ||
-    !Object.values(descriptors).some(
-      (d) =>
-        d.enumerable && typeof d.value === 'object' && d.value !== null && ownedValues.has(d.value),
-    )
+    (!reusePrevious &&
+      !Object.values(descriptors).some(
+        (d) =>
+          d.enumerable && typeof d.value === 'object' && d.value !== null && ownedValues.has(d.value),
+      ))
   )
     return undefined;
 
   const copies = new WeakMap<object, object>();
-  const clone = (node: unknown): unknown => {
+  const previousOwners = new WeakMap<object, object>();
+  const clone = (node: unknown, prior?: unknown): unknown => {
     if (typeof node !== 'object' || node === null) {
       if (node !== null && !['undefined', 'string', 'boolean', 'number'].includes(typeof node)) {
         throw NATIVE_CLONE_REQUIRED;
       }
       return node;
     }
-    if (ownedValues.has(node)) return node;
-    const previous = copies.get(node);
-    if (previous) return previous;
+    if (ownedValues.has(node)) {
+      // Mixing existing owned nodes with value-based reuse could merge two
+      // distinct input aliases. Keep the original wrapper path for that case.
+      if (reusePrevious) throw PREVIOUS_SHARING_UNAVAILABLE;
+      return node;
+    }
+    const existing = copies.get(node);
+    if (existing) return existing;
     const fields = node === value ? descriptors : plainDataDescriptors(node);
     if (!fields) throw NATIVE_CLONE_REQUIRED;
     const copy = Array.isArray(node) ? new Array(fields.length!.value as number) : {};
     copies.set(node, copy);
+    const candidate =
+      reusePrevious &&
+      typeof prior === 'object' && prior !== null && ownedValues.has(prior) &&
+      Array.isArray(prior) === Array.isArray(node) &&
+      (!previousOwners.has(prior) || previousOwners.get(prior) === node)
+        ? prior as Record<string, unknown>
+        : undefined;
+    const keys = Object.keys(fields).filter((key) => fields[key]!.enumerable);
+    const priorKeys = candidate ? Object.keys(candidate) : [];
+    let unchanged =
+      candidate !== undefined && keys.length === priorKeys.length &&
+      keys.every((key, index) => key === priorKeys[index]) &&
+      (!Array.isArray(node) || node.length === candidate['length']);
     for (const [key, field] of Object.entries(fields)) {
       if (!field.enumerable) continue;
+      const priorChild = candidate && Object.hasOwn(candidate, key) ? candidate[key] : undefined;
+      const child = clone(field.value, priorChild);
+      if (unchanged && !Object.is(child, candidate![key])) unchanged = false;
       Object.defineProperty(copy, key, {
-        value: clone(field.value),
+        value: child,
         enumerable: true,
         writable: true,
         configurable: true,
       });
     }
+    if (unchanged) {
+      previousOwners.set(candidate!, node);
+      copies.set(node, candidate!);
+      return candidate;
+    }
     return copy;
   };
   try {
-    return clone(value) as T;
+    return clone(value, previous) as T;
   } catch (error) {
+    if (error === PREVIOUS_SHARING_UNAVAILABLE) return cloneOwnedWrapper(value);
     if (error === NATIVE_CLONE_REQUIRED) return undefined;
     throw error;
   }

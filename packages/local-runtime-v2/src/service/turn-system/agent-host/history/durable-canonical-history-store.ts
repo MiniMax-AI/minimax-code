@@ -42,6 +42,7 @@ export interface DurableCanonicalHistoryProvider {
  */
 export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
   private readonly lane = new KeyedOperationLane<string>();
+  private previousSnapshot?: CanonicalHistorySnapshot;
 
   constructor(private readonly provider: DurableCanonicalHistoryProvider) {
     assertAgentHostCapabilityAvailable(
@@ -143,15 +144,17 @@ export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
   }
 
   private readProviderSnapshot(snapshot: CanonicalHistorySnapshot): CanonicalHistorySnapshot {
-    const detached = captureSemanticSnapshot(snapshot).value;
+    const detached = captureSemanticSnapshot(snapshot, this.previousSnapshot).value;
     validateCanonicalHistorySnapshot(detached);
     assertCanonicalIdentityVector(detached);
-    return captureSemanticSnapshot({
+    const result = captureSemanticSnapshot({
       revision: detached.revision.trim(),
       // Keep the separately owned arrays reusable at the next snapshot boundary.
       messages: captureSemanticSnapshot([...detached.messages]).value,
       identityVector: captureSemanticSnapshot([...detached.identityVector]).value,
     }).value;
+    this.previousSnapshot = result;
+    return result;
   }
 }
 
