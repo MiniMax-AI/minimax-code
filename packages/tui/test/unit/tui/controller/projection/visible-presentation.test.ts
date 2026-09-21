@@ -4,6 +4,9 @@ import { createTranscriptCell } from "../../../../../src/tui/transcript/model.js
 import { TranscriptStore } from "../../../../../src/tui/transcript/store.js";
 import { createTuiHostKeybindings } from "../../../../../src/tui/shell/keybindings.js";
 import { formatTuiShortcut } from "../../../../../src/tui/shell/shortcut-labels.js";
+import { normalizeAccountStatus } from "../../../../../src/runtime/adapters/normalizers.js";
+import { TuiWelcome } from "../../../../../src/tui/shell/welcome/component.js";
+import { stripAnsi } from "../../../../../src/tui/rendering/text.js";
 
 const defaultQueueLabel = `${formatTuiShortcut("alt+enter")} queue`;
 
@@ -568,6 +571,89 @@ describe("visible presentation selector", () => {
         },
       }).shell.accountStatus,
     ).toBe("Sign in with /login");
+  });
+
+  it.each([
+    ["BYOK without a managed account", "api-key", false, [], "Ready", false],
+    ["BYOK with a managed account", "api-key", true, [], "Ready", false],
+    [
+      "BYOK with no saved API key",
+      "api-key",
+      false,
+      ["Provider API key is not configured"],
+      "Setup warning",
+      false,
+    ],
+    [
+      "BYOK with invalid configuration",
+      "api-key",
+      true,
+      ["Selected provider is disabled"],
+      "Setup warning",
+      false,
+    ],
+    ["official model signed out", "managed-login", false, [], "Login required", true],
+    [
+      "official model with expired credentials",
+      "managed-login",
+      false,
+      ["Managed token expired"],
+      "Login required",
+      true,
+    ],
+    ["official model signed in", "managed-login", true, [], "Ready", false],
+  ] as const)(
+    "renders the selected route's readiness: %s",
+    (_name, authMode, tokenPresent, warnings, activity, loginRequired) => {
+      const providerId = authMode === "api-key" ? "custom_provider:test" : "minimax";
+      const account = normalizeAccountStatus({
+        selection: {
+          providerId,
+          modelId: "test-model",
+          defaultModel: `${providerId}/test-model`,
+        },
+        provider: { id: providerId, authMode },
+        auth: { tokenPresent },
+        warnings,
+      });
+      const { shell } = resolve({
+        snapshot: { ...idleChat, account },
+        selectedModel: {
+          providerId,
+          modelId: "test-model",
+          displayName: "Selected model",
+        },
+      });
+      expect(shell.model).toBe("Selected model");
+      expect(account.warnings).toEqual(warnings);
+      for (const width of [50, 80, 120]) {
+        const rendered = stripAnsi(new TuiWelcome(shell).render(width).join("\n"));
+        expect(rendered).toContain(activity);
+        expect(rendered.includes("Sign in with /login")).toBe(loginRequired);
+        expect(rendered.includes("Login required")).toBe(loginRequired);
+        if (warnings.length && !loginRequired) {
+          expect(rendered).not.toContain("● Ready");
+          expect(rendered).toContain("/provider or /status");
+        }
+      }
+    },
+  );
+
+  it("does not infer readiness from a model label while account state is unknown", () => {
+    for (const account of [
+      undefined,
+      normalizeAccountStatus({ auth: { tokenPresent: false } }),
+    ]) {
+      const { shell } = resolve({
+        snapshot: { ...idleChat, account },
+        selectedModel: { providerId: "custom_provider:test", modelId: "test-model" },
+      });
+      const rendered = stripAnsi(new TuiWelcome(shell).render(80).join("\n"));
+      expect(rendered).toContain(account ? "Account unavailable" : "Checking account");
+      expect(rendered).not.toContain("● Ready");
+      expect(rendered).not.toContain("Login required");
+      expect(rendered).not.toContain("Sign in with /login");
+    }
   });
 
   it("projects the selected model and Token Plan quota without live activity details", () => {

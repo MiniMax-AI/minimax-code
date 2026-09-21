@@ -2067,41 +2067,47 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
-  it("hydrates the selected model display name into the status rail on startup", async () => {
-    const terminal = new FakeTerminal();
-    const runtime = createRuntime();
-    vi.mocked(runtime.getAccountStatus).mockResolvedValue({
-      status: "ready",
-      defaultModel: "custom_provider:innerTest/MiniMax-M3",
-      providerId: "custom_provider:innerTest",
-      modelId: "MiniMax-M3",
-      authMode: "byok",
-      managedTokenPresent: true,
-      warnings: [],
-    });
-    vi.mocked(runtime.listModels).mockResolvedValue([
-      {
+  it.each([true, false])(
+    "hydrates the BYOK model and welcome status with managed token %s",
+    async (managedTokenPresent) => {
+      const terminal = new FakeTerminal();
+      const runtime = createRuntime();
+      vi.mocked(runtime.getAccountStatus).mockResolvedValue({
+        status: "ready",
+        defaultModel: "custom_provider:innerTest/MiniMax-M3",
         providerId: "custom_provider:innerTest",
         modelId: "MiniMax-M3",
-        displayName: "m3.05",
-        selected: true,
-      },
-    ]);
-    const app = createTuiApp({
-      runtime,
-      terminal,
-      version: "0.1.0",
-      workspaceDir: "/workspace",
-    });
+        authMode: "byok",
+        managedTokenPresent,
+        modelSource: "byok",
+        warnings: [],
+      });
+      vi.mocked(runtime.listModels).mockResolvedValue([
+        {
+          providerId: "custom_provider:innerTest",
+          modelId: "MiniMax-M3",
+          displayName: "m3.05",
+          selected: true,
+        },
+      ]);
+      const app = createTuiApp({
+        runtime,
+        terminal,
+        version: "0.1.0",
+        workspaceDir: "/workspace",
+      });
 
-    app.start();
-    await app.ready;
+      app.start();
+      await app.ready;
 
-    await vi.waitFor(() =>
-      expect(app.tui.render(120).join("\n")).toContain("✦ m3.05"),
-    );
-    await app.stop();
-  });
+      await vi.waitFor(() => expect(app.tui.render(120).join("\n")).toContain("✦ m3.05"));
+      const welcome = stripAnsi(app.tui.render(120).join("\n"));
+      expect(welcome).toContain("● Ready");
+      expect(welcome).not.toContain("Login required");
+      expect(welcome).not.toContain("Sign in with /login");
+      await app.stop();
+    },
+  );
 
   it("restores a managed-login failure to the Composer", async () => {
     const terminal = new FakeTerminal();
@@ -2573,7 +2579,7 @@ describe("createTuiApp", () => {
     expect(app.editor.getText()).toBe("Keep this through restart");
   });
 
-  it("offers MiniMax login without blocking an unauthenticated builtin BYOK Turn", async () => {
+  it("shows ready and runs an unauthenticated builtin BYOK Turn", async () => {
     const runtime = createRuntime();
     vi.mocked(runtime.getAccountStatus).mockResolvedValue({
       status: "ready",
@@ -2589,13 +2595,16 @@ describe("createTuiApp", () => {
       terminal: new FakeTerminal(),
       version: "0.1.0",
       workspaceDir: "/workspace",
+      statusLineItems: ["build-mode"],
     });
 
     app.start();
     await app.ready;
-    await vi.waitFor(() =>
-      expect(app.tui.render(80).join("\n")).toContain("Sign in with /login"),
-    );
+    const welcome = stripAnsi(app.tui.render(120).join("\n"));
+    expect(welcome).toContain("● Ready");
+    expect(welcome).toContain("state=ready");
+    expect(welcome).not.toContain("Sign in with /login");
+    expect(welcome).not.toContain("Login required");
 
     await app.submit("BYOK still runs");
 
