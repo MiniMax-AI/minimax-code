@@ -68,6 +68,7 @@
       "packages/tui/test/unit/runtime-data-dir.test.ts",
       "packages/tui/test/unit/headless-contract.test.ts",
       "packages/tui/test/unit/headless-invocation.test.ts",
+      "packages/tui/test/unit/wsl-attachment-paths.test.ts",
       "packages/tui/test/unit/headless-model-selection.test.ts",
       "packages/tui/test/unit/headless-preparation-cancellation.test.ts",
       "packages/tui/test/unit/headless-runner.test.ts",

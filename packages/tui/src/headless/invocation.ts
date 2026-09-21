@@ -10,6 +10,7 @@ import {
   MINIMAX_CODE_MAX_ATTACHMENT_COUNT,
 } from '../application/attachment-policy.js';
 import { inferTuiNativeVideoMimeType } from '../application/video-mime.js';
+import { resolveWslPath } from '../host/wsl-path.js';
 import { TuiExecError } from './exit-policy.js';
 import type { TuiExecFormat } from './output.js';
 
@@ -295,7 +296,12 @@ async function resolveHeadlessAttachment(
   signal?: AbortSignal,
 ): Promise<TuiAttachment> {
   throwIfAborted(signal);
-  const requestedPath = expandPath(reference, workspaceDir);
+  const localReference = await resolveWslPath(reference.trim(), signal).catch((error: unknown) => {
+    throwIfAborted(signal);
+    throw invocationError(`Cannot attach ${reference}: ${errorMessage(error)}`);
+  });
+  throwIfAborted(signal);
+  const requestedPath = expandPath(localReference, workspaceDir);
   const filePath = await realpath(requestedPath).catch((error: unknown) => {
     throw invocationError(`Cannot attach ${reference}: ${errorMessage(error)}`);
   });
