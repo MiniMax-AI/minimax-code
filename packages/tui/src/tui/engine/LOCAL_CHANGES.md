@@ -146,3 +146,11 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Boundary: padding is confined to the active screen. Historical text replacement/removal, real resize, overlays and image reflow retain the structural reconstruction path. Blank rows can temporarily separate native history from the visible tail; this is preferable to clearing and replaying the terminal's scrollback during ordinary completion. No mouse capture is enabled in regular mode.
 - Evidence: local-delta tests use xterm's host scroll API independently of the hardware cursor, reproduce the pre-fix jump to line zero, and verify stable scrolling, Composer position, unique history, reclaimed space, corrected-history reconstruction and resize behavior. The product queue/feature tests continue to cover canonical history replacement. Native Windows Terminal and UU Remote acceptance remain separate.
 - Removal condition: the selected Pi baseline preserves host scrolling and unique history through visible shrink.
+
+## L039: Erase regular viewport redraws in place
+
+- Product contract: repainting the visible regular-mode screen must not append the previous transcript, Composer or status line to native history.
+- Minimal difference: viewport-only full redraws home the cursor, erase each screen row with EL 2 using cursor-down movement, and return home before painting. This avoids ED 2, which saves the old screen to scrollback in Apple Terminal. Full structural reconstruction still clears and rebuilds history.
+- Evidence: local-delta tests exercise xterm and a clear-to-scrollback host model, covering historical style changes, simultaneous growth, short-document shrink, subsequent differential output, host scrolling and resize preview/replay. Native Apple Terminal replay of synthetic renderer output reproduces duplicate rows before the fix and preserves the exact document afterward.
+- Boundary: native replay covers synthetic output, not every live-model interaction or other terminal emulator.
+- Removal condition: the selected Pi baseline supplies equivalent in-place viewport erasure without retaining stale rows in native history.

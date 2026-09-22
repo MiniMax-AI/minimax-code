@@ -163,11 +163,11 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "73789fb955252262ad03907446e4f4a6052bfcb86bf2a4fdc77ddaa1dd7ee9ee",
-      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037", "L038"],
+      "currentSha256": "5d499306f4b92d443c350dd944fbdc11b6ed7c74a030eb1e7e020890bc30fdb7",
+      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037", "L038", "L039"],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
       "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
-      "behaviorImpact": "Regular updates preserve native scrollback. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored."
+      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored."
     },
     {
       "path": "tui.ts",

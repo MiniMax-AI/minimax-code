@@ -348,7 +348,18 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			output.append("\x1b[?2026h"); // Begin synchronized output
 			if (clear) {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
-				output.append(viewportOnly ? "\x1b[2J\x1b[H" : "\x1b[2J\x1b[H\x1b[3J");
+				if (viewportOnly) {
+					// ED 2 saves the old screen to scrollback in Apple Terminal. Erase
+					// each row in place so old transcript/footer rows cannot survive there.
+					output.append("\x1b[H");
+					for (let row = 0; row < height; row++) {
+						if (row > 0) output.append("\x1b[1B");
+						output.append("\x1b[2K");
+					}
+					output.append("\x1b[H");
+				} else {
+					output.append("\x1b[2J\x1b[H\x1b[3J");
+				}
 			}
 			for (let i = start; i < newLines.length; i++) {
 				if (i > start) output.append("\r\n");

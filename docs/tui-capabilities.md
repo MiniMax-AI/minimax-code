@@ -90,7 +90,9 @@ screen, the renderer keeps native scrollback and the Composer position stable.
 Freed rows temporarily remain blank at the top of the active screen and subsequent
 output reuses them. This avoids resetting the host's scroll position when a turn
 finishes. Redundant resize notifications with unchanged dimensions do not rebuild
-history.
+history. Viewport-only redraws erase rows in place so terminals that save a cleared
+screen to scrollback, including Apple Terminal, do not retain the old Composer,
+status line or duplicate transcript rows.
 
 When a change removes or replaces text already in scrollback, the renderer still
 reconstructs the current session to avoid stale or duplicate history. Real resizes
