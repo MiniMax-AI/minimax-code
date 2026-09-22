@@ -20,6 +20,65 @@ import { validateReleaseReports } from '../scripts/publish-cli-release.mjs';
 import { compareVersions, releaseCli } from '../scripts/release-cli.mjs';
 import { compareRuns, exitCodeForStatus, renderReport, spread, validateRun, validateRequest, validateToolOutput, median, selectScenarios } from '../scripts/perf/report.mjs';
 import { copyMcodeToolsArtifact, downloadMcodeToolsArtifact, MCODE_TOOLS_ARTIFACT } from '../scripts/lib/mcode-tools-artifact.mjs';
+import { checkWindowsSourceLocation, runWindowsSourceLocationCheck } from '../scripts/check-windows-source-location.mjs';
+
+test('Windows source preflight accepts localized fsutil labels', () => {
+  const result = checkWindowsSourceLocation({
+    platform: 'win32',
+    cwd: 'C:\\repo',
+    execFile: (_command, args) => args[1] === 'drivetype'
+      ? 'Laufwerkstyp: DRIVE_FIXED\n'
+      : 'Dateisystemname: NTFS\n',
+  });
+  assert.deepEqual(result, { ok: true, skipped: false });
+});
+
+test('Windows source preflight requires a local NTFS checkout', () => {
+  const calls = [];
+  const execFile = (command, args) => {
+    calls.push([command, args]);
+    if (args[1] === 'drivetype') return 'Drive type is : DRIVE_FIXED\n';
+    return 'File System Name             : NTFS\n';
+  };
+  assert.deepEqual(
+    checkWindowsSourceLocation({ platform: 'win32', cwd: 'C:\\repo', execFile }),
+    { ok: true, skipped: false },
+  );
+  assert.deepEqual(calls.map(([command, args]) => [command, args[1]]), [
+    ['fsutil', 'drivetype'],
+    ['fsutil', 'volumeinfo'],
+  ]);
+});
+
+test('Windows source preflight rejects unsupported volumes clearly', () => {
+  const run = (driveType, volumeInfo, cwd = 'C:\\repo') => checkWindowsSourceLocation({
+    platform: 'win32', cwd,
+    execFile: (_command, args) => args[1] === 'drivetype' ? driveType : volumeInfo,
+  });
+  assert.match(run('Drive type is : DRIVE_REMOTE\n', 'File System Name : NTFS\n').reason, /not a local fixed drive/);
+  assert.match(run('Drive type is : DRIVE_FIXED\n', 'File System Name : FAT32\n').reason, /not formatted as NTFS/);
+  assert.match(run('Drive type is : DRIVE_FIXED\n', 'File System Name : NTFS\n', '\\\\server\\share\\repo').reason, /not a local drive-letter path/);
+});
+
+test('Windows source preflight is a no-op on non-Windows platforms', () => {
+  assert.deepEqual(
+    checkWindowsSourceLocation({ platform: 'linux', execFile: () => assert.fail('must not run fsutil') }),
+    { ok: true, skipped: true },
+  );
+});
+
+test('Windows source preflight propagates a failed check to the CLI', () => {
+  const messages = [];
+  const result = runWindowsSourceLocationCheck({
+    platform: 'win32',
+    cwd: 'C:\\repo',
+    execFile: () => { throw new Error('fsutil unavailable'); },
+    report: (message) => messages.push(message),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /fsutil unavailable/);
+});
 
 test('artifact download recovers from TLS reset and interrupted response bodies', async () => {
   const reset = new TypeError('fetch failed', { cause: Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }) });

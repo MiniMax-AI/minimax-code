@@ -29,6 +29,7 @@ vi.mock("node:child_process", async (importOriginal) => ({
 let workspaceDir: string;
 let imagePath: string;
 const windowsPath = String.raw`D:\Users\demo\Documents\Screen shots\截图.png`;
+const skipWslConversion = process.platform === "win32";
 
 beforeEach(async () => {
   host.platform.mockReturnValue("linux");
@@ -48,8 +49,11 @@ afterEach(async () => {
   await rm(workspaceDir, { recursive: true, force: true });
 });
 
+// The mocked wslpath output is the host temp path. Native Windows correctly
+// rejects that as a Linux absolute path, so only WSL conversion cases skip there;
+// native path handling remains covered.
 describe("WSL attachment paths", () => {
-  it.each([
+  it.skipIf(process.platform === "win32").each([
     windowsPath,
     `"${windowsPath}"`,
     `'${windowsPath}'`,
@@ -91,7 +95,7 @@ describe("WSL attachment paths", () => {
     },
   );
 
-  it("resolves headless --file through the same conversion before realpath", async () => {
+  it.skipIf(skipWslConversion)("resolves headless --file through the same conversion before realpath", async () => {
     const invocation = await resolveTuiExecInvocation(
       "describe",
       { cwd: workspaceDir, file: [windowsPath] },
@@ -109,7 +113,7 @@ describe("WSL attachment paths", () => {
     expect(host.executeFile).toHaveBeenCalledOnce();
   });
 
-  it.each(["WSL_DISTRO_NAME", "WSL_INTEROP", "WSLENV"])(
+  it.skipIf(skipWslConversion).each(["WSL_DISTRO_NAME", "WSL_INTEROP", "WSLENV"])(
     "detects WSL via %s even without a Microsoft kernel name",
     async (name) => {
       host.release.mockReturnValue("custom-kernel");
@@ -156,7 +160,7 @@ describe("WSL attachment paths", () => {
     expect(host.executeFile).not.toHaveBeenCalled();
   });
 
-  it.each([
+  it.skipIf(skipWslConversion).each([
     String.raw`d:\Screen shots\$(touch marker);'截图'.png`,
     String.raw`\\server\share\截图.png`,
   ])("passes Windows paths as a literal argument: %s", async (reference) => {
@@ -221,7 +225,7 @@ describe("WSL attachment paths", () => {
     },
   );
 
-  it("still rejects missing files and directories after conversion", async () => {
+  it.skipIf(skipWslConversion)("still rejects missing files and directories after conversion", async () => {
     host.executeFile.mockResolvedValue({
       stdout: `${join(workspaceDir, "missing.png")}\n`,
     });

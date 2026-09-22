@@ -3298,6 +3298,7 @@
     "release/public-source.json",
     "scripts/build.mjs",
     "scripts/check-standalone-boundary.mjs",
+    "scripts/check-windows-source-location.mjs",
     "scripts/ci-changes.mjs",
     "scripts/export-source-preview.mjs",
     "scripts/gen-tsconfig-paths.mjs",
