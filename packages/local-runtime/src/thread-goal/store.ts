@@ -36,6 +36,7 @@ import {
   runInImmediateTransaction,
   withLocalRuntimeDb,
 } from '../persistence/db.js';
+import { runGoalStoreWrite } from './db-write-lock.js';
 import { updateThreadGoalBreaker } from './store-breaker.js';
 import { bumpThreadGoalBoundUsage, settleThreadGoalBoundTurn } from './store-bound-settlement.js';
 import {
@@ -86,7 +87,7 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
     sessionId: string,
     statusReason: ThreadGoalStatusReason = 'paused(user_requested)',
   ): Promise<ThreadGoalState | undefined> {
-    return this.withDb((db) => {
+    return this.withWriteDb((db) => {
       const now = this.nowMs();
       const result = db
         .prepare(
@@ -114,7 +115,7 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
       readonly statusReason: ThreadGoalStatusReason;
     },
   ): Promise<ThreadGoalState | undefined> {
-    return this.withDb((db) =>
+    return this.withWriteDb((db) =>
       runInImmediateTransaction(db, () => {
         const nextEpoch = Math.max(this.nowMs(), expectedEpoch + 1);
         const result = db
@@ -140,7 +141,7 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
     goalId: string,
     expectedEpoch: number,
   ): Promise<ThreadGoalState | undefined> {
-    return this.withDb((db) =>
+    return this.withWriteDb((db) =>
       runInImmediateTransaction(db, () => {
         const nextEpoch = Math.max(this.nowMs(), expectedEpoch + 1);
         const result = db
@@ -161,7 +162,7 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
   }
 
   async create(input: ThreadGoalCreateInput): Promise<ThreadGoalState> {
-    return this.withDb((db) =>
+    return this.withWriteDb((db) =>
       runInImmediateTransaction(db, () => {
         // codex parity (`insert_thread_goal`'s `ON CONFLICT … WHERE
         // status = 'complete'`): silently replace ONLY a complete goal.
@@ -232,7 +233,7 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
   }
 
   async patch(goalId: string, input: ThreadGoalPatchInput): Promise<ThreadGoalState> {
-    return this.withDb((db) => patchThreadGoal(db, this.nowMs, goalId, input));
+    return this.withWriteDb((db) => patchThreadGoal(db, this.nowMs, goalId, input));
   }
 
   /** User-authored Goal mutations; kept distinct from host settlement CAS. */
@@ -245,28 +246,28 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
     delta: ThreadGoalBoundUsageDelta,
     limits: ThreadGoalBudgetLimits,
   ): Promise<ThreadGoalBoundUsageResult> {
-    return this.withDb((db) => bumpThreadGoalBoundUsage(db, this.nowMs, binding, delta, limits));
+    return this.withWriteDb((db) => bumpThreadGoalBoundUsage(db, this.nowMs, binding, delta, limits));
   }
 
   async settleBoundTurn(input: ThreadGoalSettleBoundTurnInput): Promise<ThreadGoalDecisionResult> {
-    return this.withDb((db) => settleThreadGoalBoundTurn(db, this.nowMs, input));
+    return this.withWriteDb((db) => settleThreadGoalBoundTurn(db, this.nowMs, input));
   }
 
   async updateBreaker(
     goalId: string,
     input: ThreadGoalBreakerInput,
   ): Promise<ThreadGoalBreakerResult> {
-    return this.withDb((db) => updateThreadGoalBreaker(db, this.nowMs, goalId, input));
+    return this.withWriteDb((db) => updateThreadGoalBreaker(db, this.nowMs, goalId, input));
   }
 
   async recordVerification(
     input: ThreadGoalRecordVerificationInput,
   ): Promise<ThreadGoalDecisionResult> {
-    return this.withDb((db) => recordThreadGoalVerification(db, this.nowMs, input));
+    return this.withWriteDb((db) => recordThreadGoalVerification(db, this.nowMs, input));
   }
 
   async delete(goalId: string): Promise<void> {
-    this.withDb((db) => {
+    await this.withWriteDb((db) => {
       db.prepare(`DELETE FROM local_runtime_thread_goals WHERE goal_id = ?`).run(goalId);
     });
   }
@@ -327,7 +328,7 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
     expected: ThreadGoalKickoffState,
     next: ThreadGoalKickoffState,
   ): Promise<ThreadGoalState | undefined> {
-    return this.withDb((db) => {
+    return this.withWriteDb((db) => {
       const result = db
         .prepare(
           `UPDATE local_runtime_thread_goals
@@ -348,14 +349,14 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
     readonly expectedUpdatedAt: number;
     readonly reason: ThreadGoalWaitReason;
   }): Promise<ThreadGoalState | undefined> {
-    return this.withDb((db) => setThreadGoalExecutionWait(db, { ...input, nowMs: this.nowMs() }));
+    return this.withWriteDb((db) => setThreadGoalExecutionWait(db, { ...input, nowMs: this.nowMs() }));
   }
 
   async clearExecutionWaitAtEpoch(input: {
     readonly goalId: string;
     readonly expectedUpdatedAt: number;
   }): Promise<ThreadGoalState | undefined> {
-    return this.withDb((db) => clearThreadGoalExecutionWait(db, input));
+    return this.withWriteDb((db) => clearThreadGoalExecutionWait(db, input));
   }
 
   /** Goals still showing `verification` — only ever stale rows at startup. */
@@ -365,5 +366,13 @@ export class SqliteThreadGoalStore implements ThreadGoalStore {
 
   private withDb<T>(fn: (db: DatabaseLike) => T): T {
     return withLocalRuntimeDb(this.dataDir, fn);
+  }
+
+  /**
+   * Writes share `runtime-state.sqlite` with every other `mcode` process, so
+   * they retry lock acquisition instead of failing the Turn on SQLITE_BUSY.
+   */
+  private withWriteDb<T>(fn: (db: DatabaseLike) => T): Promise<T> {
+    return runGoalStoreWrite(this.dataDir, fn);
   }
 }

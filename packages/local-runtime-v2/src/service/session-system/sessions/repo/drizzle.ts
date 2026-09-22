@@ -20,6 +20,7 @@ import {
 } from 'drizzle-orm';
 
 import type { AppDb } from '../../../../infra/db/client.js';
+import { runWithWriteLock } from '../../../../infra/db/write-transaction.js';
 import {
   sessionAgentDefinitions,
   taskSessionBindings,
@@ -264,7 +265,8 @@ class DrizzleSessionRepository implements SessionRepository {
         ? serializeTaskSessionBinding(toLegacyTaskSessionBinding(definitionInput))
         : undefined;
     try {
-      this.options.db.transaction((tx) => {
+      await runWithWriteLock(
+        this.options.db,(tx) => {
         tx.insert(sessions)
           .values(encodeSessionRow(record, { projectId: input.projectId }))
           .run();
@@ -317,7 +319,8 @@ class DrizzleSessionRepository implements SessionRepository {
     backfill: SessionAgentDefinitionBackfill,
   ): Promise<SessionAgentDefinition> {
     const serialized = serializeSessionAgentDefinition(backfill.agentDefinition);
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const row = selectRow(tx, sessionId);
         if (!row) throw new Error(`Session does not exist: ${sessionId}`);
@@ -336,7 +339,6 @@ class DrizzleSessionRepository implements SessionRepository {
         if (!definition) throw new Error(`Session Agent definition was not created: ${sessionId}`);
         return decodeSessionAgentDefinition(definition);
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -345,7 +347,8 @@ class DrizzleSessionRepository implements SessionRepository {
     next: SessionAgentDefinitionBackfill,
   ): Promise<SessionAgentDefinition> {
     const serialized = serializeSessionAgentDefinition(next.agentDefinition);
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const row = selectRow(tx, sessionId);
         if (!row) throw new Error(`Session does not exist: ${sessionId}`);
@@ -366,7 +369,6 @@ class DrizzleSessionRepository implements SessionRepository {
           .run();
         return { sessionId, definition: next.agentDefinition.definition };
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -384,7 +386,8 @@ class DrizzleSessionRepository implements SessionRepository {
     backfill: SessionTaskAgentBindingBackfill,
   ): Promise<TaskSessionBinding> {
     const serialized = serializeTaskSessionBinding(backfill.taskAgentBinding);
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const row = selectRow(tx, sessionId);
         if (!row) throw new Error(`Session does not exist: ${sessionId}`);
@@ -403,7 +406,6 @@ class DrizzleSessionRepository implements SessionRepository {
         if (!binding) throw new Error(`Task Agent binding was not created: ${sessionId}`);
         return decodeTaskSessionBinding(binding);
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -413,7 +415,8 @@ class DrizzleSessionRepository implements SessionRepository {
     expectedModel?: SessionModelSnapshot,
     expectedTitle?: string | null,
   ): Promise<SessionRecord | undefined> {
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const row = selectRow(tx, sessionId);
         if (!row) return undefined;
@@ -429,7 +432,6 @@ class DrizzleSessionRepository implements SessionRepository {
         syncSessionAgentDefinitionModel(tx, sessionId, modelFields);
         return record;
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -440,7 +442,8 @@ class DrizzleSessionRepository implements SessionRepository {
     const normalizedCronId = originCronId.trim();
     if (!normalizedCronId) return [];
     const normalizedTargetSessionId = targetSessionId?.trim();
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const rows = tx
           .select()
@@ -472,20 +475,20 @@ class DrizzleSessionRepository implements SessionRepository {
           return detached;
         });
       },
-      { behavior: 'immediate' },
     );
   }
 
   async upsert(record: SessionWriteRecord): Promise<void> {
-    this.writeUpsert(record, false);
+    await this.writeUpsert(record, false);
   }
 
   async upsertImportedLegacy(record: SessionWriteRecord): Promise<void> {
-    this.writeUpsert(record, true);
+    await this.writeUpsert(record, true);
   }
 
   async delete(sessionId: string): Promise<void> {
-    this.options.db.transaction((tx) => {
+    await runWithWriteLock(
+      this.options.db,(tx) => {
       deleteSessionSearchDocument(tx, sessionId);
       tx.delete(sessionAgentState).where(eq(sessionAgentState.sessionId, sessionId)).run();
       tx.delete(sessions).where(eq(sessions.sessionId, sessionId)).run();
@@ -504,7 +507,8 @@ class DrizzleSessionRepository implements SessionRepository {
     sessionId: string,
     relativeDir: string,
   ): Promise<string | undefined> {
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const row = tx
           .select({ historyRelativeDir: sessions.historyRelativeDir })
@@ -531,12 +535,12 @@ class DrizzleSessionRepository implements SessionRepository {
             .get()?.historyRelativeDir ?? undefined
         );
       },
-      { behavior: 'immediate' },
     );
   }
 
   async swapRoot(input: SessionRootSwapInput): Promise<SessionRootSwapResult> {
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const nextRow = selectRow(tx, input.nextRootSessionId);
         if (!nextRow) throw new SessionRootSwapError('next-root-not-found');
@@ -597,7 +601,6 @@ class DrizzleSessionRepository implements SessionRepository {
         writeRow(tx, nextRow, nextRoot);
         return { previousRoots, nextRoot };
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -605,7 +608,8 @@ class DrizzleSessionRepository implements SessionRepository {
     parentSessionId: string,
     nextParentSessionId: string | null,
   ): Promise<void> {
-    this.options.db.transaction((tx) => {
+    await runWithWriteLock(
+      this.options.db,(tx) => {
       const nowMs = this.nowMs();
       const rows = tx
         .select()
@@ -628,7 +632,8 @@ class DrizzleSessionRepository implements SessionRepository {
 
   async applyAgentState(input: AgentSessionStateMutation): Promise<AgentSessionStateWriteResult> {
     assertAgentStateMutation(input);
-    return this.options.db.transaction(
+    return runWithWriteLock(
+      this.options.db,
       (tx) => {
         const row = selectRow(tx, input.sessionId);
         if (!row) return { status: 'not-found' };
@@ -649,7 +654,6 @@ class DrizzleSessionRepository implements SessionRepository {
           .run();
         return { status: 'applied' };
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -962,12 +966,13 @@ class DrizzleSessionRepository implements SessionRepository {
     return result;
   }
 
-  private writeUpsert(record: SessionWriteRecord, replaceIdentity: boolean): void {
+  private async writeUpsert(record: SessionWriteRecord, replaceIdentity: boolean): Promise<void> {
     const normalizedRecord: SessionRecord = {
       ...record,
       sessionType: normalizeSessionType(record.sessionType),
     };
-    this.options.db.transaction((tx) => {
+    await runWithWriteLock(
+      this.options.db,(tx) => {
       const existing = selectRow(tx, normalizedRecord.sessionId);
       if (!existing) {
         tx.insert(sessions).values(encodeSessionRow(normalizedRecord)).run();

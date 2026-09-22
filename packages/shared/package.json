@@ -191,6 +191,10 @@
     "./safety-check-v2": {
       "types": "./src/safety-check-v2.ts",
       "import": "./dist/safety-check-v2.js"
+    },
+    "./sqlite-write-retry": {
+      "types": "./src/sqlite-write-retry.ts",
+      "import": "./dist/sqlite-write-retry.js"
     }
   },
   "types": "./src/index.ts",
