@@ -69,6 +69,11 @@ provider through a shared anchor, and clearing an inherited key stays cleared
 when the file is read again. A no-op write keeps the original text. Changed
 files may have normalized whitespace or indentation.
 
+Numeric provider and model keys retain their identity during updates. YAML version
+directives do not change the application loader's scalar interpretation during
+alias expansion. Each changed document is checked with that loader before the
+configuration file is replaced.
+
 Malformed configuration is rejected without replacing the existing file. POSIX
 configuration permissions remain private. Runtime log fields and common
 credential text are redacted, while token usage counters remain readable. This

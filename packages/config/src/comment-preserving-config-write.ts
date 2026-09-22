@@ -1,5 +1,17 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import yaml from 'js-yaml';
-import { isNode, isScalar, parseDocument, visit, type Alias, type Document, type Node } from 'yaml';
+import {
+  isMap,
+  isNode,
+  isScalar,
+  parseDocument,
+  visit,
+  type Alias,
+  type Document,
+  type Node,
+  type YAMLMap,
+} from 'yaml';
 
 /**
  * Runtime rewrites of config.yaml must not throw away what the user wrote.
@@ -43,23 +55,36 @@ export function serializeConfigPreservingComments(
   previous: Record<string, unknown>,
   next: Record<string, unknown>,
 ): string {
-  const document = parseDocument(originalText, { merge: true });
-  if (document.errors.length > 0 || isUnusableDocument(document.toJSON(), originalText)) {
+  const document = parseDocument(originalText, {
+    schema: 'core',
+    compat: 'yaml-1.1',
+    customTags: ['timestamp'],
+    merge: true,
+  });
+  if (document.errors.length > 0 || (!isMap(document.contents) && originalText.trim() !== '')) {
     return dumpConfig(next);
   }
 
   try {
     const edits = collectConfigEdits(previous, next);
     if (edits.length === 0) return originalText;
+    useConfigLoaderScalarValues(document);
     materializeConfigReferences(document);
     for (const edit of edits) {
+      const path = existingConfigPath(document, edit.path);
       if (edit.kind === 'delete') {
-        document.deleteIn(edit.path);
+        document.deleteIn(path);
       } else {
-        document.setIn(edit.path, edit.value);
+        document.setIn(path, edit.value);
       }
     }
-    return document.toString({ indent: 2, lineWidth: -1 });
+    const serialized = document.toString({ indent: 2, lineWidth: -1 });
+    // The application loader is the final authority. Reject an invalid or
+    // semantically different result before the atomic writer replaces the file.
+    if (!isDeepStrictEqual(yaml.load(serialized), yaml.load(dumpConfig(next)))) {
+      throw new Error('The serialized configuration does not match the intended values');
+    }
+    return serialized;
   } catch (error) {
     // A self-referential anchor (`&a { self: *a }`) makes the emitter recurse
     // without bound. That input cannot be written back in any form, so report
@@ -67,9 +92,44 @@ export function serializeConfigPreservingComments(
     throw new Error(
       `config.yaml could not be rewritten: ${
         error instanceof Error ? error.message : String(error)
-      }. Remove the self-referential YAML anchor and retry.`,
+      }${error instanceof RangeError ? '. Remove the self-referential YAML anchor and retry.' : ''}`,
     );
   }
+}
+
+/** Keep alias expansion independent of the AST parser's implicit scalar rules. */
+function useConfigLoaderScalarValues(document: Document): void {
+  visit(document, {
+    Scalar(_key, node) {
+      if (node.addToJSMap || typeof node.source !== 'string') return;
+      if (node.type !== 'PLAIN' && !node.tag) return;
+      // A mapping wrapper keeps values such as "---" from becoming directives.
+      // Explicit tags still apply to quoted values; ordinary quoted strings
+      // already have the same interpretation in both parsers.
+      const source = node.type === 'PLAIN' ? node.source : JSON.stringify(node.source);
+      const tag = node.tag ? `!<${node.tag}> ` : '';
+      const value = (yaml.load(`value: ${tag}${source}`) as { value: unknown }).value;
+      if (!isDeepStrictEqual(node.value, value)) {
+        node.value = value;
+        delete node.format;
+      }
+    },
+  });
+}
+
+/** JavaScript config keys are strings, while YAML keeps numeric/boolean keys typed. */
+function existingConfigKey(map: YAMLMap, key: string): unknown {
+  return map.items.find((pair) => isScalar(pair.key) && String(pair.key.value) === key)?.key ?? key;
+}
+
+function existingConfigPath(document: Document, path: readonly string[]): unknown[] {
+  const resolved: unknown[] = [];
+  let parent: unknown = document.contents;
+  for (const key of path) {
+    resolved.push(isMap(parent) ? existingConfigKey(parent, key) : key);
+    parent = document.getIn(resolved, true);
+  }
+  return resolved;
 }
 
 /**
@@ -105,15 +165,20 @@ function materializeConfigReferences(document: Document): void {
       map.commentBefore = [map.commentBefore, ...comments].filter(Boolean).join('\n') || undefined;
       map.items = map.items.filter((pair) => !merges.includes(pair));
       for (const [key, value] of Object.entries(values)) {
-        if (!map.has(key)) {
+        if (!map.has(existingConfigKey(map, key))) {
           map.set(key, createConfigNode(document, value));
         }
       }
     },
   });
-  // All merge pairs are gone. The merge schema's emitter would otherwise
-  // render even a quoted literal "<<" key as merge syntax again.
-  document.setSchema(document.directives?.yaml.version ?? '1.2', { merge: false });
+  // All merge pairs are gone. Disable merge emission, and quote strings that
+  // either scalar schema could interpret (including the loader's 0b integers).
+  document.setSchema(document.directives?.yaml.version ?? '1.2', {
+    schema: 'core',
+    compat: 'yaml-1.1',
+    customTags: ['timestamp'],
+    merge: false,
+  });
 }
 
 function createConfigNode(document: Document, value: unknown): Node {
@@ -146,10 +211,6 @@ function collectConfigEdits(previous: unknown, next: unknown, path: string[] = [
     }
   }
   return edits;
-}
-
-function isUnusableDocument(value: unknown, originalText: string): boolean {
-  return !isPlainRecord(value) && originalText.trim() !== '';
 }
 
 function valuesEqual(left: unknown, right: unknown): boolean {

@@ -1,3 +1,4 @@
+import yaml from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -28,6 +29,85 @@ custom_provider:
 `;
 
 describe('comment-preserving config serialization', () => {
+  it.each(['123', '0x10', 'true', 'null'])(
+    'updates and deletes existing scalar mapping key %s',
+    (sourceKey) => {
+      const original = `custom_provider:\n  ${sourceKey}: # existing provider\n    options: { apiKey: old-placeholder }\n`;
+      const previous = parseConfigText(original);
+      const providers = previous.custom_provider as Record<string, unknown>;
+      const key = Object.keys(providers)[0];
+      const updated = apply(original, (config) => {
+        const tree = config.custom_provider as Record<string, { options: Record<string, unknown> }>;
+        tree[key].options.apiKey = 'new-placeholder';
+      });
+      expect(yaml.load(updated)).toEqual({
+        custom_provider: { [key]: { options: { apiKey: 'new-placeholder' } } },
+      });
+      expect(updated).toContain('# existing provider');
+
+      const removed = apply(original, (config) => {
+        delete (config.custom_provider as Record<string, unknown>)[key];
+      });
+      expect(yaml.load(removed)).toEqual({ custom_provider: {} });
+    },
+  );
+
+  it('preserves numeric explicit keys alongside merged defaults', () => {
+    const original = `defaults: &defaults { 123: inherited, 456: retained }
+settings:
+  <<: *defaults
+  123: explicit # local override
+`;
+    const written = apply(original, (config) => {
+      (config.settings as Record<string, unknown>)['123'] = 'updated';
+    });
+    expect(yaml.load(written)).toEqual({
+      defaults: { '123': 'inherited', '456': 'retained' },
+      settings: { '123': 'updated', '456': 'retained' },
+    });
+    expect(written).toContain('# local override');
+  });
+
+  it.each(['', '%YAML 1.1\n---\n'])(
+    'uses loader scalar semantics when materializing aliases and merges with directive %j',
+    (directive) => {
+      const original = `${directive}defaults: &defaults
+  on: on
+  yes: yes
+  no: no
+  zero: 012
+  binary: 0b10
+  binaryText: "0b10"
+  decimalText: "012"
+  separated: 1_000
+  date: 2020-01-01
+  tagged: !!str 012
+  folded: >
+    first
+    second
+alias: *defaults
+merged:
+  <<: *defaults
+  local: retained
+`;
+      const expected = { ...parseConfigText(original), logLevel: 'debug' };
+      const written = apply(original, (config) => {
+        config.logLevel = 'debug';
+      });
+      expect(yaml.load(written)).toEqual(expected);
+    },
+  );
+
+  it('rejects a serialized document that no longer matches the intended configuration', () => {
+    expect(() =>
+      serializeConfigPreservingComments(
+        'logLevel: info\n',
+        { logLevel: 'debug' },
+        { logLevel: 'debug', defaultModel: 'work/new' },
+      ),
+    ).toThrow(/serialized configuration does not match/u);
+  });
+
   it('keeps reference syntax unchanged when no configuration values change', () => {
     const original = 'first: &options { apiKey: placeholder }\nsecond: *options\n';
     const previous = parseConfigText(original);

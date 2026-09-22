@@ -48,6 +48,81 @@ describe('local model-provider config writes', () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
+  it('updates a numeric provider key without corrupting the persisted configuration', async () => {
+    fs.writeFileSync(
+      getConfigPath(),
+      `# provider settings
+custom_provider:
+  123: # numeric provider
+    options:
+      baseURL: https://fixture.example/v1
+      apiKey: old-placeholder
+`,
+      'utf-8',
+    );
+    resetConfig();
+
+    await updateLocalByokConfig((draft) => {
+      const providers = draft.custom_provider as Record<
+        string,
+        { options: Record<string, unknown> }
+      >;
+      providers['123'].options = {
+        ...providers['123'].options,
+        apiKey: 'new-placeholder',
+      };
+    });
+
+    expect(readConfig()).toEqual({
+      custom_provider: {
+        '123': {
+          options: {
+            baseURL: 'https://fixture.example/v1',
+            apiKey: 'new-placeholder',
+          },
+        },
+      },
+    });
+    expect(fs.readFileSync(getConfigPath(), 'utf-8')).toContain('# numeric provider');
+    resetConfig();
+    expect(getConfig().custom_provider?.['123'].options?.apiKey).toBe('new-placeholder');
+  });
+
+  it('preserves YAML 1.1 aliased headers when changing only the default model', async () => {
+    fs.writeFileSync(
+      getConfigPath(),
+      `%YAML 1.1
+---
+defaultModel: custom_provider:primary/old
+custom_provider:
+  primary:
+    options: &options
+      baseURL: https://fixture.example/v1
+      apiKey: placeholder
+      headers:
+        X-Feature: on # retain the header value
+        X-Binary: "0b10"
+  secondary:
+    options: *options
+`,
+      'utf-8',
+    );
+    resetConfig();
+    const expected = {
+      ...readConfig(),
+      defaultModel: 'custom_provider:primary/new',
+    };
+
+    await updateLocalModelSelection({
+      modelKey: 'custom_provider:primary/new',
+    });
+
+    expect(readConfig()).toEqual(expected);
+    expect(fs.readFileSync(getConfigPath(), 'utf-8')).toContain('# retain the header value');
+    resetConfig();
+    expect(getConfig().custom_provider?.secondary.options?.headers?.['X-Feature']).toBe('on');
+  });
+
   it.each(['primary', 'secondary'])(
     'persists an isolated %s provider update with YAML aliases',
     async (key) => {
