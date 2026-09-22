@@ -693,6 +693,7 @@
     "packages/local-runtime-v2/src/infra/db/migrations/session/migration-0033-converge-channel-session-project-schema.ts",
     "packages/local-runtime-v2/src/infra/db/migrations/session/migration-0034-restore-shared-project-schema-compatibility.ts",
     "packages/local-runtime-v2/src/infra/db/migrations/session/migration-0035-converge-published-schema-collisions.ts",
+    "packages/local-runtime-v2/src/infra/db/migrations/session/migration-0037-track-message-row-revisions.ts",
     "packages/local-runtime-v2/src/infra/db/preference-values.ts",
     "packages/local-runtime-v2/src/infra/db/project-migration-recovery.ts",
     "packages/local-runtime-v2/src/infra/db/schema-consistency.ts",

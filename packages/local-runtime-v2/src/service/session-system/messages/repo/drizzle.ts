@@ -1,9 +1,11 @@
 import { and, asc, desc, eq, gt, gte, inArray, lt, lte, placeholder, sql } from 'drizzle-orm';
 
+import { canonicalizeSqlContract } from '../../../../infra/db/sql-contract.js';
 import type { AppDb } from '../../../../infra/db/client.js';
 import { runWithWriteLock } from '../../../../infra/db/write-transaction.js';
 import {
   legacyMessages,
+  MESSAGE_ROW_REVISION_OBJECTS,
   messageRowMigrations,
   messageRows,
   sessionAssetIndexState,
@@ -150,40 +152,54 @@ class DrizzleMessageRepository implements MessageRepository {
     if (!Number.isSafeInteger(limit) || limit <= 0) return [];
     this.ensureReady(sessionId);
     return this.options.db.transaction((tx) => {
-      // Keep exact raw payloads inside SQLite. Unrelated writes through other
-      // connections must not invalidate every row, and row ids alone are not
-      // proof: external SQL can replace or rewrite an existing row.
+      // Hold one main-database snapshot for the schema proof and all row reads.
+      tx.get(sql`SELECT id FROM main.local_runtime_message_rows LIMIT 1`);
       tx.run(sql`CREATE TEMP TABLE IF NOT EXISTS mcode_display_validation (
-        id INTEGER PRIMARY KEY, message_id TEXT NOT NULL, data_json TEXT NOT NULL,
-        source TEXT, source_context_json TEXT, assistant INTEGER NOT NULL
+        id INTEGER PRIMARY KEY, version INTEGER NOT NULL, assistant INTEGER NOT NULL
       )`);
-      const turn = and(eq(messageRows.sessionId, sessionId), eq(messageRows.turnId, turnId));
-      const size = tx.get<{ count: number; bytes: number }>(sql`SELECT count(*) AS count,
-        coalesce(sum(length(CAST(data_json AS BLOB)) + length(CAST(msg_id AS BLOB)) +
-          coalesce(length(CAST(source AS BLOB)), 0) +
-          coalesce(length(CAST(source_context_json AS BLOB)), 0)), 0) AS bytes
-        FROM ${messageRows} WHERE ${turn}`)!;
-      // Bound the temporary payload copy. Oversized turns retain the uncached
-      // full-decode behavior, including errors in rows outside the final tail.
-      if (size.count > 4096 || size.bytes > 4 * 1024 * 1024) {
+      // Schema changes can remove or replace invalidation triggers. Keep the
+      // check transactional so rollback cannot leave a stale JS-side proof.
+      tx.run(sql`CREATE TEMP TABLE IF NOT EXISTS mcode_display_validation_schema (
+        id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER, valid INTEGER
+      )`);
+      const version = tx.get<{ schema_version: number }>(sql`PRAGMA main.schema_version`)!.schema_version;
+      let schema = tx.get<{ version: number; valid: number }>(sql`SELECT version, valid
+        FROM temp.mcode_display_validation_schema WHERE id = 1`);
+      if (!schema || schema.version !== version) {
+        const rows = tx.all<{ name: string; sql: string }>(sql`SELECT name, sql FROM main.sqlite_master`);
+        const definitions = new Map(rows.map(row => [row.name, row.sql]));
+        const valid = Object.entries(MESSAGE_ROW_REVISION_OBJECTS).every(([name, definition]) =>
+          definitions.has(name) && canonicalizeSqlContract(definitions.get(name)!) === canonicalizeSqlContract(definition));
+        schema = { version, valid: valid ? 1 : 0 };
         tx.run(sql`DELETE FROM temp.mcode_display_validation`);
-        return tx.select().from(messageRows).where(turn).orderBy(asc(messageRows.id))
-          .all().map(decodeDisplayMessage).filter(isCanonicalAssistant).slice(-limit);
+        tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation_schema
+          VALUES (1, ${version}, ${schema.valid})`);
+      }
+      const turn = and(eq(messageRows.sessionId, sessionId), eq(messageRows.turnId, turnId));
+      const fullRead = () => tx.select().from(messageRows).where(turn).orderBy(asc(messageRows.id))
+        .all().map(decodeDisplayMessage).filter(isCanonicalAssistant).slice(-limit);
+      if (!schema.valid) return fullRead();
+      const size = tx.get<{ count: number; indexed: number }>(sql`SELECT count(*) AS count,
+        count(v.row_id) AS indexed FROM ${messageRows}
+        LEFT JOIN local_runtime_message_row_revisions v ON v.row_id = ${messageRows.id}
+        WHERE ${turn}`)!;
+      if (size.count > 4096 || size.indexed !== size.count) {
+        tx.run(sql`DELETE FROM temp.mcode_display_validation`);
+        return fullRead();
       }
       // Retain one turn only, including after deletes and turn transfers.
       tx.run(sql`DELETE FROM temp.mcode_display_validation WHERE id NOT IN
         (SELECT id FROM ${messageRows} WHERE ${turn})`);
       const changed = tx.select().from(messageRows).where(and(turn,
         sql`NOT EXISTS (SELECT 1 FROM temp.mcode_display_validation v
-          WHERE v.id = ${messageRows.id} AND v.message_id IS ${messageRows.messageId}
-            AND v.data_json IS ${messageRows.dataJson} AND v.source IS ${messageRows.source}
-            AND v.source_context_json IS ${messageRows.sourceContextJson})`,
+          WHERE v.id = ${messageRows.id} AND v.version =
+            (SELECT version FROM local_runtime_message_row_revisions WHERE row_id = ${messageRows.id}))`,
       )).orderBy(asc(messageRows.id)).all();
       for (const row of changed) {
         const message = decodeDisplayMessage(row);
-        tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation VALUES
-          (${row.id}, ${row.messageId}, ${row.dataJson}, ${row.source},
-            ${row.sourceContextJson}, ${isCanonicalAssistant(message) ? 1 : 0})`);
+        tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation
+          SELECT ${row.id}, version, ${isCanonicalAssistant(message) ? 1 : 0}
+          FROM local_runtime_message_row_revisions WHERE row_id = ${row.id}`);
       }
       return tx.select().from(messageRows).where(and(turn,
         sql`EXISTS (SELECT 1 FROM temp.mcode_display_validation v

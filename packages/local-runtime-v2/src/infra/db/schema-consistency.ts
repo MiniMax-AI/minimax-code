@@ -1,3 +1,4 @@
+import { MESSAGE_ROW_REVISION_OBJECTS } from './schema/messages.js';
 import type { BetterSqlite3Instance } from './client.js';
 import {
   canonicalizeSqlContract,
@@ -280,6 +281,14 @@ const REMOVED_TABLES = [
 ] as const;
 
 export function assertDatabaseSchemaConsistent(db: BetterSqlite3Instance): void {
+  if (migrationApplied(db, 37)) {
+    for (const [name, expected] of Object.entries(MESSAGE_ROW_REVISION_OBJECTS)) {
+      const row = db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(name);
+      if (!row || compactSql(readSql(row)) !== compactSql(expected)) {
+        throw new Error(`Database message revision schema mismatch: ${name}`);
+      }
+    }
+  }
   assertSessionMetadataComplete();
   assertRemovedTablesAbsent(db);
   assertRequiredTableColumns(db);

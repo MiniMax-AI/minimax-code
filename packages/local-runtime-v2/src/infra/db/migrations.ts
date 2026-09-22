@@ -35,6 +35,8 @@ import { migration as m0033 } from './migrations/session/migration-0033-converge
 import { migration as m0034 } from './migrations/session/migration-0034-restore-shared-project-schema-compatibility.js';
 import { migration as m0035 } from './migrations/session/migration-0035-converge-published-schema-collisions.js';
 
+import { migration as m0037 } from './migrations/session/migration-0037-track-message-row-revisions.js';
+
 export const ALL_MIGRATIONS: readonly MigrationEntry[] = [
   m0001,
   m0002,
@@ -71,4 +73,5 @@ export const ALL_MIGRATIONS: readonly MigrationEntry[] = [
   m0034,
   m0035,
   m0036,
+  m0037,
 ];

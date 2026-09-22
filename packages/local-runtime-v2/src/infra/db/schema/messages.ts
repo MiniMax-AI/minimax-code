@@ -93,3 +93,32 @@ export const sessionAssetIndexState = sqliteTable('local_runtime_session_asset_i
   status: text('status').notNull(),
   errorJson: text('error_json'),
 });
+
+/** SQLite maintains these revisions for repository writes and other connections alike. */
+export const MESSAGE_ROW_REVISION_OBJECTS = {
+  local_runtime_message_row_revisions: `CREATE TABLE local_runtime_message_row_revisions (
+    version INTEGER PRIMARY KEY AUTOINCREMENT,
+    row_id INTEGER NOT NULL UNIQUE,
+    session_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    UNIQUE(session_id, msg_id)
+  )`,
+  local_runtime_message_revision_insert: `CREATE TRIGGER local_runtime_message_revision_insert
+    AFTER INSERT ON local_runtime_message_rows BEGIN
+      DELETE FROM local_runtime_message_row_revisions WHERE row_id = NEW.id
+        OR (session_id = NEW.session_id AND msg_id = NEW.msg_id);
+      INSERT INTO local_runtime_message_row_revisions (row_id, session_id, msg_id)
+        VALUES (NEW.id, NEW.session_id, NEW.msg_id);
+    END`,
+  local_runtime_message_revision_update: `CREATE TRIGGER local_runtime_message_revision_update
+    AFTER UPDATE ON local_runtime_message_rows BEGIN
+      DELETE FROM local_runtime_message_row_revisions WHERE row_id IN (OLD.id, NEW.id)
+        OR (session_id = NEW.session_id AND msg_id = NEW.msg_id);
+      INSERT INTO local_runtime_message_row_revisions (row_id, session_id, msg_id)
+        VALUES (NEW.id, NEW.session_id, NEW.msg_id);
+    END`,
+  local_runtime_message_revision_delete: `CREATE TRIGGER local_runtime_message_revision_delete
+    AFTER DELETE ON local_runtime_message_rows BEGIN
+      DELETE FROM local_runtime_message_row_revisions WHERE row_id = OLD.id;
+    END`,
+} as const;

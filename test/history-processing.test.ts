@@ -16,6 +16,10 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { DatabaseClient } from '../packages/local-runtime-v2/src/infra/db/client.js';
+import { runMigrations } from '../packages/local-runtime-v2/src/infra/db/migrate.js';
+import { migration as revisionMigration } from '../packages/local-runtime-v2/src/infra/db/migrations/session/migration-0037-track-message-row-revisions.js';
+import { MESSAGE_ROW_REVISION_OBJECTS } from '../packages/local-runtime-v2/src/infra/db/schema/messages.js';
+import { assertDatabaseSchemaConsistent } from '../packages/local-runtime-v2/src/infra/db/schema-consistency.js';
 import { initializeDatabase } from '../packages/local-runtime-v2/src/infra/db/initialize.js';
 import { queryCollapseViewStates } from '../packages/local-runtime-v2/src/infra/db/schema/query-collapse.js';
 import { turnIngress } from '../packages/local-runtime-v2/src/infra/db/schema/turn.js';
@@ -263,7 +267,7 @@ describe('prepared runtime reads', () => {
     });
   });
 
-  it('falls back when a turn exceeds the raw payload budget', async () => {
+  it('retains only integer validation metadata for a large message', async () => {
     await withDatabase(async (client) => {
       await createSessionRepository({ db: client.db }).create({
         sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
@@ -274,7 +278,73 @@ describe('prepared runtime reads', () => {
       } });
       const expected = await repo.listTurn('s1', 't1');
       expect(await repo.listCanonicalAssistantTail!('s1', 't1', 1)).toEqual(expected);
-      expect(client.rawDb.prepare('SELECT count(*) AS n FROM temp.mcode_display_validation').get())
+      const metadata = client.rawDb.prepare('SELECT * FROM temp.mcode_display_validation').all();
+      expect(metadata).toHaveLength(1);
+      expect(Object.values(metadata[0] as object).every(value => typeof value === 'number')).toBe(true);
+    });
+  });
+
+  it('backfills old rows and falls back if the revision schema is unavailable', async () => {
+    await withDatabase(async (client, writer) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      await repo.upsert({ sessionId: 's1', turnId: 't1', message: {
+        msg_id: 'old', role: 'assistant', text: 'original',
+      } });
+      const tail = () => repo.listCanonicalAssistantTail!('s1', 't1', 1);
+      const expected = await tail();
+      for (const name of Object.keys(MESSAGE_ROW_REVISION_OBJECTS).slice(1)) {
+        client.rawDb.exec(`DROP TRIGGER ${name}`);
+      }
+      client.rawDb.exec(`DROP TABLE local_runtime_message_row_revisions;
+        DELETE FROM local_runtime_v2_schema_migrations WHERE version = 37`);
+      expect(await tail()).toEqual(expected);
+      runMigrations(client.rawDb, [revisionMigration]);
+      assertDatabaseSchemaConsistent(client.rawDb);
+      expect(await tail()).toEqual(expected);
+      expect(client.rawDb.prepare('SELECT count(*) AS n FROM local_runtime_message_row_revisions').get())
+        .toEqual({ n: 1 });
+      writer.rawDb.exec('DROP TRIGGER local_runtime_message_revision_update');
+      expect(() => assertDatabaseSchemaConsistent(client.rawDb)).toThrow('revision schema mismatch');
+      writer.rawDb.prepare(`UPDATE local_runtime_message_rows SET data_json = ? WHERE msg_id = 'old'`)
+        .run('{"msg_id":"old","role":"user"}');
+      expect(await tail()).toEqual([]);
+      writer.rawDb.prepare(`UPDATE local_runtime_message_rows SET data_json = ? WHERE msg_id = 'old'`)
+        .run('broken');
+      await expect(tail()).rejects.toThrow();
+    });
+  });
+
+  it('keeps revisions unique across REPLACE conflicts and 64-bit sequence values', async () => {
+    await withDatabase(async (client, writer) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      for (const id of ['one', 'two']) await repo.upsert({
+        sessionId: 's1', turnId: 't1', message: { msg_id: id, role: 'assistant', text: id },
+      });
+      await repo.listCanonicalAssistantTail!('s1', 't1', 1);
+      writer.rawDb.exec(`PRAGMA foreign_keys = OFF; PRAGMA recursive_triggers = OFF;
+        UPDATE sqlite_sequence SET seq = 9007199254740992
+          WHERE name = 'local_runtime_message_row_revisions';
+        UPDATE OR REPLACE local_runtime_message_rows SET msg_id = 'two',
+          data_json = '{"msg_id":"two","role":"assistant","text":"replacement"}' WHERE msg_id = 'one'`);
+      expect((await repo.listCanonicalAssistantTail!('s1', 't1', 1))[0]?.text).toBe('replacement');
+      expect(writer.rawDb.prepare('SELECT count(*) AS n FROM local_runtime_message_row_revisions').get())
+        .toEqual({ n: 1 });
+      writer.rawDb.exec(`UPDATE local_runtime_message_rows SET data_json = 'broken' WHERE msg_id = 'two'`);
+      await expect(repo.listCanonicalAssistantTail!('s1', 't1', 1)).rejects.toThrow();
+      writer.rawDb.exec(`INSERT OR REPLACE INTO local_runtime_message_rows
+        (session_id, msg_id, turn_id, created_at_ms, data_json)
+        VALUES ('s1', 'two', 't1', 1, '{"msg_id":"two","role":"assistant","text":"new id"}')`);
+      expect((await repo.listCanonicalAssistantTail!('s1', 't1', 1))[0]?.text).toBe('new id');
+      expect(writer.rawDb.prepare('SELECT count(*) AS n FROM local_runtime_message_row_revisions').get())
+        .toEqual({ n: 1 });
+      writer.rawDb.exec('DELETE FROM local_runtime_message_rows');
+      expect(writer.rawDb.prepare('SELECT count(*) AS n FROM local_runtime_message_row_revisions').get())
         .toEqual({ n: 0 });
     });
   });
