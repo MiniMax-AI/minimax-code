@@ -18,6 +18,11 @@ export interface CanonicalHistoryFileAdapter {
   readTarget(path: string): Promise<readonly CanonicalHistoryEnvelope[] | undefined>;
   readTargetStrict(path: string): Promise<readonly CanonicalHistoryEnvelope[] | undefined>;
   readActive(path: string): Promise<readonly CanonicalHistoryEnvelope[]>;
+  /** Internal index read: fresh source bytes and their strictly decoded, immutable records. */
+  readActiveWithBytes?(path: string): Promise<{
+    readonly records: readonly CanonicalHistoryEnvelope[];
+    readonly bytes: Buffer;
+  }>;
   readActiveStrict(path: string): Promise<readonly CanonicalHistoryEnvelope[]>;
   readEnvelopesStrict(path: string): Promise<readonly CanonicalHistoryEnvelope[]>;
   readStrict(path: string): Promise<readonly CanonicalHistoryEnvelope[]>;

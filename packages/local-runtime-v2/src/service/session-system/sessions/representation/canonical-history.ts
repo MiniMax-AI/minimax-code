@@ -41,6 +41,9 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
   async readActive(path: string) {
     return this.source(path).readActive();
   }
+  async readActiveWithBytes(path: string) {
+    return this.source(path).readActiveWithBytes();
+  }
   async readActiveStrict(path: string) {
     return this.source(path).readActiveStrict();
   }

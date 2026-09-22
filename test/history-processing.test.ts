@@ -1203,8 +1203,7 @@ describe('incremental history index scanning', () => {
     try {
       await mkdir(paths.snapshotsPath);
       await run({ paths, compare: async () => {
-        const records = await files.readActiveStrict(paths.activePath);
-        const actual = await scan(paths, files, records);
+        const actual = await scan(paths, files);
         expect(actual).toEqual(await scanCanonicalHistoryArtifacts(paths));
         return actual;
       }});
@@ -1273,6 +1272,22 @@ describe('incremental history index scanning', () => {
       await writeFile(paths.activePath, encode(rows));
       await compare();
     });
+  });
+  it('rechecks fresh bytes when history changes after the provider read', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mcode-index-race-'));
+    const paths = { activePath: join(dir, 'messages.jsonl'), snapshotsPath: join(dir, 'snapshots'), sessionId: 's1' };
+    const files = createCanonicalHistoryFileAdapter({ reuseDecodedRecords: true });
+    const scan = createCanonicalHistoryScanner();
+    try {
+      await writeFile(paths.activePath, encode([row('a')]));
+      await files.readActiveStrict(paths.activePath);
+      await scan(paths, files);
+      await files.readActiveStrict(paths.activePath);
+      await writeFile(paths.activePath, '{invalid}\n');
+      await expect(scan(paths, files)).rejects.toThrow('malformed-jsonl');
+      await writeFile(paths.activePath, encode([row('z')]));
+      expect((await scan(paths, files)).locators[0]?.messageId).toBe('msg-user-v1-z');
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
   it('continues checking snapshot revisions, lineage and symlinks after warm scans', async () => {
     await fixture(async ({paths, compare}) => {

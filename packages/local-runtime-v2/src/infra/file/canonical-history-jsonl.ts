@@ -441,6 +441,24 @@ export class CanonicalHistoryJsonlDataSource {
     return records;
   }
 
+  /** Index scans consume positions and records from the same fresh file read. */
+  async readActiveWithBytes(filePath = this.options.activePath): Promise<{
+    readonly records: readonly CanonicalHistoryEnvelope[];
+    readonly bytes: Buffer;
+  }> {
+    let bytes!: Buffer;
+    const cache = this.options.reuseDecodedRecords
+      ? this.readCache
+      : { bytes: Buffer.alloc(0), records: [] };
+    const records = await readJsonl(filePath, decodeOwnedEnvelope, undefined, cache, (read) => {
+      bytes = read;
+    });
+    Object.freeze(records);
+    ownedRecordArrays.add(records);
+    inspectCanonicalHistorySequence(records);
+    return { records, bytes };
+  }
+
   async readStrict(filePath = this.options.activePath): Promise<CanonicalHistoryEnvelope[]> {
     return readStrictHistory(filePath);
   }

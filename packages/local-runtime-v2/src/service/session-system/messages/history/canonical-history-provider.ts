@@ -403,7 +403,7 @@ export function createSessionSystemCanonicalHistoryProvider(
         // independent on-disk scanner for externally supplied adapters.
         (scannerPaths) => options.files
           ? scanCanonicalHistoryArtifacts(scannerPaths)
-          : scanHistory(scannerPaths, files, active),
+          : scanHistory(scannerPaths, files),
         { activePath: paths.messages, snapshotsPath: paths.snapshots, sessionId },
       );
     } catch (error) {
