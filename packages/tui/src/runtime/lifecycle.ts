@@ -54,7 +54,11 @@ import {
 import { resolveMcodeDataEnvironment } from '../auth/environment.js';
 import { uploadTuiFeedbackDiagnostics } from './feedback/diagnostic-upload.js';
 import { TuiFeedbackService } from './feedback/service.js';
-import type { createTuiBrowserProvider, TuiBrowserProvider } from './browser-provider.js';
+import {
+  createTuiBrowserProvider,
+  disposeTuiBrowserSessionStorage,
+  type TuiBrowserProvider,
+} from './browser-provider.js';
 import { TuiDailyCheckinApplication } from '../checkin/application.js';
 import { TuiDailyCheckinHttpGateway } from '../checkin/http-gateway.js';
 import { createMcodeSharedAuthSession } from './auth-session.js';
@@ -464,13 +468,10 @@ export async function createTuiRuntime(
   }
   let browserProvider: TuiBrowserProvider | undefined;
   try {
-    const browserConfig = getConfig();
-    if (dependencies.createBrowserProvider) {
-      browserProvider = dependencies.createBrowserProvider(options.dataDir, browserConfig);
-    } else if (browserConfig.beta?.browserUseTooling === true) {
-      const { createTuiBrowserProvider } = await import('./browser-provider.js');
-      browserProvider = createTuiBrowserProvider(options.dataDir, browserConfig);
-    }
+    browserProvider = (dependencies.createBrowserProvider ?? createTuiBrowserProvider)(
+      options.dataDir,
+      getConfig(),
+    );
     const host = await logging.runDuringStartup(() =>
       createEmbeddedRuntimeHost(
         {
@@ -496,10 +497,7 @@ export async function createTuiRuntime(
         observability,
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)
-          : async (sessionId) => {
-              const { disposeTuiBrowserSessionStorage } = await import('./browser-provider.js');
-              await disposeTuiBrowserSessionStorage(options.dataDir, sessionId);
-            },
+          : (sessionId) => disposeTuiBrowserSessionStorage(options.dataDir, sessionId),
         ...(useSharedOAuth
           ? { synchronizeAuth: () => applySharedLease?.() ?? Promise.resolve() }
           : {}),

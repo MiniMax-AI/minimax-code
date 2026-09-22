@@ -493,15 +493,6 @@ test(
         ),
       "The real read tool must return file contents to the provider",
     );
-    const browserConfig = savedConfig();
-    browserConfig.beta = { ...browserConfig.beta, browserUseTooling: true };
-    writeFileSync(configPath, stringifyYaml(browserConfig));
-    const browserStart = requests.length;
-    assert.match(await run([
-      "exec", "BROWSER_ENABLED_TEST", ...modelArgs, "--timeout", "20s", "--max-steps", "1",
-    ]), /LOCAL_BYOK_OK/);
-    assert.ok(requests.length > browserStart,
-      "Opting into Browser must still initialize the runtime and complete a model request");
     assert.ok(requests.length >= 2);
     assert.ok(requests.every((r) => r.auth === "Bearer fixture-only-key"));
     assert.equal(

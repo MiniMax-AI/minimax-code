@@ -1,5 +1,3 @@
-import hljs from 'highlight.js/lib/index.js';
-import { highlight, renderHighlightedHtml, supportsLanguage } from '../../../../third_party/pi-mono/packages/coding-agent/src/utils/syntax-highlight.js';
 import { describe, expect, it } from 'vitest';
 import { presentTranscriptCell } from '../../src/tui/transcript/presentation/content.js';
 import { createTranscriptCell } from '../../src/tui/transcript/model.js';
@@ -124,28 +122,5 @@ describe('TranscriptPresentationController', () => {
 
     expect(presentation.resolveMainDisplayMode(completedTool)).toBe('collapsed');
     expect(presentation.resolveMainDisplayMode(structuredTool)).toBe('collapsed');
-  });
-});
-
-
-describe('deferred syntax highlighter', () => {
-  it('preserves every grammar, aliases, formatting and automatic detection', () => {
-    const code = 'const value = "中文 <&>"; // comment\nreturn value + 12;';
-    const theme = {
-      keyword: (text: string) => `<keyword>${text}</keyword>`,
-      string: (text: string) => `<string>${text}</string>`,
-      comment: (text: string) => `<comment>${text}</comment>`,
-    };
-    for (const language of hljs.listLanguages()) {
-      expect(supportsLanguage(language)).toBe(true);
-      expect(highlight(code, { language, ignoreIllegals: true, theme })).toBe(
-        renderHighlightedHtml(hljs.highlight(code, { language, ignoreIllegals: true }).value, theme),
-      );
-    }
-    for (const language of ['js', 'ts', 'py', 'sh']) expect(supportsLanguage(language)).toBe(true);
-    expect(supportsLanguage('missing-test-language')).toBe(false);
-    expect(highlight(code, { languageSubset: ['javascript', 'python'], theme })).toBe(
-      renderHighlightedHtml(hljs.highlightAuto(code, ['javascript', 'python']).value, theme),
-    );
   });
 });

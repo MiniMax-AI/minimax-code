@@ -1,15 +1,4 @@
-import { createRequire } from "node:module";
-import type hljs from "highlight.js/lib/index.js";
-
-let highlighter: typeof hljs | undefined;
-
-function getHighlighter(): typeof hljs {
-	// Static require stays bundled but defers grammar initialization. Unbundled
-	// ESM resolves the same dependency through its module-local require.
-	return (highlighter ??= (typeof require === "function"
-		? require("highlight.js/lib/index.js")
-		: createRequire(import.meta.url)("highlight.js/lib/index.js")) as typeof hljs);
-}
+import hljs from "highlight.js/lib/index.js";
 import { decodeHtmlEntityAt } from "./html.ts";
 
 export type HighlightFormatter = (text: string) => string;
@@ -144,14 +133,14 @@ export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}):
 
 export function highlight(code: string, options: HighlightOptions = {}): string {
 	const html = options.language
-		? getHighlighter().highlight(code, {
+		? hljs.highlight(code, {
 				language: options.language,
 				ignoreIllegals: options.ignoreIllegals,
 			}).value
-		: getHighlighter().highlightAuto(code, options.languageSubset).value;
+		: hljs.highlightAuto(code, options.languageSubset).value;
 	return renderHighlightedHtml(html, options.theme);
 }
 
 export function supportsLanguage(name: string): boolean {
-	return getHighlighter().getLanguage(name) !== undefined;
+	return hljs.getLanguage(name) !== undefined;
 }
