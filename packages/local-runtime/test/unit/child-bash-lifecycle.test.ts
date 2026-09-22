@@ -81,6 +81,34 @@ async function fixture() {
 }
 const poll = { wait: false, readTaskIds: new Set<string>() };
 
+// Force Windows PowerShell 5.1 even when pwsh 7 is installed on the host.
+// These are real shell checks, not a simulation of PowerShell exit semantics.
+describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 exit codes', () => {
+  const shellPath = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const native = (code: number) => `& ${quote(process.execPath)} -e ${quote(`console.error('native-evidence');process.exit(${code})`)}`;
+
+  describe.each([false, true])('parentDeathGuard=%s', (parentDeathGuard) => {
+    it.each([
+      ['native failure', native(7), 7, 'native-evidence'],
+      ['native failure followed by PowerShell output', `${native(7)}; Write-Output 'tail'`, 7, 'tail'],
+      ['native success', native(0), 0, 'native-evidence'],
+      ['last native command succeeds', `${native(7)}; ${native(0)}`, 0, 'native-evidence'],
+      ['pure PowerShell success', "Write-Output 'success-evidence'", 0, 'success-evidence'],
+      ['terminating PowerShell error', "throw 'ps-error'", 1, 'ps-error'],
+      ['explicit exit', 'exit 9', 9, ''],
+    ] as const)('%s', async (_name, command, exitCode, evidence) => {
+      let output = '';
+      const result = await createLocalBashOperations({ shellPath, parentDeathGuard }).exec(command, tmpdir(), {
+        onData: (chunk) => { output += chunk.toString(); },
+        timeout: 10,
+      });
+      expect(output).toContain(evidence);
+      expect(result.exitCode).toBe(exitCode);
+    }, 15_000);
+  });
+});
+
 describe('child Bash lifecycle', () => {
   it.each(['succeeded', 'failed', 'canceled', 'lost'] as const)(
     'notifies %s exactly once without acknowledging consumption',
