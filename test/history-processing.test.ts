@@ -7,6 +7,7 @@ import {
   CanonicalHistoryJsonlDataSource,
   decodeCanonicalHistoryEnvelope,
   inspectCanonicalHistorySequence,
+  type CanonicalHistoryEnvelope,
 } from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
 import { canonicalJson } from '../packages/local-runtime-v2/src/infra/file/canonical-history-json-value.js';
 import { mkdtemp, rm, writeFile, mkdir, readFile, symlink } from 'node:fs/promises';
@@ -1115,6 +1116,31 @@ describe('owned decoded history rows', () => {
       expect(cached).toEqual(plain);
       expect(canonicalActiveHistoryRevision(cached)).toBe(canonicalActiveHistoryRevision(plain));
       expect(cached[0]!.message.content).toBe('中文🙂\ufffd');
+    });
+  });
+
+  it('keeps canonical digests exact across growing, rewritten and revisited histories', async () => {
+    await withReaders(async (path, reader) => {
+      const snapshots: { records: readonly CanonicalHistoryEnvelope[]; revision: string }[] = [];
+      let rows: ReturnType<typeof row>[] = [];
+      for (let index = 0; index < 48; index++) {
+        if (index % 11 === 0) rows = rows.slice(0, 2);
+        if (index % 7 === 0 && rows[0]) rows[0] = row(`edited-${index}`, '\udc00中🙂');
+        rows.push(row(String(index), `body-${index}:中文🙂\ud800`.repeat(100)));
+        await writeFile(path, encode(rows));
+        const records = index % 2 === 0
+          ? await reader.readActiveStrict()
+          : (await reader.readActiveWithBytes()).records;
+        const revision = `sha256:${createHash('sha256')
+          .update(canonicalJson(rows.map(decodeCanonicalHistoryEnvelope)), 'utf8')
+          .digest('hex')}`;
+        expect(canonicalActiveHistoryRevision(records)).toBe(revision);
+        expect(canonicalHistoryRevision(records)).toBe(revision);
+        snapshots.push({ records, revision });
+      }
+      for (const snapshot of snapshots.reverse()) {
+        expect(canonicalHistoryRevision(snapshot.records)).toBe(snapshot.revision);
+      }
     });
   });
 

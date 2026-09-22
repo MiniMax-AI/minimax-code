@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
 
 import {
   appendJsonl,
@@ -29,6 +29,8 @@ export type { CanonicalHistoryArtifact } from './canonical-history-artifact.js';
 const ownedEnvelopeJson = new WeakMap<CanonicalHistoryEnvelope, string | undefined>();
 const ownedRecordArrays = new WeakSet<readonly CanonicalHistoryEnvelope[]>();
 const ownedRevisions = new WeakMap<readonly CanonicalHistoryEnvelope[], string>();
+// SHA state before the closing bracket; weak keys do not retain old histories.
+const ownedRevisionPrefixes = new WeakMap<readonly CanonicalHistoryEnvelope[], Hash>();
 const ownedSequences = new WeakMap<
   readonly CanonicalHistoryEnvelope[],
   CanonicalHistorySequenceInspection
@@ -435,9 +437,9 @@ export class CanonicalHistoryJsonlDataSource {
     filePath = this.options.activePath,
   ): Promise<CanonicalHistoryEnvelope[]> {
     if (!this.options.reuseDecodedRecords) return readStrictEnvelopeFile(filePath);
+    const previous = this.readCache.records;
     const records = await readJsonl(filePath, decodeOwnedEnvelope, undefined, this.readCache);
-    Object.freeze(records);
-    ownedRecordArrays.add(records);
+    rememberOwnedRecords(records, previous);
     return records;
   }
 
@@ -450,11 +452,11 @@ export class CanonicalHistoryJsonlDataSource {
     const cache = this.options.reuseDecodedRecords
       ? this.readCache
       : { bytes: Buffer.alloc(0), records: [] };
+    const previous = cache.records;
     const records = await readJsonl(filePath, decodeOwnedEnvelope, undefined, cache, (read) => {
       bytes = read;
     });
-    Object.freeze(records);
-    ownedRecordArrays.add(records);
+    rememberOwnedRecords(records, previous);
     inspectCanonicalHistorySequence(records);
     return { records, bytes };
   }
@@ -618,8 +620,40 @@ function revisionOfNormalized(records: readonly CanonicalHistoryEnvelope[]): str
   if (cached !== undefined) return cached;
   // Preserve the canonical JSON array bytes without building a sorted copy and
   // serialized string of the entire history at once.
-  const hash = createHash('sha256').update('[');
-  for (let index = 0; index < records.length; index += 1) {
+  let hash = ownedRevisionPrefixes.get(records);
+  if (!hash) {
+    hash = createHash('sha256').update('[');
+    updateRevisionPrefix(hash, records, 0);
+    if (ownedRecordArrays.has(records)) ownedRevisionPrefixes.set(records, hash);
+  }
+  const revision = `sha256:${hash.copy().update(']').digest('hex')}`;
+  if (ownedRecordArrays.has(records)) ownedRevisions.set(records, revision);
+  return revision;
+}
+
+function rememberOwnedRecords(
+  records: readonly CanonicalHistoryEnvelope[],
+  previous: readonly CanonicalHistoryEnvelope[],
+): void {
+  Object.freeze(records);
+  ownedRecordArrays.add(records);
+  if (records === previous) return;
+  const prefix = ownedRevisionPrefixes.get(previous);
+  // Fresh bytes have already been checked by readJsonl. Only its unchanged,
+  // module-owned record prefix can continue a previous SHA state.
+  if (!prefix || previous.length > records.length ||
+      !previous.every((record, index) => record === records[index])) return;
+  const hash = prefix.copy();
+  updateRevisionPrefix(hash, records, previous.length);
+  ownedRevisionPrefixes.set(records, hash);
+}
+
+function updateRevisionPrefix(
+  hash: Hash,
+  records: readonly CanonicalHistoryEnvelope[],
+  start: number,
+): void {
+  for (let index = start; index < records.length; index += 1) {
     if (index > 0) hash.update(',');
     const record = records[index]!;
     let serialized = ownedEnvelopeJson.get(record);
@@ -629,9 +663,6 @@ function revisionOfNormalized(records: readonly CanonicalHistoryEnvelope[]): str
     }
     hash.update(serialized, 'utf8');
   }
-  const revision = `sha256:${hash.update(']').digest('hex')}`;
-  if (ownedRecordArrays.has(records)) ownedRevisions.set(records, revision);
-  return revision;
 }
 
 function decodeOwnedEnvelope(value: unknown): CanonicalHistoryEnvelope {
