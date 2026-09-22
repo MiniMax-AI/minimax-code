@@ -19,6 +19,7 @@ export function checkWindowsSourceLocation({
   platform = process.platform,
   cwd = process.cwd(),
   execFile = execFileSync,
+  allowNonFixed = process.env.GITHUB_ACTIONS === "true",
 } = {}) {
   if (platform !== "win32") return { ok: true, skipped: true };
 
@@ -27,15 +28,18 @@ export function checkWindowsSourceLocation({
   if (!/^[a-z]:\\$/iu.test(root) || root.startsWith("\\\\")) {
     return fail("The checkout root is not a local drive-letter path.");
   }
+  // `fsutil` accepts a drive letter more reliably than a root path with a
+  // trailing backslash across Windows runner images.
+  const volume = root.slice(0, 2);
 
   let driveType;
   let volumeInfo;
   try {
-    driveType = execFile("fsutil", ["fsinfo", "drivetype", root], {
+    driveType = execFile("fsutil", ["fsinfo", "drivetype", volume], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    volumeInfo = execFile("fsutil", ["fsinfo", "volumeinfo", root], {
+    volumeInfo = execFile("fsutil", ["fsinfo", "volumeinfo", volume], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -44,7 +48,7 @@ export function checkWindowsSourceLocation({
     return fail(`Windows could not verify the checkout volume${detail}.`);
   }
 
-  if (!/:\s*DRIVE_FIXED(?:\r?\n|$)/iu.test(driveType)) {
+  if (!allowNonFixed && !/:\s*DRIVE_FIXED(?:\r?\n|$)/iu.test(driveType)) {
     return fail("The checkout volume is not a local fixed drive.");
   }
   if (!/:\s*NTFS(?:\r?\n|$)/iu.test(volumeInfo)) {
@@ -58,9 +62,10 @@ export function runWindowsSourceLocationCheck({
   platform = process.platform,
   cwd = process.cwd(),
   execFile = execFileSync,
+  allowNonFixed = process.env.GITHUB_ACTIONS === "true",
   report = (message) => console.error(`[source-check] ${message}`),
 } = {}) {
-  const result = checkWindowsSourceLocation({ platform, cwd, execFile });
+  const result = checkWindowsSourceLocation({ platform, cwd, execFile, allowNonFixed });
   if (!result.ok) report(result.reason);
   return result;
 }

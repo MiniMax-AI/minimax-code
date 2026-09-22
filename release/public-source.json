@@ -3336,6 +3336,7 @@
     "test/source-sync.test.mjs",
     "test/sqlite-message-contention.test.ts",
     "test/vitest-suites.json",
+    "test/windows-contract.test.mjs",
     "third_party/pi-mono/.minimax-vendor.json",
     "third_party/pi-mono/LICENSE",
     "third_party/pi-mono/MINIMAX_CHANGES.md",
