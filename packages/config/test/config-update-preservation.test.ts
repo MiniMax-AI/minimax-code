@@ -144,6 +144,31 @@ describe.each(writers)("%s config updates", (_name, write) => {
 });
 
 describe("valid local config updates", () => {
+
+  it("preserves comments and credential references through general settings writes", async () => {
+    const reference = "${WORK_API_KEY}";
+    fs.writeFileSync(configPath, [
+      "# provider credential stays external",
+      "permissionMode: auto # approval setting",
+      "custom_provider:",
+      "  work:",
+      "    options:",
+      "      apiKey: '" + reference + "' # inherited from the launcher",
+      "",
+    ].join("\n"));
+
+    await updateLocalConfigFile({ permissionMode: "default" });
+
+    const written = fs.readFileSync(configPath, "utf8");
+    expect(written).toContain("# provider credential stays external");
+    expect(written).toContain("# approval setting");
+    expect(written).toContain("# inherited from the launcher");
+    expect(yaml.load(written)).toMatchObject({
+      permissionMode: "default",
+      custom_provider: { work: { options: { apiKey: reference } } },
+    });
+  });
+
   it.each([undefined, "", "# empty config\n", "{}\n", "null\n"])(
     "initializes a missing or empty document: %s",
     async (source) => {

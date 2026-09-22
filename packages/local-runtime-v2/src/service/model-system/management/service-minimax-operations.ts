@@ -1,3 +1,4 @@
+import { probeProviderCredential } from '@mavis/config';
 import { maskSecret } from '../secret.js';
 import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from '../identity.js';
 import type { LocalModelConfig, ModelContextUpdateOutcome } from '../contracts.js';
@@ -38,7 +39,11 @@ export function getMinimaxApiKeyStatus(context: ModelProviderServiceContext): {
   maskedApiKey?: string;
   cachedStatus?: ModelCacheStatusView;
 } {
-  const apiKey = context.deps.configGetter().minimax_api?.apiKey?.trim();
+  const apiKey = probeProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: 'minimax_api',
+    value: context.deps.configGetter().minimax_api?.apiKey,
+  }).secret;
   if (!apiKey) return { hasApiKey: false };
   const cache = context.deps.cache.load();
   const target = context.resolveTestTarget(MINIMAX_API_PROVIDER_ID, undefined);

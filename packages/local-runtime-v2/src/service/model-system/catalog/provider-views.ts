@@ -16,6 +16,8 @@ import type {
   ModelProviderSource,
   ModelProviderView,
 } from '../contracts.js';
+import { probeProviderCredential } from '@mavis/config';
+
 import { modelConnectionTestFingerprint } from './config-fingerprint.js';
 import {
   MINIMAX_API_FORMAT,
@@ -44,14 +46,37 @@ import {
 
 export type { ModelProviderView } from '../contracts.js';
 
+/**
+ * Credential state for a provider view. An environment reference counts as
+ * configured even when the variable is unset right now, so the user sees what
+ * is configured rather than a provider that flickers to keyless between runs.
+ * The resolved value is masked like any other key; an unresolved reference has
+ * no masked form to show, because masking the literal `${VAR}` would imply a
+ * secret that is not there.
+ */
+function credentialViewFields(
+  options: { readonly apiKey?: string } | undefined,
+  providerId: string,
+): { hasApiKey: boolean; maskedApiKey?: string } {
+  const probe = probeProviderCredential({
+    field: 'options.apiKey',
+    provider: providerId,
+    value: options?.apiKey,
+  });
+  if (!probe.configured) return { hasApiKey: false };
+  return probe.secret
+    ? { hasApiKey: true, maskedApiKey: maskSecret(probe.secret) }
+    : { hasApiKey: true };
+}
+
 export function buildBuiltinProviderView(
   config: LocalRuntimeConfig,
   cache: ModelCacheData,
   providerId: string,
   provider: LocalProviderConfig,
 ): ModelProviderView {
-  const apiKey = provider.options?.apiKey?.trim();
   const providerName = provider.name ?? providerId;
+  const credential = credentialViewFields(provider.options, providerId);
   const providerKind = builtinProviderKind(config, providerId, provider);
   const models =
     providerId === 'minimax' && config.minimaxModelSource === 'minimax_api_key'
@@ -64,8 +89,7 @@ export function buildBuiltinProviderView(
     kind: providerKind,
     enabled: true,
     ...(provider.options?.baseURL ? { baseUrl: provider.options.baseURL } : {}),
-    hasApiKey: Boolean(apiKey),
-    ...(apiKey ? { maskedApiKey: maskSecret(apiKey) } : {}),
+    ...credential,
     models: providerModelEntries(config, cache, {
       providerId,
       models,
@@ -83,7 +107,7 @@ export function buildMinimaxProviderView(
   config: LocalRuntimeConfig,
   cache: ModelCacheData,
 ): ModelProviderView {
-  const apiKey = config.minimax_api?.apiKey?.trim();
+  const credential = credentialViewFields(config.minimax_api, MINIMAX_API_PROVIDER_ID);
   return {
     providerId: MINIMAX_API_PROVIDER_ID,
     name: MINIMAX_API_PROVIDER_NAME,
@@ -92,8 +116,7 @@ export function buildMinimaxProviderView(
     enabled: true,
     baseUrl: minimaxApiBaseUrl(config),
     apiFormat: MINIMAX_API_FORMAT,
-    hasApiKey: Boolean(apiKey),
-    ...(apiKey ? { maskedApiKey: maskSecret(apiKey) } : {}),
+    ...credential,
     models: providerModelEntries(config, cache, {
       providerId: MINIMAX_API_PROVIDER_ID,
       models: minimaxApiModels(config),
@@ -112,8 +135,8 @@ export function buildCustomProviderView(
   provider: LocalCustomProviderConfig,
 ): ModelProviderView {
   const providerId = `${CUSTOM_PROVIDER_ID_PREFIX}${providerKey}`;
-  const apiKey = provider.options?.apiKey?.trim();
   const providerName = provider.name ?? providerKey;
+  const credential = credentialViewFields(provider.options, providerId);
   const providerKind = customProviderKind(provider);
   return {
     providerId,
@@ -123,8 +146,7 @@ export function buildCustomProviderView(
     enabled: provider.enabled !== false,
     ...(provider.options?.baseURL ? { baseUrl: provider.options.baseURL } : {}),
     ...(provider.api ? { apiFormat: provider.api } : {}),
-    hasApiKey: Boolean(apiKey),
-    ...(apiKey ? { maskedApiKey: maskSecret(apiKey) } : {}),
+    ...credential,
     ...(provider.options?.headers
       ? { headerNames: Object.keys(provider.options.headers).sort() }
       : {}),
@@ -211,7 +233,11 @@ function customModelFingerprint(
   modelId: string,
   model: LocalModelConfig,
 ): string | undefined {
-  const apiKey = provider.options?.apiKey?.trim();
+  const apiKey = probeProviderCredential({
+    field: 'options.apiKey',
+    provider: provider.name ?? 'custom_provider',
+    value: provider.options?.apiKey,
+  }).secret;
   const baseUrl = provider.options?.baseURL?.trim();
   if (!apiKey || !baseUrl) return undefined;
   const api = (provider.api?.trim() || 'anthropic-messages') as ModelProviderApi;

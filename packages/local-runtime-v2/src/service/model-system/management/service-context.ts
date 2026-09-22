@@ -1,3 +1,5 @@
+import { resolveProviderCredential } from '@mavis/config';
+
 import {
   CUSTOM_PROVIDER_ID_PREFIX,
   MINIMAX_API_PROVIDER_ID,
@@ -27,7 +29,8 @@ import {
 import {
   mergeModelsFromInputs,
   normalizeApiFormat,
-  normalizeApiKeyUpdate,
+  applyProviderCredentialUpdate,
+  normalizeProviderCredentialUpdate,
   normalizeHeaderNames,
   normalizeHeaders,
   removeHeaderCaseInsensitive,
@@ -85,13 +88,15 @@ function candidateOptions(
   input: UserModelProviderCandidateView,
   baseUrl: string,
 ): NonNullable<LocalCustomProviderConfig['options']> {
-  const apiKeyUpdate = normalizeApiKeyUpdate(input.apiKey);
+  const apiKeyUpdate = normalizeProviderCredentialUpdate(input);
   const options = { ...(current?.options ?? {}), baseURL: baseUrl, authMode: 'api-key' as const };
+  // A new provider needs a credential it can actually use; an existing one
+  // keeps whatever it already has when the request carries none. `keep` on an
+  // edit is a no-op, not a missing-key error.
   if (!current && apiKeyUpdate.kind !== 'set') {
     throw new LocalModelProviderError(400, 'API key must not be empty', 'INVALID_API_KEY');
   }
-  if (apiKeyUpdate.kind === 'set') options.apiKey = apiKeyUpdate.apiKey;
-  if (apiKeyUpdate.kind === 'clear') delete options.apiKey;
+  applyProviderCredentialUpdate(options, apiKeyUpdate);
   applyCandidateHeaderUpdates(options, current, input);
   return options;
 }
@@ -190,8 +195,19 @@ function connectionTestFailureMessage(result: ModelConnectionTestResult): string
 function requireCustomProviderCredentials(
   provider: LocalCustomProviderConfig | undefined,
   apiKeyOverride: string | undefined,
+  providerId: string,
 ): { apiKey: string; baseUrl: string } {
-  const apiKey = apiKeyOverride?.trim() || provider?.options?.apiKey?.trim();
+  // A request about to leave the machine must surface the resolver's own
+  // diagnosis. The probe is the view's tool: it reports a broken reference as
+  // "configured" and returns no secret, which would downgrade "environment
+  // variable MAFIA_KEY is not set" to a generic missing key.
+  const apiKey =
+    apiKeyOverride?.trim() ||
+    resolveProviderCredential({
+      field: 'options.apiKey',
+      provider: providerId,
+      value: provider?.options?.apiKey,
+    });
   if (!apiKey) {
     throw new LocalModelProviderError(400, 'Provider API key is not configured', 'NO_API_KEY');
   }
@@ -294,7 +310,13 @@ export class ModelProviderServiceContext {
   }
 
   discoveryTargetForProvider(provider: LocalCustomProviderConfig): ModelDiscoveryTarget {
-    const apiKey = provider.options?.apiKey?.trim();
+    // Discovery talks to the upstream, so it needs the same credential the turn
+    // path uses. Reading the raw field sent a `${VAR}` literal as the key.
+    const apiKey = resolveProviderCredential({
+      field: 'options.apiKey',
+      provider: provider.name ?? 'custom_provider',
+      value: provider.options?.apiKey,
+    });
     if (!apiKey) {
       throw new LocalModelProviderError(400, 'Provider API key is not configured', 'NO_API_KEY');
     }
@@ -375,7 +397,11 @@ export class ModelProviderServiceContext {
       ? customProviderKeyFromId(providerId)
       : this.requireExistingProviderKey(providerId);
     const provider = options.customProviderOverride ?? config.custom_provider?.[providerKey];
-    const { apiKey, baseUrl } = requireCustomProviderCredentials(provider, options.apiKeyOverride);
+    const { apiKey, baseUrl } = requireCustomProviderCredentials(
+      provider,
+      options.apiKeyOverride,
+      `${CUSTOM_PROVIDER_ID_PREFIX}${providerKey}`,
+    );
     const chosenModelId = requireCustomProviderModelId(provider, modelId);
     const fullProviderId = `${CUSTOM_PROVIDER_ID_PREFIX}${providerKey}`;
     const api = normalizeApiFormat(provider?.api) ?? 'anthropic-messages';
@@ -404,7 +430,13 @@ export class ModelProviderServiceContext {
     modelId: string | undefined,
     options: ResolveMinimaxTestTargetOptions = {},
   ): ResolvedConnectionTestTarget {
-    const apiKey = options.apiKeyOverride?.trim() || config.minimax_api?.apiKey?.trim();
+    const apiKey =
+      options.apiKeyOverride?.trim() ||
+      resolveProviderCredential({
+        field: 'minimax_api.apiKey',
+        provider: 'minimax_api',
+        value: config.minimax_api?.apiKey,
+      });
     if (!apiKey) {
       throw new LocalModelProviderError(400, 'MiniMax API key is not configured', 'NO_API_KEY');
     }

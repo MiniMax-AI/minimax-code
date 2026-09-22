@@ -165,7 +165,11 @@
       "packages/local-runtime-v2/test/integration/btw-settled-history.integration.test.ts",
       "packages/tui/test/unit/tui/controller/side-session-flow.test.ts",
       "packages/tui/test/unit/observability.test.ts",
-      "packages/local-runtime-v2/src/service/session-system/fork/side-history-boundary.test.ts"
+      "packages/local-runtime-v2/src/service/session-system/fork/side-history-boundary.test.ts",
+      "packages/config/test/comment-preserving-config-write.test.ts",
+      "packages/config/test/credential-reference.test.ts",
+      "packages/config/test/local-model-provider-write.test.ts",
+      "packages/shared/test/unit/redact-log-secret.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

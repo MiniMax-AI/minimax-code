@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getConfig, getConfigPath, MINIMAX_API_MODEL_CATALOG, resetConfig } from '@mavis/config';
+import {
+  getConfig,
+  getConfigPath,
+  MINIMAX_API_MODEL_CATALOG,
+  resetConfig,
+  serializeConfigPreservingComments,
+} from '@mavis/config';
 import yaml from 'js-yaml';
 import lockfile from 'proper-lockfile';
 
@@ -86,7 +92,9 @@ export async function updateLocalConfigFile(
       stale: 10_000,
       retries: { retries: 20, factor: 1, minTimeout: 5, maxTimeout: 25 },
     });
-    const raw = readLocalRawConfig(configPath);
+    const originalText = fs.readFileSync(configPath, 'utf-8');
+    const previous = parseLocalRawConfig(originalText);
+    const raw = structuredClone(previous);
     if (preparedCommitPayload) {
       assertSafeConfigRecord({ ...preparedCommitPayload });
       const invalidRoot = Object.keys(preparedCommitPayload).find(
@@ -101,7 +109,7 @@ export async function updateLocalConfigFile(
     } else {
       applyLocalConfigUpdate(raw, body);
     }
-    await atomicWriteFile(configPath, yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }));
+    await atomicWriteFile(configPath, serializeConfigPreservingComments(originalText, previous, raw));
     resetConfig();
     return { config: getConfig() };
   } catch (err) {
@@ -144,7 +152,9 @@ export async function compareAndSetLocalModelContext(
       stale: 10_000,
       retries: { retries: 20, factor: 1, minTimeout: 5, maxTimeout: 25 },
     });
-    const raw = readLocalRawConfig(configPath);
+    const originalText = fs.readFileSync(configPath, 'utf-8');
+    const previous = parseLocalRawConfig(originalText);
+    const raw = structuredClone(previous);
     resetConfig();
     const currentConfig = getConfig() as LocalRuntimeConfig;
     const currentContext =
@@ -176,7 +186,7 @@ export async function compareAndSetLocalModelContext(
       };
     }
     assertSafeConfigRecord(raw);
-    await atomicWriteFile(configPath, yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }));
+    await atomicWriteFile(configPath, serializeConfigPreservingComments(originalText, previous, raw));
     resetConfig();
     return { updated: true, config: getConfig() as LocalRuntimeConfig };
   } catch (err) {
@@ -236,7 +246,9 @@ export async function updateLocalByokConfig(
       stale: 10_000,
       retries: { retries: 20, factor: 1, minTimeout: 5, maxTimeout: 25 },
     });
-    const raw = readLocalRawConfig(configPath);
+    const originalText = fs.readFileSync(configPath, 'utf-8');
+    const previous = parseLocalRawConfig(originalText);
+    const raw = structuredClone(previous);
     const draft: LocalByokConfigDraft = {
       minimax_api: isPlainRecord(raw.minimax_api) ? raw.minimax_api : undefined,
       custom_provider: withoutEmptyEntries(
@@ -279,7 +291,7 @@ export async function updateLocalByokConfig(
     } else if (draft.defaultModelVariant === undefined && 'defaultModelVariant' in raw) {
       delete raw.defaultModelVariant;
     }
-    await atomicWriteFile(configPath, yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }));
+    await atomicWriteFile(configPath, serializeConfigPreservingComments(originalText, previous, raw));
     resetConfig();
     return { config: getConfig() };
   } catch (err) {
@@ -309,10 +321,7 @@ export async function atomicWriteFile(filePath: string, content: string): Promis
   }
 }
 
-function readLocalRawConfig(configPath: string): Record<string, unknown> {
-  // Callers create missing files before locking. A read failure must abort the
-  // update rather than turn an existing configuration into an empty document.
-  const source = fs.readFileSync(configPath, 'utf-8');
+function parseLocalRawConfig(source: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = yaml.load(source);

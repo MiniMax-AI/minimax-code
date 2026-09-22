@@ -1,4 +1,9 @@
-import { getRuntimePresetKey, listRouteModelIds, resolveProviderAuthMode } from '@mavis/config';
+import {
+  getRuntimePresetKey,
+  listRouteModelIds,
+  resolveProviderAuthMode,
+  probeProviderCredential,
+} from '@mavis/config';
 
 import type {
   LocalCustomProviderConfig,
@@ -54,7 +59,11 @@ export function builtinProviderKind(
 }
 
 export function hasMinimaxApiKey(config: LocalRuntimeConfig): boolean {
-  return Boolean(config.minimax_api?.apiKey?.trim());
+  return probeProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: 'minimax_api',
+    value: config.minimax_api?.apiKey,
+  }).configured;
 }
 
 /** Models the builtin provider can route under the active runtime preset. */

@@ -4,7 +4,7 @@
 // tree path. Custom providers never consult the Pi catalog by name; missing
 // limits use the dedicated BYOK fallbacks (not the legacy 2048 default).
 import type { Api } from '@earendil-works/pi-ai';
-import { MINIMAX_API_MODEL_CATALOG } from '@mavis/config';
+import { MINIMAX_API_MODEL_CATALOG, resolveProviderCredential } from '@mavis/config';
 
 import type {
   LocalCustomProvidersConfig,
@@ -73,7 +73,11 @@ export function planMinimaxApiResolution(input: {
 }): ByokResolutionPlan | undefined {
   const cfg = input.byok?.minimax_api;
   if (!cfg) return undefined;
-  const apiKey = cfg.apiKey?.trim();
+  const apiKey = resolveProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: 'minimax_api',
+    value: cfg.apiKey,
+  });
   if (!apiKey) {
     throw new Error('LocalModelResolver: minimax_api apiKey is not configured.');
   }
@@ -118,7 +122,11 @@ export function planCustomProviderResolution(input: {
   if (!modelConfig) return undefined;
   const authProvider =
     cfg.kind === 'oauth' || cfg.options?.authMode === 'oauth' ? input.providerKey : undefined;
-  const apiKey = cfg.options?.apiKey?.trim();
+  const apiKey = resolveProviderCredential({
+    field: 'custom_provider options.apiKey',
+    provider: input.provider,
+    value: cfg.options?.apiKey,
+  });
   if (!apiKey && !authProvider) {
     throw new Error(`LocalModelResolver: api_key not configured for provider "${input.provider}".`);
   }

@@ -300,6 +300,34 @@ test(
     assert.equal(selected.models[0].contextLimit, undefined);
     assert.equal(selected.models[0].maxOutputTokens, undefined);
 
+    // Exercise the built public CLI with a saved environment reference, including
+    // missing-variable failure, key rotation, and a later unrelated config write.
+    const referenceConfig = savedConfig();
+    referenceConfig.custom_provider.fixture.options.apiKey = '${MCODE_PROVIDER_API_KEY}';
+    writeFileSync(configPath, '# external provider credential\n' + stringifyYaml(referenceConfig));
+    const beforeReference = requests.length;
+    await run(['provider', 'test', selected.providerId, '--model', 'fixture-model']);
+    assert.ok(requests.length > beforeReference);
+    assert.equal(requests[beforeReference].auth, 'Bearer fixture-only-key');
+    assert.match(await run([
+      'exec', 'ENV_REFERENCE_TEST', '--model', `${selected.providerId}/fixture-model`,
+      '--timeout', '20s', '--max-steps', '1',
+    ]), /LOCAL_BYOK_OK/);
+    env.MCODE_PROVIDER_API_KEY = 'fixture-rotated-key';
+    const beforeRotation = requests.length;
+    await run(['provider', 'test', selected.providerId, '--model', 'fixture-model']);
+    assert.equal(requests[beforeRotation].auth, 'Bearer fixture-rotated-key');
+    const afterRotation = requests.length;
+    env.MCODE_PROVIDER_API_KEY = '';
+    const beforeMissing = requests.length;
+    await assert.rejects(run([
+      'exec', 'MISSING_ENV_REFERENCE_TEST', '--model', `${selected.providerId}/fixture-model`,
+      '--timeout', '20s', '--max-steps', '1',
+    ]), /MCODE_PROVIDER_API_KEY.*not set/s);
+    assert.equal(requests.length, beforeMissing, 'Missing credentials must fail before an upstream request');
+    env.MCODE_PROVIDER_API_KEY = 'fixture-only-key';
+    assert.equal(savedConfig().custom_provider.fixture.options.apiKey, '${MCODE_PROVIDER_API_KEY}');
+
     // The selected plan path must survive YAML persistence and actual inference.
     const codingUrl = `${new URL(baseUrl).origin}/api/coding/paas/v4`;
     const beforeCoding = requests.length;
@@ -308,6 +336,8 @@ test(
       "--api-format", "openai-completions", "--model", "glm-5.3", "--use",
     ]);
     assert.equal(savedConfig().custom_provider.coding.options.baseURL, codingUrl);
+    assert.equal(savedConfig().custom_provider.fixture.options.apiKey, '${MCODE_PROVIDER_API_KEY}');
+    assert.match(readFileSync(configPath, 'utf8'), /# external provider credential/);
     assert.equal(savedConfig().defaultModel, "custom_provider:coding/glm-5.3");
     assert.match(await run([
       "exec", "CODING_ENDPOINT_TEST", "--timeout", "20s", "--max-steps", "1",
@@ -494,7 +524,11 @@ test(
       "The real read tool must return file contents to the provider",
     );
     assert.ok(requests.length >= 2);
-    assert.ok(requests.every((r) => r.auth === "Bearer fixture-only-key"));
+    assert.ok(requests.every((r, index) => r.auth === (
+      index >= beforeRotation && index < afterRotation
+        ? 'Bearer fixture-rotated-key'
+        : 'Bearer fixture-only-key'
+    )));
     assert.equal(
       requests.some((r) => r.body.tools?.some(
         (tool) => tool.function?.name === "workspace_semantic_search",

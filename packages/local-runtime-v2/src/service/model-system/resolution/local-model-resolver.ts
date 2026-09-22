@@ -9,6 +9,7 @@ import type { StreamFn, ThinkingLevel as PiThinkingLevel } from '@earendil-works
 import {
   isFirstPartyMinimaxMessagesRoute,
   resolveProviderAuthMode,
+  resolveProviderCredential,
   type ProviderAuthMode,
   type ProviderAuthModeSource,
 } from '@mavis/config';
@@ -727,7 +728,7 @@ export function resolveLocalProviderCredentials(
   const token = authContext?.accessToken?.trim();
   const headers = resolveCredentialHeaders(optionHeaders, modelHeaders, token, auth.authMode);
   return {
-    apiKey: resolveCredentialApiKey(modelRef, options, auth.authMode),
+    apiKey: resolveCredentialApiKey(provider, modelRef, options, auth.authMode),
     baseUrl: resolveCredentialBaseUrl(configuredBaseUrl, auth.managedBaseURL),
     ...(headers ? { headers } : {}),
     ...(options ? { rawProviderOptions: options } : {}),
@@ -739,11 +740,22 @@ export function resolveLocalProviderCredentials(
 }
 
 function resolveCredentialApiKey(
+  provider: string,
   modelRef: IModelRef,
   options: LocalProviderOptions | undefined,
   authMode: ProviderAuthMode,
 ): string | undefined {
-  const configured = modelRef.api_key?.trim() || options?.apiKey?.trim();
+  const configured =
+    resolveProviderCredential({
+      field: 'api_key',
+      provider,
+      value: modelRef.api_key,
+    }) ??
+    resolveProviderCredential({
+      field: 'options.apiKey',
+      provider,
+      value: options?.apiKey,
+    });
   if (configured) return configured;
   return authMode === 'managed-login' ? MANAGED_PROVIDER_API_KEY_PLACEHOLDER : undefined;
 }
