@@ -926,6 +926,23 @@ describe('ordered replay eviction', () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it('ignores a superseded settlement after synchronous execution re-entry', async () => {
+    const registry = new SemanticReplayRegistry<number>(3, {
+      maximumSettledBytes: 2, measureSettledBytes: value => value,
+    });
+    const inner = pending(), outer = pending();
+    let innerExecution!: Promise<number>;
+    const outerExecution = registry.run(request('a', () => {
+      innerExecution = registry.run(request('a', () => inner.promise));
+      return outer.promise;
+    }));
+    outer.resolve(1); await outerExecution;
+    inner.resolve(10); await innerExecution;
+    const execute = vi.fn(async () => 1);
+    await expect(registry.run(request('a', execute))).resolves.toBe(1);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('protects pending work, removes rejected entries, and permits an exact retry', async () => {
     const registry = new SemanticReplayRegistry<number>(1);
     const a = pending(), b = pending();
