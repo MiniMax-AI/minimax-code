@@ -317,6 +317,25 @@ describe('prepared runtime reads', () => {
     });
   });
 
+  it('keeps 64-bit row identities inside SQLite when validating assistant tails', async () => {
+    await withDatabase(async (client, writer) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      await repo.listTurn('s1', 't1');
+      writer.rawDb.exec(`INSERT INTO local_runtime_message_rows
+        (id, session_id, msg_id, turn_id, created_at_ms, data_json) VALUES
+        (9007199254740992, 's1', 'big-user', 't1', 1, '{"msg_id":"big-user","role":"user"}'),
+        (9007199254740993, 's1', 'big-assistant', 't1', 1, '{"msg_id":"big-assistant","role":"assistant"}')`);
+      const expected = (await repo.listTurn('s1', 't1')).filter(m => m.role === 'assistant');
+      expect(await repo.listCanonicalAssistantTail!('s1', 't1', 1)).toEqual(expected);
+      expect(await repo.listCanonicalAssistantTail!('s1', 't1', 1)).toEqual(expected);
+      writer.rawDb.exec(`UPDATE local_runtime_message_rows SET data_json = 'broken' WHERE id = 9007199254740992`);
+      await expect(repo.listCanonicalAssistantTail!('s1', 't1', 1)).rejects.toThrow();
+    });
+  });
+
   it('keeps revisions unique across REPLACE conflicts and 64-bit sequence values', async () => {
     await withDatabase(async (client, writer) => {
       await createSessionRepository({ db: client.db }).create({

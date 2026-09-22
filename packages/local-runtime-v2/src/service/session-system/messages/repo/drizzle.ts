@@ -198,8 +198,9 @@ class DrizzleMessageRepository implements MessageRepository {
       for (const row of changed) {
         const message = decodeDisplayMessage(row);
         tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation
-          SELECT ${row.id}, version, ${isCanonicalAssistant(message) ? 1 : 0}
-          FROM local_runtime_message_row_revisions WHERE row_id = ${row.id}`);
+          SELECT row_id, version, ${isCanonicalAssistant(message) ? 1 : 0}
+          FROM local_runtime_message_row_revisions
+          WHERE session_id = ${sessionId} AND msg_id = ${row.messageId}`);
       }
       return tx.select().from(messageRows).where(and(turn,
         sql`EXISTS (SELECT 1 FROM temp.mcode_display_validation v
