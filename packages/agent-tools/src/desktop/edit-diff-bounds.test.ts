@@ -19,8 +19,8 @@ const context = { sessionId: 'edit-diff-bounds-session', turnId: 'edit-diff-boun
 
 // Myers costs O((N+M)·D) in the length D of the edit script, so a whole-file
 // rewrite is quadratic in the number of changed lines. Rewriting every line of
-// this file took 120-139 s unbounded (the tool diffed the same input twice) and
-// produced a ~1.3 MB diff no renderer displays; bounded it settles in ~220 ms.
+// this file took 167.5-173.5 s unbounded (the tool diffed the same input twice)
+// and produced a diff no renderer displays; bounded it settles in 192-200 ms.
 // Vitest's default 5 s timeout therefore also guards the bound: if it is ever
 // removed, the whole-file case stops finishing in time.
 const wholeFileRewriteLines = 20_000;
@@ -81,6 +81,12 @@ describe('edit diff bounds', () => {
     expect(await readFile(file, 'utf8')).toBe(`${newBlock}${original.slice(oldBlock.length)}`);
     expect(result.details?.diffOmitted).toBeUndefined();
     expect(result.details?.patch).toContain('@@');
+    // The Compatible hook keeps the real hunks whenever the patch survives.
+    const hunks = readPluginHookCompatibleToolResponse(result)?.structuredPatch as
+      | readonly CompatibleHunk[]
+      | undefined;
+    expect(hunks?.length).toBeGreaterThan(0);
+    expect(hunks?.some((hunk) => hunk.lines.includes('+const value0 = 1;'))).toBe(true);
   });
 
   // Rewriting a few hundred lines is an ordinary edit, not the pathological
@@ -128,7 +134,7 @@ describe('edit diff bounds', () => {
   // A Compatible PostToolUse handler is skipped with HOOK_INVALID_INPUT when
   // `structuredPatch` is missing, so dropping `details.patch` silently disabled
   // every such hook on exactly the edits this bound targets.
-  it('still hands the Compatible hook a structured patch when the patch is omitted', async () => {
+  it('sends the Compatible hook an empty structured patch when the patch is omitted', async () => {
     const original = body(wholeFileRewriteLines, (index) => `const value${index} = ${index};`);
     const rewritten = body(wholeFileRewriteLines, (index) => `let renamed${index} = ${index * 2};`);
     await writeFile(file, original);
@@ -143,43 +149,31 @@ describe('edit diff bounds', () => {
     const response = readPluginHookCompatibleToolResponse(result);
     expect(response).toBeDefined();
     expect(response?.originalFile).toBe(original);
-    const hunks = response?.structuredPatch as readonly CompatibleHunk[] | undefined;
-    expect(hunks).toHaveLength(1);
-    const hunk = hunks?.[0];
-    expect(hunk?.oldStart).toBe(1);
-    expect(hunk?.newStart).toBe(1);
-    expect(hunk?.oldLines).toBe(wholeFileRewriteLines);
-    expect(hunk?.newLines).toBe(wholeFileRewriteLines);
-    // Every old line is removed and every new line added, in that order.
-    expect(hunk?.lines).toHaveLength(wholeFileRewriteLines * 2);
-    expect(hunk?.lines[0]).toBe('-const value0 = 0;');
-    expect(hunk?.lines[wholeFileRewriteLines - 1]).toBe(
-      `-const value${wholeFileRewriteLines - 1} = ${wholeFileRewriteLines - 1};`,
-    );
-    expect(hunk?.lines[wholeFileRewriteLines]).toBe('+let renamed0 = 0;');
+    expect(response?.structuredPatch).toEqual([]);
   });
 
-  it('marks a missing trailing newline in the synthesized hunk', async () => {
+  // The runner rejects a serialized hook input over MAX_INPUT_BYTES (1 MiB), so
+  // an unavailable patch has to degrade to something bounded: describing the
+  // edit as one whole-file hunk grew this payload to 1 679 234 B against
+  // 563 600 B here, and failed the same handler a second way. The response
+  // separately carries `originalFile`, `oldString` and `newString` in full, so
+  // this case keeps the edit strings small to isolate the patch field.
+  it('keeps the Compatible hook payload under the runner input limit', async () => {
     const original = body(wholeFileRewriteLines, (index) => `const value${index} = ${index};`);
-    const rewritten = body(
-      wholeFileRewriteLines,
-      (index) => `let renamed${index} = ${index * 2};`,
-    ).slice(0, -1);
     await writeFile(file, original);
+    // 1001 replaced lines cost 2002 edits, one past the bound.
+    const oldBlock = body(1_001, (index) => `const value${index} = ${index};`);
+    const newBlock = body(1_001, (index) => `const value${index} = ${index + 1};`);
 
     const result = await new LocalEditTool(directory).execute(context, {
       file_path: 'subject.ts',
-      old_string: original,
-      new_string: rewritten,
+      old_string: oldBlock,
+      new_string: newBlock,
     });
 
-    expect(await readFile(file, 'utf8')).toBe(rewritten);
-    const hunks = readPluginHookCompatibleToolResponse(result)?.structuredPatch as
-      | readonly CompatibleHunk[]
-      | undefined;
-    // jsdiff emits the marker after the side that lacks the newline; only the
-    // new side does here, so it lands last.
-    expect(hunks?.[0]?.lines.at(-1)).toBe('\\ No newline at end of file');
-    expect(hunks?.[0]?.lines.filter((line) => line.startsWith('\\'))).toHaveLength(1);
+    expect(result.details?.patchOmitted).toBe('too_many_changes');
+    const response = readPluginHookCompatibleToolResponse(result);
+    expect(response?.structuredPatch).toEqual([]);
+    expect(Buffer.byteLength(JSON.stringify(response), 'utf8')).toBeLessThan(1024 * 1024);
   });
 });

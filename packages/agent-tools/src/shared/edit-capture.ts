@@ -5,11 +5,6 @@ import type { EditOperations } from '@earendil-works/pi-coding-agent';
 export interface EditCapture {
   readonly path: string;
   readonly originalFile: string;
-  readonly updatedFile: string;
-}
-
-function stripBom(text: string): string {
-  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
 /**
@@ -34,10 +29,10 @@ export function createCapturingEditOperations(): {
       await writeFile(path, content, 'utf8');
       const original = pendingReads.get(path);
       if (original) {
+        const decoded = original.toString('utf8');
         captures.set(path, {
           path,
-          originalFile: stripBom(original.toString('utf8')),
-          updatedFile: stripBom(content),
+          originalFile: decoded.charCodeAt(0) === 0xfeff ? decoded.slice(1) : decoded,
         });
       }
     },

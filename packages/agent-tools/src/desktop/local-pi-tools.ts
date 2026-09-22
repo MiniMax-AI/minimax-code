@@ -299,7 +299,6 @@ export class LocalEditTool implements ToolImpl<
       oldString: normalized?.oldText ?? input.old_string,
       newString: normalized?.newText ?? input.new_string,
       originalFile: editCapture.originalFile,
-      updatedFile: editCapture.updatedFile,
       replaceAll: input.replace_all === true,
       userModified: false,
     });
