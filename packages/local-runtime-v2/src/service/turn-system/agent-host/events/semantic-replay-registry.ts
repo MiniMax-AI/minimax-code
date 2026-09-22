@@ -99,6 +99,7 @@ export class SemanticReplayRegistry<T> {
   ): Promise<void> {
     try {
       const value = await execution;
+      if (this.entries.get(identity) !== replay) return;
       replay.settled = true;
       this.settledEntries.add(replay);
       replay.retainedBytes = this.measureSettledBytes(value);
