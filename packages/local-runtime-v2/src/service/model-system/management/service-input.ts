@@ -8,7 +8,8 @@ import {
 
 const MASKED_KEY_MARKER = '****';
 
-export function assertValidRawApiKey(apiKey: string): string {
+/** Absent and blank both fail: a new provider needs one usable credential source. */
+export function assertValidRawApiKey(apiKey: string | undefined): string {
   const trimmed = typeof apiKey === 'string' ? apiKey.trim() : '';
   if (!trimmed) {
     throw new LocalModelProviderError(400, 'API key must not be empty', 'INVALID_API_KEY');
@@ -23,12 +24,33 @@ export function assertValidRawApiKey(apiKey: string): string {
   return trimmed;
 }
 
-export function normalizeApiKeyUpdate(
-  apiKey: string | undefined,
-): { kind: 'keep' } | { kind: 'clear' } | { kind: 'set'; apiKey: string } {
-  if (apiKey === undefined) return { kind: 'keep' };
-  if (apiKey.trim() === '') return { kind: 'clear' };
-  return { kind: 'set', apiKey: assertValidRawApiKey(apiKey) };
+/**
+ * Credential source states a provider write can produce. `keep` on an existing
+ * provider means "leave the stored key alone"; `clear` removes it.
+ */
+export type ProviderCredentialUpdate =
+  | { readonly kind: 'keep' }
+  | { readonly kind: 'clear' }
+  | { readonly kind: 'set'; readonly apiKey: string };
+
+export function normalizeProviderCredentialUpdate(input: {
+  readonly apiKey?: string;
+}): ProviderCredentialUpdate {
+  if (input.apiKey === undefined) return { kind: 'keep' };
+  if (input.apiKey.trim() === '') return { kind: 'clear' };
+  return { kind: 'set', apiKey: assertValidRawApiKey(input.apiKey) };
+}
+
+/** Writes the resolved credential source onto provider options. */
+export function applyProviderCredentialUpdate(
+  options: Record<string, unknown>,
+  update: ProviderCredentialUpdate,
+): void {
+  if (update.kind === 'set') {
+    options.apiKey = update.apiKey;
+    return;
+  }
+  if (update.kind === 'clear') delete options.apiKey;
 }
 
 export function normalizeApiFormat(

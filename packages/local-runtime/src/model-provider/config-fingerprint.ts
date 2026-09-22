@@ -1,3 +1,5 @@
+import { probeProviderCredential } from '@mavis/config';
+
 import type { LocalModelConfig, LocalRuntimeConfig } from '../config/types.js';
 import { MINIMAX_API_PROVIDER_ID, parseProviderId } from '../config/model-key.js';
 import { minimaxApiBaseUrl, minimaxApiModels } from './minimax-api.js';
@@ -21,7 +23,11 @@ export function byokModelTestStatus(
 ): ModelCacheStatusEntry | undefined {
   const parsed = parseProviderId(providerId);
   if (parsed?.source === 'minimax_api') {
-    const apiKey = config.minimax_api?.apiKey?.trim();
+    const apiKey = probeProviderCredential({
+      field: 'minimax_api.apiKey',
+      provider: 'minimax_api',
+      value: config.minimax_api?.apiKey,
+    }).secret;
     const model = minimaxApiModels(config)[modelId];
     if (!apiKey || !model) return undefined;
     const fingerprint = modelConnectionTestFingerprint(
@@ -37,7 +43,11 @@ export function byokModelTestStatus(
   }
   if (parsed?.source !== 'custom_provider') return undefined;
   const provider = config.custom_provider?.[parsed.providerKey];
-  const apiKey = provider?.options?.apiKey?.trim();
+  const apiKey = probeProviderCredential({
+    field: 'options.apiKey',
+    provider: providerId,
+    value: provider?.options?.apiKey,
+  }).secret;
   const baseUrl = provider?.options?.baseURL?.trim();
   const model = provider?.models?.[modelId];
   if (!provider || provider.enabled === false || !apiKey || !baseUrl || !model) return undefined;

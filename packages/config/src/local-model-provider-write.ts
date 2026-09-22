@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import fs from 'node:fs';
+import fs, { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import yaml from 'js-yaml';
@@ -12,6 +12,7 @@ import {
   resetConfig,
   type Config,
 } from './config.js';
+import { serializeConfigPreservingComments } from './comment-preserving-config-write.js';
 import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from './model-availability.js';
 
 const LOCAL_CONFIG_FILE_MODE = 0o600;
@@ -234,12 +235,16 @@ async function withLockedConfig<T>(
       stale: 10_000,
       retries: { retries: 20, factor: 1, minTimeout: 5, maxTimeout: 25 },
     });
-    const raw = readLocalRawConfig(configPath);
+    const previousRaw = readLocalRawConfig(configPath);
+    const previous = structuredClone(previousRaw);
     resetConfig();
-    const outcome = await operation(raw, getConfig());
+    const outcome = await operation(previous, getConfig());
     if (outcome.write) {
-      assertSafeConfigRecord(raw);
-      await atomicWriteFile(configPath, yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }));
+      assertSafeConfigRecord(previous);
+      await atomicWriteFile(
+        configPath,
+        serializeConfigPreservingComments(readFileSync(configPath, 'utf-8'), previousRaw, previous),
+      );
       resetConfig();
     }
     return { config: getConfig(), value: outcome.value };

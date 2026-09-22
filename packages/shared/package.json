@@ -191,6 +191,10 @@
     "./safety-check-v2": {
       "types": "./src/safety-check-v2.ts",
       "import": "./dist/safety-check-v2.js"
+    },
+    "./logging/redact-log-secret": {
+      "types": "./src/logging/redact-log-secret.ts",
+      "import": "./dist/logging/redact-log-secret.js"
     }
   },
   "types": "./src/index.ts",

@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import { LocalModelProviderError, type LocalModelConfig } from '../contracts.js';
 import {
+  applyProviderCredentialUpdate,
   assertValidRawApiKey,
   mergeModelsFromInputs,
   modelsFromInputs,
   normalizeApiFormat,
-  normalizeApiKeyUpdate,
   normalizeHeaderNames,
   normalizeHeaders,
+  normalizeProviderCredentialUpdate,
   removeHeaderCaseInsensitive,
 } from './service-input.js';
 
@@ -44,9 +45,12 @@ describe('model provider input normalization', () => {
     );
     expect(() => assertValidRawApiKey('sk-a****z')).toThrow(LocalModelProviderError);
     expect(assertValidRawApiKey(' sk-raw ')).toBe('sk-raw');
-    expect(normalizeApiKeyUpdate(undefined)).toEqual({ kind: 'keep' });
-    expect(normalizeApiKeyUpdate('   ')).toEqual({ kind: 'clear' });
-    expect(normalizeApiKeyUpdate(' sk-next ')).toEqual({ kind: 'set', apiKey: 'sk-next' });
+    expect(normalizeProviderCredentialUpdate({})).toEqual({ kind: 'keep' });
+    expect(normalizeProviderCredentialUpdate({ apiKey: '   ' })).toEqual({ kind: 'clear' });
+    expect(normalizeProviderCredentialUpdate({ apiKey: ' sk-next ' })).toEqual({
+      kind: 'set',
+      apiKey: 'sk-next',
+    });
 
     expect(normalizeApiFormat(undefined)).toBeUndefined();
     expect(normalizeApiFormat('   ')).toBeUndefined();
@@ -242,5 +246,21 @@ describe('model provider input normalization', () => {
     expect(() => modelsFromInputs([{ modelId: 'model', limit: { output: 1.5 } }])).toThrowError(
       expect.objectContaining({ code: 'VALIDATION_ERROR' }),
     );
+  });
+});
+
+describe('provider credential application', () => {
+  it('writes the resolved key and clears it', () => {
+    const options: Record<string, unknown> = {};
+    applyProviderCredentialUpdate(options, { kind: 'set', apiKey: 'sk-new' });
+    expect(options).toEqual({ apiKey: 'sk-new' });
+    applyProviderCredentialUpdate(options, { kind: 'clear' });
+    expect(options).toEqual({});
+  });
+
+  it('leaves the stored key untouched on keep', () => {
+    const options: Record<string, unknown> = { apiKey: 'sk-stored' };
+    applyProviderCredentialUpdate(options, { kind: 'keep' });
+    expect(options).toEqual({ apiKey: 'sk-stored' });
   });
 });

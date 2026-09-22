@@ -68,6 +68,11 @@ pnpm mcode provider list --json
 
 `--context-limit` and `--output-limit` each accept a positive safe integer (at most `9007199254740991`). Either flag can be used independently. The same limits apply to every repeated `--model`; only the first model is tested and selected by `--use`. The JSON list shows the configured values as `contextLimit` and `maxOutputTokens`. Without these flags, the existing defaults remain unchanged (unknown custom models currently fall back to 200,000 context tokens and 16,384 output tokens). Model discovery does not infer your local server's context size.
 
+To keep the key out of `config.yaml`, replace the saved `apiKey` with a quoted
+`${MCODE_PROVIDER_API_KEY}` reference and launch `mcode` from the shell where the
+variable is exported. See [environment-variable credentials](byok-environment-credentials.md)
+for both supported credential fields, restart behavior, and configuration writes.
+
 `--api-key-env` reads the current environment variable value and stores that value in the active profile's `config.yaml`; it does not save an environment-variable reference. The file still contains plaintext credentials. On POSIX systems, config writes and temporary copies use `0600`. When loading existing files, MCode removes group/other access while preserving the owner's permissions; already-private files such as `0400` or `0600` do not require a permission change. Loading fails if an unsafe main config cannot be restricted. Older migration backups are also checked, but inspection or repair failures produce a warning identifying the directory or backup that needs manual attention rather than preventing the main config from loading. Windows file modes do not provide equivalent ACL protection; restrict access to the profile directory using Windows permissions.
 
 ### Third-party relays and custom auth headers

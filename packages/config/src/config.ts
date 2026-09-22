@@ -1,4 +1,8 @@
 import {
+  parseConfigText,
+  serializeConfigPreservingComments,
+} from './comment-preserving-config-write.js';
+import {
   resolveRunawayGuardConfig,
   type RunawayGuardSettings,
 } from "./runaway-guard-config.js";
@@ -1654,7 +1658,11 @@ function syncManagedPresetBaseUrl(configPath: string): void {
   try {
     writePrivateConfigFileSync(
       configPath,
-      yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }),
+      serializeConfigPreservingComments(
+        originalContent.toString('utf-8'),
+        parseConfigText(originalContent.toString('utf-8')),
+        raw,
+      ),
     );
   } catch (error) {
     // This on-disk sync is optional, but a failure after truncation is not safe

@@ -19,7 +19,7 @@ import {
   mergeModelsFromInputs,
   modelsFromInputs,
   normalizeApiFormat,
-  normalizeApiKeyUpdate,
+  normalizeProviderCredentialUpdate,
   normalizeHeaderNames,
   normalizeHeaders,
   removeHeaderCaseInsensitive,
@@ -39,7 +39,7 @@ interface UserProviderUpdateInput {
 }
 
 interface PreparedUserProviderUpdate {
-  apiKeyUpdate: ReturnType<typeof normalizeApiKeyUpdate>;
+  apiKeyUpdate: ReturnType<typeof normalizeProviderCredentialUpdate>;
   baseUrl?: string;
   apiFormat?: ReturnType<typeof normalizeApiFormat>;
   headers?: Record<string, string>;
@@ -115,7 +115,7 @@ export async function updateUserProvider(
   const providerKey = context.requireExistingProviderKey(input.providerId);
   // Tri-state api_key: absent keeps the stored key, empty string clears it,
   // masked placeholders are rejected so a sanitized read can't be written back.
-  const apiKeyUpdate = normalizeApiKeyUpdate(input.apiKey);
+  const apiKeyUpdate = normalizeProviderCredentialUpdate({ apiKey: input.apiKey });
   const baseUrl = input.baseUrl?.trim();
   if (input.baseUrl !== undefined && !baseUrl) {
     throw new LocalModelProviderError(400, 'base_url must not be empty', 'VALIDATION_ERROR');

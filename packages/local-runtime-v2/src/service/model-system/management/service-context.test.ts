@@ -103,10 +103,43 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(dataDir, { recursive: true, force: true });
 });
 
 describe('LocalModelProviderService context', () => {
+
+  it('uses the environment credential for tests and invalidates status after rotation', async () => {
+    vi.stubEnv('WORK_API_KEY', CUSTOM_KEY);
+    const reference = '${WORK_API_KEY}';
+    const harness = createHarness();
+    const provider = await harness.service.createUserProvider({
+      name: 'Work',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: reference,
+      apiFormat: 'openai-completions',
+      models: [{ modelId: 'model-a' }],
+    });
+
+    await harness.service.testModel(provider.providerId, 'model-a');
+    expect(harness.testCalls[0]?.target.apiKey).toBe(CUSTOM_KEY);
+    expect(harness.config.custom_provider?.work?.options?.apiKey).toBe(reference);
+    expect(harness.service.listUserProviders()[0]?.models[0]?.status?.state).toBe('available');
+    expect(JSON.stringify(harness.service.listUserProviders())).not.toContain(CUSTOM_KEY);
+
+    vi.stubEnv('WORK_API_KEY', 'fixture-rotated-key');
+    expect(harness.service.listUserProviders()[0]?.models[0]?.status).toBeUndefined();
+    await harness.service.testModel(provider.providerId, 'model-a');
+    expect(harness.testCalls[1]?.target.apiKey).toBe('fixture-rotated-key');
+    expect(harness.service.listUserProviders()[0]?.models[0]?.status?.state).toBe('available');
+
+    vi.stubEnv('WORK_API_KEY', '');
+    expect(harness.service.listUserProviders()[0]).toMatchObject({ hasApiKey: true });
+    expect(harness.service.listUserProviders()[0]?.maskedApiKey).toBeUndefined();
+    await expect(harness.service.testModel(provider.providerId, 'model-a')).rejects.toThrow('WORK_API_KEY');
+    expect(harness.testCalls).toHaveLength(2);
+  });
+
   it('stores MiniMax credentials while exposing only their masked view', async () => {
     const harness = createHarness();
 

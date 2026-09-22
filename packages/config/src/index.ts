@@ -84,6 +84,20 @@ export {
   resolveProviderAuthMode,
 } from './provider-auth-mode.js';
 export {
+  credentialEnvReferenceName,
+  probeProviderCredential,
+  resolveProviderCredential,
+} from './credential-reference.js';
+export type {
+  ProviderCredentialInput,
+  ProviderCredentialProbe,
+  ProviderCredentialSource,
+} from './credential-reference.js';
+export {
+  parseConfigText,
+  serializeConfigPreservingComments,
+} from './comment-preserving-config-write.js';
+export {
   compareAndSetLocalModelContext,
   removeLocalProviderConfig,
   replaceLocalManagedMinimaxProvider,

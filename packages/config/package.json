@@ -28,7 +28,8 @@
   "dependencies": {
     "@mavis/shared": "workspace:^",
     "js-yaml": "^4",
-    "proper-lockfile": "^4"
+    "proper-lockfile": "^4",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/js-yaml": "^4",

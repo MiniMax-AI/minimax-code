@@ -6,6 +6,7 @@ import {
   type AssistantMessageEventStream,
 } from '@earendil-works/pi-ai';
 import { classifyLLMErrorToCode, LLM_ERROR_CODES } from '@mavis/shared/llm-error-classifier';
+import { redactSecretText } from '@mavis/shared/logging/redact-log-secret';
 
 const BYOK_ERROR_PREFIX = 'BYOK upstream error';
 const MAX_ERROR_MESSAGE_LENGTH = 1_200;
@@ -43,12 +44,7 @@ function formatByokErrorMessage(raw: unknown, providerId: string): string {
 }
 
 function redactByokErrorMessage(message: string): string {
-  return message
-    .slice(0, MAX_ERROR_MESSAGE_LENGTH)
-    .replace(/\bsk-[A-Za-z0-9._-]{8,}\b/gu, 'sk-***')
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"',}]+/giu, '$1***')
-    .replace(/((?:api[_-]?key|x-api-key)\s*[:=]\s*)[^\s"',}]+/giu, '$1***')
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/giu, '$1***');
+  return redactSecretText(message).slice(0, MAX_ERROR_MESSAGE_LENGTH);
 }
 
 function wrapStream(

@@ -5,6 +5,7 @@ import pino from 'pino';
 import pinoPretty from 'pino-pretty';
 
 import type { DiskLogTransport } from './disk-transport.js';
+import { redactSecretText, redactSecretValue } from './redact-log-secret.js';
 
 export interface TraceContextLike {
   traceId: string;
@@ -32,6 +33,15 @@ export interface StructuredLoggerOptions {
    * terminal copy keeps its colors.
    */
   disk?: DiskLogTransport;
+}
+
+/** Extras stay serializable the way the caller built them; an exotic payload degrades to its keys. */
+function stringifyExtras(extras: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(extras);
+  } catch {
+    return JSON.stringify(Object.keys(extras));
+  }
 }
 
 function getCallerLocation(): string | undefined {
@@ -87,9 +97,13 @@ function createPrettyStream(
       for (const key of Object.keys(log)) {
         if (!standardKeys.has(key)) extras[key] = log[key];
       }
-      const jsonStr = Object.keys(extras).length > 0 ? ` ${JSON.stringify(extras)}` : '';
+      // Redact here, at the single point where a log line becomes text. Every
+      // level and both the terminal and disk arms pass through it, so no call
+      // site has to remember to strip credentials before logging.
+      const safeExtras = redactSecretValue(extras);
+      const jsonStr = Object.keys(safeExtras).length > 0 ? ` ${stringifyExtras(safeExtras)}` : '';
       const traceSuffix = traceId ? ` [${traceId}]` : '';
-      return `[${String(source)}]${traceSuffix} ${String(msg)}${jsonStr}\n`;
+      return `[${String(source)}]${traceSuffix} ${redactSecretText(String(msg))}${jsonStr}\n`;
     },
   });
 }

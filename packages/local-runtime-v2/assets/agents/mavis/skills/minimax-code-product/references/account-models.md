@@ -9,6 +9,37 @@ Use this reference for MiniMax Code or MiniMax Open Platform accounts, Token Pla
 - Media support and credit eligibility are separate questions: a model may exist in the catalog without being enabled for the user's product, plan, or requested operation.
 - The Agent cannot change balance, entitlement, quota, permissions, or server-side validation.
 
+## BYOK environment-variable credentials
+
+For an API key supplied through the environment, locate the active profile's
+`config.yaml` and change the existing credential field to a whole `${NAME}`
+reference. Preserve its API format, endpoint, models, and other options:
+
+```yaml
+custom_provider:
+  work:
+    options:
+      apiKey: '${WORK_API_KEY}'
+minimax_api:
+  apiKey: '${MINIMAX_API_KEY}'
+```
+
+- Supported credential fields are `custom_provider.<id>.options.apiKey` and
+  `minimax_api.apiKey`. Variable names start with a letter or underscore and may
+  then contain letters, digits, or underscores.
+- `$NAME`, `Bearer ${NAME}`, and partial interpolation remain literal strings;
+  `{env: NAME}` is an invalid credential type.
+- Have the user set the variable locally in the shell that launches `mcode`.
+  Restart TUI, exec, or ACP after changing its launch environment. An already
+  running process keeps its existing environment.
+- Missing or blank variables produce an error naming the provider, field, and
+  variable. Check only whether the variable is set and nonempty; never echo it
+  or ask the user to paste a secret into the conversation.
+- Model requests, saved-provider discovery and connection tests use the resolved
+  key. Saving settings preserves the reference text in the configuration.
+- `provider add --api-key-env` reads and saves a value; edit `config.yaml` to keep
+  a reference. Do not assume custom headers or Base URLs expand variables.
+
 ## Official source discovery
 
 Use only the current region's sources:

@@ -104,8 +104,9 @@ global entitlement without saying so.
    - workflows → `references/workflows.md`
    - Agent/Session/Memory/Team → `references/agents.md`
    - Skill/Plugin/MCP → `references/extensions.md`
-   - plans/models/media → `references/account-models.md`
-5. Use only the current runtime region's sources described above.
+   - plans/models/media, BYOK API keys, or environment-variable credential configuration → `references/account-models.md`
+5. For BYOK environment variables, follow that reference for configuration syntax, process inheritance, and safe checks. Never request or echo the key.
+6. Use only the current runtime region's sources described above.
 
 ## Response rules
 

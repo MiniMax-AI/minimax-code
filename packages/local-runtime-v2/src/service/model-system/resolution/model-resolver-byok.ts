@@ -1,5 +1,9 @@
 import type { Api } from '@earendil-works/pi-ai';
-import { MINIMAX_API_MODEL_CATALOG, getRuntimeRegion } from '@mavis/config';
+import {
+  resolveProviderCredential,
+  MINIMAX_API_MODEL_CATALOG,
+  getRuntimeRegion,
+} from '@mavis/config';
 
 import type {
   LocalByokProviderConfig,
@@ -46,7 +50,11 @@ export function planMinimaxApiResolution(input: {
 }): ByokResolutionPlan | undefined {
   const config = input.byok?.minimax_api;
   if (!config) return undefined;
-  const apiKey = config.apiKey?.trim();
+  const apiKey = resolveProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: MINIMAX_API_PROVIDER_ID,
+    value: config.apiKey,
+  });
   if (!apiKey) {
     throw new Error('LocalModelResolver: minimax_api apiKey is not configured.');
   }
@@ -104,7 +112,11 @@ function resolveCustomProviderCredentials(
 ): Pick<ByokResolutionPlan, 'apiKey' | 'authProvider' | 'runtimeProvider' | 'baseUrl'> {
   const authProvider =
     config.kind === 'oauth' || config.options?.authMode === 'oauth' ? input.providerKey : undefined;
-  const apiKey = config.options?.apiKey?.trim();
+  const apiKey = resolveProviderCredential({
+    field: 'custom_provider options.apiKey',
+    provider: input.provider,
+    value: config.options?.apiKey,
+  });
   if (!apiKey && !authProvider) {
     throw new Error(`LocalModelResolver: api_key not configured for provider "${input.provider}".`);
   }
