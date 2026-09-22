@@ -795,3 +795,104 @@ describe("TuiRuntimeAdapter process-local facades", () => {
     },
   );
 });
+
+describe("TuiRuntimeAdapter startup model override", () => {
+  const savedGlobalSelection = {
+    providerId: "global-provider",
+    modelId: "global-model",
+  };
+
+  function createAdapter(options?: {
+    readonly startupModelOverride?: {
+      providerId: string;
+      modelId: string;
+      variant?: string;
+      thinking?: { effort?: string };
+    };
+  }) {
+    const createSession = vi.fn(async () => ({ sessionId: "session-new" }));
+    const listModels = vi.fn(async () => [
+      { ...savedGlobalSelection, selected: true },
+    ]);
+    const cliService = {
+      createSession,
+      listModels,
+    };
+    const adapter = new TuiRuntimeAdapter(cliService as never, options ?? {});
+    return { adapter, cliService, createSession, listModels };
+  }
+
+  it("keeps the --model override on every Session so /new does not fall back", async () => {
+    const { adapter, createSession } = createAdapter({
+      startupModelOverride: {
+        providerId: "override-provider",
+        modelId: "override-model",
+      },
+    });
+
+    await adapter.createSession({ workspaceDir: "/repo" });
+    await adapter.createSession({ workspaceDir: "/repo" });
+
+    expect(createSession).toHaveBeenCalledTimes(2);
+    for (const [call] of createSession.mock.calls) {
+      expect(call).toMatchObject({
+        model: {
+          providerId: "override-provider",
+          modelId: "override-model",
+        },
+      });
+    }
+  });
+
+  it("does not consult the saved global selection while an override is active", async () => {
+    const { adapter, listModels } = createAdapter({
+      startupModelOverride: {
+        providerId: "override-provider",
+        modelId: "override-model",
+      },
+    });
+
+    await adapter.createSession({ workspaceDir: "/repo" });
+
+    expect(listModels).not.toHaveBeenCalled();
+  });
+
+  it("inherits the saved global selection when no override is configured", async () => {
+    const { adapter, createSession } = createAdapter();
+
+    await adapter.createSession({ workspaceDir: "/repo" });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: {
+          providerId: "global-provider",
+          modelId: "global-model",
+        },
+      }),
+    );
+  });
+
+  it("forwards variant and think effort declared by the override", async () => {
+    const { adapter, createSession } = createAdapter({
+      startupModelOverride: {
+        providerId: "override-provider",
+        modelId: "override-model",
+        variant: "thinking",
+        thinking: { effort: "high" },
+      },
+    });
+
+    await adapter.createSession({ workspaceDir: "/repo" });
+
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: {
+          providerId: "override-provider",
+          modelId: "override-model",
+          variant: "thinking",
+          thinking: { effort: "high" },
+        },
+      }),
+    );
+  });
+});

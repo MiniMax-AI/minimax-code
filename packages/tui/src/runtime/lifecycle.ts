@@ -26,6 +26,7 @@ import {
 } from './embedded-host.js';
 import { createTuiRuntimeLogging, type TuiRuntimeLogging } from './logging.js';
 import { TuiRuntimeAdapter } from './adapter.js';
+import type { TuiModelSelection } from './port.js';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import {
@@ -82,6 +83,12 @@ export interface CreateTuiRuntimeOptions {
   observability?: TuiObservability;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
   lane?: string;
+  /**
+   * Process-scoped `--model` override. Threaded into the adapter so every
+   * Session this process creates inherits it instead of the saved default.
+   * Omitted when the flag only retargets an already-existing Session.
+   */
+  startupModelOverride?: TuiModelSelection;
 }
 
 export interface CreateTuiRuntimeDependencies {
@@ -495,6 +502,9 @@ export async function createTuiRuntime(
       adapter: new TuiRuntimeAdapter(host.cliService, {
         workspaceDir: options.workspaceDir,
         observability,
+        ...(options.startupModelOverride
+          ? { startupModelOverride: options.startupModelOverride }
+          : {}),
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)
           : (sessionId) => disposeTuiBrowserSessionStorage(options.dataDir, sessionId),
