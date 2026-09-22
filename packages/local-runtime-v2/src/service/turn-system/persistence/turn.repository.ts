@@ -29,6 +29,7 @@ import type {
   TurnRepositoryOptions,
 } from './contracts.js';
 import { createPluginHookSessionPersistence } from './plugin-hook-session.repository.js';
+import { runWithWriteLock } from '../../../infra/db/write-transaction.js';
 import {
   persistedTurnConsumesQueuePause,
   publishQueueFacts,
@@ -68,7 +69,8 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
 
   return {
     tryAcquireSessionMaintenance: async (sessionId) =>
-      options.db.transaction(
+      await runWithWriteLock(
+        options.db,
         (tx) => {
           const now = nowMs();
           const rejection = options.sessionAdmission.rejectionInTransaction(tx, { sessionId });
@@ -94,7 +96,6 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
             recovery.terminalFacts,
           );
         },
-        { behavior: 'immediate' },
       ),
     renewSessionMaintenance: async (lease) => {
       const now = nowMs();
@@ -145,7 +146,8 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
         leaseId: input.leaseId,
       };
       try {
-        const committed = options.db.transaction(
+        const committed = await runWithWriteLock(
+          options.db,
           (tx) => {
             const completedAtMs = nowMs();
             const result = settleInTransaction(tx, input, completedAtMs);
@@ -160,7 +162,6 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
                 : [];
             return { result, facts };
           },
-          { behavior: 'immediate' },
         );
         if (samePendingSettlement(pendingSettlements.get(input.sessionId), pending)) {
           pendingSettlements.delete(input.sessionId);
@@ -173,9 +174,9 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
       }
     },
     recoverExpired: async (sessionId) =>
-      options.db.transaction((tx) => recoverExpiredInTransaction(tx, sessionId, nowMs()), {
-        behavior: 'immediate',
-      }),
+      runWithWriteLock(options.db, (tx) =>
+        recoverExpiredInTransaction(tx, sessionId, nowMs()),
+      ),
     recoverProcessRestart: ({ processStartedAtMs }) =>
       recoverRepositoryProcessRestart(
         options,
@@ -189,7 +190,8 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
       ),
     beginSessionDeletion: async (sessionId) => {
       const pending = pendingSettlements.get(sessionId);
-      const result = options.db.transaction(
+      const result = await runWithWriteLock(
+        options.db,
         (tx) => {
           const now = nowMs();
           if (pending) recoverPendingSettlementInTransaction(tx, pending, now);
@@ -201,7 +203,6 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
             isLeaseOwnerCurrent,
           });
         },
-        { behavior: 'immediate' },
       );
       if (pendingSettlements.get(sessionId) === pending) pendingSettlements.delete(sessionId);
       return result;
@@ -247,7 +248,8 @@ async function admitRepositoryTurn(
   },
 ): Promise<AdmitTurnResult> {
   const pending = dependencies.pendingSettlements.get(input.sessionId);
-  const committed = options.db.transaction(
+  const committed = await runWithWriteLock(
+    options.db,
     (tx) => {
       const result = admitTurnInTransaction(tx, options, input, {
         pending,
@@ -272,7 +274,6 @@ async function admitRepositoryTurn(
         facts: effect.facts,
       };
     },
-    { behavior: 'immediate' },
   );
   if (dependencies.pendingSettlements.get(input.sessionId) === pending) {
     dependencies.pendingSettlements.delete(input.sessionId);
@@ -315,7 +316,8 @@ async function recoverRepositoryProcessRestart(
     throw new TypeError('processStartedAtMs must be finite');
   }
   const observedLegacyTurnLeases = new Set<string>();
-  const committed = options.db.transaction(
+  const committed = await runWithWriteLock(
+    options.db,
     (tx) => {
       const recovery = recoverProcessRestartInTransaction(tx, {
         ...input,
@@ -348,7 +350,6 @@ async function recoverRepositoryProcessRestart(
         queueFacts,
       };
     },
-    { behavior: 'immediate' },
   );
   for (const key of legacyTurnLeaseObservations.keys()) {
     if (!observedLegacyTurnLeases.has(key)) legacyTurnLeaseObservations.delete(key);
@@ -394,7 +395,8 @@ async function releaseSessionMaintenanceLease(
   nowMs: () => number,
   lease: Parameters<TurnRepository['releaseSessionMaintenance']>[0],
 ): Promise<void> {
-  options.db.transaction(
+  await runWithWriteLock(
+    options.db,
     (tx) => {
       const lock = findSessionLock(tx, lease.sessionId);
       if (lock?.ownerId !== lease.leaseId) return;
@@ -425,7 +427,6 @@ async function releaseSessionMaintenanceLease(
           .run();
       }
     },
-    { behavior: 'immediate' },
   );
 }
 
@@ -434,7 +435,8 @@ async function deleteTurnSessionData(
   pendingSettlements: Map<string, PendingSettlement>,
   sessionId: string,
 ): Promise<void> {
-  options.db.transaction(
+  await runWithWriteLock(
+    options.db,
     (tx) => {
       const lock = findSessionLock(tx, sessionId);
       const turnIds = tx
@@ -455,7 +457,6 @@ async function deleteTurnSessionData(
       }
       tx.delete(turnIngress).where(eq(turnIngress.sessionId, sessionId)).run();
     },
-    { behavior: 'immediate' },
   );
   pendingSettlements.delete(sessionId);
 }
@@ -465,7 +466,8 @@ async function completeTurnSessionDeletion(
   sessionId: string,
   isLeaseOwnerCurrent: (ownerId: string) => boolean,
 ): Promise<void> {
-  options.db.transaction(
+  await runWithWriteLock(
+    options.db,
     (tx) => {
       const lock = findSessionLock(tx, sessionId);
       if (!lock) return;
@@ -487,7 +489,6 @@ async function completeTurnSessionDeletion(
       }
       tx.delete(sessionLocks).where(eq(sessionLocks.sessionId, sessionId)).run();
     },
-    { behavior: 'immediate' },
   );
 }
 
@@ -581,7 +582,8 @@ async function reserveSteeringReceipt(
   options: TurnRepositoryOptions,
   input: Parameters<TurnRepository['reserveSteeringReceipt']>[0],
 ): ReturnType<TurnRepository['reserveSteeringReceipt']> {
-  return options.db.transaction(
+  return runWithWriteLock(
+    options.db,
     (tx) => {
       const existing = tx
         .select({ turnId: turnIngressClientRequests.turnId })
@@ -616,7 +618,6 @@ async function reserveSteeringReceipt(
         .run();
       return { status: 'reserved' as const };
     },
-    { behavior: 'immediate' },
   );
 }
 
@@ -624,7 +625,8 @@ async function releaseSteeringReceipt(
   options: TurnRepositoryOptions,
   input: Parameters<TurnRepository['releaseSteeringReceipt']>[0],
 ): Promise<void> {
-  options.db.transaction(
+  await runWithWriteLock(
+    options.db,
     (tx) => {
       tx.delete(turnIngressClientRequests)
         .where(
@@ -636,7 +638,6 @@ async function releaseSteeringReceipt(
         )
         .run();
     },
-    { behavior: 'immediate' },
   );
 }
 
@@ -645,7 +646,8 @@ async function revokeAdmission(
   input: Parameters<TurnRepository['revokeAdmission']>[0],
   restoredAtMs: number,
 ): Promise<boolean> {
-  const committed = options.db.transaction(
+  const committed = await runWithWriteLock(
+    options.db,
     (tx) => {
       const receipt = tx
         .select({ status: turnIngress.status })
@@ -685,7 +687,6 @@ async function revokeAdmission(
         }),
       };
     },
-    { behavior: 'immediate' },
   );
   publishQueueFacts(options, committed.facts);
   return committed.revoked;

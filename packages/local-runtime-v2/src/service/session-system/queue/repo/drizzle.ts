@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 
 import type { AppDb } from '../../../../infra/db/client.js';
+import { runWithWriteLock } from '../../../../infra/db/write-transaction.js';
 import {
   legacyQueues,
   queueItems,
@@ -325,7 +326,7 @@ class DrizzleQueueRepository implements QueueRepository {
     readonly turnId: string;
   }): Promise<void> {
     if (!input.turnId) throw new TypeError('Queue delivery requires a Turn identity');
-    this.transaction(input.sessionId, (db) => {
+    await this.transaction(input.sessionId, (db) => {
       const items = this.claimRows(db, input.sessionId, input.claimId);
       if (items.length === 0) throw new QueueClaimNotFoundError(input.sessionId, input.claimId);
       for (const item of items) {
@@ -537,7 +538,8 @@ class DrizzleQueueRepository implements QueueRepository {
     if (items.some((item) => item.sessionId !== sessionId || !isQueueItem(item))) {
       throw new TypeError('Queue replacement contains an invalid item');
     }
-    this.options.db.transaction(
+    await runWithWriteLock(
+      this.options.db,
       (db) => {
         this.replaceRows(db, sessionId, items);
         db.insert(queueRowMigrations)
@@ -550,7 +552,6 @@ class DrizzleQueueRepository implements QueueRepository {
         db.delete(legacyQueues).where(eq(legacyQueues.sessionId, sessionId)).run();
         this.reconcilePause(db, sessionId);
       },
-      { behavior: 'immediate' },
     );
     return committed(undefined);
   }
@@ -570,11 +571,11 @@ class DrizzleQueueRepository implements QueueRepository {
     });
   }
 
-  private transaction<T>(
+  private async transaction<T>(
     sessionId: string,
     operation: (db: AppDb) => CommittedQueueResult<T>,
-  ): CommittedQueueResult<T> {
-    return this.options.db.transaction(
+  ): Promise<CommittedQueueResult<T>> {
+    return runWithWriteLock(this.options.db,
       (db) => {
         ensureQueueRowsReadyInTransaction(db, sessionId, this.nowMs());
         const wasPaused = Boolean(this.pause(db, sessionId));
@@ -582,15 +583,14 @@ class DrizzleQueueRepository implements QueueRepository {
         this.reconcilePause(db, sessionId);
         return withPauseRemovalFact(result, sessionId, wasPaused && !this.pause(db, sessionId));
       },
-      { behavior: 'immediate' },
     );
   }
 
-  private mutationTransaction<T>(
+  private async mutationTransaction<T>(
     sessionId: string,
     operation: (db: AppDb) => CommittedQueueResult<T>,
-  ): CommittedQueueResult<T> {
-    return this.options.db.transaction(
+  ): Promise<CommittedQueueResult<T>> {
+    return runWithWriteLock(this.options.db,
       (db) => {
         this.assertMutationAdmitted(db, sessionId);
         ensureQueueRowsReadyInTransaction(db, sessionId, this.nowMs());
@@ -599,7 +599,6 @@ class DrizzleQueueRepository implements QueueRepository {
         this.reconcilePause(db, sessionId);
         return withPauseRemovalFact(result, sessionId, wasPaused && !this.pause(db, sessionId));
       },
-      { behavior: 'immediate' },
     );
   }
 

@@ -74,7 +74,7 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async get(sessionId: string, msgId: string): Promise<DisplayMessageRecord | undefined> {
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     const db = this.options.db;
     let query = messageReads.get(db);
     if (!query) {
@@ -86,7 +86,7 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async list(sessionId: string, options: ListMessagesOptions = {}): Promise<ListMessagesResult> {
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     const anchorId = options.before ? this.messageRowId(sessionId, options.before) : undefined;
     const limit = normalizeLimit(options.limit, 0);
     const query = this.options.db
@@ -110,7 +110,7 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async listAfter(sessionId: string, afterMsgId?: string): Promise<MessageReplayResult> {
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     const anchorId = afterMsgId ? this.messageRowId(sessionId, afterMsgId) : undefined;
     if (afterMsgId && anchorId === undefined) return { status: 'missing-anchor', messages: [] };
     const rows = this.options.db
@@ -128,7 +128,7 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async listTurn(sessionId: string, turnId: string): Promise<DisplayMessageRecord[]> {
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     const db = this.options.db;
     let query = turnReads.get(db);
     if (!query) {
@@ -147,7 +147,7 @@ class DrizzleMessageRepository implements MessageRepository {
     },
   ): Promise<DisplayMessageRecord[]> {
     if (!Number.isFinite(options.limit) || options.limit <= 0) return [];
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     const rows = this.options.db
       .select()
       .from(messageRows)
@@ -175,7 +175,8 @@ class DrizzleMessageRepository implements MessageRepository {
       generatedIdDiscriminator: `user:${input.turnId}`,
       nowMs: this.nowMs,
     });
-    return this.options.db.transaction(
+    return await runWithWriteLock(
+      this.options.db,
       (tx) => {
         const rejection = this.options.userMessageAdmission?.rejectionInTransaction(tx, {
           sessionId: input.sessionId,
@@ -235,7 +236,6 @@ class DrizzleMessageRepository implements MessageRepository {
           message: decodeDisplayMessage(inserted),
         };
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -282,7 +282,7 @@ class DrizzleMessageRepository implements MessageRepository {
 
   async replace(input: MessageReplaceInput): Promise<void> {
     const normalized = this.normalizeReplacementBatch(input.messages, 0);
-    this.writeReplacementBatch(input.sessionId, normalized, true);
+    await this.writeReplacementBatch(input.sessionId, normalized, true);
   }
 
   async replaceStream(input: MessageReplaceStreamInput): Promise<void> {
@@ -291,15 +291,16 @@ class DrizzleMessageRepository implements MessageRepository {
     for await (const batch of input.batches) {
       if (batch.length === 0) continue;
       const normalized = this.normalizeReplacementBatch(batch, messageIndex);
-      this.writeReplacementBatch(input.sessionId, normalized, replaceExisting);
+      await this.writeReplacementBatch(input.sessionId, normalized, replaceExisting);
       messageIndex += normalized.length;
       replaceExisting = false;
     }
-    if (replaceExisting) this.writeReplacementBatch(input.sessionId, [], true);
+    if (replaceExisting) await this.writeReplacementBatch(input.sessionId, [], true);
   }
 
   async rewindInclusive(input: MessageRewindInclusiveInput): Promise<MessageRewindInclusiveResult> {
-    return this.options.db.transaction(
+    return await runWithWriteLock(
+      this.options.db,
       (tx) => {
         this.ensureReadyInTransaction(tx, input.sessionId);
         if (!input.fromMessageId.startsWith('msg-user-v1-')) {
@@ -366,12 +367,11 @@ class DrizzleMessageRepository implements MessageRepository {
         this.markSessionAssetIndexCurrent(tx, input.sessionId);
         return { deletedMessageIds };
       },
-      { behavior: 'immediate' },
     );
   }
 
   async rewind(input: MessageRewindInput): Promise<void> {
-    this.mutationTransaction(input.sessionId, (tx) => {
+    await this.mutationTransaction(input.sessionId, (tx) => {
       const ids = new Set(input.messageIds ?? []);
       const anchorId = input.afterMessageId
         ? this.messageRowId(input.sessionId, input.afterMessageId, tx)
@@ -401,7 +401,7 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async resolveTurnSource(sessionId: string, turnId: string) {
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     const row = this.options.db
       .select()
       .from(messageRows)
@@ -419,7 +419,7 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async latestDisplayRowId(sessionId: string): Promise<number> {
-    this.ensureReady(sessionId);
+    await this.ensureReady(sessionId);
     return (
       this.options.db
         .select({ id: messageRows.id })
@@ -444,12 +444,12 @@ class DrizzleMessageRepository implements MessageRepository {
     targetSessionId: string;
     throughMessageId: string;
   }): Promise<void> {
-    this.options.db.transaction(
+    await runWithWriteLock(
+      this.options.db,
       (tx) => {
         this.copyPrefixInTransaction(tx, input);
         this.appendForkOriginInTransaction(tx, input);
       },
-      { behavior: 'immediate' },
     );
   }
 
@@ -514,7 +514,8 @@ class DrizzleMessageRepository implements MessageRepository {
     targetSessionId: string;
     sourceSessionId: string;
   }): Promise<void> {
-    this.options.db.transaction((tx) => {
+    await runWithWriteLock(
+      this.options.db,(tx) => {
       this.ensureReadyInTransaction(tx, input.targetSessionId);
       this.appendForkOriginInTransaction(tx, input);
     });
@@ -544,7 +545,8 @@ class DrizzleMessageRepository implements MessageRepository {
   }
 
   async deleteSessionData(sessionId: string): Promise<void> {
-    this.options.db.transaction((tx) => {
+    await runWithWriteLock(
+      this.options.db,(tx) => {
       tx.delete(sessionAssets).where(eq(sessionAssets.sessionId, sessionId)).run();
       tx.delete(sessionAssetIndexState)
         .where(eq(sessionAssetIndexState.sessionId, sessionId))
@@ -567,23 +569,23 @@ class DrizzleMessageRepository implements MessageRepository {
     });
   }
 
-  private ensureReady(sessionId: string): void {
+  private async ensureReady(sessionId: string): Promise<void> {
     const marker = this.options.db
       .select({ sessionId: messageRowMigrations.sessionId })
       .from(messageRowMigrations)
       .where(eq(messageRowMigrations.sessionId, sessionId))
       .get();
     if (marker) return;
-    this.mutationTransaction(sessionId, () => undefined);
+    await this.mutationTransaction(sessionId, () => undefined);
   }
-  private mutationTransaction<T>(sessionId: string, mutation: (db: AppDb) => T): T {
-    return this.options.db.transaction(
-      (tx) => {
-        this.ensureReadyInTransaction(tx, sessionId);
-        return mutation(tx);
-      },
-      { behavior: 'immediate' },
-    );
+  private mutationTransaction<T>(
+    sessionId: string,
+    mutation: (db: AppDb) => T,
+  ): Promise<T> {
+    return runWithWriteLock(this.options.db, (tx) => {
+      this.ensureReadyInTransaction(tx, sessionId);
+      return mutation(tx);
+    });
   }
   private ensureReadyInTransaction(db: AppDb, sessionId: string): void {
     ensureMessageRowsReadyInTransaction(db, sessionId, this.nowMs(), (message, index) => {
@@ -653,12 +655,12 @@ class DrizzleMessageRepository implements MessageRepository {
       }),
     );
   }
-  private writeReplacementBatch(
+  private async writeReplacementBatch(
     sessionId: string,
     messages: readonly NormalizedDisplayMessage[],
     replaceExisting: boolean,
-  ): void {
-    this.mutationTransaction(sessionId, (tx) => {
+  ): Promise<void> {
+    await this.mutationTransaction(sessionId, (tx) => {
       if (replaceExisting) {
         tx.delete(messageRows).where(eq(messageRows.sessionId, sessionId)).run();
         tx.delete(sessionAssets).where(eq(sessionAssets.sessionId, sessionId)).run();

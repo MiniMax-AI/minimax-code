@@ -358,6 +358,9 @@
       "@mavis/shared/source-provenance": [
         "./packages/shared/src/source-provenance.ts"
       ],
+      "@mavis/shared/sqlite-write-retry": [
+        "./packages/shared/src/sqlite-write-retry.ts"
+      ],
       "@mavis/shared/subagent-roles": [
         "./packages/shared/src/subagent-roles.ts"
       ],

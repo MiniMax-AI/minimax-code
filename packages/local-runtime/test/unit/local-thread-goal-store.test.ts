@@ -32,7 +32,11 @@ import {
   type LastVerificationV1,
 } from "@mavis/goal";
 
-import { closeLocalRuntimeDb, openLocalRuntimeDb } from "../../src/persistence/db.js";
+import {
+  closeLocalRuntimeDb,
+  openLocalRuntimeDb,
+  resolveLocalRuntimeDbPath,
+} from "../../src/persistence/db.js";
 import { SqliteThreadGoalStore } from "../../src/thread-goal/store.js";
 
 async function withDataDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -2241,3 +2245,74 @@ describe("SqliteThreadGoalStore — bound settlement", () => {
     });
   });
 });
+
+/**
+ * Issue #282: the v1 Goal store shares `runtime-state.sqlite` with every other
+ * `mcode` process. A foreign writer holding the WAL write lock used to surface
+ * `SQLITE_BUSY` out of `transaction(...).immediate()` and fail the Turn.
+ */
+describe("SqliteThreadGoalStore write contention", () => {
+  it("commits a goal after a foreign writer outlasts the native busy timeout", async () => {
+    await withDataDir(async (dataDir) => {
+      openLocalRuntimeDb(dataDir);
+      const holder = await holdForeignWriter(dataDir, 8_000);
+      try {
+        const store = new SqliteThreadGoalStore(dataDir, () => 1_700_000_000_000);
+        const goal = await store.create({ sessionId: "s-contended", objective: "survive" });
+        expect(goal.status).toBe("active");
+        expect((await store.getBySession("s-contended"))?.goalId).toBe(goal.goalId);
+      } finally {
+        await holder();
+      }
+    });
+  }, 20_000);
+
+  it("leaves reads on the synchronous path while a writer holds the lock", async () => {
+    await withDataDir(async (dataDir) => {
+      openLocalRuntimeDb(dataDir);
+      const holder = await holdForeignWriter(dataDir, 2_000);
+      try {
+        const store = new SqliteThreadGoalStore(dataDir, () => 1_700_000_000_000);
+        expect(await store.getBySession("missing")).toBeUndefined();
+      } finally {
+        await holder();
+      }
+    });
+  }, 20_000);
+});
+
+/** Hold the single WAL write lock from another process, like a second `mcode`. */
+async function holdForeignWriter(
+  dataDir: string,
+  durationMs: number,
+): Promise<() => Promise<void>> {
+  const { fork } = await import("node:child_process");
+  const { once } = await import("node:events");
+  const { createRequire } = await import("node:module");
+  const { writeFile } = await import("node:fs/promises");
+  const script = join(dataDir, "goal-lock-holder.cjs");
+  await writeFile(
+    script,
+    `const Database = require(process.argv[2]);
+     const db = new Database(process.argv[3]);
+     db.exec('BEGIN IMMEDIATE');
+     process.send('locked');
+     setTimeout(() => { db.exec('COMMIT'); db.close(); process.disconnect(); }, Number(process.argv[4]));`,
+  );
+  const child = fork(
+    script,
+    [createRequire(import.meta.url).resolve("better-sqlite3"), resolveLocalRuntimeDbPath(dataDir), String(durationMs)],
+    { execArgv: [], stdio: ["ignore", "ignore", "ignore", "ipc"] },
+  );
+  const exited = once(child, "exit");
+  await Promise.race([
+    once(child, "message"),
+    exited.then(() => {
+      throw new Error("Lock holder exited before acquiring the lock");
+    }),
+  ]);
+  return async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+  };
+}

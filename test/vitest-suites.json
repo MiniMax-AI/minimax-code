@@ -159,6 +159,7 @@
       "packages/local-runtime/test/unit/session-diff-fallback.test.ts",
       "test/history-processing.test.ts",
       "test/sqlite-message-contention.test.ts",
+      "test/sqlite-turn-contention.test.ts",
       "packages/tui/test/unit/tui-feature-viewport-contract.test.ts",
       "packages/tui/test/unit/tui-session-history-flow.test.ts",
       "packages/tui/test/unit/tui-session-mutation-panels.test.ts",
