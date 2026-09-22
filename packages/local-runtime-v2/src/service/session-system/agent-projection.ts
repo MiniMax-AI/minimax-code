@@ -43,7 +43,7 @@ export interface SessionAgentProjectionInput {
 export interface SessionSystemAgentProjectionOptions {
   readonly state: Pick<SessionStateWriter, 'markStarted' | 'markIdle' | 'markTerminal'>;
   readonly sessions: Pick<SessionRepository, 'update'>;
-  readonly messages: Pick<MessageRepository, 'upsert' | 'listTurn' | 'rewind'>;
+  readonly messages: Pick<MessageRepository, 'upsert' | 'listTurn' | 'rewind' | 'listCanonicalAssistantTail'>;
   readonly stream: Pick<SessionStreamWriter, 'write'>;
   readonly conversationActions?: Pick<ConversationActionProjectionService, 'projectTerminalTurn'>;
   readonly conversationFacts: SessionConversationFactSink;
@@ -348,11 +348,12 @@ async function projectCanonicalAssistantBoundaries(
   const canonicalMessageIds = canonicalAssistantMessageIds(input.change);
   if (canonicalMessageIds.length === 0) return;
   try {
-    const displayMessages = await options.messages.listTurn(
-      input.context.sessionId,
-      input.context.turnId,
-    );
-    const assistants = displayMessages.filter(isCanonicalAssistantDisplayMessage);
+    const assistants = options.messages.listCanonicalAssistantTail
+      ? await options.messages.listCanonicalAssistantTail(
+          input.context.sessionId, input.context.turnId, canonicalMessageIds.length,
+        )
+      : (await options.messages.listTurn(input.context.sessionId, input.context.turnId))
+          .filter(isCanonicalAssistantDisplayMessage);
     if (assistants.length < canonicalMessageIds.length) return;
     const targets = assistants.slice(-canonicalMessageIds.length);
     await Promise.all(

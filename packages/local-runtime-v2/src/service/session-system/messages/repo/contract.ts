@@ -92,6 +92,8 @@ export interface MessageRepository {
   list(sessionId: string, options?: ListMessagesOptions): Promise<ListMessagesResult>;
   listAfter(sessionId: string, afterMsgId?: string): Promise<MessageReplayResult>;
   listTurn(sessionId: string, turnId: string): Promise<DisplayMessageRecord[]>;
+  /** Validate the whole turn, then return its last ordinary assistant messages. */
+  listCanonicalAssistantTail?(sessionId: string, turnId: string, limit: number): Promise<DisplayMessageRecord[]>;
   listRecent(
     sessionId: string,
     options: {

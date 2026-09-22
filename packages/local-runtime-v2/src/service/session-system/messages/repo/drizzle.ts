@@ -67,6 +67,12 @@ function prepareTurnRead(db: AppDb) {
 const messageReads = new WeakMap<AppDb, ReturnType<typeof prepareMessageRead>>();
 const turnReads = new WeakMap<AppDb, ReturnType<typeof prepareTurnRead>>();
 
+function isCanonicalAssistant(message: DisplayMessageRecord): boolean {
+  return message.role === 'assistant' &&
+    !(typeof message.kind === 'string' && message.kind.length > 0) &&
+    !(typeof message.displayKind === 'string' && message.displayKind.length > 0);
+}
+
 class DrizzleMessageRepository implements MessageRepository {
   private readonly nowMs: () => number;
   constructor(private readonly options: MessageRepositoryOptions) {
@@ -136,6 +142,74 @@ class DrizzleMessageRepository implements MessageRepository {
       turnReads.set(db, query);
     }
     return query.all({ sessionId, turnId }).map(decodeDisplayMessage);
+  }
+
+  async listCanonicalAssistantTail(
+    sessionId: string, turnId: string, limit: number,
+  ): Promise<DisplayMessageRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit <= 0) return [];
+    this.ensureReady(sessionId);
+    return this.options.db.transaction((tx) => {
+      // Establish a main-database snapshot before reading its data_version.
+      tx.get(sql`SELECT id FROM main.local_runtime_message_rows LIMIT 1`);
+      tx.run(sql`CREATE TEMP TABLE IF NOT EXISTS mcode_display_validation (
+        id INTEGER PRIMARY KEY, assistant INTEGER NOT NULL
+      )`);
+      tx.run(sql`CREATE TEMP TABLE IF NOT EXISTS mcode_display_validation_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1), session_id TEXT, turn_id TEXT,
+        data_version INTEGER, schema_version INTEGER
+      )`);
+      // TEMP triggers observe writes through this connection, including raw SQL.
+      // An INSERT also invalidates a reused row id after INSERT OR REPLACE.
+      tx.run(sql`CREATE TEMP TRIGGER IF NOT EXISTS mcode_display_insert
+        AFTER INSERT ON main.local_runtime_message_rows BEGIN
+          DELETE FROM mcode_display_validation WHERE id = NEW.id;
+        END`);
+      tx.run(sql`CREATE TEMP TRIGGER IF NOT EXISTS mcode_display_update
+        AFTER UPDATE ON main.local_runtime_message_rows BEGIN
+          DELETE FROM mcode_display_validation WHERE id IN (OLD.id, NEW.id);
+        END`);
+      tx.run(sql`CREATE TEMP TRIGGER IF NOT EXISTS mcode_display_delete
+        AFTER DELETE ON main.local_runtime_message_rows BEGIN
+          DELETE FROM mcode_display_validation WHERE id = OLD.id;
+        END`);
+      const { data_version: dataVersion } = tx.get<{ data_version: number }>(sql`PRAGMA main.data_version`)!;
+      const { schema_version: schemaVersion } = tx.get<{ schema_version: number }>(sql`PRAGMA main.schema_version`)!;
+      const state = tx.get<{
+        session_id: string; turn_id: string; data_version: number; schema_version: number;
+      }>(sql`SELECT * FROM temp.mcode_display_validation_state WHERE id = 1`);
+      if (!state || state.session_id !== sessionId || state.turn_id !== turnId ||
+          state.data_version !== dataVersion || state.schema_version !== schemaVersion) {
+        tx.run(sql`DELETE FROM temp.mcode_display_validation`);
+        tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation_state
+          VALUES (1, ${sessionId}, ${turnId}, ${dataVersion}, ${schemaVersion})`);
+      }
+      const turn = and(eq(messageRows.sessionId, sessionId), eq(messageRows.turnId, turnId));
+      const count = tx.get<{ count: number }>(sql`SELECT count(*) AS count
+        FROM ${messageRows} WHERE ${turn}`)!.count;
+      // The index retains only integer flags, never message contents. Bound it
+      // even for pathological turns; the uncached path has identical semantics.
+      if (count > 4096) {
+        tx.run(sql`DELETE FROM temp.mcode_display_validation`);
+        return tx.select().from(messageRows).where(turn).orderBy(asc(messageRows.id))
+          .all().map(decodeDisplayMessage).filter(isCanonicalAssistant).slice(-limit);
+      }
+      const changed = tx.select().from(messageRows).where(and(turn,
+        sql`NOT EXISTS (SELECT 1 FROM temp.mcode_display_validation v WHERE v.id = ${messageRows.id})`,
+      )).orderBy(asc(messageRows.id)).all();
+      for (const row of changed) {
+        const message = decodeDisplayMessage(row);
+        tx.run(sql`INSERT INTO temp.mcode_display_validation VALUES
+          (${row.id}, ${isCanonicalAssistant(message) ? 1 : 0})`);
+      }
+      // Keep deletions and turn transfers from retaining orphaned flags.
+      tx.run(sql`DELETE FROM temp.mcode_display_validation WHERE id NOT IN
+        (SELECT id FROM ${messageRows} WHERE ${turn})`);
+      return tx.select().from(messageRows).where(and(turn,
+        sql`EXISTS (SELECT 1 FROM temp.mcode_display_validation v
+          WHERE v.id = ${messageRows.id} AND v.assistant = 1)`,
+      )).orderBy(desc(messageRows.id)).limit(limit).all().reverse().map(decodeDisplayMessage);
+    });
   }
 
   async listRecent(

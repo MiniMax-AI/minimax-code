@@ -159,6 +159,130 @@ describe('prepared runtime reads', () => {
     });
   });
 
+  it('keeps incremental assistant tails equivalent to full decoding after SQL changes and rollback', async () => {
+    await withDatabase(async (client, writer) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      const tail = (limit = 2) => repo.listCanonicalAssistantTail!('s1', 't1', limit);
+      const compare = async () => {
+        const full = (await repo.listTurn('s1', 't1')).filter(m => m.role === 'assistant' &&
+          !(typeof m.kind === 'string' && m.kind.length > 0) &&
+          !(typeof m.displayKind === 'string' && m.displayKind.length > 0));
+        expect(await tail()).toEqual(full.slice(-2));
+      };
+      for (let i = 0; i < 6; i++) await repo.upsert({
+        sessionId: 's1', turnId: 't1', message: {
+          msg_id: `m${i}`, role: i % 2 ? 'assistant' : 'user', text: `text-${i}`,
+          ...(i === 5 ? { displayKind: 'reasoning' } : {}),
+        },
+      });
+      await compare();
+      const returned = await tail();
+      returned[0]!.text = 'caller mutation';
+      await compare();
+      // Raw SQL bypasses the repository. Both connections must invalidate proof.
+      for (const connection of [client, writer]) {
+        connection.rawDb.prepare(`UPDATE local_runtime_message_rows SET data_json = ? WHERE msg_id = 'm0'`)
+          .run('not-json');
+        await expect(tail()).rejects.toThrow();
+        await expect(repo.listTurn('s1', 't1')).rejects.toThrow();
+        connection.rawDb.prepare(`UPDATE local_runtime_message_rows SET data_json = ? WHERE msg_id = 'm0'`)
+          .run('{"msg_id":"m0","role":"user","role":"assistant","kind":"x","kind":""}');
+        await compare();
+        connection.rawDb.prepare(`UPDATE local_runtime_message_rows SET source_context_json = ? WHERE msg_id = 'm0'`)
+          .run('[]');
+        await expect(tail()).rejects.toThrow();
+        connection.rawDb.prepare(`UPDATE local_runtime_message_rows SET source_context_json = NULL WHERE msg_id = 'm0'`).run();
+        await compare();
+      }
+      let inside: ReturnType<typeof tail> | undefined;
+      expect(() => client.db.transaction(() => {
+        client.rawDb.prepare(`UPDATE local_runtime_message_rows SET data_json = ? WHERE msg_id = 'm3'`)
+          .run('{"msg_id":"m3","role":"user"}');
+        inside = tail();
+        throw new Error('rollback');
+      })).toThrow('rollback');
+      await inside;
+      await compare();
+      client.rawDb.exec(`INSERT OR REPLACE INTO local_runtime_message_rows
+        (id, session_id, msg_id, turn_id, created_at_ms, data_json)
+        SELECT id, session_id, msg_id, turn_id, created_at_ms,
+          '{"msg_id":"m3","role":"assistant","text":"replaced"}'
+        FROM local_runtime_message_rows WHERE msg_id = 'm3'`);
+      await compare();
+      writer.rawDb.exec(`UPDATE local_runtime_message_rows SET turn_id = 't2' WHERE msg_id = 'm3'`);
+      await compare();
+      client.rawDb.exec(`DELETE FROM local_runtime_message_rows WHERE msg_id = 'm1'`);
+      await compare();
+      // A concurrent WAL commit cannot mix proof from a newer database with
+      // rows from an older read transaction.
+      let beforeCommit: ReturnType<typeof tail> | undefined;
+      let afterCommit: ReturnType<typeof tail> | undefined;
+      client.db.transaction(() => {
+        beforeCommit = tail();
+        writer.rawDb.prepare(`UPDATE local_runtime_message_rows SET data_json = ? WHERE msg_id = 'm0'`)
+          .run('{"msg_id":"m0","role":"user"}');
+        afterCommit = tail();
+      });
+      expect(await afterCommit).toEqual(await beforeCommit);
+      await compare();
+      const expected = await tail();
+      client.close();
+      expect(await createMessageRepository({ db: client.db }).listCanonicalAssistantTail!('s1', 't1', 2))
+        .toEqual(expected);
+    });
+  });
+
+  it('bounds the validation index and rolls back its initial creation', async () => {
+    await withDatabase(async (client) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      await repo.listTurn('s1', 't1');
+      let pending: Promise<unknown> | undefined;
+      expect(() => client.db.transaction(() => {
+        pending = repo.listCanonicalAssistantTail!('s1', 't1', 1);
+        throw new Error('rollback initial cache');
+      })).toThrow('rollback initial cache');
+      await pending;
+      await expect(repo.listCanonicalAssistantTail!('s1', 't1', 1)).resolves.toEqual([]);
+      client.rawDb.exec(`WITH RECURSIVE seq(n) AS (
+        SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 4097
+      ) INSERT INTO local_runtime_message_rows
+        (session_id, msg_id, turn_id, created_at_ms, data_json)
+        SELECT 's1', 'row-' || n, 't1', 1,
+          '{"msg_id":"row-' || n || '","role":"assistant"}' FROM seq`);
+      expect((await repo.listCanonicalAssistantTail!('s1', 't1', 1))[0]?.msg_id).toBe('row-4097');
+      expect(client.rawDb.prepare('SELECT count(*) AS n FROM temp.mcode_display_validation').get())
+        .toEqual({ n: 0 });
+      client.rawDb.exec(`UPDATE local_runtime_message_rows SET data_json = 'broken' WHERE msg_id = 'row-1'`);
+      await expect(repo.listCanonicalAssistantTail!('s1', 't1', 1)).rejects.toThrow();
+    });
+  });
+
+  it('does not decode unchanged old rows when selecting an assistant tail', async () => {
+    await withDatabase(async (client) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      for (let i = 0; i < 50; i++) await repo.upsert({
+        sessionId: 's1', turnId: 't1', message: {
+          msg_id: `decode-probe-${i}`, role: 'assistant', text: 'x'.repeat(4096),
+        },
+      });
+      await repo.listCanonicalAssistantTail!('s1', 't1', 1);
+      const parse = vi.spyOn(JSON, 'parse');
+      try {
+        await repo.listCanonicalAssistantTail!('s1', 't1', 1);
+        expect(parse.mock.calls.filter(([raw]) => raw.includes('decode-probe-'))).toHaveLength(1);
+      } finally { parse.mockRestore(); }
+    });
+  });
+
   it('keeps processing reads fresh across sessions, completion and another connection', async () => {
     await withDatabase(async (client, writer) => {
       const state = createQueryCollapseState({ db: client.db, nowMs: () => 1 });
