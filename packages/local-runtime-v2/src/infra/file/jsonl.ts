@@ -64,63 +64,6 @@ export async function readJsonl<T>(
   return records;
 }
 
-const MAX_CACHED_JSONL_BYTES = 4 * 1024 * 1024;
-const jsonlReadBuffers = new WeakMap<object, Buffer>();
-
-/** Read every byte afresh, but detach a new buffer only when its contents changed. */
-async function readFreshJsonlBytes<T>(filePath: string, cache: JsonlReadCache<T>): Promise<Buffer> {
-  const handle = await open(filePath, 'r');
-  let buffer: Buffer | undefined;
-  let readFailure: unknown;
-  let failed = false;
-  try {
-    const info = await handle.stat();
-    if (!info.isFile() || info.size === 0 || info.size > MAX_CACHED_JSONL_BYTES) {
-      jsonlReadBuffers.delete(cache);
-      return await handle.readFile();
-    }
-    const required = Math.max(64 * 1024, 2 ** Math.ceil(Math.log2(info.size)));
-    buffer = jsonlReadBuffers.get(cache);
-    // Concurrent reads must never borrow the same mutable scratch space.
-    jsonlReadBuffers.delete(cache);
-    if (!buffer || buffer.length < required) buffer = Buffer.allocUnsafe(required);
-    let used = 0;
-    const chunkSize = 512 * 1024;
-    // Match readFile's known-size reads: a concurrent append belongs to a later
-    // read, and a truncated file returns only the bytes actually observed.
-    while (used < info.size) {
-      const length = Math.min(info.size - used, chunkSize);
-      const { bytesRead } = await handle.read(buffer, used, length, null);
-      used += bytesRead;
-      if (bytesRead === 0 || (info.size <= chunkSize && bytesRead < length)) break;
-    }
-    const bytes = buffer.subarray(0, used);
-    return bytes.equals(cache.bytes) ? cache.bytes : Buffer.from(bytes);
-  } catch (error) {
-    failed = true;
-    readFailure = error;
-    throw error;
-  } finally {
-    if (buffer && buffer.length > (jsonlReadBuffers.get(cache)?.length ?? 0)) {
-      // Retain at most one bounded buffer per private reader, including after failure.
-      jsonlReadBuffers.set(cache, buffer);
-    }
-    try {
-      await handle.close();
-    } catch (closeError) {
-      if (!failed) throw closeError;
-      const error = new AggregateError(
-        [readFailure, closeError],
-        readFailure instanceof Error ? readFailure.message : 'JSONL read failed',
-      );
-      if (readFailure instanceof Error && 'code' in readFailure) {
-        Object.assign(error, { code: readFailure.code });
-      }
-      throw error;
-    }
-  }
-}
-
 async function readCachedJsonl<T>(
   filePath: string,
   decode: (value: unknown) => T,
@@ -129,15 +72,15 @@ async function readCachedJsonl<T>(
 ): Promise<T[]> {
   // Always read fresh bytes: timestamps and file size cannot prove an unchanged
   // prefix. Compare before decoding to avoid allocating a whole-history string.
-  const bytes = await readFreshJsonlBytes(filePath, cache);
+  const bytes = await readFile(filePath);
   onReadBytes?.(bytes);
-  if (bytes === cache.bytes || bytes.equals(cache.bytes)) return cache.records as T[];
+  if (bytes.equals(cache.bytes)) return cache.records as T[];
   const reuse = cache.bytes.at(-1) === 10 &&
     bytes.length >= cache.bytes.length &&
     bytes.subarray(0, cache.bytes.length).equals(cache.bytes);
   const records: T[] = reuse ? [...cache.records] : [];
   let offset = reuse ? cache.bytes.length : 0;
-  const limit = MAX_CACHED_JSONL_BYTES;
+  const limit = 4 * 1024 * 1024;
   let retainedEnd = offset;
   let retainedRecords = records.length;
   while (offset < bytes.length) {
