@@ -48,6 +48,7 @@ import type { TuiGoalFlow } from './controller/product/goal-flow.js';
 import { createTuiSessionLifecycleBridge } from './controller/session-lifecycle-bridge.js';
 import { parseTuiStatusLineItems as parseStatusItems } from './shell/status-line-items.js';
 import { showTuiStatusLineSetup } from './controller/product/status-line-setup.js';
+import { showTuiThemeSetup } from './controller/product/theme-setup.js';
 import { TuiCodexHandoffFlow } from './controller/product/codex-handoff-flow.js';
 
 export type { CreateTuiAppOptions, TuiApp, TuiStopOptions };
@@ -510,6 +511,12 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
         statusLine: status,
         surface: interactionSurface,
         persist: options.persistStatusLineItems,
+      }),
+    showTheme: () =>
+      showTuiThemeSetup({
+        controller: themeController,
+        surface: interactionSurface,
+        persist: options.persistTheme,
       }),
     keybindings: options.keybindings,
     getTuiKeybindingOverrides: options.getTuiKeybindingOverrides,

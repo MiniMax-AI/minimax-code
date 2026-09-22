@@ -89,6 +89,7 @@ export interface TuiCommandFlowOptions {
   readonly surfaceHost: TuiSurfaceHost;
   readonly showTasks?: () => void | Promise<void>;
   readonly showStatusLine?: () => void;
+  readonly showTheme?: () => void;
   readonly persistTuiMode?: (mode: TuiMode) => void;
   readonly queueEnabled: boolean;
   readonly liveRunId: () => string | undefined;
@@ -1192,6 +1193,7 @@ export class TuiCommandFlow {
       checkin: async () => this.runDailyCheckinCommand(),
       settings: () => this.showSettingsPicker(),
       statusline: () => this.options.showStatusLine?.(),
+      theme: () => this.options.showTheme?.(),
       hotkeys: () => this.showHotkeysPicker(),
       reload: async () => {
         if (!this.options.reloadTui) {
