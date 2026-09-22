@@ -37,6 +37,14 @@ class RecordingVirtualTerminal extends VirtualTerminal {
   }
 }
 
+// Apple Terminal preserves the old screen in scrollback on ED 2. Model that
+// behavior explicitly: xterm's default erase implementation does not expose it.
+class ClearToScrollbackTerminal extends RecordingVirtualTerminal {
+  override write(data: string): void {
+    super.write(data.replaceAll('\x1b[2J', `\x1b[${this.rows};1H${'\r\n'.repeat(this.rows)}\x1b[2J`));
+  }
+}
+
 class MutableLines implements Component {
   lines: string[] = [];
 
@@ -48,6 +56,156 @@ class MutableLines implements Component {
 }
 
 describe('MCode Pi Engine local deltas', () => {
+  describe.each([
+    ['xterm', RecordingVirtualTerminal],
+    ['clear-to-scrollback host', ClearToScrollbackTerminal],
+  ] as const)('%s viewport repaint', (_name, Terminal) => {
+    it.each([0, 30])('keeps unique history after a style update and %i new rows', async (growth) => {
+      const terminal = new Terminal(60, 12);
+      const tui = new TuiMainScreen(terminal);
+      const component = new MutableLines();
+      const answer = Array.from({ length: 40 }, (_, index) => `Answer ${index}`);
+      component.lines = [...answer, `old composer${CURSOR_MARKER}`, 'running'];
+      tui.addChild(component);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-10);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+
+      const more = Array.from({ length: growth }, (_, index) => `More ${index}`);
+      component.lines = [...answer, ...more, `composer${CURSOR_MARKER}`, 'idle'];
+      component.lines[0] = '\x1b[1mAnswer 0\x1b[0m';
+      tui.renderNow();
+      await terminal.flush();
+
+      expect(terminal.getScrollBuffer()).toEqual([...answer, ...more, 'composer', 'idle']);
+      expect(terminal.getScrollPosition().viewport).toBe(before.viewport);
+      expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 10 });
+      const writes = terminal.takeWrites();
+      expect(writes).not.toContain('\x1b[2J');
+      expect(writes).not.toContain('\x1b[3J');
+
+      // Subsequent differential output must still overwrite the current footer.
+      component.lines.splice(-2, 0, 'Next response');
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getScrollBuffer()).toEqual([...answer, ...more, 'Next response', 'composer', 'idle']);
+      terminal.scrollLines(1000);
+      expect(terminal.getViewport().slice(-3)).toEqual(['Next response', 'composer', 'idle']);
+    });
+
+    it('erases stale rows when a short document shrinks', async () => {
+      const terminal = new Terminal(60, 12);
+      const tui = new TuiMainScreen(terminal);
+      tui.setClearOnShrink(true);
+      const component = new MutableLines();
+      component.lines = ['answer', 'activity 1', 'activity 2', `old composer${CURSOR_MARKER}`, 'running'];
+      tui.addChild(component);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.takeWrites();
+
+      component.lines = ['answer', `composer${CURSOR_MARKER}`, 'idle'];
+      tui.renderNow();
+      await terminal.flush();
+
+      expect(terminal.getScrollBuffer()).toEqual(['answer', 'composer', 'idle', ...Array<string>(9).fill('')]);
+      expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 1 });
+      const writes = terminal.takeWrites();
+      expect(writes).not.toContain('\x1b[2J');
+      expect(writes).not.toContain('\x1b[3J');
+    });
+  });
+
+  it.each([1, 8, 30])('preserves a scrolled host viewport when %i visible activity rows settle', async (activityRows) => {
+    const terminal = new RecordingVirtualTerminal(60, 44);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    const answer = Array.from({ length: 80 }, (_, index) => `Answer ${index}`);
+    component.lines = [
+      ...answer,
+      ...Array.from({ length: activityRows }, (_, index) => `Activity ${index}`),
+      `composer${CURSOR_MARKER}`,
+      'running',
+    ];
+    tui.addChild(component);
+    tui.renderNow();
+    await terminal.flush();
+    terminal.scrollLines(-10);
+    const before = terminal.getScrollPosition();
+    expect(before.viewport).toBeGreaterThan(0);
+    expect(before.viewport).toBeLessThan(before.bottom);
+    terminal.takeWrites();
+
+    component.lines = [...answer, `composer${CURSOR_MARKER}`, 'idle'];
+    tui.renderNow();
+    await terminal.flush();
+
+    expect(terminal.getScrollPosition()).toEqual(before);
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer().filter(Boolean)).toEqual([...answer, 'composer', 'idle']);
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 42 });
+
+    // Repeated idle redraws must not reset the view or duplicate the transcript.
+    tui.renderNow();
+    await terminal.flush();
+    expect(terminal.getScrollPosition()).toEqual(before);
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+
+    terminal.scrollLines(1000);
+    expect(terminal.getViewport().slice(-2)).toEqual(['composer', 'idle']);
+  });
+
+  it('ignores same-size resize notifications while the host is scrolled up', async () => {
+    const terminal = new RecordingVirtualTerminal(60, 12);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    component.lines = Array.from({ length: 80 }, (_, index) => `Answer ${index}`);
+    tui.addChild(component);
+    try {
+      tui.start();
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-10);
+      const before = terminal.getScrollPosition();
+      const redraws = tui.fullRedraws;
+      terminal.takeWrites();
+      terminal.resize(60, 12);
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      await terminal.flush();
+      expect(terminal.getScrollPosition()).toEqual(before);
+      expect(tui.fullRedraws).toBe(redraws);
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    } finally {
+      tui.stop();
+    }
+  });
+
+  it('still reconstructs corrected history after a viewport shrink was absorbed', async () => {
+    const terminal = new RecordingVirtualTerminal(60, 12);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    const answer = Array.from({ length: 80 }, (_, index) => `Answer ${index}`);
+    component.lines = [...answer, 'activity', `composer${CURSOR_MARKER}`, 'status'];
+    tui.addChild(component);
+    tui.renderNow();
+    await terminal.flush();
+    terminal.takeWrites();
+
+    component.lines = [...answer, `composer${CURSOR_MARKER}`, 'status'];
+    tui.renderNow();
+    await terminal.flush();
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+
+    component.lines[0] = 'Corrected answer';
+    tui.renderNow();
+    await terminal.flush();
+    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).toEqual(['Corrected answer', ...answer.slice(1), 'composer', 'status']);
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 10 });
+  });
+
   it('fits Text padding within narrow terminal widths', () => {
     const text = new Text('content', 2, 0);
 
@@ -104,13 +262,15 @@ describe('MCode Pi Engine local deltas', () => {
     component.lines[0] = '\x1b[1mAnswer line 0\x1b[0m';
     tui.renderNow();
     await terminal.flush();
-    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
     component.lines[0] = '\x1b[1mAnswer line 0\x1b[0m';
     tui.renderNow();
     await terminal.flush();
 
     expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer()).toEqual([...answer, 'composer', 'status']);
+    expect(terminal.getScrollBuffer()).toEqual([
+      ...answer.slice(0, 39), '', ...answer.slice(39), 'composer', 'status',
+    ]);
     expect(terminal.getViewport().at(-1)).toBe('status');
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 42 });
 
@@ -148,15 +308,17 @@ describe('MCode Pi Engine local deltas', () => {
       for (let added = 0; added <= activityRows + 1; added++) {
         tui.renderNow();
         await terminal.flush();
+        // Native history keeps its original boundary. Freed rows remain visible
+        // until new output consumes them, rather than replaying historical text.
+        const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
+        const remainingSpace = Math.max(0, activityRows - added);
+        if (remainingSpace > 0) expected.splice(38 + activityRows, 0, ...Array<string>(remainingSpace).fill(''));
         expect(terminal.getViewport()).toEqual(
-          component.lines.slice(-terminal.rows).map((line) => line.replace(CURSOR_MARKER, '')),
+          expected.slice(-terminal.rows),
         );
         expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 42 });
-        if (added === 0) expect(terminal.takeWrites()).toContain('\x1b[3J');
-        else expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-        expect(terminal.getScrollBuffer()).toEqual(
-          component.lines.map((line) => line.replace(CURSOR_MARKER, '')),
-        );
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+        expect(terminal.getScrollBuffer()).toEqual(expected);
         if (added <= activityRows) component.lines.splice(-2, 0, `New answer ${added}`);
       }
       expect(terminal.getScrollBuffer()).not.toContain('');
@@ -238,8 +400,11 @@ describe('MCode Pi Engine local deltas', () => {
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 1 });
   });
 
-  it('still previews the resized tail and restores ordered scrollback after resize settles', async () => {
-    const terminal = new RecordingVirtualTerminal(67, 44);
+  it.each([
+    ['xterm', RecordingVirtualTerminal],
+    ['clear-to-scrollback host', ClearToScrollbackTerminal],
+  ] as const)('previews the resized tail and restores ordered scrollback on %s', async (_name, Terminal) => {
+    const terminal = new Terminal(67, 44);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
     component.lines = [
@@ -256,11 +421,20 @@ describe('MCode Pi Engine local deltas', () => {
       terminal.resize(60, 30);
       tui.renderNow();
       await terminal.flush();
-      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      const previewWrites = terminal.takeWrites();
+      expect(previewWrites).not.toContain('\x1b[2J');
+      expect(previewWrites).not.toContain('\x1b[3J');
+      expect(terminal.getScrollBuffer()).toEqual([
+        ...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`),
+        'composer',
+      ]);
       expect(terminal.getViewport()).toEqual([
         ...Array.from({ length: 29 }, (_, index) => `Answer line ${index + 51}`),
         'composer',
       ]);
+
+      // A redundant notification must not discard the pending genuine resize replay.
+      terminal.resize(60, 30);
 
       await new Promise<void>((resolve) => setTimeout(resolve, 200));
       tui.renderNow();

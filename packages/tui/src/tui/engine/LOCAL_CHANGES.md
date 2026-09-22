@@ -119,8 +119,8 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 ## L034: Regular viewport reconstruction after document changes
 
 - Product contract: after running content or a feature panel closes, show the complete current chat viewport with its Composer and status line. Every current-session row must occur once in native history.
-- Minimal difference: when a shorter document would move the viewport origin backwards, or changed visible text is already in scrollback, clear and replay the complete current projection. Compare changed historical rows without terminal sequences so style-only updates preserve scrollback. Other updates retain differential rendering and resize retains the existing delayed history replay.
-- Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement.
+- Minimal difference: when a shorter document would move the viewport origin backwards, or changed visible text is already in scrollback, clear and replay the complete current projection, except for addressable text-only shrink covered by L038. Compare changed historical rows without terminal sequences so style-only updates preserve scrollback. Other updates retain differential rendering and genuine resize retains the existing delayed history replay.
+- Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement. L038 keeps freed visible rows temporarily blank instead of reconstructing unchanged history.
 - Evidence: local-delta tests assert every visible row and the complete history, while real Tasks and feature lifecycle tests cover short/long content, background growth, paging, resize, nested panels and return to chat. Queue lifecycle tests replay bracketed CJK paste, Alt+Enter, auto-drain, and history refresh through Ghostty; equal-height and growing historical edits are also covered by xterm. Virtual terminals do not establish native Windows Terminal or iTerm2 touchpad acceptance.
 - Removal condition: the selected Pi baseline provides equivalent complete viewport and unique-history behavior.
 
@@ -138,3 +138,19 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Minimal difference: append cursor restoration to the bounded frame writer before ending synchronized output. Cursor-only updates retain the existing path. The product renderer separately defaults to a visible hardware cursor on Windows, where older ConPTY renderers can omit hidden cursor positions; explicit options and `PI_HARDWARE_CURSOR` remain authoritative.
 - Evidence: `test/unit/tui-ime-cursor.test.ts` replays terminal sequences at each synchronized-output boundary and exercises the product renderer, Composer, Editor, focus, mode switches, CJK wrapping, resize and shrink. Native Windows IME and ConPTY transport require separate acceptance.
 - Removal condition: the selected Pi baseline commits cursor restoration within the same synchronized frame.
+
+## L038: Preserve native scrolling during visible content shrink
+
+- Product contract: settling visible activity rows must not clear native scrollback or pin a scrolled host viewport to the top. The Composer and status remain at the bottom, and historical content remains unique.
+- Minimal difference: when terminal geometry and the text already in scrollback are unchanged, absorb visible text-only shrink with blank rows at the current screen boundary before cursor extraction and differential rendering. Subsequent output consumes the space before advancing native history. Ignore redundant same-size resize notifications without cancelling a genuine pending resize replay.
+- Boundary: padding is confined to the active screen. Historical text replacement/removal, real resize, overlays and image reflow retain the structural reconstruction path. Blank rows can temporarily separate native history from the visible tail; this is preferable to clearing and replaying the terminal's scrollback during ordinary completion. No mouse capture is enabled in regular mode.
+- Evidence: local-delta tests use xterm's host scroll API independently of the hardware cursor, reproduce the pre-fix jump to line zero, and verify stable scrolling, Composer position, unique history, reclaimed space, corrected-history reconstruction and resize behavior. The product queue/feature tests continue to cover canonical history replacement. Native Windows Terminal and UU Remote acceptance remain separate.
+- Removal condition: the selected Pi baseline preserves host scrolling and unique history through visible shrink.
+
+## L039: Erase regular viewport redraws in place
+
+- Product contract: repainting the visible regular-mode screen must not append the previous transcript, Composer or status line to native history.
+- Minimal difference: viewport-only full redraws home the cursor, erase each screen row with EL 2 using cursor-down movement, and return home before painting. This avoids ED 2, which saves the old screen to scrollback in Apple Terminal. Full structural reconstruction still clears and rebuilds history.
+- Evidence: local-delta tests exercise xterm and a clear-to-scrollback host model, covering historical style changes, simultaneous growth, short-document shrink, subsequent differential output, host scrolling and resize preview/replay. Native Apple Terminal replay of synthetic renderer output reproduces duplicate rows before the fix and preserves the exact document afterward.
+- Boundary: native replay covers synthetic output, not every live-model interaction or other terminal emulator.
+- Removal condition: the selected Pi baseline supplies equivalent in-place viewport erasure without retaining stale rows in native history.

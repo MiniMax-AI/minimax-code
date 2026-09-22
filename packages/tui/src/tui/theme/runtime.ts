@@ -4,16 +4,22 @@ import type { MarkdownTheme } from '../engine/public.js';
 import { detectProcessTerminalCapabilities } from '../platform/terminal-capabilities.js';
 import type { EditorTheme } from '../widgets/editor/editor.js';
 import type { SelectListTheme } from '../widgets/select-list.js';
-import type { TuiColorLevel, TuiThemeColors, TuiThemePalette } from './contracts.js';
+import type {
+  TuiColorLevel,
+  TuiThemeColors,
+  TuiThemePalette,
+  TuiThemeSyntaxTones,
+} from './contracts.js';
 import { resolveTuiAnsi16Foreground, shouldSuppressTuiAnsi16Background } from './ansi16.js';
 import { resolveEnvironmentAppearance } from './detection.js';
 import { MINIMAX_CODE_DARK_THEME, MINIMAX_CODE_LIGHT_THEME } from './palettes.js';
-import { createCatppuccinHighlightTheme } from './syntax.js';
+import { createSyntaxHighlightTheme } from './syntax.js';
 
 export interface TuiRenderThemeSnapshot {
   readonly name: string;
   readonly appearance: 'light' | 'dark';
   readonly colorLevel: TuiColorLevel;
+  readonly signature: string;
 }
 
 const initialCapabilities = detectProcessTerminalCapabilities();
@@ -22,9 +28,18 @@ let renderThemeSnapshot: TuiRenderThemeSnapshot = {
   name: 'minimax',
   appearance: initialAppearance,
   colorLevel: initialCapabilities.colorLevel,
+  signature: '',
 };
 let activeColors: TuiThemeColors =
   initialAppearance === 'light' ? MINIMAX_CODE_LIGHT_THEME.colors : MINIMAX_CODE_DARK_THEME.colors;
+let activeSyntax: TuiThemeSyntaxTones =
+  initialAppearance === 'light' ? MINIMAX_CODE_LIGHT_THEME.syntax : MINIMAX_CODE_DARK_THEME.syntax;
+renderThemeSnapshot = {
+  ...renderThemeSnapshot,
+  signature: paletteSignature(
+    initialAppearance === 'light' ? MINIMAX_CODE_LIGHT_THEME : MINIMAX_CODE_DARK_THEME,
+  ),
+};
 
 export const tuiColors: TuiThemeColors = Object.freeze({
   get brand() {
@@ -210,19 +225,29 @@ export function renderTuiActionHint(value: string): string {
     .join('');
 }
 
+/**
+ * Identity of a palette's *content*, not just its name. Editing a custom theme
+ * file in place keeps the same id and appearance, so comparing ids alone would
+ * swallow the repaint and leave stale colors on screen.
+ */
+export function paletteSignature(palette: TuiThemePalette): string {
+  return JSON.stringify([palette.id, palette.appearance, palette.colors, palette.syntax]);
+}
+
 export function applyTuiRenderTheme(palette: TuiThemePalette, colorLevel: TuiColorLevel): boolean {
+  const signature = paletteSignature(palette);
   const changed =
-    renderThemeSnapshot.name !== palette.id ||
-    renderThemeSnapshot.appearance !== palette.appearance ||
-    renderThemeSnapshot.colorLevel !== colorLevel;
+    renderThemeSnapshot.signature !== signature || renderThemeSnapshot.colorLevel !== colorLevel;
   if (!changed) return false;
   const colorLevelChanged = renderThemeSnapshot.colorLevel !== colorLevel;
   renderThemeSnapshot = {
     name: palette.id,
     appearance: palette.appearance,
     colorLevel,
+    signature,
   };
   activeColors = palette.colors;
+  activeSyntax = palette.syntax;
   if (colorLevelChanged) activeChalk = createTuiChalk({ colorLevel });
   return true;
 }
@@ -231,8 +256,9 @@ export function getTuiThemeSnapshot(): TuiRenderThemeSnapshot {
   return { ...renderThemeSnapshot };
 }
 
-const tuiHighlightTheme = createCatppuccinHighlightTheme(
+const tuiHighlightTheme = createSyntaxHighlightTheme(
   tuiChalk,
+  () => activeSyntax,
   () => renderThemeSnapshot.appearance,
 );
 

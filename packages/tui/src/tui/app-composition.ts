@@ -174,6 +174,8 @@ export function createTuiApplicationRenderer(options: CreateTuiAppOptions) {
   themeController = new TuiThemeController({
     ui: tui,
     colorLevel: capabilities.colorLevel,
+    ...(options.dataDir ? { dataDir: options.dataDir } : {}),
+    ...(options.theme ? { theme: options.theme } : {}),
     onDetection: (snapshot) => options.observability?.recordTheme?.(snapshot),
   });
 

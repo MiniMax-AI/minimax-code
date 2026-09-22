@@ -131,6 +131,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private historyReplayPending = false;
 
 	protected override onTerminalResize(): void {
+		// Some hosts repeat resize notifications while scrolling or reconnecting.
+		// An unchanged geometry must not clear and replay native scrollback.
+		if (this.previousWidth === this.terminal.columns && this.previousHeight === this.terminal.rows) return;
 		// Render the visible tail now; replay native scrollback only after the drag settles.
 		if (this.previousLines.length > 0 && !isTermuxSession()) {
 			if (this.resizeTimer) clearTimeout(this.resizeTimer);
@@ -296,6 +299,29 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
 
+		// A native scrollback viewport cannot move backwards without clearing history.
+		// When only addressable rows shrink, absorb the freed rows at the top of the
+		// screen instead. The composer stays at the bottom, historical rows stay unique,
+		// and later output consumes this temporary space before scrolling again.
+		if (
+			!widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
+			prevViewportTop > 0 && newLines.length > prevViewportTop &&
+			newLines.length < prevViewportTop + height &&
+			this.previousKittyImageIds.size === 0 && !newLines.some(isImageLine)
+		) {
+			let unchangedHistory = true;
+			for (let i = 0; i < prevViewportTop; i++) {
+				if (stripTerminalSequences(this.previousLines[i] ?? "") !== stripTerminalSequences(newLines[i] ?? "")) {
+					unchangedHistory = false;
+					break;
+				}
+			}
+			if (unchangedHistory) {
+				const padding = Array<string>(prevViewportTop + height - newLines.length).fill("");
+				newLines = [...newLines.slice(0, prevViewportTop), ...padding, ...newLines.slice(prevViewportTop)];
+			}
+		}
+
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
 
@@ -322,7 +348,18 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			output.append("\x1b[?2026h"); // Begin synchronized output
 			if (clear) {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
-				output.append(viewportOnly ? "\x1b[2J\x1b[H" : "\x1b[2J\x1b[H\x1b[3J");
+				if (viewportOnly) {
+					// ED 2 saves the old screen to scrollback in Apple Terminal. Erase
+					// each row in place so old transcript/footer rows cannot survive there.
+					output.append("\x1b[H");
+					for (let row = 0; row < height; row++) {
+						if (row > 0) output.append("\x1b[1B");
+						output.append("\x1b[2K");
+					}
+					output.append("\x1b[H");
+				} else {
+					output.append("\x1b[2J\x1b[H\x1b[3J");
+				}
 			}
 			for (let i = start; i < newLines.length; i++) {
 				if (i > start) output.append("\r\n");

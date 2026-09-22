@@ -209,6 +209,16 @@ export class VirtualTerminal implements Terminal {
 		};
 	}
 
+	/** Scroll the host viewport independently of the application's hardware cursor. */
+	scrollLines(amount: number): void {
+		this.xterm.scrollLines(amount);
+	}
+
+	getScrollPosition(): { viewport: number; bottom: number } {
+		const buffer = this.xterm.buffer.active;
+		return { viewport: buffer.viewportY, bottom: buffer.baseY };
+	}
+
 	/** Wait for TUI's throttled render pipeline to settle. */
 	async waitForRender(): Promise<void> {
 		await new Promise<void>((resolve) => process.nextTick(resolve));

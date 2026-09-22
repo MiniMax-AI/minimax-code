@@ -35,6 +35,9 @@ export interface CreateTuiAppOptions extends TuiUpdateOptions {
   terminal?: Terminal;
   tuiMode?: TuiMode;
   persistTuiMode?: (mode: TuiMode) => void;
+  /** Saved theme selection, e.g. `aurora` or `aurora/dark`. */
+  theme?: string;
+  persistTheme?: (theme: string) => void;
   runtimeLogDirectory?: string;
   resolveAttachment?: (
     reference: string,

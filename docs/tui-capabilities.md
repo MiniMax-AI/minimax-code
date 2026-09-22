@@ -85,10 +85,20 @@ and initial prompt are not applied.
 
 In regular mode, independent feature panels occupy the complete visible terminal
 area, including short Rewind previews and scope pickers. Closing a panel restores
-the current conversation. When running content shrinks across the native scrolling
-boundary, or history refresh changes text already in scrollback, the renderer
-reconstructs the current session to fill the viewport and keep its history unique. This reconstruction clears earlier shell scrollback;
-ordinary updates keep native scrolling and selection behavior.
+the current conversation. When running content shrinks entirely within the current
+screen, the renderer keeps native scrollback and the Composer position stable.
+Freed rows temporarily remain blank at the top of the active screen and subsequent
+output reuses them. This avoids resetting the host's scroll position when a turn
+finishes. Redundant resize notifications with unchanged dimensions do not rebuild
+history. Viewport-only redraws erase rows in place so terminals that save a cleared
+screen to scrollback, including Apple Terminal, do not retain the old Composer,
+status line or duplicate transcript rows.
+
+When a change removes or replaces text already in scrollback, the renderer still
+reconstructs the current session to avoid stale or duplicate history. Real resizes
+and image layout changes also retain the existing reconstruction behavior. A
+reconstruction clears earlier shell scrollback and can reset the host's scroll
+position; ordinary updates keep native scrolling and selection behavior.
 
 Rewind and Fork history-loading hints disappear as soon as their lists are ready.
 Returning from a cancelled operation must not leave a stale loading message in the
