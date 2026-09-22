@@ -1,3 +1,4 @@
+import { readJsonl, type JsonlReadCache } from '../packages/local-runtime-v2/src/infra/file/jsonl.js';
 import { createHash } from 'node:crypto';
 import { createCanonicalHistoryScanner, scanCanonicalHistoryArtifacts } from '../packages/local-runtime-v2/src/service/session-system/messages/history/mutation/canonical-history-scanner.js';
 import {
@@ -8,7 +9,7 @@ import {
   inspectCanonicalHistorySequence,
 } from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
 import { canonicalJson } from '../packages/local-runtime-v2/src/infra/file/canonical-history-json-value.js';
-import { mkdtemp, rm, writeFile, mkdir, readFile, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, readFile, symlink, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -1450,6 +1451,119 @@ describe('incremental history index scanning', () => {
       await writeFile(join(paths.snapshotsPath, 'target'), original);
       await symlink('target', parentPath);
       await expect(compare()).rejects.toThrow('unsafe-artifact');
+    });
+  });
+});
+
+describe('bounded history read buffers', () => {
+  async function fixture(run: (path: string, cache: JsonlReadCache<{ text: string }>) => Promise<void>) {
+    const directory = await mkdtemp(join(tmpdir(), 'mcode-history-read-buffer-'));
+    try {
+      await run(join(directory, 'messages.jsonl'), { bytes: Buffer.alloc(0), records: [] });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+  const decode = (value: unknown) => Object.freeze(value as { text: string });
+  const line = (text: string) => JSON.stringify({ text }) + '\n';
+
+  it('reuses unchanged bytes and isolates earlier buffers across append and same-size rewrite', async () => {
+    await fixture(async (path, cache) => {
+      const firstText = line('original');
+      await writeFile(path, firstText);
+      const first = await readJsonl(path, decode, undefined, cache);
+      const firstBytes = cache.bytes;
+      for (let i = 0; i < 8; i++) {
+        let observed: Buffer | undefined;
+        expect(await readJsonl(path, decode, undefined, cache, bytes => { observed = bytes; })).toBe(first);
+        expect(observed).toBe(firstBytes);
+      }
+      await writeFile(path, firstText + line('second'));
+      const appended = await readJsonl(path, decode, undefined, cache);
+      expect(appended[0]).toBe(first[0]);
+      expect(firstBytes.toString()).toBe(firstText);
+      const appendBytes = cache.bytes;
+      await writeFile(path, line('rewritten').replace('rewritten', 'changed!') + line('second'));
+      const rewritten = await readJsonl(path, decode, undefined, cache);
+      expect(rewritten.map(row => row.text)).toEqual(['changed!', 'second']);
+      expect(appendBytes.toString()).toBe(firstText + line('second'));
+      const concurrent = await Promise.all(Array.from({ length: 12 }, () => readJsonl(path, decode, undefined, cache)));
+      expect(concurrent.every(rows => rows === rewritten)).toBe(true);
+      await writeFile(path, '{invalid}\n');
+      await expect(readJsonl(path, decode, undefined, cache)).rejects.toThrow('invalid JSON');
+      await writeFile(path, line('recovered'));
+      expect((await readJsonl(path, decode, undefined, cache))[0]?.text).toBe('recovered');
+      await rm(path);
+      await expect(readJsonl(path, decode, undefined, cache)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
+  it.each(['append', 'truncate'] as const)('preserves known-size read semantics during a concurrent %s', async (mode) => {
+    await fixture(async (path, cache) => {
+      const original = line('a'.repeat(600_000));
+      await writeFile(path, original);
+      const handle = await open(path, 'r');
+      const prototype = Object.getPrototypeOf(handle);
+      await handle.close();
+      const originalStat = prototype.stat;
+      let changed = false;
+      const replacement = mode === 'append' ? original + line('tail') : line('short');
+      const spy = vi.spyOn(prototype, 'stat').mockImplementation(async function(this: typeof handle, ...args: unknown[]) {
+        const info = await originalStat.apply(this, args);
+        if (!changed) { changed = true; await writeFile(path, replacement); }
+        return info;
+      });
+      try {
+        const result = await readJsonl(path, decode, undefined, cache);
+        expect(result.map(row => row.text)).toEqual(mode === 'append' ? ['a'.repeat(600_000)] : ['short']);
+      } finally { spy.mockRestore(); }
+      expect((await readJsonl(path, decode, undefined, cache)).map(row => row.text)).toEqual(
+        mode === 'append' ? ['a'.repeat(600_000), 'tail'] : ['short'],
+      );
+    });
+  });
+
+  it.each([4 * 1024 * 1024 - 20, 4 * 1024 * 1024 + 20])('keeps fresh paired bytes at the cache boundary (%i)', async (size) => {
+    await fixture(async (path, cache) => {
+      const contents = line('x'.repeat(size));
+      await writeFile(path, contents);
+      for (let i = 0; i < 2; i++) {
+        let observed: Buffer | undefined;
+        const rows = await readJsonl(path, decode, undefined, cache, bytes => { observed = bytes; });
+        expect(rows[0]?.text.length).toBe(size);
+        expect(observed?.equals(Buffer.from(contents))).toBe(true);
+        expect(cache.bytes.length).toBeLessThanOrEqual(4 * 1024 * 1024);
+      }
+    });
+  });
+
+  it('closes failed reads and preserves both read and close failures', async () => {
+    await fixture(async (path, cache) => {
+      await writeFile(path, line('original'));
+      const handle = await open(path, 'r');
+      const prototype = Object.getPrototypeOf(handle);
+      await handle.close();
+      const originalStat = prototype.stat;
+      let closed = false;
+      const readError = Object.assign(new Error('read failed'), { code: 'EIO' });
+      const closeError = new Error('close failed');
+      const readSpy = vi.spyOn(prototype, 'read').mockRejectedValue(readError);
+      const statSpy = vi.spyOn(prototype, 'stat').mockImplementation(async function(this: typeof handle, ...args: unknown[]) {
+        const close = this.close;
+        this.close = async () => {
+          await close.call(this);
+          closed = true;
+          throw closeError;
+        };
+        return originalStat.apply(this, args);
+      });
+      try {
+        await expect(readJsonl(path, decode, undefined, cache)).rejects.toMatchObject({
+          message: 'read failed', code: 'EIO', errors: [readError, closeError],
+        });
+      } finally { readSpy.mockRestore(); statSpy.mockRestore(); }
+      expect(closed).toBe(true);
+      expect((await readJsonl(path, decode, undefined, cache))[0]?.text).toBe('original');
     });
   });
 });
