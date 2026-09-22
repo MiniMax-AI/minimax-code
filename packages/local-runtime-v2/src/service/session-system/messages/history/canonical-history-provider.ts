@@ -28,6 +28,7 @@ import {
 } from './mutation/canonical-history-index.js';
 import {
   HistoryScannerError,
+  createCanonicalHistoryScanner,
   scanCanonicalHistoryArtifacts,
 } from './mutation/canonical-history-scanner.js';
 import { isUserMessageId } from '../../shared/user-message-id.js';
@@ -213,6 +214,7 @@ export function createSessionSystemCanonicalHistoryProvider(
     options.locations ??
     createSessionHistoryLocationResolver({ dataDir: options.dataDir, sessions: options.sessions });
   const indexes = new Map<string, CanonicalHistoryIndexAdapter>();
+  const scanHistory = createCanonicalHistoryScanner();
   const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
 
   return {
@@ -399,7 +401,9 @@ export function createSessionSystemCanonicalHistoryProvider(
         },
         // Only the default reader owns reusable immutable records. Preserve the
         // independent on-disk scanner for externally supplied adapters.
-        (scannerPaths) => scanCanonicalHistoryArtifacts(scannerPaths, options.files ? undefined : files),
+        (scannerPaths) => options.files
+          ? scanCanonicalHistoryArtifacts(scannerPaths)
+          : scanHistory(scannerPaths, files, active),
         { activePath: paths.messages, snapshotsPath: paths.snapshots, sessionId },
       );
     } catch (error) {

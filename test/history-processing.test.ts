@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { createCanonicalHistoryScanner, scanCanonicalHistoryArtifacts } from '../packages/local-runtime-v2/src/service/session-system/messages/history/mutation/canonical-history-scanner.js';
 import {
   canonicalActiveHistoryRevision,
   canonicalHistoryRevision,
@@ -7,7 +8,7 @@ import {
   inspectCanonicalHistorySequence,
 } from '../packages/local-runtime-v2/src/infra/file/canonical-history-jsonl.js';
 import { canonicalJson } from '../packages/local-runtime-v2/src/infra/file/canonical-history-json-value.js';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -1181,5 +1182,119 @@ describe('owned decoded history rows', () => {
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe('incremental history index scanning', () => {
+  const row = (id: string, content = '中文🙂') => ({
+    message_id: `msg-user-v1-${id}`, turn_id: `turn-${id}`,
+    message: { role: 'user', content, timestamp: 1 },
+  });
+  const encode = (rows: unknown[]) => rows.map(value => JSON.stringify(value)).join('\n') + '\n';
+  async function fixture(run: (input: {
+    paths: import('../packages/local-runtime-v2/src/service/session-system/messages/history/mutation/canonical-history-scanner.js').CanonicalHistoryScannerPaths;
+    compare: () => Promise<Awaited<ReturnType<typeof scanCanonicalHistoryArtifacts>>>;
+  }) => Promise<void>) {
+    const dir = await mkdtemp(join(tmpdir(), 'mcode-index-scan-'));
+    const paths = { activePath: join(dir, 'messages.jsonl'), snapshotsPath: join(dir, 'snapshots'), sessionId: 's1' };
+    const scan = createCanonicalHistoryScanner();
+    const files = createCanonicalHistoryFileAdapter({ reuseDecodedRecords: true });
+    try {
+      await mkdir(paths.snapshotsPath);
+      await run({ paths, compare: async () => {
+        const records = await files.readActiveStrict(paths.activePath);
+        const actual = await scan(paths, files, records);
+        expect(actual).toEqual(await scanCanonicalHistoryArtifacts(paths));
+        return actual;
+      }});
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+
+  it('matches full scanning across append, unchanged reads and new external user rows', async () => {
+    await fixture(async ({paths, compare}) => {
+      const rows = [row('a')];
+      await writeFile(paths.activePath, encode(rows));
+      const first = await compare();
+      for (let i = 0; i < 20; i++) {
+        rows.push(row(String(i), 'x'.repeat(4096)));
+        await writeFile(paths.activePath, encode(rows));
+        expect((await compare()).locators).toHaveLength(rows.length);
+        await compare();
+      }
+      expect(first.locators).toHaveLength(1);
+    });
+  });
+  it('rebuilds positions after same-length changes, truncation and recreation', async () => {
+    await fixture(async ({paths, compare}) => {
+      await writeFile(paths.activePath, encode([row('a', 'aaa'), row('b', 'bbb')]));
+      await compare();
+      await writeFile(paths.activePath, encode([row('z', 'zzz'), row('b', 'bbb')]));
+      expect((await compare()).locators[0]?.messageId).toBe('msg-user-v1-z');
+      await writeFile(paths.activePath, encode([row('c')]));
+      await compare();
+      await rm(paths.activePath);
+      await expect(compare()).rejects.toThrow();
+      await writeFile(paths.activePath, encode([row('a'), row('b')]));
+      await compare();
+    });
+  });
+  it('matches UTF-8 replacement offsets, CRLF, whitespace and unterminated tails', async () => {
+    await fixture(async ({paths, compare}) => {
+      const first = Buffer.from('  ' + JSON.stringify(row('a', 'X中文🙂')) + ' \r\n');
+      first[first.indexOf('X')] = 0xff;
+      await writeFile(paths.activePath, first);
+      await compare();
+      const second = Buffer.from(JSON.stringify(row('b')));
+      await writeFile(paths.activePath, Buffer.concat([first, second]));
+      await compare();
+      await writeFile(paths.activePath, Buffer.concat([first, second, Buffer.from('\n' + encode([row('c')]))]));
+      await compare();
+    });
+  });
+  it('keeps full validation after cache hits and rejects duplicate external identities', async () => {
+    await fixture(async ({paths, compare}) => {
+      await writeFile(paths.activePath, encode([row('a')]));
+      await compare();
+      await writeFile(paths.activePath, encode([row('a'), row('a')]));
+      await expect(compare()).rejects.toThrow();
+      await writeFile(paths.activePath, '{invalid}\n');
+      await expect(compare()).rejects.toThrow();
+      await writeFile(paths.activePath, encode([row('a')]));
+      await compare();
+    });
+  });
+  it('falls back beyond the retained byte budget without changing offsets', async () => {
+    await fixture(async ({paths, compare}) => {
+      const rows = [row('a', 'x'.repeat(4 * 1024 * 1024)), row('b')];
+      await writeFile(paths.activePath, encode(rows));
+      await compare();
+      rows.push(row('c'));
+      await writeFile(paths.activePath, encode(rows));
+      await compare();
+    });
+  });
+  it('continues checking snapshot revisions, lineage and symlinks after warm scans', async () => {
+    await fixture(async ({paths, compare}) => {
+      const parent = [row('a')];
+      const parentPath = join(paths.snapshotsPath, 'g000000000000--compact.jsonl');
+      await writeFile(parentPath, encode(parent));
+      const active = [{ ...row('a'), history_artifact: {
+        schemaVersion: 1, generation: 1, producedBy: 'llm_checkpoint',
+        parentSnapshot: { generation: 0, compactionId: 'compact', revision: canonicalHistoryRevision(parent) },
+      } }, row('b')];
+      await writeFile(paths.activePath, encode(active));
+      await compare();
+      await compare();
+      await writeFile(parentPath, encode([row('a', 'modified')]));
+      await expect(compare()).rejects.toThrow('artifact-revision-mismatch');
+      await writeFile(parentPath, encode(parent));
+      await compare();
+      const original = await readFile(parentPath);
+      await rm(parentPath);
+      await writeFile(join(paths.snapshotsPath, 'target'), original);
+      await symlink('target', parentPath);
+      await expect(compare()).rejects.toThrow('unsafe-artifact');
+    });
   });
 });
