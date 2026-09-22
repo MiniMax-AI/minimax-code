@@ -4,10 +4,13 @@ import { IncrementalSha256 } from './incremental-sha256.js';
 export interface SemanticSnapshot<T> {
   readonly value: T;
   readonly fingerprint: string;
+  /** Process-local replay identity; never used as a persisted history digest. */
+  readonly replayFingerprint: string;
 }
 
 const ownedValues = new WeakSet<object>();
 const fingerprints = new WeakMap<object, string>();
+const replayFingerprints = new WeakMap<object, string>();
 const measuredSizes = new WeakMap<object, number>();
 
 /**
@@ -30,6 +33,10 @@ export function captureSemanticSnapshot<T>(value: T, previous?: T): SemanticSnap
   let fingerprint: string | undefined;
   return {
     value: snapshot,
+    get replayFingerprint() {
+      if (typeof snapshot === 'object' && snapshot !== null) return replaySubtreeFingerprint(snapshot);
+      return this.fingerprint;
+    },
     // Value-only consumers still validate and detach eagerly, but never encode
     // or hash the history. Only values frozen by this module may be reused.
     get fingerprint() {
@@ -45,6 +52,20 @@ export function captureSemanticSnapshot<T>(value: T, previous?: T): SemanticSnap
       return fingerprint;
     },
   };
+}
+
+// Each immutable child contributes a framed SHA-256 digest. Equal detached
+// values produce the same tree identity, including repeated aliases, but old
+// message bodies are encoded only once. The legacy byte digest stays separate.
+function replaySubtreeFingerprint(value: object): string {
+  const cached = replayFingerprints.get(value);
+  if (cached !== undefined) return cached;
+  if (!ownedValues.has(value)) throw new TypeError('Replay identity requires an owned snapshot.');
+  const encoder = new SemanticIdentityEncoder(new IncrementalSha256(), true);
+  encodeObject(value, new WeakSet<object>(), encoder);
+  const digest = encoder.digest();
+  replayFingerprints.set(value, digest);
+  return digest;
 }
 
 const NATIVE_CLONE_REQUIRED = Symbol('native-clone-required');
@@ -179,6 +200,7 @@ const SEMANTIC_TAGS = [
   'length',
   'end',
   'key',
+  'subtree',
 ] as const;
 type SemanticTag = (typeof SEMANTIC_TAGS)[number];
 const FRAME_PREFIXES = Object.fromEntries(
@@ -190,7 +212,7 @@ class SemanticIdentityEncoder {
 
   get measuresOnly(): boolean { return this.hash === undefined; }
 
-  constructor(private readonly hash?: IncrementalSha256) {}
+  constructor(private readonly hash?: IncrementalSha256, readonly replayTree = false) {}
 
   frame(tag: SemanticTag, payload: string): void {
     // Only string values and object/array keys can contain non-ASCII text.
@@ -243,6 +265,10 @@ function encodeValue(
   if (encodePrimitive(value, encoder)) return;
   if (typeof value !== 'object' || value === null) {
     throw new TypeError(`Unsupported semantic identity value: ${typeof value}.`);
+  }
+  if (encoder.replayTree) {
+    encoder.frame('subtree', replaySubtreeFingerprint(value));
+    return;
   }
   // Only this module's deeply frozen values are safe to reuse. Count each
   // occurrence, including aliases, so replay eviction retains the same budget.

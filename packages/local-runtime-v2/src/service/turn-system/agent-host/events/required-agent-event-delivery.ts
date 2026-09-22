@@ -191,7 +191,7 @@ export class RequiredAgentEventDelivery implements AgentEventDelivery, AgentHost
       const identity = historyIdentity(snapshot.value.context, snapshot.value.change);
       return this.historyReplays.run({
         identity,
-        fingerprint: snapshot.fingerprint,
+        fingerprint: snapshot.replayFingerprint,
         conflict: () => new AgentEventIdentityConflictError('history-committed', identity),
         execute: () =>
           this.lane.run(snapshot.value.context.sessionId, () =>

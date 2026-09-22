@@ -1,3 +1,4 @@
+import { SemanticReplayRegistry } from '../packages/local-runtime-v2/src/service/turn-system/agent-host/events/semantic-replay-registry.js';
 import { createHash } from 'node:crypto';
 import { createCanonicalHistoryScanner, scanCanonicalHistoryArtifacts } from '../packages/local-runtime-v2/src/service/session-system/messages/history/mutation/canonical-history-scanner.js';
 import {
@@ -629,6 +630,84 @@ describe('semantic snapshots', () => {
       ).size,
     ).toBe(13);
     expect(fingerprint(['ab', 'c'])).not.toBe(fingerprint(['a', 'bc']));
+  });
+});
+
+describe('incremental replay identities', () => {
+  it('preserves semantic equality, ordering and special-value distinctions', () => {
+    const values: unknown[] = [undefined, null, NaN, Infinity, -Infinity, -0, 0, '', [],
+      Array(1), [undefined], {}, { a: undefined }, ['ab', 'c'], ['a', 'bc'],
+      { b: 2, a: 1 }, { a: 1, b: 2 }, { text: '\ud800🙂中文' }, { text: '\ufffd🙂中文' }];
+    const shared = { a: 'repeat' };
+    values.push([shared, shared], [{ a: 'repeat' }, { a: 'repeat' }]);
+    const snapshots = values.map(value => captureSemanticSnapshot(value));
+    for (const a of snapshots) for (const b of snapshots) {
+      expect(a.replayFingerprint === b.replayFingerprint).toBe(a.fingerprint === b.fingerprint);
+    }
+  });
+
+  it('reuses owned children without masking caller mutations or changing byte budgets', () => {
+    const raw = { body: '中文🙂'.repeat(4096), metadata: { version: 1 } };
+    const old = captureSemanticSnapshot(raw);
+    const before = old.replayFingerprint;
+    const first = captureSemanticSnapshot({ messages: [old.value, old.value] });
+    const second = captureSemanticSnapshot(structuredClone(first.value));
+    expect(first.replayFingerprint).toBe(second.replayFingerprint);
+    expect(estimateSemanticValueSize(first.value)).toBe(estimateSemanticValueSize(second.value));
+    raw.metadata.version = 2;
+    expect(old.replayFingerprint).toBe(before);
+    expect(captureSemanticSnapshot(raw).replayFingerprint).not.toBe(before);
+    const updated = captureSemanticSnapshot({ messages: [old.value, captureSemanticSnapshot(raw).value] });
+    expect(updated.replayFingerprint).not.toBe(first.replayFingerprint);
+  });
+});
+
+describe('ordered replay eviction', () => {
+  function pending() {
+    let resolve!: (value: number) => void;
+    let reject!: (reason: Error) => void;
+    const promise = new Promise<number>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  }
+  const request = (identity: string, execute: () => Promise<number>, fingerprint = identity) => ({
+    identity, fingerprint, execute, conflict: () => new Error('conflict'),
+  });
+
+  it('evicts by insertion order rather than completion order and keeps conflict tombstones', async () => {
+    const registry = new SemanticReplayRegistry<number>(3, {
+      maximumSettledBytes: 2, measureSettledBytes: value => value,
+    });
+    const a = pending(), b = pending(), c = pending();
+    const pa = registry.run(request('a', () => a.promise));
+    const pb = registry.run(request('b', () => b.promise));
+    const pc = registry.run(request('c', () => c.promise));
+    c.resolve(1); await pc;
+    b.resolve(1); await pb;
+    a.resolve(1); await pa;
+    const execute = vi.fn(async () => 1);
+    await expect(registry.run(request('a', execute))).rejects.toThrow('no longer retained');
+    await expect(registry.run(request('a', execute, 'different'))).rejects.toThrow('conflict');
+    expect(execute).not.toHaveBeenCalled();
+    expect(registry.run(request('b', execute))).toBe(pb);
+    expect(registry.run(request('c', execute))).toBe(pc);
+    await registry.run(request('d', execute));
+    await registry.run(request('a', execute));
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('protects pending work, removes rejected entries, and permits an exact retry', async () => {
+    const registry = new SemanticReplayRegistry<number>(1);
+    const a = pending(), b = pending();
+    const pa = registry.run(request('a', () => a.promise));
+    const pb = registry.run(request('b', () => b.promise));
+    b.resolve(2); await pb;
+    const execute = vi.fn(async () => 3);
+    expect(registry.run(request('a', execute))).toBe(pa);
+    await expect(registry.run(request('b', execute))).resolves.toBe(3);
+    a.reject(new Error('retryable'));
+    await expect(pa).rejects.toThrow('retryable');
+    await expect(registry.run(request('a', execute))).resolves.toBe(3);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 });
 
