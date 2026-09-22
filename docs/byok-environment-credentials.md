@@ -71,8 +71,9 @@ files may have normalized whitespace or indentation.
 
 Numeric provider and model keys retain their identity during updates. YAML version
 directives do not change the application loader's scalar interpretation during
-alias expansion. Each changed document is checked with that loader before the
-configuration file is replaced.
+alias expansion. Multiline plain strings retain their folded line breaks when
+unrelated settings are saved. Each changed document is checked with that loader
+before the configuration file is replaced.
 
 Malformed configuration is rejected without replacing the existing file. POSIX
 configuration permissions remain private. Runtime log fields and common

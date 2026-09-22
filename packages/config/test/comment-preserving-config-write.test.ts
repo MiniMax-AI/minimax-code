@@ -98,6 +98,31 @@ merged:
     },
   );
 
+  it.each(['', '%YAML 1.1\n---\n'])(
+    'preserves multiline plain strings when saving unrelated fields with directive %j',
+    (directive) => {
+      const original = `${directive}defaults: &defaults
+  note: first
+
+    second
+
+
+    third
+  tagged: !!str alpha
+
+    beta
+alias: *defaults
+logLevel: info
+`;
+      const previous = parseConfigText(original);
+      const written = apply(original, (config) => {
+        config.logLevel = 'debug';
+      });
+      expect(yaml.load(written)).toEqual({ ...previous, logLevel: 'debug' });
+      expect((previous.defaults as Record<string, unknown>).note).toBe('first\nsecond\n\nthird');
+    },
+  );
+
   it('rejects a serialized document that no longer matches the intended configuration', () => {
     expect(() =>
       serializeConfigPreservingComments(

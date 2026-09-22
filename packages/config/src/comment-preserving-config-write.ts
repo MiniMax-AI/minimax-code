@@ -104,9 +104,13 @@ function useConfigLoaderScalarValues(document: Document): void {
       if (node.addToJSMap || typeof node.source !== 'string') return;
       if (node.type !== 'PLAIN' && !node.tag) return;
       // A mapping wrapper keeps values such as "---" from becoming directives.
-      // Explicit tags still apply to quoted values; ordinary quoted strings
-      // already have the same interpretation in both parsers.
-      const source = node.type === 'PLAIN' ? node.source : JSON.stringify(node.source);
+      // node.source already contains YAML's folded multiline value. Quote it
+      // before reparsing so its line breaks keep their meaning and indentation.
+      // Explicit tags still apply to quoted values.
+      const source =
+        node.type === 'PLAIN' && !node.source.includes('\n')
+          ? node.source
+          : JSON.stringify(node.source);
       const tag = node.tag ? `!<${node.tag}> ` : '';
       const value = (yaml.load(`value: ${tag}${source}`) as { value: unknown }).value;
       if (!isDeepStrictEqual(node.value, value)) {
