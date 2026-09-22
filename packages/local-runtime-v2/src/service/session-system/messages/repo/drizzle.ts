@@ -150,61 +150,41 @@ class DrizzleMessageRepository implements MessageRepository {
     if (!Number.isSafeInteger(limit) || limit <= 0) return [];
     this.ensureReady(sessionId);
     return this.options.db.transaction((tx) => {
-      // Establish a main-database snapshot before reading its data_version.
-      tx.get(sql`SELECT id FROM main.local_runtime_message_rows LIMIT 1`);
+      // Keep exact raw payloads inside SQLite. Unrelated writes through other
+      // connections must not invalidate every row, and row ids alone are not
+      // proof: external SQL can replace or rewrite an existing row.
       tx.run(sql`CREATE TEMP TABLE IF NOT EXISTS mcode_display_validation (
-        id INTEGER PRIMARY KEY, assistant INTEGER NOT NULL
+        id INTEGER PRIMARY KEY, message_id TEXT NOT NULL, data_json TEXT NOT NULL,
+        source TEXT, source_context_json TEXT, assistant INTEGER NOT NULL
       )`);
-      tx.run(sql`CREATE TEMP TABLE IF NOT EXISTS mcode_display_validation_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1), session_id TEXT, turn_id TEXT,
-        data_version INTEGER, schema_version INTEGER
-      )`);
-      // TEMP triggers observe writes through this connection, including raw SQL.
-      // An INSERT also invalidates a reused row id after INSERT OR REPLACE.
-      tx.run(sql`CREATE TEMP TRIGGER IF NOT EXISTS mcode_display_insert
-        AFTER INSERT ON main.local_runtime_message_rows BEGIN
-          DELETE FROM mcode_display_validation WHERE id = NEW.id;
-        END`);
-      tx.run(sql`CREATE TEMP TRIGGER IF NOT EXISTS mcode_display_update
-        AFTER UPDATE ON main.local_runtime_message_rows BEGIN
-          DELETE FROM mcode_display_validation WHERE id IN (OLD.id, NEW.id);
-        END`);
-      tx.run(sql`CREATE TEMP TRIGGER IF NOT EXISTS mcode_display_delete
-        AFTER DELETE ON main.local_runtime_message_rows BEGIN
-          DELETE FROM mcode_display_validation WHERE id = OLD.id;
-        END`);
-      const { data_version: dataVersion } = tx.get<{ data_version: number }>(sql`PRAGMA main.data_version`)!;
-      const { schema_version: schemaVersion } = tx.get<{ schema_version: number }>(sql`PRAGMA main.schema_version`)!;
-      const state = tx.get<{
-        session_id: string; turn_id: string; data_version: number; schema_version: number;
-      }>(sql`SELECT * FROM temp.mcode_display_validation_state WHERE id = 1`);
-      if (!state || state.session_id !== sessionId || state.turn_id !== turnId ||
-          state.data_version !== dataVersion || state.schema_version !== schemaVersion) {
-        tx.run(sql`DELETE FROM temp.mcode_display_validation`);
-        tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation_state
-          VALUES (1, ${sessionId}, ${turnId}, ${dataVersion}, ${schemaVersion})`);
-      }
       const turn = and(eq(messageRows.sessionId, sessionId), eq(messageRows.turnId, turnId));
-      const count = tx.get<{ count: number }>(sql`SELECT count(*) AS count
-        FROM ${messageRows} WHERE ${turn}`)!.count;
-      // The index retains only integer flags, never message contents. Bound it
-      // even for pathological turns; the uncached path has identical semantics.
-      if (count > 4096) {
+      const size = tx.get<{ count: number; bytes: number }>(sql`SELECT count(*) AS count,
+        coalesce(sum(length(CAST(data_json AS BLOB)) + length(CAST(msg_id AS BLOB)) +
+          coalesce(length(CAST(source AS BLOB)), 0) +
+          coalesce(length(CAST(source_context_json AS BLOB)), 0)), 0) AS bytes
+        FROM ${messageRows} WHERE ${turn}`)!;
+      // Bound the temporary payload copy. Oversized turns retain the uncached
+      // full-decode behavior, including errors in rows outside the final tail.
+      if (size.count > 4096 || size.bytes > 4 * 1024 * 1024) {
         tx.run(sql`DELETE FROM temp.mcode_display_validation`);
         return tx.select().from(messageRows).where(turn).orderBy(asc(messageRows.id))
           .all().map(decodeDisplayMessage).filter(isCanonicalAssistant).slice(-limit);
       }
+      // Retain one turn only, including after deletes and turn transfers.
+      tx.run(sql`DELETE FROM temp.mcode_display_validation WHERE id NOT IN
+        (SELECT id FROM ${messageRows} WHERE ${turn})`);
       const changed = tx.select().from(messageRows).where(and(turn,
-        sql`NOT EXISTS (SELECT 1 FROM temp.mcode_display_validation v WHERE v.id = ${messageRows.id})`,
+        sql`NOT EXISTS (SELECT 1 FROM temp.mcode_display_validation v
+          WHERE v.id = ${messageRows.id} AND v.message_id IS ${messageRows.messageId}
+            AND v.data_json IS ${messageRows.dataJson} AND v.source IS ${messageRows.source}
+            AND v.source_context_json IS ${messageRows.sourceContextJson})`,
       )).orderBy(asc(messageRows.id)).all();
       for (const row of changed) {
         const message = decodeDisplayMessage(row);
-        tx.run(sql`INSERT INTO temp.mcode_display_validation VALUES
-          (${row.id}, ${isCanonicalAssistant(message) ? 1 : 0})`);
+        tx.run(sql`INSERT OR REPLACE INTO temp.mcode_display_validation VALUES
+          (${row.id}, ${row.messageId}, ${row.dataJson}, ${row.source},
+            ${row.sourceContextJson}, ${isCanonicalAssistant(message) ? 1 : 0})`);
       }
-      // Keep deletions and turn transfers from retaining orphaned flags.
-      tx.run(sql`DELETE FROM temp.mcode_display_validation WHERE id NOT IN
-        (SELECT id FROM ${messageRows} WHERE ${turn})`);
       return tx.select().from(messageRows).where(and(turn,
         sql`EXISTS (SELECT 1 FROM temp.mcode_display_validation v
           WHERE v.id = ${messageRows.id} AND v.assistant = 1)`,

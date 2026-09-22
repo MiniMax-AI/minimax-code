@@ -263,8 +263,24 @@ describe('prepared runtime reads', () => {
     });
   });
 
-  it('does not decode unchanged old rows when selecting an assistant tail', async () => {
+  it('falls back when a turn exceeds the raw payload budget', async () => {
     await withDatabase(async (client) => {
+      await createSessionRepository({ db: client.db }).create({
+        sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
+      });
+      const repo = createMessageRepository({ db: client.db });
+      await repo.upsert({ sessionId: 's1', turnId: 't1', message: {
+        msg_id: 'large', role: 'assistant', text: 'x'.repeat(4 * 1024 * 1024),
+      } });
+      const expected = await repo.listTurn('s1', 't1');
+      expect(await repo.listCanonicalAssistantTail!('s1', 't1', 1)).toEqual(expected);
+      expect(client.rawDb.prepare('SELECT count(*) AS n FROM temp.mcode_display_validation').get())
+        .toEqual({ n: 0 });
+    });
+  });
+
+  it('does not decode unchanged old rows even after unrelated writes on another connection', async () => {
+    await withDatabase(async (client, writer) => {
       await createSessionRepository({ db: client.db }).create({
         sessionId: 's1', agentName: 'test', workspaceDir: '/tmp', runtime: 'pi-agent',
       });
@@ -275,6 +291,7 @@ describe('prepared runtime reads', () => {
         },
       });
       await repo.listCanonicalAssistantTail!('s1', 't1', 1);
+      writer.db.update(sessions).set({ title: 'unrelated write' }).where(eq(sessions.sessionId, 's1')).run();
       const parse = vi.spyOn(JSON, 'parse');
       try {
         await repo.listCanonicalAssistantTail!('s1', 't1', 1);
