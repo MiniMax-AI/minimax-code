@@ -1216,6 +1216,116 @@ describe('owned decoded history rows', () => {
 });
 
 
+describe('internal history snapshot handoff', () => {
+  async function fixture(run: (input: {
+    provider: ReturnType<typeof createSessionSystemCanonicalHistoryProvider>;
+    session: SessionRecord;
+    dataDir: string;
+  }) => Promise<void>) {
+    const dataDir = await mkdtemp(join(tmpdir(), 'mcode-history-handoff-'));
+    const session: SessionRecord = {
+      sessionId: 'handoff', agentName: 'test', workspaceDir: dataDir,
+      runtime: 'pi-agent', sessionType: 'root', sessionKind: 'conversation',
+      archived: false, status: 'idle', createdAtMs: 0, updatedAtMs: 0,
+      historyRelativeDir: utcSessionHistoryRelativeDir('handoff', 0),
+    };
+    try {
+      await run({ dataDir, session, provider: createSessionSystemCanonicalHistoryProvider({
+        dataDir, sessions: { get: async () => session },
+      }) });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  it('reuses frozen messages only in the internal view and keeps ordinary callers isolated', async () => {
+    await fixture(async ({ provider, session, dataDir }) => {
+      const internal = provider.withSnapshotTransform!(snapshot => snapshot);
+      const change = (id: string, text: string) => ({
+        sessionId: session.sessionId, turnId: id, reason: 'messageDelta' as const,
+        operation: { id, kind: 'append' },
+        messages: [{ role: 'user', timestamp: 1, content: [{ type: 'text', text }] }],
+      });
+      const input = change('one', 'first');
+      const first = await internal.append(input);
+      input.messages[0]!.content[0]!.text = 'caller edit';
+      const second = await internal.append(change('two', 'second'));
+      expect(second.messages[0]).toBe(first.messages[0]);
+      expect(first.messages).toHaveLength(1);
+      expect(Object.isFrozen(first.messages[0])).toBe(true);
+      const message = first.messages[0] as typeof input.messages[number];
+      expect(Object.isFrozen(message.content[0])).toBe(true);
+      expect(message.content[0]!.text).toBe('first');
+      const ordinary = await provider.readActive(session.sessionId);
+      expect(ordinary).toEqual(second);
+      expect(ordinary.messages[0]).not.toBe(first.messages[0]);
+      (ordinary.messages[0] as typeof message).content[0]!.text = 'ordinary caller edit';
+      const inspected = await internal.inspectActive(session.sessionId);
+      (inspected.messages[0] as typeof message).content[0]!.text = 'inspection edit';
+      expect(await internal.readActive(session.sessionId)).toEqual(second);
+      const path = resolveSessionHistoryPaths(dataDir, session).messages;
+      const bytes = await readFile(path, 'utf8');
+      await writeFile(path, bytes.replace('first', 'other'));
+      const rewritten = await internal.readActive(session.sessionId);
+      expect((rewritten.messages[0] as typeof message).content[0]!.text).toBe('other');
+      expect(rewritten.messages[0]).not.toBe(first.messages[0]);
+      expect(message.content[0]!.text).toBe('first');
+      await writeFile(path, '{bad}\n');
+      await expect(internal.readActive(session.sessionId)).rejects.toThrow();
+      await provider.delete(session.sessionId);
+      expect((await internal.readActive(session.sessionId)).messages).toEqual([]);
+      const recreated = await internal.append(change('three', 'new'));
+      expect(recreated.messages).toHaveLength(1);
+      expect(recreated.messages[0]).not.toBe(first.messages[0]);
+    });
+  });
+
+  it('preserves pending-tail recovery, compaction identities and snapshot generation', async () => {
+    await fixture(async ({ provider, session }) => {
+      const internal = provider.withSnapshotTransform!(snapshot => captureSemanticSnapshot(snapshot).value);
+      const active = await internal.append({
+        sessionId: session.sessionId, turnId: 'pending', reason: 'messageDelta',
+        operation: { id: 'pending', kind: 'append' },
+        messages: [
+          { role: 'user', timestamp: 1, content: 'question' },
+          { role: 'assistant', timestamp: 2, content: [
+            { type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'pwd' } },
+          ] },
+        ],
+      });
+      expect(active.messages).toHaveLength(2);
+      expect(await internal.readActive(session.sessionId)).toEqual(active);
+      const settled = await internal.read(session.sessionId);
+      expect(settled.messages).not.toEqual(active.messages);
+      expect(await provider.read(session.sessionId)).toEqual(settled);
+      const compacted = await internal.compact({
+        sessionId: session.sessionId, turnId: 'compact', reason: 'replaceMessages',
+        operation: { id: 'compact', kind: 'compaction' }, compactionId: 'compact',
+        method: 'llm_checkpoint', summary: 'summary',
+        messages: [{ role: 'compactionSummary', summary: 'summary' }],
+      });
+      expect(compacted.generation).toBe(1);
+      const plain = await provider.readActive(session.sessionId);
+      expect(compacted.messages).toEqual(plain.messages);
+      expect(compacted.identityVector).toEqual(plain.identityVector);
+      expect(compacted.revision).toBe(plain.revision);
+      expect(Object.isFrozen(compacted.messages)).toBe(true);
+      expect((await internal.readActive(session.sessionId)).messages).toEqual(plain.messages);
+      expect(active.messages).toHaveLength(2);
+    });
+  });
+
+  it('keeps injected adapters outside the immutable handoff', async () => {
+    await fixture(async ({ dataDir, session }) => {
+      const provider = createSessionSystemCanonicalHistoryProvider({
+        dataDir, sessions: { get: async () => session },
+        files: createCanonicalHistoryFileAdapter(),
+      });
+      expect(provider.withSnapshotTransform).toBeUndefined();
+    });
+  });
+});
+
 describe('incremental history index scanning', () => {
   const row = (id: string, content = '中文🙂') => ({
     message_id: `msg-user-v1-${id}`, turn_id: `turn-${id}`,

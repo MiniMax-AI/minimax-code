@@ -124,7 +124,11 @@ export interface SessionCanonicalHistoryCommit {
   readonly identityVector: readonly string[];
 }
 
+type HistorySnapshotTransform = (snapshot: SessionCanonicalHistorySnapshot) => SessionCanonicalHistorySnapshot;
+
 export interface SessionSystemCanonicalHistoryProvider {
+  /** Internal synchronous ownership transfer; ordinary reads remain detached and mutable. */
+  withSnapshotTransform?(transform: HistorySnapshotTransform): SessionSystemCanonicalHistoryProvider;
   /** Provider-safe settled history; deterministic tool-protocol tails are repaired in place. */
   read(sessionId: string): Promise<SessionCanonicalHistorySnapshot>;
   /** Strict active history; only the final legal pending tool round is accepted. */
@@ -169,14 +173,16 @@ type CanonicalHistoryMessage = TimestampedCanonicalHistoryMessage | MinimalNativ
 function historySnapshot(
   records: readonly CanonicalHistoryEnvelope[],
   useActiveRevision: boolean,
+  transform?: HistorySnapshotTransform,
 ): SessionCanonicalHistorySnapshot {
-  return {
+  const snapshot = {
     revision: useActiveRevision
       ? canonicalActiveHistoryRevision(records)
       : canonicalHistoryRevision(records),
-    messages: records.map(({ message }) => detached(message)),
+    messages: records.map(({ message }) => transform ? message : detached(message)),
     identityVector: records.map(({ message_id }) => message_id),
   };
+  return transform ? transform(snapshot) : snapshot;
 }
 
 function isMissingParentScannerError(error: unknown): error is HistoryScannerError {
@@ -217,112 +223,118 @@ export function createSessionSystemCanonicalHistoryProvider(
   const scanHistory = createCanonicalHistoryScanner();
   const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
 
-  return {
-    read: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, false)),
-    readActive: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, true)),
-    inspectActive: (sessionId) => inLane(sessionId, () => inspectActiveSnapshot(sessionId)),
-    initialize: (sessionId) =>
-      inLane(sessionId, async () => {
-        const paths = await ensureInitialized(sessionId, 'allocate');
-        await syncIndex(sessionId, paths);
-      }),
-    delete: (sessionId) =>
-      inLane(sessionId, async () => {
-        const located = await locations.resolveSession(sessionId);
-        if (!located) return;
-        deleteSessionHistory(options.dataDir, located.session, located.paths);
-        options.activity?.notify(sessionId);
-      }),
-    append: (change) =>
-      inLane(change.sessionId, async () => {
-        await persistCanonical(async () => {
-          assertChange(change, 'messageDelta');
-          const paths = await ensureInitialized(change.sessionId);
-          const existing = await files.readActiveStrict(paths.messages);
-          const appended = appendEnvelopes(change);
-          assertAppendIdentityBoundary(existing, appended);
-          await appendWithInterruptedToolRoundRecovery({
-            files,
-            path: paths.messages,
-            existing,
-            appended,
-          });
-        }, retryDelay);
-        const committed = await readSnapshot(change.sessionId, true);
-        options.activity?.notify(change.sessionId);
-        return committed;
-      }),
-    replace: (change) =>
-      inLane(change.sessionId, async () => {
-        await persistCanonical(async () => {
-          assertChange(change, 'replaceMessages');
-          const paths = await ensureInitialized(change.sessionId);
-          const existing = await files.readStrict(paths.messages);
-          const snapshotId = replacementSnapshotId(change.metadata);
-          if (snapshotId) {
-            const generation = activeGeneration(existing);
-            await files.publishSnapshot(
-              join(
-                paths.snapshots,
-                `g${String(generation).padStart(12, '0')}--${safeCompactionId(snapshotId)}.jsonl`,
-              ),
+  return view();
+
+  function view(transform?: HistorySnapshotTransform): SessionSystemCanonicalHistoryProvider {
+    return {
+      // Only the private default reader proves that messages are deeply immutable.
+      // Injected adapters retain the original detach-and-validate boundary.
+      ...(options.files === undefined ? { withSnapshotTransform: view } : {}),
+      read: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, false, transform)),
+      readActive: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, true, transform)),
+      inspectActive: (sessionId) => inLane(sessionId, () => inspectActiveSnapshot(sessionId)),
+      initialize: (sessionId) =>
+        inLane(sessionId, async () => {
+          const paths = await ensureInitialized(sessionId, 'allocate');
+          await syncIndex(sessionId, paths);
+        }),
+      delete: (sessionId) =>
+        inLane(sessionId, async () => {
+          const located = await locations.resolveSession(sessionId);
+          if (!located) return;
+          deleteSessionHistory(options.dataDir, located.session, located.paths);
+          options.activity?.notify(sessionId);
+        }),
+      append: (change) =>
+        inLane(change.sessionId, async () => {
+          await persistCanonical(async () => {
+            assertChange(change, 'messageDelta');
+            const paths = await ensureInitialized(change.sessionId);
+            const existing = await files.readActiveStrict(paths.messages);
+            const appended = appendEnvelopes(change);
+            assertAppendIdentityBoundary(existing, appended);
+            await appendWithInterruptedToolRoundRecovery({
+              files,
+              path: paths.messages,
               existing,
+              appended,
+            });
+          }, retryDelay);
+          const committed = await readSnapshot(change.sessionId, true, transform);
+          options.activity?.notify(change.sessionId);
+          return committed;
+        }),
+      replace: (change) =>
+        inLane(change.sessionId, async () => {
+          await persistCanonical(async () => {
+            assertChange(change, 'replaceMessages');
+            const paths = await ensureInitialized(change.sessionId);
+            const existing = await files.readStrict(paths.messages);
+            const snapshotId = replacementSnapshotId(change.metadata);
+            if (snapshotId) {
+              const generation = activeGeneration(existing);
+              await files.publishSnapshot(
+                join(
+                  paths.snapshots,
+                  `g${String(generation).padStart(12, '0')}--${safeCompactionId(snapshotId)}.jsonl`,
+                ),
+                existing,
+              );
+            }
+            await files.replace(paths.messages, replacementEnvelopes(change, existing));
+          }, retryDelay);
+          const committed = await readSnapshot(change.sessionId, true, transform);
+          options.activity?.notify(change.sessionId);
+          return committed;
+        }),
+      compact: (change) =>
+        inLane(change.sessionId, async () => {
+          const paths = await ensureInitialized(change.sessionId);
+          const active = await files.readActiveStrict(paths.messages);
+          await scanCompactionLineageAllowingMissingParent(paths, change.sessionId);
+          const generation = activeGeneration(active);
+          const compactionId = safeCompactionId(change.compactionId);
+          const snapshotPath = join(
+            paths.snapshots,
+            `g${String(generation).padStart(12, '0')}--${compactionId}.jsonl`,
+          );
+          const preRevision = canonicalActiveHistoryRevision(active);
+          const replacement = compactionReplacementEnvelopes(change, active);
+          const marker: NonNullable<CanonicalHistoryEnvelope['history_artifact']> = {
+            schemaVersion: 1,
+            generation: generation + 1,
+            producedBy: change.method,
+            parentSnapshot: {
+              generation,
+              compactionId,
+              revision: preRevision,
+            },
+          };
+          const markedReplacement = markHistoryArtifact(replacement, marker);
+          await files.publishSnapshot(snapshotPath, active);
+          await files.replaceActive(paths.messages, markedReplacement);
+          const committed = await files.readActiveStrict(paths.messages);
+          const committedGeneration = activeGeneration(committed);
+          if (committedGeneration !== generation + 1) {
+            throw new Error(
+              `Canonical compaction generation verification failed: ${change.sessionId}`,
             );
           }
-          await files.replace(paths.messages, replacementEnvelopes(change, existing));
-        }, retryDelay);
-        const committed = await readSnapshot(change.sessionId, true);
-        options.activity?.notify(change.sessionId);
-        return committed;
-      }),
-    compact: (change) =>
-      inLane(change.sessionId, async () => {
-        const paths = await ensureInitialized(change.sessionId);
-        const active = await files.readActiveStrict(paths.messages);
-        await scanCompactionLineageAllowingMissingParent(paths, change.sessionId);
-        const generation = activeGeneration(active);
-        const compactionId = safeCompactionId(change.compactionId);
-        const snapshotPath = join(
-          paths.snapshots,
-          `g${String(generation).padStart(12, '0')}--${compactionId}.jsonl`,
-        );
-        const preRevision = canonicalActiveHistoryRevision(active);
-        const replacement = compactionReplacementEnvelopes(change, active);
-        const marker: NonNullable<CanonicalHistoryEnvelope['history_artifact']> = {
-          schemaVersion: 1,
-          generation: generation + 1,
-          producedBy: change.method,
-          parentSnapshot: {
-            generation,
-            compactionId,
-            revision: preRevision,
-          },
-        };
-        const markedReplacement = markHistoryArtifact(replacement, marker);
-        await files.publishSnapshot(snapshotPath, active);
-        await files.replaceActive(paths.messages, markedReplacement);
-        const committed = await files.readActiveStrict(paths.messages);
-        const committedGeneration = activeGeneration(committed);
-        if (committedGeneration !== generation + 1) {
-          throw new Error(
-            `Canonical compaction generation verification failed: ${change.sessionId}`,
-          );
-        }
-        await syncIndex(change.sessionId, paths, true, committed);
-        const result = {
-          revision: canonicalActiveHistoryRevision(committed),
-          generation: committedGeneration,
-          messages: committed.map(({ message }) => detached(message)),
-          identityVector: committed.map(({ message_id }) => message_id),
-        };
-        options.activity?.notify(change.sessionId);
-        return result;
-      }),
-  };
+          await syncIndex(change.sessionId, paths, true, committed);
+          const result = {
+            ...historySnapshot(committed, true, transform),
+            generation: committedGeneration,
+          };
+          options.activity?.notify(change.sessionId);
+          return result;
+        }),
+    };
+  }
 
   async function readSnapshot(
     sessionId: string,
     allowPendingToolCallTail: boolean,
+    transform?: HistorySnapshotTransform,
   ): Promise<SessionCanonicalHistorySnapshot> {
     const paths = await ensureInitialized(sessionId);
     const decoded = await files.readEnvelopesStrict(paths.messages);
@@ -351,7 +363,7 @@ export function createSessionSystemCanonicalHistoryProvider(
       }
     }
     await syncIndex(sessionId, paths, true, records);
-    return historySnapshot(records, allowPendingToolCallTail);
+    return historySnapshot(records, allowPendingToolCallTail, transform);
   }
 
   async function inspectActiveSnapshot(

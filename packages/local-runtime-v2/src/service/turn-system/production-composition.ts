@@ -59,6 +59,7 @@ import {
 import type { AgentExecutionSnapshot, AgentHost } from './agent-host/contracts.js';
 import type { CanonicalHistoryCompactionChange } from './agent-host/history/contracts.js';
 import type { DurableCanonicalHistoryProvider } from './agent-host/history/durable-canonical-history-store.js';
+import { captureSemanticSnapshot } from './agent-host/history/semantic-identity.js';
 import { validateCanonicalHistoryMessages } from './agent-host/history/canonical-history-validation.js';
 import type { TurnSystemHostCapabilities } from './contracts.js';
 import type {
@@ -836,6 +837,26 @@ function adaptCanonicalHistory(
   provider: SessionSystemOwner['canonicalHistory'],
   mutation: SessionSystemOwner['sessions']['historyMutation'],
 ): DurableCanonicalHistoryProvider {
+  // The default Session provider owns deeply immutable decoded rows. Transfer
+  // each message once; legacy and injected providers keep their original path.
+  if (provider.withSnapshotTransform) {
+    const messages = new WeakMap<object, unknown>();
+    provider = provider.withSnapshotTransform((snapshot) => {
+      const owned = snapshot.messages.map((message) => {
+        if (typeof message !== 'object' || message === null) return message;
+        const previous = messages.get(message);
+        if (previous !== undefined) return previous;
+        const value = captureSemanticSnapshot(message).value;
+        messages.set(message, value);
+        return value;
+      });
+      return captureSemanticSnapshot({
+        revision: snapshot.revision,
+        messages: captureSemanticSnapshot(owned).value,
+        identityVector: captureSemanticSnapshot(snapshot.identityVector).value,
+      }).value;
+    });
+  }
   return {
     read: async (sessionId) => {
       const snapshot = await provider.read(sessionId);
