@@ -131,6 +131,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private historyReplayPending = false;
 
 	protected override onTerminalResize(): void {
+		// Some hosts repeat resize notifications while scrolling or reconnecting.
+		// An unchanged geometry must not clear and replay native scrollback.
+		if (this.previousWidth === this.terminal.columns && this.previousHeight === this.terminal.rows) return;
 		// Render the visible tail now; replay native scrollback only after the drag settles.
 		if (this.previousLines.length > 0 && !isTermuxSession()) {
 			if (this.resizeTimer) clearTimeout(this.resizeTimer);
@@ -294,6 +297,29 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
 			newLines = this.compositeOverlays(newLines, width, height);
+		}
+
+		// A native scrollback viewport cannot move backwards without clearing history.
+		// When only addressable rows shrink, absorb the freed rows at the top of the
+		// screen instead. The composer stays at the bottom, historical rows stay unique,
+		// and later output consumes this temporary space before scrolling again.
+		if (
+			!widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
+			prevViewportTop > 0 && newLines.length > prevViewportTop &&
+			newLines.length < prevViewportTop + height &&
+			this.previousKittyImageIds.size === 0 && !newLines.some(isImageLine)
+		) {
+			let unchangedHistory = true;
+			for (let i = 0; i < prevViewportTop; i++) {
+				if (stripTerminalSequences(this.previousLines[i] ?? "") !== stripTerminalSequences(newLines[i] ?? "")) {
+					unchangedHistory = false;
+					break;
+				}
+			}
+			if (unchangedHistory) {
+				const padding = Array<string>(prevViewportTop + height - newLines.length).fill("");
+				newLines = [...newLines.slice(0, prevViewportTop), ...padding, ...newLines.slice(prevViewportTop)];
+			}
 		}
 
 		// Extract cursor position before applying line resets (marker must be found first)

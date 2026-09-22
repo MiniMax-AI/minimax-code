@@ -42,6 +42,7 @@ import type {
   McodeBusinessTelemetry,
 } from "../../src/analytics/business-telemetry.js";
 import { VirtualTerminalScreen } from "../helpers/virtual-terminal.js";
+import { VirtualTerminal } from "../pi-084-upstream/virtual-terminal.js";
 import { TuiFailure } from "../../src/failure.js";
 
 const runtimeEvent = (event: RawTuiRuntimeEvent): TuiRuntimeEvent =>
@@ -12738,6 +12739,50 @@ describe("createTuiApp", () => {
     } finally {
       await app.stop();
       await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a scrolled host viewport in place when a long streamed answer finishes", async () => {
+    const terminal = new FakeTerminal();
+    const screen = new VirtualTerminal(terminal.columns, terminal.rows);
+    const runtime = createRuntime();
+    let finish: (() => void) | undefined;
+    const answer = Array.from({ length: 80 }, (_, index) => `Answer ${index}`).join("\n\n");
+    vi.mocked(runtime.sendMessage).mockImplementation(async function* () {
+      yield { type: "delta", content: answer };
+      await new Promise<void>((resolve) => { finish = resolve; });
+      yield { type: "done" };
+    });
+    const app = createTuiApp({ runtime, terminal, version: "0.1.0", workspaceDir: "/workspace" });
+    let writeIndex = 0;
+    const flush = async () => {
+      app.tui.renderNow();
+      for (; writeIndex < terminal.writes.length; writeIndex++) screen.write(terminal.writes[writeIndex]!);
+      await screen.flush();
+    };
+    app.start();
+    try {
+      await app.ready;
+      const sending = app.submit("Write a long answer");
+      await vi.waitFor(() => expect(app.tui.render(80).join("\n")).toContain("Answer 79"));
+      await flush();
+      screen.scrollLines(-10);
+      const before = screen.getScrollPosition();
+      expect(before.viewport).toBeGreaterThan(0);
+      const start = writeIndex;
+      finish?.();
+      await sending;
+      await flush();
+      expect(screen.getScrollPosition().viewport).toBe(before.viewport);
+      expect(terminal.writes.slice(start).join("")).not.toContain("\x1b[3J");
+      for (let index = 0; index < 80; index++) {
+        expect(screen.getScrollBuffer().filter((line) => line.match(/Answer (\d+)/u)?.[1] === String(index))).toHaveLength(1);
+      }
+      screen.scrollLines(10000);
+      expect(screen.getViewport().join("\n")).toContain("Ask Mcode to do anything");
+    } finally {
+      finish?.();
+      await app.stop();
     }
   });
 
