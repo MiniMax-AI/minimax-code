@@ -357,6 +357,36 @@ describe('semantic snapshots', () => {
       expect(estimateSemanticValueSize(snapshot.value)).toBe(bytes);
     }
   });
+  it('keeps exact size accounting when owned subtrees are reused and aliases repeat', () => {
+    const body = captureSemanticSnapshot({ text: '中文🙂'.repeat(2048), parts: [-0, undefined] }).value;
+    const expected = estimateSemanticValueSize(structuredClone(body));
+    expect(estimateSemanticValueSize(body)).toBe(expected);
+    expect(estimateSemanticValueSize(body)).toBe(expected);
+    const wrapped = captureSemanticSnapshot({ a: body, b: body }).value;
+    expect(estimateSemanticValueSize(wrapped)).toBe(estimateSemanticValueSize(structuredClone(wrapped)));
+    const mutable = { nested: { text: 'before' } };
+    const before = estimateSemanticValueSize(mutable);
+    mutable.nested.text = 'after with a longer body';
+    expect(estimateSemanticValueSize(mutable)).not.toBe(before);
+    const shallow = Object.freeze({ nested: { text: 'a' } });
+    estimateSemanticValueSize(shallow);
+    shallow.nested.text = 'longer';
+    expect(estimateSemanticValueSize(shallow)).toBe(estimateSemanticValueSize(structuredClone(shallow)));
+  });
+  it('preserves changed-parent aliases, own __proto__, empty objects and cycles during reuse', () => {
+    const shared = { child: { text: 'same' } };
+    const prior = captureSemanticSnapshot({ ['__proto__']: shared, first: shared, second: {}, tail: [1] }).value;
+    const input = { ['__proto__']: shared, first: shared, second: {}, tail: [2] };
+    const next = captureSemanticSnapshot(input, prior);
+    expect(next.value).toEqual(structuredClone(input));
+    expect(next.value['__proto__']).toBe(next.value.first);
+    expect(next.value.first).toBe(prior.first);
+    expect(next.value.second).toBe(prior.second);
+    expect(next.fingerprint).toBe(captureSemanticSnapshot(input).fingerprint);
+    const cyclic: { child?: unknown } = {};
+    cyclic.child = cyclic;
+    expect(() => captureSemanticSnapshot(cyclic, captureSemanticSnapshot({ child: {} }).value)).toThrow('Cyclic');
+  });
   it('detaches and freezes eagerly but hashes only when identity is requested', () => {
     const hash = vi.spyOn(IncrementalSha256.prototype, 'update');
     try {

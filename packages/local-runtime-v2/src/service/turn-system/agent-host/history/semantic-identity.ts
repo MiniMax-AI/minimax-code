@@ -8,6 +8,7 @@ export interface SemanticSnapshot<T> {
 
 const ownedValues = new WeakSet<object>();
 const fingerprints = new WeakMap<object, string>();
+const measuredSizes = new WeakMap<object, number>();
 
 /**
  * Detach callback-owned History/event data before it becomes an in-run
@@ -81,6 +82,17 @@ function cloneOwnedWrapper<T>(value: T, previous?: T): T | undefined {
 
   const copies = new WeakMap<object, object>();
   const previousOwners = new WeakMap<object, object>();
+  const visiting = new WeakSet<object>();
+  const allocate = (node: object, fields: PropertyDescriptorMap): object => {
+    const result = Array.isArray(node) ? new Array(fields.length!.value as number) : {};
+    copies.set(node, result);
+    return result;
+  };
+  const define = (target: object, key: string, child: unknown) => {
+    Object.defineProperty(target, key, {
+      value: child, enumerable: true, writable: true, configurable: true,
+    });
+  };
   const clone = (node: unknown, prior?: unknown): unknown => {
     if (typeof node !== 'object' || node === null) {
       if (node !== null && !['undefined', 'string', 'boolean', 'number'].includes(typeof node)) {
@@ -98,8 +110,8 @@ function cloneOwnedWrapper<T>(value: T, previous?: T): T | undefined {
     if (existing) return existing;
     const fields = node === value ? descriptors : plainDataDescriptors(node);
     if (!fields) throw NATIVE_CLONE_REQUIRED;
-    const copy = Array.isArray(node) ? new Array(fields.length!.value as number) : {};
-    copies.set(node, copy);
+    if (visiting.has(node)) throw NATIVE_CLONE_REQUIRED;
+    visiting.add(node);
     const candidate =
       reusePrevious &&
       typeof prior === 'object' && prior !== null && ownedValues.has(prior) &&
@@ -113,24 +125,30 @@ function cloneOwnedWrapper<T>(value: T, previous?: T): T | undefined {
       candidate !== undefined && keys.length === priorKeys.length &&
       keys.every((key, index) => key === priorKeys[index]) &&
       (!Array.isArray(node) || node.length === candidate['length']);
-    for (const [key, field] of Object.entries(fields)) {
-      if (!field.enumerable) continue;
+    let copy: object | undefined;
+    if (!unchanged) copy = allocate(node, fields);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index]!;
       const priorChild = candidate && Object.hasOwn(candidate, key) ? candidate[key] : undefined;
-      const child = clone(field.value, priorChild);
-      if (unchanged && !Object.is(child, candidate![key])) unchanged = false;
-      Object.defineProperty(copy, key, {
-        value: child,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      const child = clone(fields[key]!.value, priorChild);
+      if (unchanged && Object.is(child, candidate![key])) continue;
+      if (unchanged) {
+        unchanged = false;
+        copy = allocate(node, fields);
+        for (let preceding = 0; preceding < index; preceding++) {
+          const priorKey = keys[preceding]!;
+          define(copy, priorKey, candidate![priorKey]);
+        }
+      }
+      define(copy!, key, child);
     }
+    visiting.delete(node);
     if (unchanged) {
       previousOwners.set(candidate!, node);
       copies.set(node, candidate!);
       return candidate;
     }
-    return copy;
+    return copy!;
   };
   try {
     return clone(value, previous) as T;
@@ -169,6 +187,8 @@ const FRAME_PREFIXES = Object.fromEntries(
 
 class SemanticIdentityEncoder {
   byteSize = 0;
+
+  get measuresOnly(): boolean { return this.hash === undefined; }
 
   constructor(private readonly hash?: IncrementalSha256) {}
 
@@ -224,7 +244,17 @@ function encodeValue(
   if (typeof value !== 'object' || value === null) {
     throw new TypeError(`Unsupported semantic identity value: ${typeof value}.`);
   }
+  // Only this module's deeply frozen values are safe to reuse. Count each
+  // occurrence, including aliases, so replay eviction retains the same budget.
+  const reusable = encoder.measuresOnly && ownedValues.has(value);
+  const measured = reusable ? measuredSizes.get(value) : undefined;
+  if (measured !== undefined) {
+    encoder.byteSize += measured;
+    return;
+  }
+  const before = encoder.byteSize;
   encodeObject(value, ancestors, encoder);
+  if (reusable) measuredSizes.set(value, encoder.byteSize - before);
 }
 
 function encodePrimitive(value: unknown, encoder: SemanticIdentityEncoder): boolean {
