@@ -549,6 +549,60 @@ describe("createTuiApp", () => {
     }
   });
 
+  it("re-arms follow-tail when a follow-up is accepted into the queue", async () => {
+    let releaseRun: (() => void) | undefined;
+    const runGate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    const runtime = createRuntime();
+    vi.mocked(runtime.sendMessage).mockImplementation(
+      async function* pendingRun() {
+        yield {
+          type: "delta",
+          turnId: "turn-pending",
+          role: "assistant",
+          content: "Working",
+        };
+        await runGate;
+        yield { type: "done", turnId: "turn-pending" };
+      },
+    );
+    const forceFollowBottom = vi.spyOn(TuiChatLayout.prototype, "forceFollowBottom");
+    const app = createTuiApp({
+      runtime,
+      terminal: new FakeTerminal(),
+      version: "test",
+      workspaceDir: "/workspace",
+      productFeatures: { queue: true },
+    });
+    app.start();
+
+    try {
+      await app.ready;
+      const firstSubmission = app.submit("Start the live run");
+      await vi.waitFor(() =>
+        expect(app.controller.snapshot().status).toBe("running"),
+      );
+
+      forceFollowBottom.mockClear();
+      await app.submit("Queue the follow-up");
+
+      expect(runtime.enqueueMessage).toHaveBeenCalledWith(
+        "session-1",
+        "Queue the follow-up",
+        expect.objectContaining({ attachments: [] }),
+      );
+      expect(forceFollowBottom).toHaveBeenCalled();
+
+      releaseRun?.();
+      await firstSubmission;
+    } finally {
+      releaseRun?.();
+      await app.stop();
+      forceFollowBottom.mockRestore();
+    }
+  });
+
   it.each(["regular", "fullscreen"] as const)(
     "configures /statusline from terminal input and reopens the saved selection in %s mode",
     async (tuiMode) => {

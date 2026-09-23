@@ -127,7 +127,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onTodoChange: (items) => tasks.setItems(items),
     onUserSubmissionProjected: () => {
       codexHandoffFlow?.dismiss();
-      layout.forceFollowBottom();
       if (started && !stopped) tui.requestImmediateRender();
     },
     onSessionLifecycle: (sessionId) => {
@@ -541,7 +540,10 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       tui.requestRender();
     },
     userMessageCount: () => transcript.snapshot().filter((cell) => cell.kind === 'user').length,
-    onMessageAdmitted: (input) => businessEventTracker?.trackChatSend(input),
+    onMessageAdmitted: (input) => {
+      businessEventTracker?.trackChatSend(input);
+      layout.forceFollowBottom();
+    },
   });
   activeRunFlow.setCommandCatalog(commandFlow.catalog);
   runtimeEventFlow = new TuiRuntimeEventFlow({
