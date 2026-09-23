@@ -57,7 +57,7 @@ export class TuiPluginAutocomplete implements AutocompleteProvider {
             .map((plugin) => {
               const name =
                 sanitizeTerminalText(plugin.displayName)
-                  .replace(/[\[\]\\]/gu, ' ')
+                  .replace(/[[\]\\]/gu, ' ')
                   .replace(/\s+/gu, ' ')
                   .trim()
                   .slice(0, 256) || plugin.name;

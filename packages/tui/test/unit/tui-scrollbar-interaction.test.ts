@@ -187,7 +187,7 @@ describe("Scrollbar interaction boundaries", () => {
         render: (width: number) =>
           Array.from(
             { length: CONTENT_LINES },
-            () => "x".repeat(width - 2) + "YZ",
+            () => `${"x".repeat(width - 2)}YZ`,
           ),
         invalidate() {},
       };

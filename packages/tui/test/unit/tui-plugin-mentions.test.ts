@@ -2,7 +2,7 @@ import { ConversationApplication } from '../../../local-runtime-v2/src/applicati
 import { DirectSendDeliveryService } from '../../../local-runtime-v2/src/application/conversation/direct-send-delivery.js';
 import { TuiUserProjection } from '../../src/tui/controller/projection/turn-user-projection.js';
 import { TranscriptStore } from '../../src/tui/transcript/store.js';
-import { visibleWidth } from '../../src/tui/engine/public.js';
+import { visibleWidth, stripTerminalSequences } from '../../src/tui/engine/public.js';
 import { TuiInputFlow } from '../../src/tui/controller/interaction/input-flow.js';
 import { TuiExternalEditorFlow } from '../../src/tui/controller/interaction/external-editor-flow.js';
 import { TuiSessionMutationFlow } from '../../src/tui/controller/product/session-mutation-flow.js';
@@ -31,7 +31,6 @@ import {
 } from '../../src/tui/widgets/editor/editor.js';
 import { TuiDraftRecovery } from '../../src/tui/features/composer/draft-recovery.js';
 import { createTuiSubmissionSnapshot } from '../../src/tui/features/composer/submission.js';
-import { stripTerminalSequences } from '../../src/tui/engine/public.js';
 
 const identity = (value: string) => value;
 const makePlugin = (name = 'notes', marketplace: 'local' | 'official' = 'local') => ({
@@ -525,14 +524,14 @@ describe('Plugin mention review regressions', () => {
         workspaceDir: '/workspace',
         configuredCommand: 'synthetic-editor',
         editDraft: async ({ draft }) =>
-          rename ? draft.replace('@My Notes', '@Other Notes') : draft + ' tomorrow',
+          rename ? draft.replace('@My Notes', '@Other Notes') : `${draft} tomorrow`,
         isAppStopped: () => false,
         append: vi.fn(),
         setHint: vi.fn(),
         onChanged: vi.fn(),
       });
       await flow.open();
-      expect(submittedEditorTransport(editor.captureDraft())).toBe(transport + ' tomorrow');
+      expect(submittedEditorTransport(editor.captureDraft())).toBe(`${transport} tomorrow`);
       editor.handleInput('\x1f');
       expect(editor.captureDraft()).toEqual(before);
       rename = true;
@@ -550,7 +549,7 @@ describe('Plugin mention review regressions', () => {
       tui: { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() },
       workspaceDir: '/workspace',
       configuredCommand: 'synthetic-editor',
-      editDraft: async ({ draft }) => 'Please ' + draft + ' tomorrow',
+      editDraft: async ({ draft }) => `Please ${draft} tomorrow`,
       isAppStopped: () => false,
       append: vi.fn(),
       setHint: vi.fn(),
@@ -670,7 +669,7 @@ describe('Plugin mention review regressions', () => {
       editor.handleInput(' tomorrow');
       await flow.submitEdit(editor.getText(), [], editor.captureDraft());
       expect(editSessionMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ content: canonical + ' tomorrow' }),
+        expect.objectContaining({ content: `${canonical} tomorrow` }),
       );
     },
   );

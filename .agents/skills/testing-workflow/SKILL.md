@@ -34,6 +34,7 @@ suites are outside this distribution's verification.
 | Sandbox on macOS | `pnpm test:sandbox` |
 | Source-sync, workflow and release tools | `pnpm test:release-tools` |
 | npm release archive installation | `MCODE_RELEASE_TAG=vX.Y.Z MCODE_RELEASE_ARCHIVE=/path/to/package.tar.gz pnpm verify --profile package` |
+| TUI source and test lint | `pnpm lint:tui` |
 | Types and standalone build boundary | `pnpm typecheck`, `pnpm build`, `pnpm check:standalone` |
 | Published files and generated paths | `pnpm check:source`, `pnpm check:tsconfig` |
 

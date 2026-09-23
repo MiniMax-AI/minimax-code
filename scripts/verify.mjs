@@ -48,6 +48,7 @@ const steps = [
     command: ["scripts/export-source-preview.mjs", "--out", preview],
   },
   { name: "test:release-tools", script: "test:release-tools", docs: true, windows: true },
+  { name: "lint:tui", script: "lint:tui", windows: true },
   // Compiler inputs are identical across the matrix. One Linux job runs this;
   // all platforms still build and validate native artifacts on their own platform.
   { name: "typecheck", script: "typecheck", fullOnly: true },
