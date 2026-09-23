@@ -646,6 +646,15 @@ export class TuiChatController {
     return Boolean(this.activeTurn || this.runCoordinator.activeTurnId());
   }
 
+  getTerminalDurationId(): string | undefined {
+    return this.transcript.snapshot().find((cell) => cell.kind === 'turn-duration')?.id;
+  }
+
+  dismissTerminalDuration(id: string | undefined): void {
+    if (!id || this.transcript.get(id)?.kind !== 'turn-duration') return;
+    if (this.transcript.remove(id)) this.notify();
+  }
+
   beginRuntimeTurn(turnId: string, timestamp: number): void {
     this.outputRate.beginTurn(turnId);
     this.turnProjection.beginTurn(turnId, timestamp);

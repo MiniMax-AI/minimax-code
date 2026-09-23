@@ -12,6 +12,7 @@ import type {
  */
 export class TranscriptVisibilityProjection implements TranscriptProjectionSource {
   private hiddenFromSourceMessageId: string | undefined;
+  private hiddenTerminalDurationId: string | undefined;
   private visibilityRevision = 0;
   private visibleLengthCache:
     | {
@@ -43,6 +44,18 @@ export class TranscriptVisibilityProjection implements TranscriptProjectionSourc
   readonly hideFromSourceMessage = (sourceMessageId: string | undefined): void => {
     if (this.hiddenFromSourceMessageId === sourceMessageId) return;
     this.hiddenFromSourceMessageId = sourceMessageId;
+    this.hiddenTerminalDurationId = undefined;
+    if (sourceMessageId) {
+      let durationId: string | undefined;
+      for (let index = this.source.length - 1; index >= 0; index -= 1) {
+        const cell = this.source.cellAt(index);
+        if (cell?.kind === 'turn-duration') durationId = cell.id;
+        if (cell?.sourceMessageId === sourceMessageId) {
+          this.hiddenTerminalDurationId = durationId;
+          break;
+        }
+      }
+    }
     this.visibilityRevision += 1;
   };
 
@@ -79,6 +92,11 @@ export class TranscriptVisibilityProjection implements TranscriptProjectionSourc
       if (this.source.cellAt(index)?.sourceMessageId !== sourceMessageId) continue;
       length = index;
       break;
+    }
+    // Runtime can refresh rewound history before the edit RPC settles. Keep
+    // the captured footer hidden if that refresh removes the message anchor.
+    if (length === this.source.length && this.hiddenTerminalDurationId) {
+      length = this.source.locateCell(this.hiddenTerminalDurationId)?.index ?? length;
     }
     if (sourceRevision !== undefined) {
       this.visibleLengthCache = {

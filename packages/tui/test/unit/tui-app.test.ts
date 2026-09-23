@@ -11654,6 +11654,209 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it.each([
+    "resubmit",
+    "cancel",
+    "failed-submit-cancel",
+    "new-operation-cancel",
+    "rewound-submit-cancel",
+    "resubmit-required-cancel",
+    "fast-completion",
+    "early-rewind",
+    "display-commit-cancel",
+  ])(
+    "keeps the interrupted footer lifecycle correct after double Escape and %s",
+    async (action) => {
+      const terminal = new FakeTerminal();
+      const screen = new VirtualTerminalScreen(terminal.columns, terminal.rows);
+      const frames: string[] = [];
+      const write = terminal.write.bind(terminal);
+      terminal.write = (data) => {
+        write(data);
+        screen.feed(data);
+        if (data.includes("\x1b[?2026l")) frames.push(screen.text());
+      };
+      const runtime = createRuntime();
+      const busEvents: TuiRuntimeEvent[] = [];
+      let wakeBus: (() => void) | undefined;
+      let finishEdit: (() => void) | undefined;
+      vi.mocked(runtime.watchEvents).mockImplementation(async function* (signal) {
+        while (!signal.aborted) {
+          if (busEvents.length === 0) {
+            await new Promise<void>((resolve) => {
+              wakeBus = resolve;
+              signal.addEventListener("abort", resolve, { once: true });
+            });
+          }
+          const event = busEvents.shift();
+          if (event) yield event;
+        }
+      });
+      const originalMessage = {
+        id: "msg-user-interrupted",
+        role: "user" as const,
+        content: "Original query",
+        timestamp: 1,
+      };
+      vi.mocked(runtime.listSessionInputSummaries).mockResolvedValue([
+        { userMessageId: originalMessage.id, timestamp: 1, fileChangeCount: 0 },
+      ]);
+      vi.mocked(runtime.listMessagePage).mockResolvedValue({
+        messages: [originalMessage],
+        hasMore: false,
+      });
+      vi.mocked(runtime.sendMessage).mockImplementation(
+        async function* (_request, signal) {
+          yield { type: "message", message: originalMessage };
+          yield { type: "delta", content: "Partial response" };
+          await new Promise<void>((resolve) => {
+            signal?.addEventListener("abort", resolve, { once: true });
+          });
+          yield { type: "done" };
+        },
+      );
+      // The RPC/history refresh can finish before the replacement session.start event.
+      vi.mocked(runtime.editSessionMessage).mockImplementation(async () => {
+        if (action === "failed-submit-cancel")
+          throw new Error("Edit rejected before rewind");
+        const failureCodes: Partial<Record<string, string>> = {
+          "new-operation-cancel": "EDIT_RESTART_NEEDS_NEW_OPERATION",
+          "rewound-submit-cancel": "EDIT_SUBMIT_FAILED_AFTER_REWIND",
+          "resubmit-required-cancel": "EDIT_RESTART_NEEDS_RESUBMIT",
+          "display-commit-cancel": "REWIND_DISPLAY_COMMIT_FAILED",
+        };
+        const failureCode = failureCodes[action];
+        if (failureCode)
+          throw Object.assign(new Error("Edit failed"), { key: failureCode });
+        if (action === "fast-completion") {
+          app.controller.beginRuntimeTurn("turn-edited", 1);
+          app.controller.runtimeTurnSettlement.settleProjection(
+            "turn-edited",
+            "succeeded",
+            2_000,
+          );
+        }
+        vi.mocked(runtime.getMessages).mockResolvedValue([
+          { ...originalMessage, id: "msg-user-edited", content: "Edited query" },
+        ]);
+        if (action === "early-rewind") {
+          busEvents.push(
+            runtimeEvent({
+              type: "message.rewind",
+              timestamp: 101,
+              source: "runtime-v2",
+              payload: { sessionId: "session-1", contextReset: true },
+            }),
+          );
+          wakeBus?.();
+          await new Promise<void>((resolve) => {
+            finishEdit = resolve;
+          });
+        }
+        return {
+          rewound: true,
+          turnId: "turn-edited",
+          userMessageId: "msg-user-edited",
+        };
+      });
+      const app = createTuiApp({
+        runtime,
+        terminal,
+        version: "0.1.0",
+        workspaceDir: "/workspace",
+      });
+      app.start();
+      try {
+        await app.ready;
+        terminal.input?.("Original query");
+        terminal.input?.("\r");
+        await vi.waitFor(() =>
+          expect(
+            app.transcript
+              .snapshot()
+              .some((cell) => cell.content === "Partial response"),
+          ).toBe(true),
+        );
+        terminal.input?.("\x1b");
+        await vi.waitFor(() =>
+          expect(
+            app.transcript
+              .snapshot()
+              .some((cell) => cell.kind === "turn-duration"),
+          ).toBe(true),
+        );
+        expect(app.editor.getText()).toBe("");
+        app.tui.renderNow();
+        expect(screen.text()).toContain("Interrupted after");
+
+        terminal.input?.("\x1b");
+        terminal.input?.("\x1b");
+        await vi.waitFor(() =>
+          expect(app.editor.getText()).toBe("Original query"),
+        );
+        app.tui.renderNow();
+        expect(screen.text()).not.toContain("Interrupted after");
+
+        if (action === "cancel") {
+          terminal.input?.("\x1b");
+          app.tui.renderNow();
+          expect(screen.text()).toContain("Interrupted after");
+          expect(runtime.editSessionMessage).not.toHaveBeenCalled();
+          return;
+        }
+
+        frames.length = 0;
+        app.editor.setText("Edited query");
+        terminal.input?.("\r");
+        if (action.endsWith("-cancel")) {
+          await vi.waitFor(() =>
+            expect(app.editor.getText()).toBe("Edited query"),
+          );
+          expect(runtime.editSessionMessage).toHaveBeenCalledOnce();
+          terminal.input?.("\x1b");
+          app.tui.renderNow();
+          if (
+            action === "failed-submit-cancel" ||
+            action === "new-operation-cancel"
+          ) {
+            expect(screen.text()).toContain("Interrupted after");
+          } else {
+            expect(screen.text()).not.toContain("Interrupted after");
+          }
+          return;
+        }
+        await vi.waitFor(() =>
+          expect(
+            app.transcript
+              .snapshot()
+              .some((cell) => cell.sourceMessageId === "msg-user-edited"),
+          ).toBe(true),
+        );
+        app.tui.renderNow();
+        if (action === "early-rewind") {
+          // Inspect the actual screen while the edit RPC is still pending.
+          expect(finishEdit).toBeDefined();
+          expect(screen.text()).not.toContain("Interrupted after");
+          finishEdit?.();
+          await vi.waitFor(() => expect(app.editor.getText()).toBe(""));
+          app.tui.renderNow();
+        }
+        expect(runtime.editSessionMessage).toHaveBeenCalledOnce();
+        expect(screen.text()).toContain("Edited query");
+        expect(screen.text()).not.toContain("Interrupted after");
+        if (action === "fast-completion")
+          expect(screen.text()).toContain("Completed in 2s");
+        expect(
+          frames.filter((frame) => frame.includes("Interrupted after")),
+        ).toEqual([]);
+      } finally {
+        finishEdit?.();
+        await app.stop();
+        screen.dispose();
+      }
+    },
+  );
+
   it("clears the interrupted duration before the next message input returns", async () => {
     const terminal = new FakeTerminal();
     terminal.rows = 10;

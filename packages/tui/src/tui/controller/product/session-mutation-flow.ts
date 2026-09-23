@@ -427,6 +427,7 @@ export class TuiSessionMutationFlow {
         ...(mergedAttachments ? { attachments: mergedAttachments } : {}),
       };
     }
+    const previousDurationId = this.options.controller.getTerminalDurationId();
     this.invocations.set(invocation.sequence, { ...invocation, phase: 'submitting' });
     this.options.setHint(sessionMutationText('sessionMutation.hint.editSubmitting'));
     this.options.onChanged();
@@ -446,6 +447,13 @@ export class TuiSessionMutationFlow {
         return 'retained';
       }
       const code = rewindErrorCode(error);
+      if (
+        code === 'EDIT_RESTART_NEEDS_RESUBMIT' ||
+        code === 'EDIT_SUBMIT_FAILED_AFTER_REWIND' ||
+        code === 'REWIND_DISPLAY_COMMIT_FAILED'
+      ) {
+        this.options.controller.dismissTerminalDuration(previousDurationId);
+      }
       if (code === 'EDIT_RESTART_NEEDS_NEW_OPERATION') {
         this.invocations.set(invocation.sequence, {
           ...current,
@@ -480,6 +488,11 @@ export class TuiSessionMutationFlow {
         'warning',
       );
       return 'retained';
+    }
+    // Edit bypasses normal submit. Discard only the captured footer on success,
+    // before history refresh can expose it; a new run may already have finished.
+    if (this.isCurrentMutation(invocation)) {
+      this.options.controller.dismissTerminalDuration(previousDurationId);
     }
     try {
       await this.options.refreshProjection?.(invocation.sourceSessionId);
