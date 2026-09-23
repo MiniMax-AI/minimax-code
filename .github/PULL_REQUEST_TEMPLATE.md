@@ -4,6 +4,8 @@
 
 Describe the user-visible problem and resulting behavior. Link a public issue when applicable.
 
+- PR labels: change type (`bug`, `enhancement`, `documentation` or `dependencies`) and affected product (`cli`, `tui` together with `cli`, or `desktop`) where applicable; see the [label guide](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/maintainers.md#pull-request-labels).
+
 ## Validation
 
 - Checks run and results (include the revision/profile where relevant):

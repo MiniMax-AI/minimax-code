@@ -6,6 +6,8 @@ Thanks for your interest in contributing. For now, we only accept code and docum
 
 Repository collaborators should submit pull requests from feature branches; do not push directly to the default branch. Describe user-visible changes, checks you ran, live-service or platform validation you did not run, and documentation impact. Preserve real author identities and existing copyright notices.
 
+Apply the relevant change-type and product labels using the [pull request label guide](docs/maintainers.md#pull-request-labels). Add `perf:full` separately when the [performance rules](#performance-checks) require the full suite.
+
 ## Maintainers and review
 
 See [Maintainers](docs/maintainers.md) for review ownership, independent approval, security/release routing and the public-to-internal contribution flow. The [PR template](.github/PULL_REQUEST_TEMPLATE.md) records checks, untested boundaries and permission to contribute under the existing applicable licenses. CODEOWNERS routes reviews; required checks and approvals must also be enabled in repository settings.
