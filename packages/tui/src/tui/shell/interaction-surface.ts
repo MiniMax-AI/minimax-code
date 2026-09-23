@@ -8,7 +8,7 @@ export class TuiInteractionSurface {
   constructor(
     private readonly host: TuiInlinePanelHost,
     private readonly surfaces: TuiSurfaceHost,
-    private readonly requestRender: (rebuild?: boolean) => void,
+    private readonly requestRender: () => void,
     private readonly onActiveChanged?: (active: boolean) => void,
     private readonly followFullscreenBottom?: () => void,
   ) {}
@@ -38,13 +38,11 @@ export class TuiInteractionSurface {
 
   close(panel?: Component): boolean {
     if (!this.host.isActive(panel)) return false;
-    const rebuild = this.surfaces.getChatMode() === 'regular' && this.host.fullscreenViewport;
     if (this.layer && !this.layer.close()) return false;
     this.layer = undefined;
     if (!this.host.close(panel)) return false;
     this.onActiveChanged?.(false);
-    if (rebuild) this.requestRender(true);
-    else this.requestRender();
+    this.requestRender();
     return true;
   }
 

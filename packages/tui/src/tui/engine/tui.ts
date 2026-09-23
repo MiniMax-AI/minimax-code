@@ -28,6 +28,13 @@ export interface Component {
 	render(width: number): string[];
 
 	/**
+	 * Opt into preserving native scrolling when only background content shrinks.
+	 * Return a key for the last rendered transient layout (menus, editor, banners).
+	 * A changed or missing key restores exposed document rows instead of padding.
+	 */
+	getViewportLayoutKey?(): string | undefined;
+
+	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
@@ -312,8 +319,6 @@ export interface TUI extends Component {
 	renderNow(force?: boolean): void;
 	requestRender(force?: boolean): void;
 	requestImmediateRender(): void;
-	/** Restore rows exposed by a shrinking interactive layout instead of padding them. */
-	requestLayoutRender(): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
@@ -785,10 +790,6 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
-	}
-
-	requestLayoutRender(): void {
-		this.requestImmediateRender();
 	}
 
 	requestImmediateRender(): void {

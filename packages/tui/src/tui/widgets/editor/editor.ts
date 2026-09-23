@@ -80,14 +80,6 @@ export class Editor implements Component, Focusable {
     return this.engine.focused;
   }
 
-  get onAutocompleteResize(): PiEditor['onAutocompleteResize'] {
-    return this.engine.onAutocompleteResize;
-  }
-
-  set onAutocompleteResize(callback: PiEditor['onAutocompleteResize']) {
-    this.engine.onAutocompleteResize = callback;
-  }
-
   set focused(value: boolean) {
     this.engine.focused = value;
   }

@@ -2968,7 +2968,7 @@ describe("createTuiApp", () => {
 
     app.start();
     await app.ready;
-    const requestLayoutRender = vi.spyOn(app.tui, "requestLayoutRender");
+    const writesBefore = terminal.writes.length;
     terminal.input?.("/");
 
     await vi.waitFor(() =>
@@ -2984,7 +2984,7 @@ describe("createTuiApp", () => {
     terminal.input?.("\u001B");
     expect(app.editor.getText()).toBe("/");
     expect(app.editor.focused).toBe(true);
-    expect(requestLayoutRender).not.toHaveBeenCalled();
+    expect(terminal.writes.slice(writesBefore).join("")).not.toContain("\x1b[3J");
 
     await app.stop();
   });
@@ -6125,6 +6125,66 @@ describe("createTuiApp", () => {
     );
 
     await app.stop();
+  });
+
+  it.each(["/theme", "/settings", "history search"])("restores the complete chat viewport after closing %s", async (entry) => {
+    const terminal = new VirtualTerminal(80, 24);
+    const app = createTuiApp({ runtime: createRuntime(), terminal, version: "0.2.0", workspaceDir: "/workspace" });
+    app.start();
+    try {
+      await app.ready;
+      for (let index = 0; index < 12; index++) await app.submit(`Message ${index}`);
+      if (entry === "history search") {
+        for (let index = 0; index < 12; index++) app.editor.addToHistory(`Message ${index}`);
+        terminal.sendInput("\x12");
+      }
+      else await app.submit(entry);
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(app.interaction.isActive()).toBe(true);
+      terminal.sendInput("\x1b");
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(app.interaction.isActive()).toBe(false);
+      const expected = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).slice(-24);
+      expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(expected);
+      for (let index = 0; index < 12; index++) {
+        expect(terminal.getScrollBuffer().filter((line) => line.trimEnd().endsWith(`› Message ${index}`))).toHaveLength(1);
+      }
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it.each(["multiline draft", "image preview"])("restores the chat viewport after dismissing %s", async (kind) => {
+    const terminal = new ClearToScrollbackTerminal(80, 24);
+    const app = createTuiApp({
+      runtime: createRuntime(), terminal, version: "0.2.0", workspaceDir: "/workspace",
+      resolveAttachment: async () => ({ type: "image", filePath: "/tmp/preview-missing.png", fileName: "preview.png", mimeType: "image/png", sizeBytes: 32768 }),
+    });
+    app.start();
+    try {
+      await app.ready;
+      for (let index = 0; index < 12; index++) await app.submit(`Message ${index}`);
+      if (kind === "multiline draft") {
+        app.editor.setText(Array.from({ length: 8 }, (_, index) => `Draft ${index}`).join("\n"));
+      } else {
+        terminal.sendInput("\x1b[200~/tmp/preview-missing.png\x1b[201~");
+        await vi.waitFor(() => expect(app.editor.getAttachmentPreview()).toBeDefined());
+      }
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getViewport().join("\n")).toContain(kind === "multiline draft" ? "Draft 7" : "preview.png");
+      terminal.sendInput(kind === "multiline draft" ? "\x03" : "\x1b");
+      app.tui.renderNow();
+      await terminal.flush();
+      if (kind === "multiline draft") expect(app.editor.getText()).toBe("");
+      else expect(app.editor.getAttachmentPreview()).toBeUndefined();
+      const expected = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).slice(-24);
+      expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(expected);
+    } finally {
+      await app.stop();
+    }
   });
 
   it("does not push the conversation downward after closing /usage", async () => {

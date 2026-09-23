@@ -21,8 +21,8 @@
     },
     {
       "path": "components/editor.ts",
-      "currentSha256": "0c257eb6225d4847a78152b14bd12fe299223541b193a5f4bc0c5667680c7b52",
-      "changeIds": ["L005", "L009", "L022", "L030", "L032", "L041"],
+      "currentSha256": "0775a490df136d1083738cce649e026d6153ecb5480715b2c1104d51051968c5",
+      "changeIds": ["L005", "L009", "L022", "L030", "L032"],
       "reason": "Keep strict TypeScript fixes and add the smallest generic snapshot, paste, telemetry, programmatic submission, undo-extension and empty-placeholder hooks needed by the MCode product wrapper. 提供方通过上下文回调控制自动触发，并通过 applyOnEnter 控制 Enter 是否填入候选。 强制补全上下文失效时立即取消请求并清空菜单。 支持单帧 placeholder 覆盖，由 Editor 统一保留 padding、可见光标和 IME 定位标记。 命令参数候选标记阶段，接受命令后续查参数，并隔离参数回调失败。",
       "behaviorImpact": "MCode Draft, attachment, product-level submission-intent and empty-input guidance semantics use the canonical Pi Editor cursor, width, padding, history, undo, paste-marker and autocomplete behavior. Shell 补全只由 Tab 打开，菜单内输入继续过滤；Enter 执行当前输入，Tab 填入选中项。其他提供方沿用默认行为。 删除 Shell 标记或命令名前缀后立即关闭候选；已取消请求的延迟结果无法恢复旧菜单。 带参数候选的命令支持连续补全，参数 Enter 仅填入，Esc 保留草稿；无参数命令保持原行为。"
     },
@@ -163,7 +163,7 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "f0127d16377ed9f159df5e2e78aeae11f9b05bbb857b0ea31ff944dea6869226",
+      "currentSha256": "9d5c2b83b6b3f0b614f9746a398025eb2c9d324a83959138e77728a08679939c",
       "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037", "L038", "L039", "L041"],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
       "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
@@ -171,7 +171,7 @@
     },
     {
       "path": "tui.ts",
-      "currentSha256": "27c80c6c58f0eb35a4f3e199123aca47c95296abd4dd46b922df770effa9d42a",
+      "currentSha256": "96591553bc244dbe431de5bff46f57a874d83cd5fe623c94b47b637f83afcec0",
       "changeIds": ["L005", "L015", "L023", "L027", "L028", "L031", "L040", "L041"],
       "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。",
       "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。"

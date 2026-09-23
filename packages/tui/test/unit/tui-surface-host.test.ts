@@ -71,10 +71,10 @@ function createRecordingPresenter(): {
 
 describe('TuiSurfaceHost', () => {
   it.each([
-    { mode: 'regular', fullscreenViewport: true, rebuild: true },
-    { mode: 'regular', fullscreenViewport: false, rebuild: false },
-    { mode: 'fullscreen', fullscreenViewport: true, rebuild: false },
-  ] as const)('requests rebuild on interaction close only for a regular full-viewport panel ($mode, $fullscreenViewport)', ({ mode, fullscreenViewport, rebuild }) => {
+    { mode: 'regular', fullscreenViewport: true },
+    { mode: 'regular', fullscreenViewport: false },
+    { mode: 'fullscreen', fullscreenViewport: true },
+  ] as const)('leaves layout restoration to the renderer on interaction close ($mode, $fullscreenViewport)', ({ mode, fullscreenViewport }) => {
     const inline = new TuiInlinePanelHost();
     const host = createSurfaceHost({
       chat: { component: inline, focus: component([]) },
@@ -91,8 +91,7 @@ describe('TuiSurfaceHost', () => {
     requestRender.mockClear();
     expect(interaction.close(panel)).toBe(true);
     expect(requestRender).toHaveBeenCalledOnce();
-    if (rebuild) expect(requestRender).toHaveBeenCalledWith(true);
-    else expect(requestRender).toHaveBeenCalledWith();
+    expect(requestRender).toHaveBeenCalledWith();
   });
 
   it.each(['regular', 'fullscreen'] as const)(

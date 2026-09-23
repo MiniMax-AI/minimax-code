@@ -208,9 +208,6 @@ export function createTuiApplicationEditor(
     autocompleteMaxVisible: 8,
     placeholder: composerText('placeholder'),
   });
-  editor.onAutocompleteResize = (previousRows, rows) => {
-    if (tui.mode === 'regular' && rows < previousRows) tui.requestLayoutRender();
-  };
   editor.setAutocompleteProvider(createTuiInitialAutocomplete(workspaceRoots.list(), runtime));
   return editor;
 }
@@ -428,7 +425,7 @@ export function createTuiApplicationSurface(options: {
   readonly liveRunId: (snapshot?: TuiChatSnapshot) => string | undefined;
   readonly shouldResumeDraftAfterLogin: () => boolean;
   readonly isActive: () => boolean;
-  readonly requestInteractionRender: (rebuild?: boolean) => void;
+  readonly requestInteractionRender: () => void;
   readonly mode: () => TuiMode;
   readonly switchMode: (mode: TuiMode) => boolean;
   readonly chatMode: TuiMode;

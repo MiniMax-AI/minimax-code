@@ -331,7 +331,6 @@ export class Editor implements Component, Focusable {
   private autocompleteTriggerPattern = buildTriggerPattern(this.autocompleteTriggerCharacters);
   private autocompleteDebouncePattern = buildDebouncePattern(this.autocompleteTriggerCharacters);
   private autocompleteList?: SelectList;
-  private renderedAutocompleteRows = 0;
   private autocompleteSuggestions?: AutocompleteSuggestions;
   private autocompleteState: 'regular' | 'force' | null = null;
   private autocompletePrefix: string = '';
@@ -382,8 +381,6 @@ export class Editor implements Component, Focusable {
   public onChange?: (text: string) => void;
   public onPaste?: (text: string) => boolean;
   public onAutocompleteView?: (suggestions: AutocompleteSuggestions) => void;
-  /** Lets hosts restore space occupied by a shrinking inline completion menu. */
-  public onAutocompleteResize?: (previousRows: number, rows: number) => void;
   public onAutocompleteSelect?: (
     suggestions: AutocompleteSuggestions,
     item: AutocompleteSuggestions['items'][number],
@@ -698,10 +695,8 @@ export class Editor implements Component, Focusable {
     }
 
     // Add autocomplete list if active
-    this.renderedAutocompleteRows = 0;
     if (this.autocompleteState && this.autocompleteList) {
       const autocompleteResult = this.autocompleteList.render(contentWidth);
-      this.renderedAutocompleteRows = autocompleteResult.length;
       for (const line of autocompleteResult) {
         const lineWidth = visibleWidth(line);
         const linePadding = ' '.repeat(Math.max(0, contentWidth - lineWidth));
@@ -786,7 +781,6 @@ export class Editor implements Component, Focusable {
 
       if (kb.matches(data, 'tui.select.up') || kb.matches(data, 'tui.select.down')) {
         this.autocompleteList.handleInput(data);
-        this.notifyAutocompleteResize();
         return;
       }
 
@@ -1220,7 +1214,6 @@ export class Editor implements Component, Focusable {
   }
 
   dispose(): void {
-    this.onAutocompleteResize = undefined;
     this.cancelAutocomplete();
     this.autocompleteProvider = undefined;
     this.onPaste = undefined;
@@ -2639,7 +2632,6 @@ export class Editor implements Component, Focusable {
     }
 
     this.autocompleteState = state;
-    this.notifyAutocompleteResize();
     const kind = suggestions.prefix.startsWith('/')
       ? '/'
       : suggestions.prefix.startsWith('@')
@@ -2667,21 +2659,6 @@ export class Editor implements Component, Focusable {
     this.autocompleteSuggestions = undefined;
     this.autocompletePrefix = '';
     this.reportedAutocompleteKind = undefined;
-    this.notifyAutocompleteResize();
-  }
-
-  private autocompleteRows(): number {
-    if (!this.onAutocompleteResize || !this.autocompleteState || !this.autocompleteList) return 0;
-    // SelectList owns group headings and pagination rows; reuse its layout rather
-    // than assuming one row per candidate. Its rows do not wrap with terminal width.
-    return this.autocompleteList.render(this.tui.terminal.columns).length;
-  }
-
-  private notifyAutocompleteResize(): void {
-    const rows = this.autocompleteRows();
-    if (rows !== this.renderedAutocompleteRows) {
-      this.onAutocompleteResize?.(this.renderedAutocompleteRows, rows);
-    }
   }
 
   private cancelAutocomplete(): void {

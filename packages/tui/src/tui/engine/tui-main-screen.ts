@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.js";
-import { type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
+import { type Component, type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
 import { stripTerminalSequences, visibleWidth } from "./utils.js";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
@@ -114,6 +114,8 @@ export interface TuiMainScreenRenderState {
 	hardwareCursorRow: number;
 	maxLinesRendered: number;
 	previousViewportTop: number;
+	viewportLayouts: { component: Component; key: string | undefined }[];
+	hadOverlays: boolean;
 }
 
 /** TUI implementation that renders into the terminal's main screen and scrollback. */
@@ -129,12 +131,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private previousViewportTop = 0;
 	private resizeTimer: ReturnType<typeof setTimeout> | undefined;
 	private historyReplayPending = false;
-	private layoutRenderPending = false;
-
-	override requestLayoutRender(): void {
-		this.layoutRenderPending = true;
-		super.requestLayoutRender();
-	}
+	private viewportLayouts: TuiMainScreenRenderState['viewportLayouts'] = [];
+	private hadOverlays = false;
 
 	protected override onTerminalResize(): void {
 		// Some hosts repeat resize notifications while scrolling or reconnecting.
@@ -173,6 +171,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			hardwareCursorRow: this.hardwareCursorRow,
 			maxLinesRendered: this.maxLinesRendered,
 			previousViewportTop: this.previousViewportTop,
+			viewportLayouts: this.viewportLayouts.map((layout) => ({ ...layout })),
+			hadOverlays: this.hadOverlays,
 		};
 	}
 
@@ -187,10 +187,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.hardwareCursorRow = state.hardwareCursorRow;
 		this.maxLinesRendered = state.maxLinesRendered;
 		this.previousViewportTop = state.previousViewportTop;
+		this.viewportLayouts = state.viewportLayouts.map((layout) => ({ ...layout }));
+		this.hadOverlays = state.hadOverlays;
 	}
 
 	protected override resetRenderState(): void {
-		this.layoutRenderPending = false;
+		this.viewportLayouts = [];
+		this.hadOverlays = false;
 		this.cancelResize();
 		this.historyReplayPending = false;
 		this.previousLines = [];
@@ -297,11 +300,21 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		const layoutRender = this.layoutRenderPending;
-		this.layoutRenderPending = false;
 		// Render all components to get new lines. Strip OSC 133 zone sentinels before the
 		// differential compare so they never enter previousLines or any terminal write.
 		let newLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+		const viewportLayouts = this.children.map((component) => ({
+			component,
+			key: component.getViewportLayoutKey?.(),
+		}));
+		const stableLayout = viewportLayouts.length > 0 &&
+			viewportLayouts.length === this.viewportLayouts.length &&
+			viewportLayouts.every(({ component, key }, index) =>
+				key !== undefined && component === this.viewportLayouts[index]?.component &&
+				key === this.viewportLayouts[index]?.key);
+		this.viewportLayouts = viewportLayouts;
+		const hadOverlays = this.hadOverlays;
+		this.hadOverlays = this.hasOverlayEntries;
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
@@ -313,7 +326,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// screen instead. The composer stays at the bottom, historical rows stay unique,
 		// and later output consumes this temporary space before scrolling again.
 		if (
-			!layoutRender && !widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
+			stableLayout && !hadOverlays && !widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
 			prevViewportTop > 0 && newLines.length > prevViewportTop &&
 			newLines.length < prevViewportTop + height &&
 			this.previousKittyImageIds.size === 0 && !newLines.some(isImageLine)

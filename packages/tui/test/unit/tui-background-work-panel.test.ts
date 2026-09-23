@@ -342,7 +342,12 @@ describe('Tasks in the regular terminal viewport', () => {
       const terminal = new VirtualTerminal(80, 16);
       const tui = new TuiMainScreen(terminal);
       const chatLines = Array.from({ length: 40 }, (_, index) => `chat-line-${index}`);
-      tui.addChild({ render: () => [...chatLines, 'COMPOSER', 'STATUS'], invalidate() {} });
+      tui.addChild({
+        render: () => [...chatLines, 'COMPOSER', 'STATUS'],
+        // This fixture settles background content while the transient footer stays fixed.
+        getViewportLayoutKey: () => 'composer:1,status:1',
+        invalidate() {},
+      });
       const tasks = Array.from({ length: 30 }, (_, index) => ({
         ...backgroundTasks()[0]!,
         taskId: `task-${index}`,

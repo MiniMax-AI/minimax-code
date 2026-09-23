@@ -85,13 +85,16 @@ and initial prompt are not applied.
 
 In regular mode, independent feature panels occupy the complete visible terminal
 area, including short Rewind previews and scope pickers. Closing a panel restores
-the current conversation. Closing a full-viewport interaction rebuilds the chat
-screen so its temporary rows do not leave a large blank area above the conversation.
-Closing or shrinking a Composer completion menu also restores the exposed chat
-rows. Short documents refresh in place; history is reconstructed only when the
-smaller layout needs to bring scrolled rows back into view.
-When running content shrinks entirely within the current screen, the renderer
-keeps native scrollback and the Composer position stable.
+the current conversation. Closing, replacing or shrinking a transient region
+restores the exposed chat rows. This includes inline selectors such as `/theme`,
+completion menus, multi-line drafts, image previews, queued messages, task and
+Goal summaries, welcome notices and status rows. Short documents refresh in place;
+history is reconstructed only when the smaller layout needs to bring scrolled
+rows back into view. This rule follows the rendered layout, including asynchronous
+updates, rather than requiring each close handler to request a special redraw.
+When background running content shrinks entirely within the current screen and
+the transient layout stays unchanged, the renderer keeps native scrollback and
+the Composer position stable.
 Freed rows temporarily remain blank at the top of the active screen and subsequent
 output reuses them. This avoids resetting the host's scroll position when a turn
 finishes. Redundant resize notifications with unchanged dimensions do not rebuild
