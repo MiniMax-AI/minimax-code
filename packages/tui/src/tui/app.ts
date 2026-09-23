@@ -131,7 +131,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onTodoChange: (items) => tasks.setItems(items),
     onUserSubmissionProjected: () => {
       codexHandoffFlow?.dismiss();
-      if (started && !stopped) tui.requestImmediateRender();
+      if (started && !stopped) tui.renderNow();
     },
     onSessionLifecycle: (sessionId) => {
       if (!sessionId) bashFlow.clearUnboundContext();

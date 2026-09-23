@@ -154,3 +154,11 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Evidence: local-delta tests exercise xterm and a clear-to-scrollback host model, covering historical style changes, simultaneous growth, short-document shrink, subsequent differential output, host scrolling and resize preview/replay. Native Apple Terminal replay of synthetic renderer output reproduces duplicate rows before the fix and preserves the exact document afterward.
 - Boundary: native replay covers synthetic output, not every live-model interaction or other terminal emulator.
 - Removal condition: the selected Pi baseline supplies equivalent in-place viewport erasure without retaining stale rows in native history.
+
+## L040: Coalesce synchronous submission renders
+
+- Product contract: sending the next message removes the previous interrupted duration from the physical terminal before the input callback returns, without rendering the same frame twice.
+- Minimal difference: queue the normal immediate input render before dispatching a focused component's key. A synchronous `renderNow()` during submission clears that queued request; ordinary keys still render on the next tick.
+- User impact: the previous interrupted footer disappears with the submitted message, and the extra no-op render after Enter is avoided.
+- Evidence: `tui-app.test.ts` checks every presented frame across interrupt and resend; `tui-engine-local-deltas.test.ts` checks that a synchronous input render has no second pass.
+- Removal condition: the selected Pi baseline coalesces synchronous input renders while preserving immediate key rendering.

@@ -11654,6 +11654,97 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it("clears the interrupted duration before the next message input returns", async () => {
+    const terminal = new FakeTerminal();
+    terminal.rows = 10;
+    const screen = new VirtualTerminalScreen(terminal.columns, terminal.rows);
+    const frames: string[] = [];
+    const write = terminal.write.bind(terminal);
+    terminal.write = (data) => {
+      write(data);
+      // Model terminals that preserve an erased screen in native scrollback.
+      screen.feed(
+        data.replaceAll(
+          "\x1b[2J",
+          `\x1b[${terminal.rows};1H${"\r\n".repeat(terminal.rows)}\x1b[2J`,
+        ),
+      );
+      if (data.includes("\x1b[?2026l")) frames.push(screen.text());
+    };
+    const runtime = createRuntime();
+    let finishResend: (() => void) | undefined;
+    let sendCount = 0;
+    vi.mocked(runtime.sendMessage).mockImplementation(
+      async function* (_request, signal) {
+        sendCount += 1;
+        if (sendCount <= 10) {
+          yield { type: "delta", content: `Preload reply ${sendCount}` };
+          yield { type: "done" };
+          return;
+        }
+        if (sendCount === 11) {
+          yield { type: "delta", content: "Partial response" };
+          await new Promise<void>((resolve) => {
+            signal?.addEventListener("abort", resolve, { once: true });
+          });
+        } else {
+          await new Promise<void>((resolve) => {
+            finishResend = resolve;
+          });
+        }
+        if (sendCount === 12) yield { type: "delta", content: "Agent reply" };
+        yield { type: "done" };
+      },
+    );
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+    });
+
+    app.start();
+    try {
+      await app.ready;
+      for (let i = 0; i < 10; i++) {
+        await app.submit(`Preload ${i}`);
+        app.tui.renderNow();
+      }
+      terminal.input?.("First request");
+      terminal.input?.("\r");
+      await vi.waitFor(() => expect(app.controller.snapshot().status).toBe("running"));
+      terminal.input?.("\x1b");
+      await vi.waitFor(() =>
+        expect(app.tui.render(80).join("\n")).toContain("Partial response"),
+      );
+      await vi.waitFor(() =>
+        expect(
+          app.transcript
+            .snapshot()
+            .some((cell) => cell.kind === "turn-duration" && cell.status === "cancelled"),
+        ).toBe(true),
+      );
+      app.tui.renderNow();
+      expect(screen.text()).toContain("Interrupted after");
+
+      app.tui.renderNow();
+      frames.length = 0;
+      terminal.input?.("Second request");
+      terminal.input?.("\r");
+      expect(screen.text()).not.toContain("Interrupted after");
+      expect(app.tui.render(80).join("\n")).not.toContain("Interrupted after");
+      await vi.waitFor(() => expect(runtime.sendMessage).toHaveBeenCalledTimes(12));
+      app.tui.renderNow();
+
+      expect(frames.length).toBeGreaterThan(0);
+      expect(frames.filter((frame) => frame.includes("Interrupted after"))).toEqual([]);
+    } finally {
+      finishResend?.();
+      await app.stop();
+      screen.dispose();
+    }
+  });
+
   it("returns a thinking-only turn's prompt to the composer on abort", async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();

@@ -56,6 +56,52 @@ class MutableLines implements Component {
 }
 
 describe('MCode Pi Engine local deltas', () => {
+  it('does not replay a submitted input frame after a synchronous render', async () => {
+    const terminal = new RecordingVirtualTerminal(60, 12);
+    const tui = new TuiMainScreen(terminal);
+    let renderCount = 0;
+    let content = 'old footer';
+    let updateAfterSyncRender = false;
+    const component: Component = {
+      render: () => {
+        renderCount += 1;
+        return [content];
+      },
+      invalidate: () => undefined,
+      handleInput: () => {
+        content = 'new message';
+        tui.renderNow();
+        if (updateAfterSyncRender) {
+          content = 'later status';
+          tui.requestRender();
+        }
+      },
+    };
+    tui.addChild(component);
+    tui.setFocus(component);
+    tui.start();
+    tui.renderNow();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    renderCount = 0;
+
+    terminal.sendInput('\r');
+    expect(renderCount).toBe(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(renderCount).toBe(1);
+    await terminal.flush();
+    expect(terminal.getViewport().join('\n')).toContain('new message');
+
+    updateAfterSyncRender = true;
+    renderCount = 0;
+    terminal.sendInput('\r');
+    expect(renderCount).toBe(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(renderCount).toBe(2);
+    await terminal.flush();
+    expect(terminal.getViewport().join('\n')).toContain('later status');
+    tui.stop();
+  });
+
   describe.each([
     ['xterm', RecordingVirtualTerminal],
     ['clear-to-scrollback host', ClearToScrollbackTerminal],

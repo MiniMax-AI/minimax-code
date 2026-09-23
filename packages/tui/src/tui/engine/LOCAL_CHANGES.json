@@ -171,10 +171,10 @@
     },
     {
       "path": "tui.ts",
-      "currentSha256": "0dee17d791b8f02fc26b28fe32506b036eb82761572dbcd378f2cac782a01798",
-      "changeIds": ["L005", "L015", "L023", "L027", "L028", "L031"],
-      "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, and dispatch the input left over after terminal color sequences are removed. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。",
-      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。"
+      "currentSha256": "cea30262a99f7e22dc03c51d4f6dfb9a949aee183c7da1d6138c5eeff77a7ea3",
+      "changeIds": ["L005", "L015", "L023", "L027", "L028", "L031", "L040"],
+      "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。",
+      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。"
     },
     {
       "path": "utils.ts",
