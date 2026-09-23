@@ -5,6 +5,7 @@
       "test/windows-contract.test.mjs"
     ],
     "capability": [
+      "packages/local-runtime/test/unit/skill-directory-symlinks.test.ts",
       "packages/agent-core/test/unit/bash-subprocess-env.test.ts",
       "packages/agent-modules/permission/test/unit/permission/bash-policy-regressions.test.ts",
       "packages/agent-tools/src/shared/replace-all-edit.test.ts",

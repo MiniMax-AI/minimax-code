@@ -21,6 +21,15 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | Files, shell, subagents, sessions, headless, ACP | Actual runtime retained | BYOK, file reads, session resume, ACP, sandbox, and status protocol tests |
 | Built-in skills, MCP, plugin tools | Original TUI assets and activation conditions retained | Asset build, plugin, and MCP tests; no claim that every skill has passed a real task |
 
+## Skill directory links
+
+Workspace `.agents/skills`, `.claude/skills`, and `.minimax/skills` support
+directory symlinks, both for the entire skill root and for individual skill
+directories. Targets may live outside the workspace. Existing external-source
+enable settings and duplicate-name priority still apply. Linked directories are
+watched for `SKILL.md` creation and edits; broken links are skipped. `SKILL.md`
+itself must remain a regular file.
+
 ## ACP Skill commands
 
 ACP clients receive enabled Skills alongside built-in slash commands when a session

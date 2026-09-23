@@ -2656,6 +2656,7 @@
     "packages/local-runtime/test/unit/local-thread-goal-wiring.test.ts",
     "packages/local-runtime/test/unit/metrics-telemetry-privacy.test.ts",
     "packages/local-runtime/test/unit/session-diff-fallback.test.ts",
+    "packages/local-runtime/test/unit/skill-directory-symlinks.test.ts",
     "packages/local-runtime/test/unit/thread-goal-kickoff-host.test.ts",
     "packages/local-runtime/test/unit/thread-goal-verifier-contract.test.ts",
     "packages/local-runtime/test/unit/thread-goal/contract.test.ts",

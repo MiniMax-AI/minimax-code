@@ -134,6 +134,7 @@ function externalSkillRoot(
     rootPath,
     priority: sourceConfig.priority + priorityBonus,
     external: true,
+    allowDirectorySymlinksOutsideRoot: true,
   };
 }
 
