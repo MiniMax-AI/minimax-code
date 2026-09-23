@@ -579,6 +579,7 @@ export class TuiCommandFlow {
                 submission.attachments.map((attachment) => attachment.fileName),
               );
             }
+            let queuedItemId: string | undefined;
             try {
               await this.options.controller.requireLoginForAgentAction();
               const draft = {
@@ -590,9 +591,19 @@ export class TuiCommandFlow {
                 submission.transportContent ||
                 submission.reviewRequest
               ) {
-                await this.options.queueFlow.enqueue(command, draft, submission, activeAdmissionId);
+                queuedItemId = await this.options.queueFlow.enqueue(
+                  command,
+                  draft,
+                  submission,
+                  activeAdmissionId,
+                );
               } else {
-                await this.options.queueFlow.enqueue(command, draft, undefined, activeAdmissionId);
+                queuedItemId = await this.options.queueFlow.enqueue(
+                  command,
+                  draft,
+                  undefined,
+                  activeAdmissionId,
+                );
               }
             } catch (error) {
               this.options.queueFlow.cancelAdmission(activeAdmissionId);
@@ -602,10 +613,12 @@ export class TuiCommandFlow {
                 disposition: await this.restorePreparedSubmission(seed, submission, input),
               };
             }
-            this.options.onMessageAdmitted?.({
-              attachmentCount: submission.attachments.length,
-              isFirstMessage,
-            });
+            if (queuedItemId) {
+              this.options.onMessageAdmitted?.({
+                attachmentCount: submission.attachments.length,
+                isFirstMessage,
+              });
+            }
             return { disposition: 'consumed' };
           }
           this.options.setHint('Wait for the current response or press Esc to interrupt');
@@ -746,19 +759,32 @@ export class TuiCommandFlow {
         command,
         submission.attachments.map((attachment) => attachment.fileName),
       );
+      let fallbackItemId: string | undefined;
       try {
         const draft = {
           attachments: submission.attachments,
         };
         if (prepared.atomic || submission.clientIntent || submission.reviewRequest) {
-          await this.options.queueFlow.enqueue(command, draft, submission, fallbackAdmissionId);
+          fallbackItemId = await this.options.queueFlow.enqueue(
+            command,
+            draft,
+            submission,
+            fallbackAdmissionId,
+          );
         } else {
-          await this.options.queueFlow.enqueue(command, draft, undefined, fallbackAdmissionId);
+          fallbackItemId = await this.options.queueFlow.enqueue(
+            command,
+            draft,
+            undefined,
+            fallbackAdmissionId,
+          );
         }
-        this.options.onMessageAdmitted?.({
-          attachmentCount: submission.attachments.length,
-          isFirstMessage,
-        });
+        if (fallbackItemId) {
+          this.options.onMessageAdmitted?.({
+            attachmentCount: submission.attachments.length,
+            isFirstMessage,
+          });
+        }
         return 'consumed';
       } catch (error) {
         this.options.queueFlow.cancelAdmission(fallbackAdmissionId);

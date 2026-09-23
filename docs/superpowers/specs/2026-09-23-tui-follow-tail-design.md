@@ -1,6 +1,6 @@
 # TUI Follow-Tail Preservation Design
 
-Date: 2026-09-23  
+Date: 2026-09-23
 Issue: https://github.com/MiniMax-AI/minimax-code/issues/320
 
 ## Summary

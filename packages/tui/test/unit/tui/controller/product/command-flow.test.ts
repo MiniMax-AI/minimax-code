@@ -1058,13 +1058,15 @@ describe("TuiCommandFlow", () => {
   });
 
   it.each([
-    ["accepts the handoff", false],
-    ["rejects the handoff", true],
+    ["accepts the handoff", false, "queue-item-1"],
+    ["rejects the handoff", true, undefined],
+    ["drops a stale Session result", false, undefined],
   ] as const)(
     "preserves direct-admission semantics when the Runtime queue %s",
-    async (_scenario, enqueueFails) => {
+    async (_scenario, enqueueFails, queuedItemId) => {
       const draft = { attachments: [] };
       const append = vi.fn();
+      const onMessageAdmitted = vi.fn();
       const controller = {
         snapshot: vi.fn(() => ({
           status: "idle" as const,
@@ -1086,6 +1088,7 @@ describe("TuiCommandFlow", () => {
         cancelAdmission: vi.fn(),
         enqueue: vi.fn(async () => {
           if (enqueueFails) throw new Error("queue unavailable");
+          return queuedItemId;
         }),
       };
       const flow = new TuiCommandFlow({
@@ -1116,6 +1119,7 @@ describe("TuiCommandFlow", () => {
         append,
         setHint: vi.fn(),
         onChanged: vi.fn(),
+        onMessageAdmitted,
       });
 
       await expect(flow.submit("follow-up")).resolves.toBe(
@@ -1134,6 +1138,11 @@ describe("TuiCommandFlow", () => {
         [],
       );
       expect(composerDraft.completeSubmission).not.toHaveBeenCalled();
+      if (queuedItemId) {
+        expect(onMessageAdmitted).toHaveBeenCalledOnce();
+      } else {
+        expect(onMessageAdmitted).not.toHaveBeenCalled();
+      }
       if (enqueueFails) {
         expect(queueFlow.cancelAdmission).toHaveBeenCalledWith(
           expect.stringMatching(/^\d+-\d+$/u),
