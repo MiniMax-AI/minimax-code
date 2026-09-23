@@ -32,6 +32,10 @@ class ScrollableLines implements Component {
     return [...this.lines];
   }
 
+  appendLine(line: string): void {
+    this.lines.push(line);
+  }
+
   invalidate(): void {}
 }
 
@@ -301,5 +305,51 @@ describe("Scrollbar interaction boundaries", () => {
     expect(viewportText(terminal)).toContain("line-00");
     expect(viewportText(terminal)).not.toContain("line-59");
     expect(viewportText(terminal)).toContain("composer");
+  });
+
+  it("preserves a detached transcript position until follow-tail is explicitly re-armed", async () => {
+    const terminal = new VirtualTerminal(40, 15);
+    const empty = { render: () => [], invalidate() {} };
+    const content = new ScrollableLines(CONTENT_LINES);
+    const layout = new TuiChatLayout(terminal, {
+      surface: () => "conversation",
+      transcript: content,
+      welcome: empty,
+      interaction: { ...empty, isActive: () => false },
+      activity: empty,
+      followUp: empty,
+      composer: { render: () => ["composer"], invalidate() {} },
+      status: empty,
+    });
+    const tui = new TuiAltScreen(terminal);
+    screens.push(tui);
+    tui.setLayoutRoot(layout.fullscreenLayoutRoot);
+    tui.start();
+    await terminal.waitForRender();
+
+    expect(viewportText(terminal)).toContain("line-59");
+
+    terminal.sendInput(sgrPress(37, 0));
+    terminal.sendInput(sgrRelease(37, 0));
+    await terminal.waitForRender();
+    expect(viewportText(terminal)).toContain("line-00");
+
+    content.appendLine("line-60");
+    layout.followBottom();
+    tui.requestRender();
+    await terminal.waitForRender();
+    expect(viewportText(terminal)).toContain("line-00");
+    expect(viewportText(terminal)).not.toContain("line-60");
+
+    layout.forceFollowBottom();
+    tui.requestRender();
+    await terminal.waitForRender();
+    expect(viewportText(terminal)).toContain("line-60");
+
+    content.appendLine("line-61");
+    layout.followBottom();
+    tui.requestRender();
+    await terminal.waitForRender();
+    expect(viewportText(terminal)).toContain("line-61");
   });
 });

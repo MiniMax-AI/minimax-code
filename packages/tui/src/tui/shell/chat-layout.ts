@@ -140,6 +140,12 @@ export class TuiChatLayout implements Component {
   }
 
   followBottom(): void {
+    if (this.fullscreenBodyViewport.isFollowingEnd) {
+      this.fullscreenBodyViewport.scrollToEnd();
+    }
+  }
+
+  forceFollowBottom(): void {
     this.fullscreenBodyViewport.scrollToEnd();
   }
 
