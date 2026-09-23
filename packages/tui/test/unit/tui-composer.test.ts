@@ -312,7 +312,7 @@ describe("TuiComposer", () => {
     );
 
     const firstHeader = stripAnsi(composer.render(120)[0] ?? "");
-    expect(firstHeader).toContain("Start · @ file · / autocomplete");
+    expect(firstHeader).toContain("Start · @ file or Plugin · / autocomplete");
     expect(firstHeader).toContain(
       "Tip: /goal keeps multi-step work focused on a finish line",
     );
@@ -329,7 +329,7 @@ describe("TuiComposer", () => {
       { now: () => 30_000, tips: ordinaryTip ? [ordinaryTip] : [] },
     );
     const nextHeader = stripAnsi(nextComposer.render(120)[0] ?? "");
-    expect(nextHeader).toContain("Start · @ file · / autocomplete");
+    expect(nextHeader).toContain("Start · @ file or Plugin · / autocomplete");
     expect(nextHeader).toContain(
       "Tip: Ctrl+U resumes your recent Codex session",
     );
@@ -459,7 +459,7 @@ describe("TuiComposer", () => {
     ],
     [
       { mode: "message", surface: "welcome" },
-      "Start · @ file · / autocomplete",
+      "Start · @ file or Plugin · / autocomplete",
     ],
   ] satisfies Array<[TuiComposerState, string]>)(
     "explains the %s submission mode before the user presses Enter",

@@ -1982,7 +1982,7 @@ describe("createTuiApp", () => {
 
       const starting = app.tui.render(80).join("\n");
       expect(starting).toContain("⠋ Starting server...");
-      expect(starting).not.toContain("Start · @ file · / autocomplete");
+      expect(starting).not.toContain("Start · @ file or Plugin · / autocomplete");
       expect(starting).not.toContain("Loading session");
 
       releaseSessions?.();
@@ -1990,7 +1990,7 @@ describe("createTuiApp", () => {
       app.setStartupStatus(undefined);
 
       expect(app.tui.render(80).join("\n")).toContain(
-        "Start · @ file · / autocomplete",
+        "Start · @ file or Plugin · / autocomplete",
       );
     } finally {
       releaseSessions?.();
