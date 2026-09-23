@@ -188,12 +188,12 @@ describe('child Bash lifecycle', () => {
         mode === 'explicit'
           ? await adapter.startBackground(
               toolContext('child'),
-              { description: '运行测试命令', command, run_in_background: true },
+              { command, run_in_background: true },
               controller.signal,
             )
           : await adapter.runManagedForeground!(
               toolContext('child'),
-              { description: '运行测试命令', command },
+              { command },
               1,
               controller.signal,
             );
@@ -240,7 +240,6 @@ describe('real child Bash boundaries', () => {
       const receipt = await tool.execute(
         { ...toolContext('child'), canConsumeBackgroundBashOutput: true },
         {
-          description: '运行测试命令',
           command: nodeCommand("setTimeout(() => console.log('after-real-soft-yield'), 61500)"),
         },
         controller.signal,
@@ -294,7 +293,6 @@ describe('real child Bash boundaries', () => {
       const receipt = await adapter.startBackground(
         toolContext('child'),
         {
-          description: '运行测试命令',
           command: nodeCommand(script),
           ...(mode === 'timeout' ? { timeout: 1 } : {}),
         },

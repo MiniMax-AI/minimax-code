@@ -955,7 +955,7 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
         expect(admittedBash.def.schema).not.toBe(bash.def.schema);
         const result = await admittedBash.impl.execute(
           toolContext,
-          { description: '运行测试命令', command: 'controlled command' },
+          { command: "controlled command" },
           runInput.signal,
         );
         if (allowed) expect(result.details?.status).toBe("auto_promoted");
@@ -965,11 +965,7 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
         }
         const backgroundResult = await admittedBash.impl.execute(
           toolContext,
-          {
-            description: '运行测试命令',
-            command: 'controlled background command',
-            run_in_background: true,
-          },
+          { command: "controlled background command", run_in_background: true },
           runInput.signal,
         );
         if (allowed) {
@@ -1000,9 +996,7 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
       expect(direct).toHaveBeenCalledTimes(allowed ? 0 : 1);
     },
   );
-});
 
-describe('LocalRuntimeTurnExecutor native output provenance', () => {
   it.each([
     { source: undefined, allowed: true },
     { source: "builtin" as const, allowed: true },
@@ -1051,8 +1045,7 @@ describe('LocalRuntimeTurnExecutor native output provenance', () => {
           const result = await admittedBash.impl.execute(
             toolContext,
             {
-              description: '运行测试命令',
-              command: 'controlled background command',
+              command: "controlled background command",
               run_in_background: true,
             },
             runInput.signal,

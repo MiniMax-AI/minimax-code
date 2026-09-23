@@ -19,7 +19,7 @@ No upstream source files are changed in the baseline import.
 - Change: require exit code zero for success; preserve signals, cancellation reasons, timeout deadlines, and partial output in structured success and failure results. Add an optional original head-and-tail preview and host-owned persistence so managed commands use one complete log. Report persistence failures separately from the process outcome.
 - The existing exit-code-only helper and default tail preview remain compatible. Process cleanup and command timers retain their existing lifecycle.
 - Provenance: shared MiniMax Bash implementation, adapted to the standalone source distribution. Existing upstream notices and licenses apply; no new dependency is introduced. Upstream PR: not opened.
-- Regression coverage: the declared local Bash output, timeout, background executor, runner, stop-race, and child-lifecycle tests exercise the vendored implementation through its product consumers. Vendored upstream suites remain outside this distribution's verification; real-model and Windows acceptance are separate.
+- Regression coverage: the existing child Bash lifecycle, turn executor, and built-in catalog tests cover command deadlines, native output capability gating, and rendered prompt guidance. Vendored upstream suites remain outside this distribution's verification; real-model and Windows acceptance are separate.
 
 ### 2026-09-21 — report why the edit unified patch was omitted
 

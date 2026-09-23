@@ -176,16 +176,7 @@
       "packages/tui/test/unit/tui/theme/palettes.test.ts",
       "packages/tui/test/unit/tui/theme/runtime.test.ts",
       "packages/tui/test/unit/tui-plugin-mentions.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts",
-      "packages/agent-tools/test/desktop/local-bash-output.test.ts",
-      "packages/agent-tools/test/desktop/local-bash-timeout.test.ts",
-      "packages/agent-tools/test/desktop/local-task-output-polling.test.ts",
-      "packages/local-runtime/test/unit/local-background-bash-runner.test.ts",
-      "packages/local-runtime/test/unit/local-background-bash-review-regressions.test.ts",
-      "packages/local-runtime/test/unit/local-background-task-stop-races.test.ts",
-      "packages/local-runtime-v2/src/service/background-bash/executor.test.ts",
-      "packages/tui/test/unit/tui-tool-evidence.test.ts",
-      "packages/tui/test/unit/tui-tool-summary.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
