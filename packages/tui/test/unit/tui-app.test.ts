@@ -518,7 +518,7 @@ function createRuntime(): TuiRuntime {
 }
 
 describe("createTuiApp", () => {
-  it("force-follows user submissions and Session transitions", async () => {
+  it("force-follows user submissions, /new, and Session transitions", async () => {
     const forceFollowBottom = vi.spyOn(TuiChatLayout.prototype, "forceFollowBottom");
     const app = createTuiApp({
       runtime: createRuntime(),
@@ -535,6 +535,10 @@ describe("createTuiApp", () => {
       forceFollowBottom.mockClear();
       await app.submit("Continue with the next step");
       await vi.waitFor(() => expect(forceFollowBottom).toHaveBeenCalled());
+
+      forceFollowBottom.mockClear();
+      await app.submit("/new");
+      expect(forceFollowBottom).toHaveBeenCalled();
 
       forceFollowBottom.mockClear();
       await app.openSession("session-2");
@@ -717,6 +721,11 @@ describe("createTuiApp", () => {
   it("runs an editor ! command locally and carries its result into the next model message", async () => {
     const directory = await mkdtemp(join(tmpdir(), "tui-bash-app-"));
     const runtime = createRuntime();
+    const followBottom = vi.spyOn(TuiChatLayout.prototype, "followBottom");
+    const forceFollowBottom = vi.spyOn(
+      TuiChatLayout.prototype,
+      "forceFollowBottom",
+    );
     const app = createTuiApp({
       runtime,
       terminal: new FakeTerminal(),
@@ -725,6 +734,8 @@ describe("createTuiApp", () => {
     });
     try {
       await app.ready;
+      followBottom.mockClear();
+      forceFollowBottom.mockClear();
       app.editor.setText(
         process.platform === "win32"
           ? "!Write-Output shell-result"
@@ -744,6 +755,8 @@ describe("createTuiApp", () => {
           ).toBe(true),
         { timeout: 5000 },
       );
+      expect(followBottom).toHaveBeenCalled();
+      expect(forceFollowBottom).not.toHaveBeenCalled();
       expect(runtime.sendMessage).not.toHaveBeenCalled();
       expect(
         app.transcript
@@ -762,6 +775,8 @@ describe("createTuiApp", () => {
       );
     } finally {
       await app.stop();
+      followBottom.mockRestore();
+      forceFollowBottom.mockRestore();
       await rm(directory, { recursive: true, force: true });
     }
   });

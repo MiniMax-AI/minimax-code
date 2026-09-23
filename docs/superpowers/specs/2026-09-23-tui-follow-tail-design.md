@@ -42,7 +42,7 @@ The ordinary guarded path covers:
 
 ### Explicit force-follow operations
 
-`TuiChatLayout` will expose an explicit force-follow operation, represented internally by an optional `force` argument to the layout boundary. It calls `scrollToEnd()` regardless of the prior follow-end state.
+`TuiChatLayout` exposes an explicit `forceFollowBottom()` method. It calls `scrollToEnd()` regardless of the prior follow-end state.
 
 Force-follow applies only to user or Session intent:
 

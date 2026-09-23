@@ -341,8 +341,7 @@ describe("Scrollbar interaction boundaries", () => {
     expect(viewportText(terminal)).toContain("line-00");
     expect(viewportText(terminal)).not.toContain("line-60");
 
-    layout.forceFollowBottom();
-    tui.requestRender();
+    terminal.sendInput("\x1b[F");
     await terminal.waitForRender();
     expect(viewportText(terminal)).toContain("line-60");
 
