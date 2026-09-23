@@ -74,15 +74,30 @@ describe('TuiThemePicker', () => {
     expect(preview).toHaveBeenLastCalledWith('minimax');
   });
 
-  it('cycles the appearance with the a key', () => {
+  it('selects light, auto, and dark with the left and right arrows', () => {
     const { picker, setAppearance } = build();
 
-    picker.handleInput('a');
+    picker.handleInput('\u001b[D');
     expect(setAppearance).toHaveBeenLastCalledWith('light');
-    picker.handleInput('a');
-    expect(setAppearance).toHaveBeenLastCalledWith('dark');
-    picker.handleInput('a');
+    picker.handleInput('\u001b[D');
+    expect(setAppearance).toHaveBeenCalledTimes(1);
+
+    picker.handleInput('\u001b[C');
     expect(setAppearance).toHaveBeenLastCalledWith('auto');
+    picker.handleInput('\u001b[C');
+    expect(setAppearance).toHaveBeenLastCalledWith('dark');
+    picker.handleInput('\u001b[C');
+    expect(setAppearance).toHaveBeenCalledTimes(3);
+  });
+
+  it('ignores a as an appearance shortcut', () => {
+    const { picker, preview, setAppearance, requestRender } = build();
+
+    picker.handleInput('a');
+
+    expect(setAppearance).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
+    expect(requestRender).not.toHaveBeenCalled();
   });
 
   it('saves the focused theme and closes', async () => {
@@ -99,7 +114,7 @@ describe('TuiThemePicker', () => {
     const { picker, save, onClose } = build();
 
     picker.handleInput('\u001b[B');
-    picker.handleInput('a');
+    picker.handleInput('\u001b[D');
     picker.handleInput('\r');
     await vi.waitFor(() => expect(onClose).toHaveBeenCalled());
 
@@ -119,7 +134,7 @@ describe('TuiThemePicker', () => {
     const { picker, preview, setAppearance, save, onClose } = build();
 
     picker.handleInput('\u001b[B');
-    picker.handleInput('a');
+    picker.handleInput('\u001b[D');
     preview.mockClear();
     picker.handleInput('\u001b');
 

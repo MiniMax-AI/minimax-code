@@ -11,6 +11,9 @@ import type {
 
 export type TuiThemeAppearanceChoice = 'auto' | TuiResolvedAppearance;
 
+const APPEARANCE_CHOICES = ['light', 'auto', 'dark'] as const satisfies
+  readonly TuiThemeAppearanceChoice[];
+
 export interface TuiThemePickerOptions {
   readonly themes: readonly TuiThemeDefinition[];
   readonly currentThemeId: string;
@@ -64,9 +67,10 @@ export class TuiThemePicker implements Component {
       this.selectedIndex = (this.selectedIndex - 1 + themes.length) % themes.length;
     } else if (keys.matches(data, 'tui.select.down')) {
       this.selectedIndex = (this.selectedIndex + 1) % themes.length;
-    } else if (matchesKey(data, 'a')) {
-      this.appearance = cycleAppearance(this.appearance);
-      this.options.setAppearance(this.appearance);
+    } else if (matchesKey(data, 'left')) {
+      this.shiftAppearance(-1);
+    } else if (matchesKey(data, 'right')) {
+      this.shiftAppearance(1);
     } else {
       return;
     }
@@ -162,6 +166,14 @@ export class TuiThemePicker implements Component {
     return this.appearance === 'auto' ? this.options.currentAppearance : this.appearance;
   }
 
+  private shiftAppearance(step: -1 | 1): void {
+    const index = APPEARANCE_CHOICES.indexOf(this.appearance);
+    const next = APPEARANCE_CHOICES[Math.max(0, Math.min(index + step, APPEARANCE_CHOICES.length - 1))]!;
+    if (next === this.appearance) return;
+    this.appearance = next;
+    this.options.setAppearance(next);
+  }
+
   private restore(): void {
     const theme = this.options.themes.find((candidate) => candidate.id === this.originalThemeId);
     if (theme) this.options.preview(this.originalThemeId);
@@ -191,12 +203,6 @@ export class TuiThemePicker implements Component {
       if (!this.disposed) this.options.requestRender();
     }
   }
-}
-
-function cycleAppearance(current: TuiThemeAppearanceChoice): TuiThemeAppearanceChoice {
-  if (current === 'auto') return 'light';
-  if (current === 'light') return 'dark';
-  return 'auto';
 }
 
 function appearanceLabel(
@@ -243,6 +249,6 @@ const CURRENT_BADGE = ' current ';
 function footerText(width: number, busy: boolean): string {
   if (busy) return 'Saving…';
   return width >= 64
-    ? '↑↓ preview · a appearance · Enter save · Esc cancel'
-    : '↑↓ · a · Enter · Esc';
+    ? '↑↓ theme · ←→ appearance · Enter save · Esc cancel'
+    : '↑↓ ←→ · Enter · Esc';
 }
