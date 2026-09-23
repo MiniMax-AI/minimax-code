@@ -266,7 +266,22 @@ describe('TuiChatController', () => {
       onUserSubmissionProjected,
     });
 
+    transcript.upsert({
+      id: 'turn-duration:previous-turn',
+      kind: 'turn-duration',
+      status: 'cancelled',
+      content: '',
+      durationMs: 12_000,
+      turnId: 'previous-turn',
+      ephemeral: true,
+      createdAtMs: 80,
+      updatedAtMs: 80,
+    });
+    const view = new TranscriptView(transcript);
+    expect(view.render(80).join('\n')).toContain('Interrupted after 12s');
     controller.projectOptimisticUserMessage('submission-1', 'Show this immediately', 90);
+    expect(view.render(80).join('\n')).not.toContain('Interrupted after 12s');
+    expect(transcript.get('turn-duration:previous-turn')).toBeUndefined();
     const sending = controller.submit('Show this immediately', {
       optimisticRequestId: 'submission-1',
     });
@@ -279,12 +294,38 @@ describe('TuiChatController', () => {
     });
     expect(transcript.get('optimistic:user:submission-1')).toBeUndefined();
     expect(transcript.snapshot().filter((cell) => cell.kind === 'user')).toHaveLength(1);
+    expect(view.render(80).join('\n')).not.toContain('Interrupted after 12s');
+    expect(transcript.get('turn-duration:previous-turn')).toBeUndefined();
     expect(onUserSubmissionProjected).toHaveBeenCalledOnce();
     expect(runtime.createSession).not.toHaveBeenCalled();
     expect(runtime.sendMessage).not.toHaveBeenCalled();
 
     resolveAccount?.({ status: 'ready', managedTokenPresent: true, warnings: [] });
     await expect(sending).resolves.toBe('succeeded');
+  });
+
+  it('keeps the previous duration while projecting a steer for the current turn', () => {
+    const transcript = new TranscriptStore();
+    transcript.upsert({
+      id: 'turn-duration:previous-turn',
+      kind: 'turn-duration',
+      status: 'cancelled',
+      content: '',
+      durationMs: 12_000,
+      turnId: 'previous-turn',
+      ephemeral: true,
+      createdAtMs: 80,
+      updatedAtMs: 80,
+    });
+    const controller = new ProductionTuiChatController({
+      runtime: {} as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+
+    controller.projectOptimisticUserMessage('steer-1', 'Continue this turn', 90, [], 'pending-steer');
+
+    expect(transcript.get('turn-duration:previous-turn')).toBeDefined();
   });
 
   it('detaches the foreground observer when switching Sessions without aborting the Runtime turn', async () => {

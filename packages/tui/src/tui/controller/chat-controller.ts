@@ -380,6 +380,8 @@ export class TuiChatController {
         updatedAtMs: timestamp,
       });
     }
+    // The user turn is already visible while the asynchronous login preflight runs.
+    this.turnProjection.removePreviousTerminalDuration(turnId);
     this.updateState({
       activeTurnId: turnId,
       lastSettledTurn: undefined,
@@ -667,6 +669,9 @@ export class TuiChatController {
     attachments: readonly TranscriptAttachment[] = [],
     userPresentation?: TranscriptUserPresentation,
   ): void {
+    if (userPresentation !== 'pending-steer') {
+      this.turnProjection.removePreviousTerminalDuration();
+    }
     this.turnProjection.projectOptimisticUserMessage(
       requestId,
       content,

@@ -59,19 +59,29 @@ export class TuiTurnProjection {
 
   beginTurn(turnId: string, timestamp: number): void {
     let changed = this.todoProjection.clearSettled();
+    changed = this.removePreviousTerminalDuration(turnId) || changed;
     // One-time feedback survives history refreshes, so dismiss it when a new run starts.
     for (const cell of this.transcript.snapshot()) {
       if (
-        (cell.kind === 'turn-duration' && cell.turnId !== turnId) ||
-        (cell.kind === 'shell' &&
-          cell.ephemeral &&
-          (cell.status === 'succeeded' || cell.status === 'failed' || cell.status === 'cancelled'))
+        cell.kind === 'shell' &&
+        cell.ephemeral &&
+        (cell.status === 'succeeded' || cell.status === 'failed' || cell.status === 'cancelled')
       ) {
         changed = this.transcript.remove(cell.id) || changed;
       }
     }
     if (changed) this.onChange();
     this.liveProjection.beginTurn(turnId, timestamp);
+  }
+
+  removePreviousTerminalDuration(turnId?: string): boolean {
+    let changed = false;
+    for (const cell of this.transcript.snapshot()) {
+      if (cell.kind === 'turn-duration' && (turnId === undefined || cell.turnId !== turnId)) {
+        changed = this.transcript.remove(cell.id) || changed;
+      }
+    }
+    return changed;
   }
 
   projectOptimisticUserMessage(
