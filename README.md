@@ -145,7 +145,7 @@ Inside the TUI, use `/sessions` to find previous sessions and `/help` to see all
 | Reference a workspace file or directory | `@` |
 | Toggle Plan Mode | `Shift+Tab` |
 | Switch permission modes | `Alt+M` |
-| Close a panel or interrupt a running task | `Esc` |
+| Close a panel or interrupt a running task; interrupting before the model replies returns the message to the composer | `Esc` |
 
 ## Uninstall
 

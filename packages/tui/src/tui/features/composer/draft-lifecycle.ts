@@ -122,6 +122,28 @@ export class TuiDraftLifecycle {
     void this.recovery.flush(this.capture()).catch((error: unknown) => this.report(error));
   }
 
+  /**
+   * Drop pending retry submissions for the current session. Used when the
+   * caller has already restored the aborted submission's text into the
+   * composer: keeping the retry would merge the same text again on the next
+   * launch hydrate (`restoreSubmittedDraft` concatenates). The flush mirrors
+   * settleSubmission so the persisted recovery file is rewritten without the
+   * retry even if the process dies before the next scheduled flush.
+   */
+  discardPendingRetries(): void {
+    if (this.stopped) return;
+    let discarded = false;
+    for (const [submissionToken, pending] of this.pendingSubmissions) {
+      if (pending.sessionKey !== this.sessionKey) continue;
+      this.pendingSubmissions.delete(submissionToken);
+      discarded = true;
+    }
+    if (!discarded || !this.recovery) return;
+    void this.recovery
+      .flush(this.capture())
+      .catch((error: unknown) => this.report(error));
+  }
+
   switchSession(sessionKey: string): Promise<void> {
     return this.enqueueTransition(async () => {
       if (this.stopped || sessionKey === this.sessionKey) return;

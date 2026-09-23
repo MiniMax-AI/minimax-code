@@ -70,4 +70,10 @@ export interface TuiSubmitOptions {
   beforeTurnAdmission?: (sessionId: string) => void | Promise<void>;
   onRuntimeAccepted?: (sessionId: string) => void;
   optimisticRequestId?: string;
+  /**
+   * Fired once a new turn has been minted and projected (before the first
+   * await), so the caller can retain per-turn state such as the original
+   * submission snapshot. Not fired for steer paths or retry continuations.
+   */
+  onTurnStarted?: (turnId: string) => void;
 }

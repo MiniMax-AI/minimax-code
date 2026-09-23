@@ -579,7 +579,8 @@ function relocateEditorAttachmentPlaceholders(
   };
 }
 
-function retainAvailableAttachmentPlaceholders(
+/** Drops editor attachment placeholders whose backing file no longer exists. */
+export function retainAvailableAttachmentPlaceholders(
   editor: EditorDraftSnapshot,
   attachments: readonly TuiAttachment[],
 ): EditorDraftSnapshot {

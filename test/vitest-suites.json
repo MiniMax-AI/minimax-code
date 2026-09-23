@@ -149,6 +149,7 @@
       "packages/tui/test/unit/tui/controller/product/chrome-flow.test.ts",
       "packages/tui/test/unit/tui/controller/product/command-flow.test.ts",
       "packages/tui/test/unit/tui/controller/product/feature-flow.test.ts",
+      "packages/tui/test/unit/tui/controller/run/turn-submission-retainer.test.ts",
       "packages/tui/test/unit/tui/features/settings/hotkeys-picker.test.ts",
       "packages/tui/test/unit/incident-reporter-privacy.test.ts",
       "packages/config/test/config-file-permissions.test.ts",

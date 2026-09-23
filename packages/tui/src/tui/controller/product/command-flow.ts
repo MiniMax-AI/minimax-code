@@ -23,6 +23,7 @@ import type { FeedbackFlow } from './feedback-flow.js';
 import type { TuiSessionMutationFlow } from './session-mutation-flow.js';
 import type { TuiInteractionFlow } from '../interaction/interaction-flow.js';
 import type { TuiQueueFlow } from '../run/queue-flow.js';
+import { TuiTurnSubmissionRetainer } from '../run/turn-submission-retainer.js';
 import type { TuiSessionFlow } from '../session-flow.js';
 import type { TuiUpdateFlow } from './update-flow.js';
 import type { TuiGoalFlow } from './goal-flow.js';
@@ -171,6 +172,7 @@ export class TuiCommandFlow {
   private readonly recoverableSubmissions = new Map<string, TuiSubmissionSnapshot>();
   private readonly sessionRetryability = new Map<string, boolean>();
   private readonly failedSubmissions = new Map<string, TuiSubmissionSnapshot>();
+  private readonly turnSubmissionRetainer = new TuiTurnSubmissionRetainer();
   private readonly openExternalTarget: TuiExternalTargetOpener;
 
   constructor(private readonly options: TuiCommandFlowOptions) {
@@ -179,6 +181,20 @@ export class TuiCommandFlow {
     this.catalog = createTuiCommandCatalog(options.contributions, this.createHandlers(), () =>
       this.commandContext(),
     );
+  }
+
+  /** The original submission retained for a still-unoutput turn, if any. */
+  getRetainedSubmission(turnId: string): TuiSubmissionSnapshot | undefined {
+    return this.turnSubmissionRetainer.get(turnId);
+  }
+
+  dropRetainedSubmission(turnId: string): void {
+    this.turnSubmissionRetainer.drop(turnId);
+  }
+
+  /** Clears per-turn retained submissions on a session switch. */
+  clearRetainedSubmissions(): void {
+    this.turnSubmissionRetainer.clear();
   }
 
   captureSubmissionSeed(editorDraft?: ReturnType<Editor['captureDraft']>): TuiSubmissionSeed {
@@ -202,6 +218,7 @@ export class TuiCommandFlow {
       ...(recoverable?.transportAttachments
         ? { transportAttachments: recoverable.transportAttachments }
         : {}),
+      ...(recoverable?.clientIntent ? { clientIntent: recoverable.clientIntent } : {}),
       ...(recoverable?.reviewRequest ? { reviewRequest: recoverable.reviewRequest } : {}),
     };
   }
@@ -622,6 +639,7 @@ export class TuiCommandFlow {
           });
         }
         await this.options.featureFlow.waitForWelcomeModelSelection();
+        let retainedTurnId: string | undefined;
         try {
           return {
             primary: this.options.controller.submit(submission.transportContent ?? command, {
@@ -636,9 +654,20 @@ export class TuiCommandFlow {
               ...(optimisticRequestId ? { optimisticRequestId } : {}),
               ...(submission.clientIntent ? { clientIntent: submission.clientIntent } : {}),
               ...(submission.reviewRequest ? { reviewRequest: submission.reviewRequest } : {}),
+              onTurnStarted: (turnId) => {
+                // Retain the original submission for this turn so an early
+                // abort can replay it in full instead of reconstructing a
+                // lossy copy from the transcript cell.
+                retainedTurnId = turnId;
+                this.turnSubmissionRetainer.remember(turnId, submission);
+              },
               onSessionResolved: (sessionId) => {
                 submission = { ...submission, sessionId };
                 preparingSubmission = submission;
+                // Re-remember with the resolved session id attached.
+                if (retainedTurnId !== undefined) {
+                  this.turnSubmissionRetainer.remember(retainedTurnId, submission);
+                }
                 options.onSubmissionPrepared?.(submission);
                 if (submission.clientIntent) {
                   this.options.planModeFlow?.bindSubmissionToSession(
@@ -849,7 +878,12 @@ export class TuiCommandFlow {
         !attachment.filePath ||
         !submission.attachments.some((draft) => draft.filePath === attachment.filePath),
     );
-    if (submission.transportContent || submission.reviewRequest || hasTransportOnlyAttachment) {
+    if (
+      submission.transportContent ||
+      submission.clientIntent ||
+      submission.reviewRequest ||
+      hasTransportOnlyAttachment
+    ) {
       this.restoreRecoverableSubmission(submission);
     }
     this.options.editor.restoreSubmittedDraft(submission.editor);

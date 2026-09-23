@@ -821,9 +821,16 @@ function renderUserIntent(content: string, width: number): string[] {
 function renderUserMessage(cell: TranscriptCell, width: number): string[] {
   const attachments = renderUserAttachments(cell, width);
   const body = cell.content.trim() ? renderUserIntent(cell.content, width) : [];
-  return attachments.length > 0 && body.length > 0
-    ? [...attachments, ' ', ...body]
-    : [...attachments, ...body];
+  const rows =
+    attachments.length > 0 && body.length > 0
+      ? [...attachments, ' ', ...body]
+      : [...attachments, ...body];
+  // A cancelled user row (prompt restored to the composer on abort) stays in
+  // the history with a muted marker, matching the cancelled-todo precedent.
+  if (cell.status === 'cancelled') {
+    return [chalk.hex(colors.muted)('× Cancelled'), ...rows];
+  }
+  return rows;
 }
 
 function renderPendingSteerMessage(cell: TranscriptCell, width: number): string[] {

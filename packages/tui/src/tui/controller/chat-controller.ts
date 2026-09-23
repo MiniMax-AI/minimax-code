@@ -389,6 +389,9 @@ export class TuiChatController {
       errorRetryable: undefined,
     });
     if (!optimisticCell && !isRetryContinuation) this.onUserSubmissionProjected?.();
+    // Before the first await: the turn id is final, so the caller can retain
+    // the original submission snapshot for this turn.
+    if (!isRetryContinuation) options.onTurnStarted?.(turnId);
 
     try {
       await this.requireLoginForAgentAction();

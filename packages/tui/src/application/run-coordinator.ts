@@ -87,7 +87,7 @@ export interface TuiRunCoordinatorOptions {
   nowMs?: () => number;
 }
 
-const DEFAULT_CANCELLATION_SETTLEMENT_TIMEOUT_MS = 1_000;
+export const DEFAULT_CANCELLATION_SETTLEMENT_TIMEOUT_MS = 1_000;
 
 export class TuiRunCoordinator {
   private activeRun?: ActiveRun;
