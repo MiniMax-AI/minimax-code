@@ -563,14 +563,16 @@ describe("thread-goal tool impls", () => {
       const before = await store.getBySession(ctx.sessionId);
       const patch = vi.spyOn(store, "patch");
 
-      // An unbound proposal: the Turn carries no Goal binding, so the host
-      // rejects it. Both the stale and the unbound refusals share `err()`.
       const stale = await new UpdateGoalTool(
         store,
         signalCollector("stale"),
       ).execute(ctx, {
         status: "complete",
       });
+      const unbound = await new UpdateGoalTool(
+        store,
+        signalCollector("not_a_goal_turn"),
+      ).execute(ctx, { status: "complete" });
       const missingMode = await new UpdateGoalTool(
         store,
         signalCollector(),
@@ -580,6 +582,8 @@ describe("thread-goal tool impls", () => {
       });
 
       expect(stale.isError).toBe(true);
+      expect(unbound.isError).toBe(true);
+      expect(unbound.terminate).toBeUndefined();
       expect(missingMode.isError).toBe(true);
       expect(patch).not.toHaveBeenCalled();
       expect(await store.getBySession(ctx.sessionId)).toEqual(before);

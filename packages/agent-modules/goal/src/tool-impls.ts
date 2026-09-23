@@ -246,6 +246,13 @@ export class UpdateGoalTool implements ToolImpl<
       objectiveDigest: digestThreadGoalObjective(existing.objective),
       ...(summary ? { summary } : {}),
     });
+    if (collection === 'not_a_goal_turn') {
+      return err(
+        UpdateGoalToolDef.name,
+        'cannot update goal because this turn is not bound to the goal; continue handling the user request in this turn without updating goal status. This tool cannot resume a goal',
+        { reason: collection, currentGoal: serializeGoal(existing) },
+      );
+    }
     if (collection === 'stale') {
       return {
         ...err(

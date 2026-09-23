@@ -88,8 +88,8 @@ export class GoalTurnContextRegistry {
 
   collectSignal(turnId: string, signal: GoalTurnSignal): ThreadGoalSignalCollectionResult {
     const boundTurn = this.bindings.get(turnId);
+    if (!boundTurn) return 'not_a_goal_turn';
     if (
-      !boundTurn ||
       boundTurn.kind !== 'main' ||
       boundTurn.binding.goalId !== signal.goalId ||
       boundTurn.binding.objectiveDigest !== signal.objectiveDigest
