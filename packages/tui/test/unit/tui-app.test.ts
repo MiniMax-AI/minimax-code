@@ -11557,11 +11557,121 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
-  it("restores a mixed file-backed and asset-backed submission completely on abort", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mcode-mixed-abort-"));
-    try {
-      const localPath = join(directory, "local.png");
-      await writeFile(localPath, "png");
+  it.each([false, true])(
+    "restores a mixed submission after abort (local attachment removed: %s)",
+    async (removeLocal) => {
+      const directory = await mkdtemp(join(tmpdir(), "mcode-mixed-abort-"));
+      try {
+        const localPath = join(directory, "local.png");
+        await writeFile(localPath, "png");
+        const terminal = new FakeTerminal();
+        const runtime = createRuntime();
+        vi.mocked(runtime.sendMessage).mockImplementation(
+          async function* sendMessage(_req: SendMessageReq, signal?: AbortSignal) {
+            await new Promise<void>((resolve) => {
+              signal?.addEventListener("abort", resolve, { once: true });
+            });
+            yield { type: "done" };
+          },
+        );
+        vi.mocked(runtime.abortSession).mockResolvedValue(true);
+        const app = createTuiApp({
+          runtime,
+          terminal,
+          version: "0.1.0",
+          workspaceDir: "/workspace",
+        });
+
+        app.start();
+        await app.ready;
+        // Mixed submission: a file-backed attachment (composer chip) plus an
+        // asset-only transport attachment. Submit through the seed path so the
+        // snapshot carries the full transport list, exactly as a paste flow
+        // would produce.
+        const seed = {
+          editor: {
+            schemaVersion: 1 as const,
+            text: "Mixed restore",
+            cursor: 13,
+            pastes: [],
+            pasteCounter: 0,
+          },
+          resources: {
+            attachments: [
+              {
+                type: "image" as const,
+                fileName: "local.png",
+                mimeType: "image/png",
+                sizeBytes: 3,
+                filePath: localPath,
+              },
+            ],
+          },
+          transportAttachments: [
+            {
+              type: "image" as const,
+              fileName: "local.png",
+              mimeType: "image/png",
+              filePath: localPath,
+            },
+            {
+              type: "image" as const,
+              fileName: "asset.png",
+              mimeType: "image/png",
+              assetId: "asset-mixed-1",
+            },
+          ],
+        };
+        void app.commandFlow.submit("Mixed restore", seed).catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(app.controller.snapshot().status).toBe("running"),
+        );
+        const turnIdAtAbort = app.controller.snapshot().activeTurnId;
+
+        terminal.input?.("\x1b");
+        await vi.waitFor(() =>
+          expect(app.editor.getText()).toBe("Mixed restore [Image #1] "),
+        );
+        // The retained snapshot was consulted and dropped after the restore.
+        await vi.waitFor(() =>
+          expect(app.commandFlow.getRetainedSubmission(String(turnIdAtAbort))).toBeUndefined(),
+        );
+
+        if (removeLocal) {
+          app.editor.handleInput("\x05");
+          app.editor.handleInput("\x7f");
+          await vi.waitFor(() =>
+            expect(app.editor.getText()).not.toContain("[Image #1]"),
+          );
+        }
+
+        // Resubmit the restored draft with its current attachment selection.
+        app.editor.handleInput("\r");
+        await vi.waitFor(() =>
+          expect(vi.mocked(runtime.sendMessage).mock.calls.length).toBe(2),
+        );
+
+        const request = vi.mocked(runtime.sendMessage).mock.calls[1][0];
+        expect(request.attachments).toHaveLength(removeLocal ? 1 : 2);
+        const locals = request.attachments?.map((attachment) => attachment.local) ?? [];
+        expect(locals).toEqual(
+          removeLocal
+            ? [expect.objectContaining({ assetId: "asset-mixed-1" })]
+            : expect.arrayContaining([
+                expect.objectContaining({ filePath: localPath }),
+                expect.objectContaining({ assetId: "asset-mixed-1" }),
+              ]),
+        );
+        await app.stop();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "restores hidden transport only for unchanged text (edited: %s)",
+    async (edited) => {
       const terminal = new FakeTerminal();
       const runtime = createRuntime();
       vi.mocked(runtime.sendMessage).mockImplementation(
@@ -11582,81 +11692,27 @@ describe("createTuiApp", () => {
 
       app.start();
       await app.ready;
-      // Mixed submission: a file-backed attachment (composer chip) plus an
-      // asset-only transport attachment. Submit through the seed path so the
-      // snapshot carries the full transport list, exactly as a paste flow
-      // would produce.
-      const seed = {
-        editor: {
-          schemaVersion: 1 as const,
-          text: "Mixed restore",
-          cursor: 13,
-          pastes: [],
-          pasteCounter: 0,
-        },
-        resources: {
-          attachments: [
-            {
-              type: "image" as const,
-              fileName: "local.png",
-              mimeType: "image/png",
-              sizeBytes: 3,
-              filePath: localPath,
-            },
-          ],
-        },
-        transportAttachments: [
-          {
-            type: "image" as const,
-            fileName: "local.png",
-            mimeType: "image/png",
-            filePath: localPath,
-          },
-          {
-            type: "image" as const,
-            fileName: "asset.png",
-            mimeType: "image/png",
-            assetId: "asset-mixed-1",
-          },
-        ],
-      };
-      void app.commandFlow.submit("Mixed restore", seed).catch(() => undefined);
-      await vi.waitFor(() =>
-        expect(app.controller.snapshot().status).toBe("running"),
-      );
-      const turnIdAtAbort = app.controller.snapshot().activeTurnId;
+      void app.commandFlow.submit("Visible prompt", {
+        editor: { schemaVersion: 1, text: "", cursor: 0, pastes: [], pasteCounter: 0 },
+        resources: { attachments: [] },
+        transportContent: "Original hidden transport",
+        clientIntent: "plan-entry",
+      });
+      await vi.waitFor(() => expect(app.controller.snapshot().status).toBe("running"));
 
       terminal.input?.("\x1b");
-      await vi.waitFor(() =>
-        expect(app.editor.getText()).toBe("Mixed restore [Image #1] "),
-      );
-      // The retained snapshot was consulted and dropped after the restore.
-      await vi.waitFor(() =>
-        expect(app.commandFlow.getRetainedSubmission(String(turnIdAtAbort))).toBeUndefined(),
-      );
-
-      // Resubmit the restored draft unchanged.
+      await vi.waitFor(() => expect(app.editor.getText()).toBe("Visible prompt"));
+      if (edited) app.editor.setText("Corrected prompt");
       app.editor.handleInput("\r");
-      await vi.waitFor(() =>
-        expect(vi.mocked(runtime.sendMessage).mock.calls.length).toBe(2),
-      );
-
+      await vi.waitFor(() => expect(vi.mocked(runtime.sendMessage)).toHaveBeenCalledTimes(2));
       const request = vi.mocked(runtime.sendMessage).mock.calls[1][0];
-      expect(request.attachments).toHaveLength(2);
-      const locals = request.attachments?.map((attachment) => attachment.local) ?? [];
-      expect(locals).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ filePath: localPath }),
-          expect.objectContaining({ assetId: "asset-mixed-1" }),
-        ]),
-      );
+      expect(request.content).toBe(edited ? "Corrected prompt" : "Original hidden transport");
+      expect(request.clientIntent).toBe(edited ? undefined : "plan-entry");
       await app.stop();
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
-  it("restores visible text and hidden transport with its original client intent", async () => {
+  it("sends edited visible text instead of stale hidden review transport after abort", async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
     vi.mocked(runtime.sendMessage).mockImplementation(
@@ -11677,22 +11733,29 @@ describe("createTuiApp", () => {
 
     app.start();
     await app.ready;
-    void app.commandFlow.submit("Visible prompt", {
-      editor: { schemaVersion: 1, text: "", cursor: 0, pastes: [], pasteCounter: 0 },
-      resources: { attachments: [] },
-      transportContent: "Original hidden transport",
-      clientIntent: "plan-entry",
-    });
+    void app.commandFlow.submit(
+      "/review",
+      {
+        editor: { schemaVersion: 1, text: "/review", cursor: 7, pastes: [], pasteCounter: 0 },
+        resources: { attachments: [] },
+      },
+      {
+        forceMessage: true,
+        transportContent: "Please review my uncommitted changes.",
+        reviewRequest: { scope: "local_changes" },
+      },
+    );
     await vi.waitFor(() => expect(app.controller.snapshot().status).toBe("running"));
 
     terminal.input?.("\x1b");
-    await vi.waitFor(() => expect(app.editor.getText()).toBe("Visible prompt"));
+    await vi.waitFor(() => expect(app.editor.getText()).toBe("/review"));
+    app.editor.setText("Review only src/foo.ts");
     app.editor.handleInput("\r");
     await vi.waitFor(() => expect(vi.mocked(runtime.sendMessage)).toHaveBeenCalledTimes(2));
     expect(vi.mocked(runtime.sendMessage).mock.calls[1][0]).toMatchObject({
-      content: "Original hidden transport",
-      clientIntent: "plan-entry",
+      content: "Review only src/foo.ts",
     });
+    expect(vi.mocked(runtime.sendMessage).mock.calls[1][0].reviewRequest).toBeUndefined();
     await app.stop();
   });
 
@@ -11882,6 +11945,163 @@ describe("createTuiApp", () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  it("preserves restored asset and hidden submission metadata after relaunch", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "mcode-abort-metadata-"));
+    try {
+      const localPath = join(dataDir, "local.png");
+      await writeFile(localPath, "png");
+      const runtime = createRuntime();
+      vi.mocked(runtime.sendMessage).mockImplementation(
+        async function* sendMessage(_req: SendMessageReq, signal?: AbortSignal) {
+          await new Promise<void>((resolve) => {
+            signal?.addEventListener("abort", resolve, { once: true });
+          });
+          yield { type: "done" };
+        },
+      );
+      vi.mocked(runtime.abortSession).mockResolvedValue(true);
+      const first = createTuiApp({
+        runtime,
+        terminal: new FakeTerminal(),
+        version: "0.1.0",
+        dataDir,
+        workspaceDir: "/workspace",
+      });
+      first.start();
+      await first.ready;
+      await first.openSession("session-1");
+      void first.commandFlow.submit("Mixed restore", {
+        sessionId: "session-1",
+        editor: {
+          schemaVersion: 1,
+          text: "Mixed restore",
+          cursor: 13,
+          pastes: [],
+          pasteCounter: 0,
+        },
+        resources: {
+          attachments: [{
+            type: "image",
+            fileName: "local.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+            filePath: localPath,
+          }],
+        },
+        transportAttachments: [
+          { type: "image", fileName: "local.png", mimeType: "image/png", filePath: localPath },
+          { type: "image", fileName: "asset.png", mimeType: "image/png", assetId: "asset-1" },
+        ],
+        transportContent: "Original hidden transport",
+        clientIntent: "plan-entry",
+      });
+      await vi.waitFor(() => expect(first.controller.snapshot().status).toBe("running"));
+      await first.abortTurn();
+      await vi.waitFor(() => expect(first.editor.getText()).toContain("Mixed restore"));
+      await first.stop();
+
+      const nextRuntime = createRuntime();
+      const restored = createTuiApp({
+        runtime: nextRuntime,
+        terminal: new FakeTerminal(),
+        version: "0.1.0",
+        dataDir,
+        workspaceDir: "/workspace",
+      });
+      restored.start();
+      await restored.ready;
+      await restored.openSession("session-1");
+      await vi.waitFor(() => expect(restored.editor.getText()).toContain("Mixed restore"));
+      expect(restored.editor.captureDraft().attachmentPlaceholders).toHaveLength(1);
+      restored.editor.handleInput("\r");
+      await vi.waitFor(() => expect(nextRuntime.sendMessage).toHaveBeenCalledTimes(1));
+      const request = vi.mocked(nextRuntime.sendMessage).mock.calls[0][0];
+      expect(request.content).toBe("Original hidden transport");
+      expect(request.clientIntent).toBe("plan-entry");
+      expect(request.attachments?.map((attachment) => attachment.local)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ filePath: localPath }),
+          expect.objectContaining({ assetId: "asset-1" }),
+        ]),
+      );
+      await restored.stop();
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    "preserves review metadata after relaunch only when unchanged (edited: %s)",
+    async (edited) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "mcode-abort-review-"));
+      try {
+        const runtime = createRuntime();
+        vi.mocked(runtime.sendMessage).mockImplementation(
+          async function* sendMessage(_req: SendMessageReq, signal?: AbortSignal) {
+            await new Promise<void>((resolve) => {
+              signal?.addEventListener("abort", resolve, { once: true });
+            });
+            yield { type: "done" };
+          },
+        );
+        vi.mocked(runtime.abortSession).mockResolvedValue(true);
+        const first = createTuiApp({
+          runtime,
+          terminal: new FakeTerminal(),
+          version: "0.1.0",
+          dataDir,
+          workspaceDir: "/workspace",
+        });
+        first.start();
+        await first.ready;
+        await first.openSession("session-1");
+        void first.commandFlow.submit(
+          "/review",
+          {
+            sessionId: "session-1",
+            editor: { schemaVersion: 1, text: "/review", cursor: 7, pastes: [], pasteCounter: 0 },
+            resources: { attachments: [] },
+          },
+          {
+            forceMessage: true,
+            transportContent: "Please review my uncommitted changes.",
+            reviewRequest: { scope: "local_changes" },
+          },
+        );
+        await vi.waitFor(() => expect(first.controller.snapshot().status).toBe("running"));
+        await first.abortTurn();
+        await vi.waitFor(() => expect(first.editor.getText()).toBe("/review"));
+        await first.stop();
+
+        const nextRuntime = createRuntime();
+        const restored = createTuiApp({
+          runtime: nextRuntime,
+          terminal: new FakeTerminal(),
+          version: "0.1.0",
+          dataDir,
+          workspaceDir: "/workspace",
+        });
+        restored.start();
+        await restored.ready;
+        await restored.openSession("session-1");
+        await vi.waitFor(() => expect(restored.editor.getText()).toBe("/review"));
+        if (edited) restored.editor.setText("Review src/foo.ts");
+        restored.editor.handleInput("\r");
+        await vi.waitFor(() => expect(nextRuntime.sendMessage).toHaveBeenCalledOnce());
+        const request = vi.mocked(nextRuntime.sendMessage).mock.calls[0][0];
+        expect(request.content).toBe(
+          edited ? "Review src/foo.ts" : "Please review my uncommitted changes.",
+        );
+        expect(request.reviewRequest).toEqual(
+          edited ? undefined : { scope: "local_changes" },
+        );
+        await restored.stop();
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("aborts session creation when the TUI stops during its first turn", async () => {
     const terminal = new FakeTerminal();

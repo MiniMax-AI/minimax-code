@@ -12,7 +12,7 @@ import { TuiLoginRegionPicker } from '../../features/auth/login-region-picker.js
 import { TuiPermissionModePicker } from '../../features/interaction/permission-mode-picker.js';
 import { TuiSettingsPicker } from '../../features/settings/picker.js';
 import { TuiHotkeysPicker } from '../../features/settings/hotkeys-picker.js';
-import type { Editor } from '../../widgets/editor/editor.js';
+import { submittedEditorContent, type Editor } from '../../widgets/editor/editor.js';
 import type { TuiInteractionSurface } from '../../shell/interaction-surface.js';
 import type { TuiSurfaceHost } from '../../shell/surface-host.js';
 import type { TuiRunProjection } from '../../state/run-projection.js';
@@ -50,7 +50,7 @@ import { rebuildSessionMutationTransport } from '../../features/session-mutation
 import { toTuiTranscriptAttachments } from '../../features/composer/attachments.js';
 import { resolveTuiRuntimeFailure } from '../runtime/runtime-error-presentation.js';
 import type { TuiEditMessageAttachment, TuiSession } from '../../../runtime/port.js';
-import type { TuiTransportAttachment } from '../../../types/invocation.js';
+import type { TuiAttachment, TuiTransportAttachment } from '../../../types/invocation.js';
 import { sessionMutationText } from '../../features/session-mutation/copy.js';
 import { parseTuiBashInput } from '../../commands/bash-input.js';
 import type { TuiBashFlow } from './bash-flow.js';
@@ -173,6 +173,7 @@ export class TuiCommandFlow {
   private readonly sessionRetryability = new Map<string, boolean>();
   private readonly failedSubmissions = new Map<string, TuiSubmissionSnapshot>();
   private readonly turnSubmissionRetainer = new TuiTurnSubmissionRetainer();
+  private readonly restoredAbortSubmissionIds = new Set<string>();
   private readonly openExternalTarget: TuiExternalTargetOpener;
 
   constructor(private readonly options: TuiCommandFlowOptions) {
@@ -195,6 +196,16 @@ export class TuiCommandFlow {
   /** Clears per-turn retained submissions on a session switch. */
   clearRetainedSubmissions(): void {
     this.turnSubmissionRetainer.clear();
+    this.restoredAbortSubmissionIds.clear();
+  }
+
+  /** Keep a restored draft's attachment lease when its original send finishes. */
+  markAbortSubmissionRestored(submissionId: string): void {
+    this.restoredAbortSubmissionIds.add(submissionId);
+    if (this.restoredAbortSubmissionIds.size > 8) {
+      const oldest = this.restoredAbortSubmissionIds.values().next().value;
+      if (oldest) this.restoredAbortSubmissionIds.delete(oldest);
+    }
   }
 
   captureSubmissionSeed(editorDraft?: ReturnType<Editor['captureDraft']>): TuiSubmissionSeed {
@@ -210,16 +221,32 @@ export class TuiCommandFlow {
     const recoveryKey = sessionId ?? 'new-session';
     const recoverable = this.recoverableSubmissions.get(recoveryKey);
     this.recoverableSubmissions.delete(recoveryKey);
+    const visibleContent = submittedEditorContent(editor);
+    const unchangedText = recoverable?.content === visibleContent;
+    // Hidden context may be rebuilt for an edited session-mutation message.
+    // Other opaque transport (including /review) belongs to the old text and
+    // must not override the user's correction.
+    const transportContent = recoverable?.transportContent &&
+      (unchangedText || rebuildSessionMutationTransport(recoverable.transportContent, visibleContent))
+      ? recoverable.transportContent
+      : undefined;
+    const transportAttachments = recoverable?.transportAttachments
+      ? reconcileRecoveredTransportAttachments(recoverable, resources.attachments)
+      : undefined;
     return {
       ...(sessionId ? { sessionId } : {}),
       editor,
       resources,
-      ...(recoverable?.transportContent ? { transportContent: recoverable.transportContent } : {}),
-      ...(recoverable?.transportAttachments
-        ? { transportAttachments: recoverable.transportAttachments }
+      ...(transportContent ? { transportContent } : {}),
+      ...(transportAttachments
+        ? { transportAttachments }
         : {}),
-      ...(recoverable?.clientIntent ? { clientIntent: recoverable.clientIntent } : {}),
-      ...(recoverable?.reviewRequest ? { reviewRequest: recoverable.reviewRequest } : {}),
+      ...(unchangedText && recoverable?.clientIntent
+        ? { clientIntent: recoverable.clientIntent }
+        : {}),
+      ...(unchangedText && recoverable?.reviewRequest
+        ? { reviewRequest: recoverable.reviewRequest }
+        : {}),
     };
   }
 
@@ -569,9 +596,7 @@ export class TuiCommandFlow {
                 isFirstMessage,
               });
               this.options.planModeFlow?.rejectSubmission(submission.submissionId);
-              await this.options.composerDraft.completeSubmission({
-                attachments: submission.attachments,
-              });
+              await this.completeSubmittedResources(submission);
               return { disposition: 'consumed' };
             } catch (error) {
               this.options.planModeFlow?.rejectSubmission(submission.submissionId);
@@ -760,9 +785,7 @@ export class TuiCommandFlow {
     }
     if (this.options.isStopped?.()) {
       await this.options.whenStopping?.();
-      await this.options.composerDraft.completeSubmission({
-        attachments: submission.attachments,
-      });
+      await this.completeSubmittedResources(submission);
       return 'consumed';
     }
     if (submitStatus === 'queue-required' && this.options.queueEnabled) {
@@ -827,9 +850,7 @@ export class TuiCommandFlow {
       submitStatus === 'cancelled' ||
       submitStatus === 'ignored'
     ) {
-      await this.options.composerDraft.completeSubmission({
-        attachments: submission.attachments,
-      });
+      await this.completeSubmittedResources(submission);
     } else if (prepared.atomic) {
       this.restoreSubmission(submission);
     } else {
@@ -878,6 +899,8 @@ export class TuiCommandFlow {
         !attachment.filePath ||
         !submission.attachments.some((draft) => draft.filePath === attachment.filePath),
     );
+    this.options.editor.restoreSubmittedDraft(submission.editor);
+    this.options.composerDraft.restoreSubmission({ attachments: submission.attachments });
     if (
       submission.transportContent ||
       submission.clientIntent ||
@@ -886,11 +909,14 @@ export class TuiCommandFlow {
     ) {
       this.restoreRecoverableSubmission(submission);
     }
-    this.options.editor.restoreSubmittedDraft(submission.editor);
-    this.options.composerDraft.restoreSubmission({ attachments: submission.attachments });
     this.options.surfaceHost.setChatFocus(this.options.editor);
     this.options.onChanged();
     return 'retained';
+  }
+
+  private async completeSubmittedResources(submission: TuiSubmissionSnapshot): Promise<void> {
+    if (this.restoredAbortSubmissionIds.delete(submission.submissionId)) return;
+    await this.options.composerDraft.completeSubmission({ attachments: submission.attachments });
   }
 
   private async completeStoppedSubmission(seed: TuiSubmissionSeed): Promise<void> {
@@ -1760,6 +1786,22 @@ function toRecoveredEditTransportAttachments(
     if (attachment.assetId) return [{ ...metadata, assetId: attachment.assetId }];
     return [];
   });
+}
+
+function reconcileRecoveredTransportAttachments(
+  submission: TuiSubmissionSnapshot,
+  currentAttachments: readonly TuiAttachment[],
+): TuiTransportAttachment[] {
+  const originalLocalPaths = new Set(submission.attachments.map((item) => item.filePath));
+  const currentPaths = new Set(currentAttachments.map((item) => item.filePath));
+  const retained = (submission.transportAttachments ?? []).filter(
+    (item) => !item.filePath || !originalLocalPaths.has(item.filePath) || currentPaths.has(item.filePath),
+  );
+  const retainedPaths = new Set(retained.flatMap((item) => item.filePath ? [item.filePath] : []));
+  return [
+    ...retained,
+    ...currentAttachments.filter((item) => !retainedPaths.has(item.filePath)),
+  ];
 }
 
 function prepareSubmissionFailureMessage(error: unknown): string {

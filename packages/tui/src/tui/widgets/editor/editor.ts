@@ -450,8 +450,7 @@ export class Editor implements Component, Focusable {
       ),
     };
     this.pendingSubmission = undefined;
-    const visibleText = removeAttachmentElements(draft.text, draft.attachmentPlaceholders ?? []);
-    const content = expandDraftPastes(visibleText, draft.pastes).trim();
+    const content = submittedEditorContent(draft);
     if (draft.attachmentPlaceholders?.length) this.lastAttachmentSubmission = { content, draft };
     this.onSubmit?.(content, draft);
   }
@@ -806,6 +805,11 @@ function appendAttachmentElements(
     cursor = output.length;
   }
   return { text: output, cursor, elements: appended };
+}
+
+export function submittedEditorContent(draft: EditorDraftSnapshot): string {
+  const visibleText = removeAttachmentElements(draft.text, draft.attachmentPlaceholders ?? []);
+  return expandDraftPastes(visibleText, draft.pastes).trim();
 }
 
 function removeAttachmentElements(

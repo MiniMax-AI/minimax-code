@@ -413,12 +413,13 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       const retainedFiltered = retained
         ? filterRetainedSubmissionForRestore(retained)
         : undefined;
-      if (retainedFiltered) {
+      if (retained && retainedFiltered) {
         commandFlow.restoreSubmission(retainedFiltered);
+        commandFlow.markAbortSubmissionRestored(retained.submissionId);
         commandFlow.dropRetainedSubmission(turnId);
         restoredAbortTurnIds.add(turnId);
         markAbortedUserRowCancelled(transcript, turnId);
-        draftLifecycle?.discardPendingRetries();
+        draftLifecycle?.recordRestoredSubmission(retainedFiltered);
         chromeFlow?.setHint('Stopped · message restored to the Composer.');
         updateChrome(controller.snapshot());
         tui.requestRender();
@@ -469,7 +470,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       if (!text.trim() && draftAttachments.length === 0 && transportAttachments.length === 0) {
         return;
       }
-      commandFlow.restoreSubmission({
+      const restoredSubmission: TuiSubmissionSnapshot = {
         submissionId: `abort-restore:${turnId}`,
         sessionId: controller.snapshot().session?.sessionId,
         content: text,
@@ -483,12 +484,13 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
           pastes: [],
           pasteCounter: 0,
         },
-      });
+      };
+      commandFlow.restoreSubmission(restoredSubmission);
       restoredAbortTurnIds.add(turnId);
       markAbortedUserRowCancelled(transcript, turnId);
       // The restored text already carries the submission's content; a pending
       // retry for it would merge the same text again on the next hydrate.
-      draftLifecycle?.discardPendingRetries();
+      draftLifecycle?.recordRestoredSubmission(restoredSubmission);
       chromeFlow?.setHint('Stopped · message restored to the Composer.');
       // The funnel's updateChrome tail ran during the settle wait, before this
       // hint was set; push the chrome once more so the hint is not left
@@ -855,8 +857,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     activity.dispose();
     widgets.imagePreview.dispose();
     renderer.prepareTranscriptExit();
-    disposeComponents(surfaceHost, editor, transcriptView, status, goal);
     draftStopPromise ??= draftLifecycle?.stop() ?? Promise.resolve();
+    disposeComponents(surfaceHost, editor, transcriptView, status, goal);
     if (stopOptions.abortActiveTurn !== false) {
       const snapshot = controller.snapshot();
       if (snapshot.activeTurnId) void controller.abort().catch(() => undefined);
