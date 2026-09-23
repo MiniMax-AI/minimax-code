@@ -288,6 +288,9 @@ export function watchCustomThemes(
   try {
     watcher = watch(directory, { persistent: false }, fire);
     watcher.on('error', () => undefined);
+    // Native watching may miss edits made while it starts (notably on macOS).
+    // Reconcile once after registration, then use the same debounced event path.
+    fire();
   } catch {
     watcher = undefined;
   }

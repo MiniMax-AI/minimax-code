@@ -568,6 +568,7 @@ describe('TuiThemeController theme selection', () => {
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
     const dataDir = await mkdtemp(join(tmpdir(), 'mcode-theme-reload-'));
+    let controller: TuiThemeController | undefined;
     try {
       const themesDir = join(dataDir, 'tui', 'themes');
       await mkdir(themesDir, { recursive: true });
@@ -577,7 +578,7 @@ describe('TuiThemeController theme selection', () => {
 
       await write('#112233');
       const ui = new ThemeUi();
-      const controller = new TuiThemeController({
+      controller = new TuiThemeController({
         ui,
         colorLevel: 3,
         env: { COLORFGBG: '15;0' },
@@ -594,8 +595,8 @@ describe('TuiThemeController theme selection', () => {
 
       expect(controller.selectedThemeId()).toBe('mine');
       expect(onChange).toHaveBeenCalled();
-      controller.dispose();
     } finally {
+      controller?.dispose();
       await rm(dataDir, { recursive: true, force: true });
       restoreTheme();
     }
@@ -606,6 +607,7 @@ describe('TuiThemeController theme selection', () => {
     const { tmpdir } = await import('node:os');
     const { join } = await import('node:path');
     const dataDir = await mkdtemp(join(tmpdir(), 'mcode-theme-noop-'));
+    let controller: TuiThemeController | undefined;
     try {
       const themesDir = join(dataDir, 'tui', 'themes');
       await mkdir(themesDir, { recursive: true });
@@ -619,7 +621,7 @@ describe('TuiThemeController theme selection', () => {
 
       const ui = new ThemeUi();
       const onThemesChanged = vi.fn();
-      const controller = new TuiThemeController({
+      controller = new TuiThemeController({
         ui,
         colorLevel: 3,
         env: { COLORFGBG: '15;0' },
@@ -629,8 +631,11 @@ describe('TuiThemeController theme selection', () => {
       controller.setTheme('mine');
       const onChange = vi.fn();
       controller.onChange(onChange);
-      // The constructor load already fired once; only a watcher-driven reload
-      // may satisfy the wait below.
+      // Let the constructor load and startup reconciliation finish before the
+      // no-op edit, so this assertion still requires a native watcher event.
+      await vi.waitFor(() => expect(onThemesChanged.mock.calls.length).toBeGreaterThanOrEqual(2), {
+        timeout: 4000,
+      });
       onThemesChanged.mockClear();
 
       await writeFile(file, body);
@@ -640,8 +645,8 @@ describe('TuiThemeController theme selection', () => {
 
       expect(tuiColors.brand).toBe('#112233');
       expect(onChange).not.toHaveBeenCalled();
-      controller.dispose();
     } finally {
+      controller?.dispose();
       await rm(dataDir, { recursive: true, force: true });
       restoreTheme();
     }

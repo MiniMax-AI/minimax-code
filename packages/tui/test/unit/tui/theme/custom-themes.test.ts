@@ -1,10 +1,12 @@
+import { watch as watchFs, writeFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   customThemesDirectory,
   loadCustomThemes,
+  watchCustomThemes,
 } from '../../../../src/tui/theme/custom-themes.js';
 import { TuiThemeRegistry } from '../../../../src/tui/theme/registry.js';
 import type { TuiThemeDefinition } from '../../../../src/tui/theme/contracts.js';
@@ -14,9 +16,15 @@ import {
   MINIMAX_CODE_LIGHT_THEME,
 } from '../../../../src/tui/theme/palettes.js';
 
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, watch: vi.fn(actual.watch) };
+});
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
   );
@@ -42,6 +50,55 @@ function onlyTheme(themes: readonly TuiThemeDefinition[]): TuiThemeDefinition {
 }
 
 describe('custom TUI theme files', () => {
+  it('reconciles edits missed during watcher startup and continues to reload later events', async () => {
+    const dataDir = await themesDataDir({
+      'mine.json': { name: 'mine', appearance: 'dark', colors: { brand: '#112233' } },
+    });
+    const file = join(customThemesDirectory(dataDir), 'mine.json');
+    expect(onlyTheme(loadCustomThemes(dataDir).themes).dark.colors.brand).toBe('#112233');
+    const close = vi.fn();
+    vi.mocked(watchFs).mockReturnValueOnce({ on: vi.fn(), close } as never);
+    vi.useFakeTimers();
+    const onChange = vi.fn();
+    const stop = watchCustomThemes(dataDir, onChange);
+    try {
+      // Model macOS dropping the first edit before native watching is ready.
+      writeFileSync(
+        file,
+        JSON.stringify({ name: 'mine', appearance: 'dark', colors: { brand: '#AABBCC' } }),
+      );
+      await vi.advanceTimersByTimeAsync(150);
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onlyTheme(onChange.mock.calls[0]![0].themes).dark.colors.brand).toBe('#AABBCC');
+
+      writeFileSync(
+        file,
+        JSON.stringify({ name: 'mine', appearance: 'dark', colors: { brand: '#DDEEFF' } }),
+      );
+      const fire = vi.mocked(watchFs).mock.calls.at(-1)![2]!;
+      fire('change', 'mine.json');
+      await vi.advanceTimersByTimeAsync(150);
+      expect(onChange).toHaveBeenCalledTimes(2);
+      expect(onlyTheme(onChange.mock.calls[1]![0].themes).dark.colors.brand).toBe('#DDEEFF');
+    } finally {
+      stop();
+    }
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the startup reconciliation when disposed', async () => {
+    const dataDir = await themesDataDir({});
+    const close = vi.fn();
+    vi.mocked(watchFs).mockReturnValueOnce({ on: vi.fn(), close } as never);
+    vi.useFakeTimers();
+    const onChange = vi.fn();
+    const stop = watchCustomThemes(dataDir, onChange);
+    stop();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('returns no themes when the directory is absent', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'mcode-tui-themes-empty-'));
     temporaryDirectories.push(dataDir);
