@@ -4,6 +4,7 @@ import type { ToolDefinition } from '@mavis/agent-core/tools';
 
 import { createMavisOperationClassifier } from '../shared/mavis-operation-classifier.js';
 import { LOCAL_MAVIS_COMMANDS } from './local-mavis-commands.js';
+import { BashDescriptionSchema } from './local-bash-input.js';
 import { prepareAskUserArguments } from './prepare-ask-user-arguments.js';
 
 import {
@@ -102,33 +103,17 @@ export const LocalEditToolDef = {
 } as const satisfies ToolDefinition;
 export type LocalEditToolInput = Static<typeof LocalEditToolDef.schema>;
 
-const _isWindows = process.platform === 'win32';
-const MAX_BACKGROUND_BASH_TIMEOUT_SECONDS = 2_147_483;
-
 export const LocalBashToolDef = {
   name: 'bash',
   executionMode: 'sequential',
   description: [
-    'Executes a command in a fresh local shell and returns its output.',
+    'Executes a shell command and returns its output.',
     '',
-    '- Each call starts in the session workspace. `cd` and shell state do not persist between calls; use absolute paths or change directories within the same command.',
-    '- Use dedicated `read`, `write`, `edit`, `grep`, and `glob` tools for file operations. Do not use shell commands for file reading, searching, or modification unless the user explicitly requests it or you have verified that the dedicated tools cannot perform the required operation. Use `bash` for processes, git, package managers, builds, tests, and necessary pipelines.',
-    '- The shell is non-interactive: no TTY or stdin prompts. Run non-interactive commands yourself; check `--help` for suitable flags before asking the user to run one. Leave physical authorization (OAuth consent, MFA, hardware keys) to the user.',
-    '- Use `run_in_background` for long commands. Do not increase timeouts to mask hung commands. A returned task id refers to the original process; do not rerun it. Use `task_query` or `task_output` to inspect progress and `task_stop` to cancel.',
+    '- Each call starts in the session workspace. Changes to the working directory and shell state (variables and functions) do not persist between calls. If a command requires a different working directory, change directories within the same call.',
+    '- Use dedicated `read`, `write`, `edit`, `grep`, and `glob` tools for file operations. Do not use shell commands for file reading, searching, or modification unless the user explicitly requests it or you have verified that the dedicated tools cannot perform the required operation. Use `bash` for processes, git, package managers, builds, tests, and pipelines.',
+    '- The shell is non-interactive: no TTY or stdin prompts. For commands that require interaction, check `--help` for non-interactive options before asking the user to run them. Leave physical authorization (OAuth consent, MFA, hardware keys) to the user.',
     '- For file or directory deletion, use one top-level `rm -- <path> ...`; the local runtime routes it through recoverable deletion.',
     '- Do not bypass recoverable deletion with absolute paths to deletion commands or inline scripts. If it fails, report the failure instead of falling back to permanent deletion. Permission checks still apply.',
-    ...(_isWindows
-      ? [
-          '',
-          'Windows shell:',
-          '- PowerShell is preferred; Bash is a fallback when PowerShell is unavailable. Match the selected shell syntax.',
-          '- For PowerShell, use `$env:VAR`; do not use `export`, `/dev/null`, heredocs, `sed -i`, or `&&`. Do not wrap commands in `powershell -Command`.',
-          "- Start multi-statement PowerShell scripts with `$ErrorActionPreference = 'Stop'`. Use single quotes for literals and regex patterns. Do NOT use Bash-style backslash escapes.",
-          '- For native program failures in PowerShell, check `$LASTEXITCODE` or enable `$PSNativeCommandUseErrorActionPreference` when available.',
-          '- Avoid `Get-Content | ... | Set-Content` file-editing pipelines. Prefer file tools or a script with explicit UTF-8 encoding for batch changes. If Get-Content/Set-Content are needed, specify `-Encoding UTF8`; PowerShell 5.1 writes a BOM.',
-          '- If a CLI is missing, check `.cmd` or `.ps1` wrappers. If `bash` opens WSL or produces garbled output, switch to direct `node`/`python` execution or a verified Git Bash path. After two failures with the same approach, change strategy.',
-        ]
-      : []),
     '',
     '# Git',
     '- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.',
@@ -137,19 +122,19 @@ export const LocalBashToolDef = {
   ].join('\n'),
   schema: Type.Object({
     command: Type.String({
-      description: 'Shell command line to execute locally.',
+      description: 'The command to execute',
     }),
+    description: BashDescriptionSchema,
     timeout: Type.Optional(
       Type.Number({
-        maximum: MAX_BACKGROUND_BASH_TIMEOUT_SECONDS,
+        exclusiveMinimum: 0,
         description:
-          'Timeout in seconds. Foreground: default 120s, max 300s. Use run_in_background for longer commands. Background tasks use the requested timeout, subject to a runtime watchdog.',
+          'Total command timeout in seconds. Foreground-only: default 120s, max 300s. Foreground with automatic backgrounding: default/max 600s, including foreground time. Explicit background: uses the specified timeout, or a 30-minute limit if omitted.',
       }),
     ),
     run_in_background: Type.Optional(
       Type.Boolean({
-        description:
-          'Start in the background and return a task id immediately. Foreground commands may also return a task id after 15s without restarting the process.',
+        description: 'Set to true to run this command in the background.',
       }),
     ),
   }),

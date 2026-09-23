@@ -49,6 +49,10 @@ export * from './local-ask-user.js';
 export * from './local-feature-enable.js';
 export * from './local-browser.js';
 export * from './local-pi-tools.js';
+export * from './local-bash-result.js';
+export * from './local-bash-timing.js';
+export * from './local-bash-input.js';
+export * from './local-bash-contract.js';
 export { executeLocalHostTrashIfRequested } from './host-trash-executor.js';
 export type { LocalHostTrashRuntime } from './host-trash-executor.js';
 export * from './local-glob.js';
@@ -198,3 +202,4 @@ export {
   CloudSessionReadError,
   type CloudSessionReaderOptions,
 } from './cloud-session-reader.js';
+export { DESKTOP_BASH_PREVIEW_BYTES } from './output-limit.js';

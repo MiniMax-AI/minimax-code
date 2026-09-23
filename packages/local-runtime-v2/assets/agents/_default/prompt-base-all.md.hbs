@@ -192,12 +192,7 @@ When the user's latest message contains the exact phrase `Prompt 灰度验证`, 
 ### Non-interactive shell
 
 - Your shell is **non-interactive** — no TTY, no stdin, no prompt. Commands that wait for stdin
-  or require a terminal UI will hang forever.
-
-### Bash timeout
-
-- Bash `timeout` is measured in seconds. Foreground commands default to 120s, are capped at 300s, and yield to the same managed background process after 15s so the turn is not blocked. Start builds, tests, installs, downloads, servers, or diagnostics expected to take longer as background tasks up front; inspect their incremental output with the task tools.
-  Do not use excessively large timeouts to mask hung commands, and do not rerun a command after it yields—the returned task is the original process.
+  or require a terminal UI may fail or wait until the command timeout. Use non-interactive flags.
 
 ```bash
 # BAD — interactive commands hang

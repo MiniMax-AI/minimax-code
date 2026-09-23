@@ -1496,3 +1496,27 @@ describe("BuiltinAgentCatalog prompt modes", () => {
     );
   });
 });
+
+describe('Bash prompt contract across product surfaces', () => {
+  it.each([
+    { agentName: 'worker', surface: 'task-child', promptProfile: undefined },
+    { agentName: 'mavis', surface: 'interactive', promptProfile: 'desktop' },
+    { agentName: 'mavis', surface: 'cli', promptProfile: 'tui' },
+    { agentName: 'worker', surface: 'task-child', promptProfile: 'tui' },
+  ] as const)(
+    'renders capability-neutral base guidance for $agentName / $surface / $promptProfile',
+    async (profile) => {
+      const catalog = new BuiltinAgentCatalog();
+      const rendered = await catalog.render({
+        ...profile,
+        appMode: 'coding',
+        locale: 'zh-CN',
+        promptChannel: 'online',
+        capabilities: resolveAgentCapabilities({ tools: ['bash'] }),
+      });
+      const text = [rendered.corePrompt, rendered.surfacePrompt].join('\n');
+      expect(text).not.toContain('and yield to the same managed background process after 15s');
+      expect(text).not.toContain('PowerShell syntax only');
+    },
+  );
+});

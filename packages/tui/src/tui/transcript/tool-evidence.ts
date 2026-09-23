@@ -20,6 +20,7 @@ export interface TranscriptToolEvidence {
 }
 
 interface ToolArguments {
+  readonly description?: string;
   readonly path?: string;
   readonly query?: string;
   readonly taskId?: string;
@@ -163,7 +164,7 @@ function presentBackgroundBashEvidence(
       : { lines: [] as readonly string[] };
   const taskId = BASH_BACKGROUND_TASK_ID_PATTERN.exec(cell.detail ?? '')?.[1];
   return {
-    ...(taskId ? { summary: taskId } : {}),
+    summary: [parseToolArguments(cell.content).description, taskId].filter(Boolean).join(' · '),
     lines: [...commandEvidence.lines, ...failureEvidence.lines],
     handlesDetail: true,
   };
@@ -222,7 +223,10 @@ function presentShellEvidence(
   }
 
   return {
-    summary: composeShellSummary(command, shellOutputSummary(output.length, cell.status)),
+    summary: composeShellSummary(
+      parseToolArguments(cell.content).description || command,
+      shellOutputSummary(output.length, cell.status),
+    ),
     lines,
     handlesDetail: true,
   };
@@ -371,6 +375,7 @@ function parseToolArguments(content: string): ToolArguments {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const record = value as Readonly<Record<string, unknown>>;
   return {
+    description: summarizeShellCommand(stringValue(record.description)),
     path: stringValue(record.path) ?? stringValue(record.filePath) ?? stringValue(record.file_path),
     query: stringValue(record.query) ?? stringValue(record.pattern),
     taskId: stringValue(record.task_id),

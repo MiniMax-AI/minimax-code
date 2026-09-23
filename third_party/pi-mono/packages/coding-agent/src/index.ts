@@ -240,6 +240,8 @@ export {
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
 // Tools
 export {
+	BashExecutionError,
+	type BashExecutionOutcome,
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,

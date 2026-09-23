@@ -470,6 +470,39 @@ describe("Coding Agent Tools", () => {
 			rmSync(snapshot.fullOutputPath!, { force: true });
 		});
 
+		it("keeps bounded original head and tail with split UTF-8 and host persistence", async () => {
+			const accumulator = new OutputAccumulator({ strategy: "head_tail", maxBytes: 128, persistOutput: false });
+			const raw = Buffer.from("FIRST汉" + "中".repeat(10000) + "TAIL末");
+			for (let i = 0; i < raw.length; i += 7) accumulator.append(raw.subarray(i, i + 7), "stdout");
+			accumulator.finish();
+			await accumulator.closeTempFile();
+			const snapshot = accumulator.snapshot({ persistIfTruncated: true });
+			expect(snapshot.content).toContain("FIRST汉");
+			expect(snapshot.content).toContain("TAIL末");
+			expect(snapshot.content).not.toContain("�");
+			expect(Buffer.byteLength(snapshot.content)).toBeLessThanOrEqual(128);
+			expect(snapshot.rawBytes).toBe(raw.length);
+			expect(snapshot.fullOutputPath).toBeUndefined();
+		});
+
+		it("reports an early spill error without advertising a full file or losing the preview", async () => {
+			const tool = createBashToolDefinition(testDir, {
+				output: { strategy: "head_tail", maxBytes: 128, tempFilePrefix: `missing-${Date.now()}/pi` },
+				operations: { exec: async (_command, _cwd, options) => {
+					options.onData(Buffer.from("FIRST" + "x".repeat(1000) + "TAIL"));
+					await new Promise((resolve) => setTimeout(resolve, 20));
+					return { exitCode: 0 };
+				} },
+			});
+			const result = await tool.execute("spill-error", { command: "test" });
+			expect(getTextOutput(result)).toContain("FIRST");
+			expect(getTextOutput(result)).toContain("TAIL");
+			expect(result.details?.output?.persistenceError).toBeTruthy();
+			expect(result.details?.fullOutputPath).toBeUndefined();
+			expect(result.details?.output?.persistence).toBe("incomplete");
+			expect(result.details?.execution?.exitCode).toBe(0);
+		});
+
 		it("describes the command as the current shell rather than always calling it Bash", () => {
 			const definition = createBashToolDefinition(testDir, { operations: { exec: async () => ({ exitCode: 0 }) } });
 			const commandDescription = (definition.parameters as { properties?: { command?: { description?: string } } }).properties
@@ -542,6 +575,10 @@ describe("Coding Agent Tools", () => {
 				}
 
 				expect(error).toBeInstanceOf(Error);
+				expect(error).toMatchObject({ details: {
+					execution: { reason: testCase.error.startsWith("timeout:") ? "command_timeout" : "canceled" },
+					fullOutputPath: expect.any(String),
+				} });
 				const message = (error as Error).message;
 				expect(message).toContain(testCase.expected);
 				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);

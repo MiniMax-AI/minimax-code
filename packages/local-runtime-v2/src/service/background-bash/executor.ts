@@ -1,11 +1,13 @@
 import { StringDecoder } from 'node:string_decoder';
 
 import { createBashTool, type BashOperations } from '@earendil-works/pi-coding-agent/tools';
+import { createBashEnvSpawnHook, type BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
 import {
-  createBashEnvSpawnHook,
-  type BashEnvPolicy,
-} from '@mavis/agent-core/bash-subprocess-env';
-import type { LocalSandboxBashOperationsFactory } from '@mavis/agent-tools/desktop';
+  localBashResultFromError,
+  localBashResultFromPi,
+  DESKTOP_BASH_PREVIEW_BYTES,
+  type LocalSandboxBashOperationsFactory,
+} from '@mavis/agent-tools/desktop';
 
 import type { LocalBackgroundBashExecutor } from './contracts.js';
 
@@ -38,9 +40,25 @@ export function createLocalBackgroundBashExecutor(
         combined: new StringDecoder('utf8'),
       };
       const operations: BashOperations = {
+        separatesOutputStreams: localOperations.separatesOutputStreams,
         exec: (command, cwd, options) =>
           localOperations.exec(command, cwd, {
             ...options,
+            onProcessEvent: (event) => {
+              options.onProcessEvent?.(event);
+              if (
+                event.type === 'timer_started' &&
+                event.atMs !== undefined &&
+                input.timeout !== undefined
+              ) {
+                input.onDetails?.({
+                  timing: {
+                    commandTimerStartedAt: event.atMs,
+                    commandDeadlineAt: event.atMs + input.timeout * 1000,
+                  },
+                });
+              }
+            },
             onData: (data, stream) => {
               options.onData(data, stream);
               input.onOutput?.(decoders[stream ?? 'combined'].write(data), data.length);
@@ -49,35 +67,37 @@ export function createLocalBackgroundBashExecutor(
       };
       let envSanitized: string[] = [];
       const tool = createBashTool(input.workspaceRoot, {
+        output: {
+          strategy: 'head_tail',
+          maxBytes: DESKTOP_BASH_PREVIEW_BYTES,
+          maxLines: Number.MAX_SAFE_INTEGER,
+          persistOutput: false,
+        },
         operations,
         spawnHook: createBashEnvSpawnHook(envPolicy, (removed) => {
           envSanitized = removed;
           if (removed.length > 0) input.onDetails?.({ envSanitized: removed });
         }),
       });
-      let result;
       try {
-        result = await tool.execute(
-          '',
-          { command: input.command, timeout: input.timeout },
-          input.signal,
+        const result = localBashResultFromPi(
+          await tool.execute('', { command: input.command, timeout: input.timeout }, input.signal),
         );
+        return {
+          ...result,
+          details: { ...result.details, ...(envSanitized.length > 0 ? { envSanitized } : {}) },
+        };
+      } catch (error) {
+        const result = localBashResultFromError(error, input.signal);
+        return {
+          ...result,
+          details: { ...result.details, ...(envSanitized.length > 0 ? { envSanitized } : {}) },
+        };
       } finally {
         input.onOutput?.(decoders.stdout.end(), 0);
         input.onOutput?.(decoders.stderr.end(), 0);
         input.onOutput?.(decoders.combined.end(), 0);
       }
-      const text = result.content
-        .filter((content): content is { type: 'text'; text: string } => content.type === 'text')
-        .map((content) => content.text)
-        .join('\n');
-      return {
-        text,
-        details: {
-          ...((result.details ?? {}) as Record<string, unknown>),
-          ...(envSanitized.length > 0 ? { envSanitized } : {}),
-        },
-      };
     },
   };
 }

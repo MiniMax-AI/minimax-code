@@ -21,6 +21,19 @@ import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir, release } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { resolveBashDescription } from './local-bash-input.js';
+import {
+  DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS,
+  resolveLocalBashTiming,
+  validateBashCommand,
+  withLocalBashTiming,
+  type LocalBashTiming,
+} from './local-bash-timing.js';
+import {
+  localBashResultFromError,
+  localBashResultFromPi,
+  readBashExecutionOutcome,
+} from './local-bash-result.js';
 
 import {
   LocalBashToolDef,
@@ -65,6 +78,7 @@ import { buildWriteToolResult, createCapturingWriteOperations } from '../shared/
 import {
   applyDesktopTextLimit,
   DESKTOP_BASH_MAX_BYTES,
+  DESKTOP_BASH_PREVIEW_BYTES,
   DESKTOP_READ_TEXT_MAX_BYTES,
   limitDesktopHeadTailLines,
   limitDesktopPrefixLines,
@@ -372,6 +386,11 @@ export class LocalBashTool implements ToolImpl<
     // The background executor and the pi-turn-runner fallback apply the same
     // hook — keep the three spawn sites in sync.
     this.tool = createBashTool(workspaceRoot, {
+      output: {
+        strategy: 'head_tail',
+        maxBytes: DESKTOP_BASH_PREVIEW_BYTES,
+        maxLines: Number.MAX_SAFE_INTEGER,
+      },
       spawnHook: (ctx) => {
         const { env, removed } = sanitizeBashSubprocessEnv(ctx.env, this.envPolicy);
         this.lastEnvRemoved = removed;
@@ -386,6 +405,49 @@ export class LocalBashTool implements ToolImpl<
     signal?: AbortSignal,
   ): Promise<ToolResult> {
     if (signal?.aborted) throw new Error('Operation aborted');
+    let timing: LocalBashTiming;
+    let description: string;
+    try {
+      description = resolveBashDescription(input.description, input.command);
+      validateBashCommand(input.command);
+      timing = resolveLocalBashTiming(
+        input.timeout,
+        input.run_in_background
+          ? 'explicit_background'
+          : ctx.canConsumeBackgroundBashOutput === true &&
+              ctx.allowBashAutoPromotion !== false &&
+              this.backgroundAdapter?.runManagedForeground
+            ? 'managed_foreground'
+            : 'direct_foreground',
+      );
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      return {
+        tool_name: LocalBashToolDef.name,
+        text,
+        content: [{ type: 'text', text }],
+        isError: true,
+        details: { status: 'invalid_input', error_code: 'BASH_INVALID_INPUT' },
+      };
+    }
+    try {
+      const result = await this.executeValidated(ctx, { ...input, description }, timing, signal);
+      return { ...result, details: { ...result.details, description } };
+    } catch (error) {
+      if (error instanceof Error) {
+        const details = (error as Error & { details?: Record<string, unknown> }).details;
+        Object.assign(error, { details: { ...details, description } });
+      }
+      throw error;
+    }
+  }
+
+  private async executeValidated(
+    ctx: LocalRuntimeToolContext,
+    input: LocalBashToolInput,
+    timing: LocalBashTiming,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     if (input.run_in_background === true && ctx.canConsumeBackgroundBashOutput !== true) {
       return unavailableBackgroundBashOutputResult();
     }
@@ -426,16 +488,24 @@ export class LocalBashTool implements ToolImpl<
       return backgroundBashToolResult(
         started.taskId,
         'started',
-        this.consumeEnvSanitizationHint(started.details),
+        this.consumeEnvSanitizationHint({
+          ...started.details,
+          description: input.description,
+          timing: { ...timing, ...(started.details?.timing as object) },
+        }),
       );
     }
 
     const { run_in_background: _runInBackground, ...rest } = input;
-    const foregroundInput = { ...rest, timeout: resolveForegroundTimeout(rest) };
-    if (ctx.allowBashAutoPromotion !== false && this.backgroundAdapter?.runManagedForeground) {
+    const foregroundInput = { ...rest, timeout: timing.commandTimeoutSeconds };
+    if (
+      ctx.canConsumeBackgroundBashOutput === true &&
+      ctx.allowBashAutoPromotion !== false &&
+      this.backgroundAdapter?.runManagedForeground
+    ) {
       const managed = await this.backgroundAdapter.runManagedForeground(
         ctx,
-        foregroundInput,
+        rest,
         DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS,
         signal,
       );
@@ -444,7 +514,11 @@ export class LocalBashTool implements ToolImpl<
           return backgroundBashToolResult(
             managed.taskId,
             'auto_promoted',
-            this.consumeEnvSanitizationHint(managed.details),
+            this.consumeEnvSanitizationHint({
+              ...managed.details,
+              description: input.description,
+              timing: { ...timing, ...(managed.details?.timing as object) },
+            }),
           );
         }
         const text = `<bash_error>${managed.errorMessage ?? 'Local managed bash failed to start'}</bash_error>`;
@@ -460,27 +534,36 @@ export class LocalBashTool implements ToolImpl<
         typeof managed.details?.fullOutputPath === 'string'
           ? managed.details.fullOutputPath
           : undefined;
-      const limited = limitDesktopBashOutput(managed.text, managedFullOutputPath);
+
       const managedDetails = this.consumeEnvSanitizationHint(managed.details);
-      return applyDesktopTextLimit(
-        {
+      const result = withLocalBashTiming(
+        withCompatibleBashToolResponseFromPiDetails({
           tool_name: LocalBashToolDef.name,
           text: managed.text,
           content: [{ type: 'text', text: managed.text }],
           details: {
             ...managedDetails,
-            status: 'completed',
+            status: readBashExecutionOutcome(managedDetails)?.status ?? 'completed',
             task_id: managed.taskId,
           },
           ...(managed.isError ? { isError: true } : {}),
-        },
-        limited,
+        }),
+        timing,
+      );
+      return applyDesktopTextLimit(
+        result,
+        limitDesktopBashOutput(result.text, managedFullOutputPath, result.details, managed.taskId),
       );
     }
     let result: ToolResult;
     try {
       const tool = this.sandboxOperationsFactory
         ? createBashTool(this.workspaceRoot, {
+            output: {
+              strategy: 'head_tail',
+              maxBytes: DESKTOP_BASH_PREVIEW_BYTES,
+              maxLines: Number.MAX_SAFE_INTEGER,
+            },
             operations: this.sandboxOperationsFactory.create({
               identity: directForegroundIdentity(ctx),
               workspaceRoot: this.workspaceRoot,
@@ -493,28 +576,29 @@ export class LocalBashTool implements ToolImpl<
           })
         : this.tool;
       const res = await tool.execute('', foregroundInput, signal);
-      result = withCompatibleBashToolResponseFromPiDetails(
-        toToolResult(LocalBashToolDef.name, res),
-      );
+      const completed = localBashResultFromPi(res);
+      result = withCompatibleBashToolResponseFromPiDetails({
+        tool_name: LocalBashToolDef.name,
+        ...completed,
+        content: [{ type: 'text', text: completed.text }],
+      });
     } catch (error) {
       if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
         throw error;
       }
-      const text = error instanceof Error ? error.message : String(error);
-      const fullOutputPath = extractBashFullOutputPath(text);
-      result = {
+      const failed = localBashResultFromError(error, signal);
+      result = withCompatibleBashToolResponseFromPiDetails({
         tool_name: LocalBashToolDef.name,
-        text,
-        content: [{ type: 'text', text }],
-        ...(fullOutputPath ? { details: { fullOutputPath } } : {}),
-        isError: true,
-      };
+        ...failed,
+        content: [{ type: 'text', text: failed.text }],
+      });
     }
+    result = withLocalBashTiming(result, timing);
     const fullOutputPath =
       typeof result.details?.fullOutputPath === 'string'
         ? result.details.fullOutputPath
         : undefined;
-    const limited = limitDesktopBashOutput(result.text, fullOutputPath);
+    const limited = limitDesktopBashOutput(result.text, fullOutputPath, result.details);
     result = applyDesktopTextLimit(result, limited);
     result.details = this.consumeEnvSanitizationHint({
       ...(result.details ?? {}),
@@ -550,57 +634,67 @@ function directForegroundIdentity(ctx: LocalRuntimeToolContext): LocalSandboxInv
   };
 }
 
-function limitDesktopBashOutput(text: string, fullOutputPath?: string) {
-  const limited = limitDesktopHeadTailLines(text, {
+function limitDesktopBashOutput(
+  text: string,
+  fullOutputPath?: string,
+  details?: Record<string, unknown>,
+  taskId?: string,
+) {
+  const output = details?.output as { rawBytes?: number; persistenceError?: string } | undefined;
+  let previewText = text;
+  if (!taskId) {
+    if ((details?.truncation as { truncated?: boolean } | undefined)?.truncated) {
+      previewText += `\n\n[desktop bash output truncated: original_bytes=${output?.rawBytes}; original head+tail shown.${fullOutputPath ? ` Full output: ${fullOutputPath}` : ''}]`;
+    }
+    if (output?.persistenceError) {
+      previewText += `\n\n[Output persistence failed; complete output is unavailable: ${output.persistenceError}]`;
+    }
+  }
+  const limited = limitDesktopHeadTailLines(previewText, {
     maxBytes: DESKTOP_BASH_MAX_BYTES,
     notice: ({ originalBytes }) =>
       fullOutputPath
         ? `[desktop bash output truncated: original_bytes=${originalBytes}; head+tail shown; boundary lines may be UTF-8 byte-truncated; Full output: ${fullOutputPath}]`
-        : `[desktop bash output truncated: original_bytes=${originalBytes}; head+tail shown; boundary lines may be UTF-8 byte-truncated; rerun with a narrower command or redirect output to a file and use read.]`,
+        : `[desktop bash output truncated: original_bytes=${originalBytes}; head+tail shown; boundary lines may be UTF-8 byte-truncated.]`,
   });
-  return withDesktopOutputContinuation(limited, {
-    continuation_hint: fullOutputPath
-      ? {
-          tool: 'read',
-          preserve_args: ['path'],
-          instruction: `Read the full output at ${fullOutputPath}; continue long reads with the returned next_offset.`,
-        }
-      : {
-          tool: 'bash',
-          preserve_args: [],
-          instruction:
-            'Do not blindly rerun a potentially side-effecting command; narrow it or redirect output to a file, then use read.',
-        },
-  });
-}
-
-function extractBashFullOutputPath(text: string): string | undefined {
-  const matches = [...text.matchAll(/Full output:\s*(.+?)\](?:\n|$)/gi)];
-  const path = matches.at(-1)?.[1]?.trim();
-  return path || undefined;
-}
-
-/**
- * Default foreground timeout (seconds) applied when the model omits `timeout`.
- * Restores main's historical 120s bound so interactive/blocking foreground
- * commands (e.g. `lark-cli auth login`) cannot hang forever. Background tasks
- * (`run_in_background: true`) are intentionally NOT bounded by this.
- */
-export const DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS = 120;
-export const MAX_FOREGROUND_BASH_TIMEOUT_SECONDS = 300;
-export const DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS = 15_000;
-
-/**
- * Keep interactive foreground commands bounded. Missing, non-finite and
- * non-positive values use the 120s default; larger values are capped at 5m.
- * Longer commands should opt into background execution explicitly.
- */
-export function resolveForegroundTimeout(input: { timeout?: number }): number {
-  const requested = input.timeout;
-  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
-    return DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS;
+  if (
+    limited.truncation ||
+    (details?.truncation as { truncated?: boolean } | undefined)?.truncated
+  ) {
+    limited.truncation = {
+      truncated: true,
+      has_more: true,
+      strategy: 'head_tail_lines',
+      original_bytes:
+        output?.rawBytes ?? limited.truncation?.original_bytes ?? Buffer.byteLength(text, 'utf8'),
+      returned_bytes: Buffer.byteLength(limited.text, 'utf8'),
+      max_bytes: DESKTOP_BASH_MAX_BYTES,
+    };
   }
-  return Math.min(requested, MAX_FOREGROUND_BASH_TIMEOUT_SECONDS);
+  return withDesktopOutputContinuation(limited, {
+    continuation_hint: taskId
+      ? {
+          tool: 'task_output',
+          preserve_args: ['task_id'],
+          instruction: `Read task ${taskId} with task_output; continue with its next_offset (UTF-8 log file bytes). Check output persistence status before treating the log as complete.`,
+        }
+      : fullOutputPath
+        ? {
+            tool: 'read',
+            preserve_args: ['path'],
+            instruction: `Read the full output at ${fullOutputPath}; continue long reads with the returned next_offset.`,
+          }
+        : {
+            tool: 'bash',
+            preserve_args: [],
+            instruction:
+              'Do not blindly rerun a potentially side-effecting command; narrow it or redirect output to a file, then use read.',
+          },
+  });
+}
+
+export function resolveForegroundTimeout(input: { timeout?: number }): number {
+  return resolveLocalBashTiming(input.timeout, 'direct_foreground').commandTimeoutSeconds!;
 }
 
 function backgroundBashToolResult(
@@ -611,8 +705,15 @@ function backgroundBashToolResult(
   const lead =
     status === 'auto_promoted'
       ? 'The command is still running and was yielded to a managed background task without restarting it.'
-      : 'Started local background bash task.';
-  const text = `<bash_background task_id="${taskId}">\n${lead} The owning conversation will automatically resume when it finishes; use task_query/task_output to inspect incremental output and task_stop to cancel it.\n</bash_background>`;
+      : 'Background Bash task accepted; command startup may still be in progress.';
+  const timing = details.timing as LocalBashTiming | undefined;
+  const timingText =
+    timing?.commandTimeoutSeconds !== undefined
+      ? ` Command limit: ${timing.commandTimeoutSeconds}s total; yielding does not reset it.`
+      : '';
+  const purpose =
+    typeof details.description === 'string' ? `Purpose: ${details.description}\n` : '';
+  const text = `<bash_background task_id="${taskId}">\n${purpose}${lead}${timingText} The owning conversation will automatically resume when it finishes; use task_output to inspect incremental output, and task_stop to cancel if that tool is available.\n</bash_background>`;
   return {
     tool_name: LocalBashToolDef.name,
     text,
@@ -735,3 +836,9 @@ async function pathExists(filePath: string): Promise<boolean> {
 function isFsNotFoundError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOENT';
 }
+
+export {
+  DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS,
+  MAX_FOREGROUND_BASH_TIMEOUT_SECONDS,
+  DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS,
+} from './local-bash-timing.js';

@@ -8,7 +8,7 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
-import { waitForChildProcess } from "../../utils/child-process.ts";
+import { waitForChildProcess, waitForChildProcessExit } from "../../utils/child-process.ts";
 import {
 	armParentDeathGuard,
 	getShellConfig,
@@ -20,7 +20,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { OutputAccumulator } from "./output-accumulator.ts";
+import { OutputAccumulator, type OutputAccumulatorOptions } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
@@ -38,8 +38,39 @@ export type BashToolInput = Static<typeof bashSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	execution?: BashExecutionOutcome;
+	timing?: { commandTimerStartedAt: number; commandDeadlineAt: number };
+	output?: {
+		rawBytes: number;
+		persistence: "inline" | "complete" | "incomplete" | "host";
+		persistenceError?: string;
+	};
 	/** Exact process facts retained for consumers that need split streams. */
 	processOutput?: BashProcessOutput;
+}
+
+export interface BashExecutionOutcome {
+	status: "succeeded" | "failed" | "canceled";
+	reason: "exited" | "signaled" | "command_timeout" | "canceled" | "spawn_failed" | "unknown";
+	exitCode: number | null;
+	signal?: NodeJS.Signals;
+	errorCode?: string;
+	cancellationReason?: string;
+	/** Failure explanation without duplicating captured command output. */
+	message?: string;
+}
+
+/** Carries the same output and execution facts as a successful Bash result. */
+export class BashExecutionError extends Error {
+	readonly details: BashToolDetails & { execution: BashExecutionOutcome };
+	readonly code?: string;
+
+	constructor(message: string, details: BashToolDetails & { execution: BashExecutionOutcome }, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "BashExecutionError";
+		this.details = details;
+		this.code = details.execution.errorCode;
+	}
 }
 
 export interface BashProcessOutput {
@@ -64,7 +95,7 @@ export interface BashOperations {
 	 * @param command The command to execute
 	 * @param cwd Working directory
 	 * @param options Execution options
-	 * @returns Promise resolving to exit code (null if killed)
+	 * @returns Promise resolving to the exit code and, when available, terminating signal
 	 */
 	exec: (
 		command: string,
@@ -76,11 +107,12 @@ export interface BashOperations {
 			env?: NodeJS.ProcessEnv;
 			/** Best-effort process facts. A launcher spawn does not prove the user command started. */
 			onProcessEvent?: (event: {
-				type: "spawned" | "spawn_failed" | "timeout" | "command_dispatched";
+				type: "spawned" | "spawn_failed" | "timeout" | "command_dispatched" | "timer_started";
+				atMs?: number;
 				processRole: "shell" | "guardian_launcher";
 			}) => void;
 		},
-	) => Promise<{ exitCode: number | null }>;
+	) => Promise<{ exitCode: number | null; signal?: NodeJS.Signals | null }>;
 }
 
 const GUARDED_SHELL_LAUNCHER_SOURCE = String.raw`
@@ -207,9 +239,9 @@ export function createLocalBashOperations(options?: {
 	return {
 		separatesOutputStreams: true,
 		exec: async (command, cwd, { onData, signal, timeout, env, onProcessEvent }) => {
-			const observe = (type: "spawned" | "spawn_failed" | "timeout" | "command_dispatched") => {
+			const observe = (type: "spawned" | "spawn_failed" | "timeout" | "command_dispatched" | "timer_started", atMs?: number) => {
 				try {
-					onProcessEvent?.({ type, processRole: options?.parentDeathGuard ? "guardian_launcher" : "shell" });
+					onProcessEvent?.({ type, processRole: options?.parentDeathGuard ? "guardian_launcher" : "shell", ...(atMs === undefined ? {} : { atMs }) });
 				} catch {
 					// Observers never control execution.
 				}
@@ -295,7 +327,7 @@ export function createLocalBashOperations(options?: {
 			child.stderr?.on("data", (data: Buffer) => onData(data, "stderr"));
 			child.stdin?.on("error", () => undefined);
 			if (!guardRequired && stdinCommand !== undefined) child.stdin?.end(stdinCommand);
-			const childCompletion = waitForChildProcess(child);
+			const childCompletion = waitForChildProcessExit(child);
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			// Stop/timeout send SIGTERM to the process group first so shell
@@ -349,22 +381,41 @@ export function createLocalBashOperations(options?: {
 				}
 				// Set timeout if provided.
 				if (timeout !== undefined && timeout > 0) {
+					const timerStartedAt = Date.now();
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
 						observe("timeout");
 						scheduleGracefulKill();
 					}, timeout * 1000);
+					observe("timer_started", timerStartedAt);
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await childCompletion;
+				const termination = await childCompletion;
 				if (signal?.aborted) {
-					throw new Error("aborted");
+					throw new BashExecutionError("aborted", {
+						execution: {
+							...termination,
+							signal: termination.signal ?? undefined,
+							status: "canceled",
+							reason: "canceled",
+							cancellationReason: formatCancellationReason(signal),
+							message: "Command aborted",
+						},
+					});
 				}
 				if (timedOut) {
-					throw new Error(`timeout:${timeout}`);
+					throw new BashExecutionError(`timeout:${timeout}`, {
+						execution: {
+							...termination,
+							signal: termination.signal ?? undefined,
+							status: "failed",
+							reason: "command_timeout",
+							message: `Command timed out after ${timeout} seconds`,
+						},
+					});
 				}
-				return { exitCode };
+				return termination;
 			} finally {
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -402,6 +453,13 @@ export function createLocalBashOperations(options?: {
 			}
 		},
 	};
+}
+
+function formatCancellationReason(signal?: AbortSignal): string | undefined {
+	if (!signal?.aborted) return undefined;
+	return signal.reason instanceof Error
+		? signal.reason.message
+		: typeof signal.reason === "string" ? signal.reason : undefined;
 }
 
 function wrapConstrainedWindowsPowerShellCommand(): {
@@ -480,6 +538,8 @@ function resolveSpawnContext(command: string, cwd: string, spawnHook?: BashSpawn
 }
 
 export interface BashToolOptions {
+	/** Host-specific preview and persistence policy; defaults retain Pi's tail preview. */
+	output?: OutputAccumulatorOptions;
 	/** Custom operations for command execution. Default: local shell */
 	operations?: BashOperations;
 	/** Command prefix prepended to every command (for example shell setup commands) */
@@ -683,12 +743,13 @@ export function createBashToolDefinition(
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
-			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
+			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash", ...options?.output });
 			const stdout = new BashProcessStreamCapture();
 			const stderr = new BashProcessStreamCapture();
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
+			let timing: BashToolDetails["timing"];
 
 			const emitOutputUpdate = () => {
 				if (!onUpdate || !updateDirty) return;
@@ -741,11 +802,17 @@ export function createBashToolDefinition(
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
 				const stdoutSnapshot = stdout.snapshot();
 				const stderrSnapshot = stderr.snapshot();
-				await output.closeTempFile();
-				return { snapshot, stdoutSnapshot, stderrSnapshot };
+				let persistenceError: string | undefined;
+				try {
+					await output.closeTempFile();
+				} catch (error) {
+					if (!options?.output) throw error;
+					persistenceError = error instanceof Error ? error.message : String(error);
+				}
+				const snapshot = output.snapshot({ persistIfTruncated: true });
+				return { snapshot, stdoutSnapshot, stderrSnapshot, persistenceError };
 			};
 
 			const formatOutput = (finished: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
@@ -753,6 +820,9 @@ export function createBashToolDefinition(
 				const truncation = snapshot.truncation;
 				let text = snapshot.content || emptyText;
 				let details: BashToolDetails | undefined;
+				if (options?.output?.strategy === "head_tail") {
+					return { text, details: { ...(truncation.truncated ? { truncation } : {}), fullOutputPath: snapshot.fullOutputPath } };
+				}
 				if (truncation.truncated) {
 					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
@@ -770,49 +840,118 @@ export function createBashToolDefinition(
 			};
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
+			const resultDetails = (
+				finished: Awaited<ReturnType<typeof finishOutput>>,
+				execution: BashExecutionOutcome,
+			): BashToolDetails & { execution: BashExecutionOutcome } => ({
+				...formatOutput(finished).details,
+				execution,
+				...(timing ? { timing } : {}),
+				...(options?.output ? { output: {
+					rawBytes: finished.snapshot.rawBytes,
+					persistence: finished.persistenceError ? "incomplete" as const
+						: options.output.persistOutput === false ? "host" as const
+							: finished.snapshot.fullOutputPath ? "complete" as const : "inline" as const,
+					...(finished.persistenceError ? { persistenceError: finished.persistenceError } : {}),
+				} } : {}),
+				...(ops.separatesOutputStreams
+					? {
+							processOutput: {
+								stdout: finished.stdoutSnapshot.content,
+								stderr: finished.stderrSnapshot.content,
+								exitCode: execution.exitCode,
+								interrupted: execution.reason === "canceled" || execution.reason === "command_timeout",
+								stdoutTruncated: finished.stdoutSnapshot.truncated,
+								stderrTruncated: finished.stderrSnapshot.truncated,
+								rawOutputPath: finished.snapshot.fullOutputPath,
+							},
+						}
+					: {}),
+			});
 
 			try {
 				let exitCode: number | null;
+				let exitSignal: NodeJS.Signals | null | undefined;
+				let spawnFailed = false;
 				try {
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
 						timeout,
 						env: spawnContext.env,
+						onProcessEvent: (event) => {
+							if (event.type === "spawn_failed") spawnFailed = true;
+							if (event.type === "timer_started" && event.atMs !== undefined && timeout !== undefined) {
+								timing = { commandTimerStartedAt: event.atMs, commandDeadlineAt: event.atMs + timeout * 1000 };
+							}
+						},
 					});
 					exitCode = result.exitCode;
+					exitSignal = result.signal;
 				} catch (err) {
 					const finished = await finishOutput();
 					const { text } = formatOutput(finished, "");
-					if (err instanceof Error && err.message === "aborted") {
-						throw new Error(appendStatus(text, "Command aborted"));
+					let execution: BashExecutionOutcome;
+					if (err instanceof BashExecutionError) execution = err.details.execution;
+					else {
+						const message = err instanceof Error ? err.message : String(err);
+						const errorCode =
+							err instanceof Error && "code" in err && typeof err.code === "string"
+								? err.code
+								: undefined;
+						// Preserve the existing custom-operations protocol; native operations carry typed facts.
+						const canceled = signal?.aborted || message === "aborted";
+						const legacyTimeout = message.startsWith("timeout:")
+							? message.slice("timeout:".length)
+							: undefined;
+						execution = {
+							status: canceled ? "canceled" : "failed",
+							reason: canceled
+								? "canceled"
+								: legacyTimeout !== undefined
+									? "command_timeout"
+									: spawnFailed
+										? "spawn_failed"
+										: "unknown",
+							exitCode: null,
+							...(canceled ? { cancellationReason: formatCancellationReason(signal) } : {}),
+							...(errorCode ? { errorCode } : {}),
+							message: canceled
+								? "Command aborted"
+								: legacyTimeout !== undefined
+									? `Command timed out after ${legacyTimeout} seconds`
+									: message,
+						};
 					}
-					if (err instanceof Error && err.message.startsWith("timeout:")) {
-						const timeoutSecs = err.message.split(":")[1];
-						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
-					}
-					throw err;
+					throw new BashExecutionError(
+						appendStatus(text, execution.message ?? "Command failed"),
+						resultDetails(finished, execution),
+						{ cause: err },
+					);
 				}
 
 				const finished = await finishOutput();
-				const { text: outputText, details } = formatOutput(finished);
-				if (exitCode !== 0 && exitCode !== null) {
-					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
+				const { text: outputText } = formatOutput(finished);
+				const execution: BashExecutionOutcome = {
+					status: !exitSignal && exitCode === 0 ? "succeeded" : "failed",
+					reason: exitSignal ? "signaled" : exitCode === null ? "unknown" : "exited",
+					exitCode,
+					...(exitSignal ? { signal: exitSignal } : {}),
+				};
+				if (execution.status !== "succeeded") {
+					execution.message = exitSignal
+						? `Command terminated by signal ${exitSignal}`
+						: exitCode === null
+							? "Command terminated without an exit code"
+							: `Command exited with code ${exitCode}`;
+					throw new BashExecutionError(
+						appendStatus(outputText, execution.message),
+						resultDetails(finished, execution),
+					);
 				}
-				const processOutput = ops.separatesOutputStreams
-					? {
-							stdout: finished.stdoutSnapshot.content,
-							stderr: finished.stderrSnapshot.content,
-							exitCode,
-							interrupted: false,
-							stdoutTruncated: finished.stdoutSnapshot.truncated,
-							stderrTruncated: finished.stderrSnapshot.truncated,
-							rawOutputPath: finished.snapshot.fullOutputPath,
-						}
-					: undefined;
 				return {
 					content: [{ type: "text", text: outputText }],
-					details: details || processOutput ? { ...details, processOutput } : undefined,
+					details: resultDetails(finished, execution),
 				};
 			} finally {
 				clearUpdateTimer();

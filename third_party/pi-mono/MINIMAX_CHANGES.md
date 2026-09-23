@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-23 — preserve Bash execution facts and bounded output
+
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), Bash execution, child-process observation, and output accumulation.
+- Change: require exit code zero for success; preserve signals, cancellation reasons, timeout deadlines, and partial output in structured success and failure results. Add an optional original head-and-tail preview and host-owned persistence so managed commands use one complete log. Report persistence failures separately from the process outcome.
+- The existing exit-code-only helper and default tail preview remain compatible. Process cleanup and command timers retain their existing lifecycle.
+- Provenance: shared MiniMax Bash implementation, adapted to the standalone source distribution. Existing upstream notices and licenses apply; no new dependency is introduced. Upstream PR: not opened.
+- Regression coverage: the declared local Bash output, timeout, background executor, runner, stop-race, and child-lifecycle tests exercise the vendored implementation through its product consumers. Vendored upstream suites remain outside this distribution's verification; real-model and Windows acceptance are separate.
+
 ### 2026-09-21 — report why the edit unified patch was omitted
 
 - Reason: the unified patch is a second, independently timed Myers run over the same input as the display diff. When only that run ran out of time, `details` held a diff, no patch, and no `diffOmitted` — consumers could not tell an omitted patch apart from a tool that never produces one.

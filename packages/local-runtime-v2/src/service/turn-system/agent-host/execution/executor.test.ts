@@ -946,9 +946,16 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
             "Expected the native Bash tool and its Turn context to remain admitted",
           );
         }
+        const properties = admittedBash.def.schema.properties as Record<string, unknown>;
+        expect('run_in_background' in properties).toBe(allowed);
+        expect(admittedBash.def.description).toContain(
+          allowed ? 'task_output' : 'foreground execution only',
+        );
+        expect(bash.def.schema.properties).toHaveProperty('run_in_background');
+        expect(admittedBash.def.schema).not.toBe(bash.def.schema);
         const result = await admittedBash.impl.execute(
           toolContext,
-          { command: "controlled command" },
+          { description: '运行测试命令', command: 'controlled command' },
           runInput.signal,
         );
         if (allowed) expect(result.details?.status).toBe("auto_promoted");
@@ -958,7 +965,11 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
         }
         const backgroundResult = await admittedBash.impl.execute(
           toolContext,
-          { command: "controlled background command", run_in_background: true },
+          {
+            description: '运行测试命令',
+            command: 'controlled background command',
+            run_in_background: true,
+          },
           runInput.signal,
         );
         if (allowed) {
@@ -989,7 +1000,9 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
       expect(direct).toHaveBeenCalledTimes(allowed ? 0 : 1);
     },
   );
+});
 
+describe('LocalRuntimeTurnExecutor native output provenance', () => {
   it.each([
     { source: undefined, allowed: true },
     { source: "builtin" as const, allowed: true },
@@ -1034,10 +1047,12 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
               "Expected the native Bash tool and its Turn context to remain admitted",
             );
           }
+          expect('run_in_background' in admittedBash.def.schema.properties).toBe(allowed);
           const result = await admittedBash.impl.execute(
             toolContext,
             {
-              command: "controlled background command",
+              description: '运行测试命令',
+              command: 'controlled background command',
               run_in_background: true,
             },
             runInput.signal,

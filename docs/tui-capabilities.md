@@ -21,6 +21,25 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | Files, shell, subagents, sessions, headless, ACP | Actual runtime retained | BYOK, file reads, session resume, ACP, sandbox, and status protocol tests |
 | Built-in skills, MCP, plugin tools | Original TUI assets and activation conditions retained | Asset build, plugin, and MCP tests; no claim that every skill has passed a real task |
 
+## Local Bash execution
+
+When the current turn includes native `task_output`, foreground Bash waits up to
+60 seconds before returning the same command's background task ID. Its total
+command timeout defaults to 600 seconds and is capped at 600 seconds; a shorter
+requested timeout applies. Backgrounding and output reads preserve the original
+deadline. Without native `task_output`, Bash stays in the foreground with a
+120-second default and a 300-second cap, and its schema omits `run_in_background`.
+Explicit background commands use the requested timeout; when omitted, the
+existing 30-minute runtime watchdog applies.
+
+Only exit code zero is success. Results retain available exit, signal, timeout,
+cancellation, and partial-output facts. Large output keeps its original beginning
+and end within a 24 KiB first-response text budget, with a full-log reference when
+persistence succeeds. `task_output` reads use byte offsets; a successful read can
+report a failed command. Stop failures and incomplete logs are reported separately.
+An optional `description` supplies the TUI summary while execution and permission
+checks continue to use the original command.
+
 ## Skill directory links
 
 Workspace `.agents/skills`, `.claude/skills`, and `.minimax/skills` support

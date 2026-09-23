@@ -1,9 +1,9 @@
 import { waitForChildBashTaskChange } from './child-bash-lifecycle.js';
+import { performTaskStop } from './task-stop.js';
 import {
   createTaskLifecycleEventId,
   InvalidTaskStatusTransitionError,
   isTerminalTaskStatus,
-  normalizeTaskError,
   type BackgroundTask,
   type BackgroundTaskCheckpointSnapshot,
   type BackgroundTaskReminderSnapshot,
@@ -244,13 +244,14 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
           return {
             ...read,
             status: task.status,
+            task,
             ...(waitMs > 0 ? { timedOut: false } : {}),
           };
         }
 
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) {
-          return { ...read, status: task.status, timedOut: true };
+          return { ...read, status: task.status, task, timedOut: true };
         }
         const outcome = await waiter!.wait(remainingMs);
         if (outcome === 'timeout') {
@@ -258,7 +259,7 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
           const latestRead = await this.outputStore.read(taskId, readOptions);
           return {
             ...latestRead,
-            ...(latestTask ? { status: latestTask.status } : {}),
+            ...(latestTask ? { status: latestTask.status, task: latestTask } : {}),
             timedOut: true,
           };
         }
@@ -286,47 +287,23 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
     // make every concurrent caller reuse its settled terminal result.
     const pendingAfterRead = this.stopRequests.get(taskId);
     if (pendingAfterRead) return pendingAfterRead;
-    const stopping = this.performStop(task, reason);
+    const stopping = performTaskStop(
+      {
+        store: this.store,
+        nowMs: this.nowMs,
+        stopRuntime: this.stopRuntime,
+        patchStatusIfNotTerminal: (current, status, patch) =>
+          this.patchStatusIfNotTerminal(current, status, patch),
+        emit: (current, type, payload) => this.emit(current, type, payload),
+      },
+      task,
+      reason,
+    );
     this.stopRequests.set(taskId, stopping);
     try {
       return await stopping;
     } finally {
       if (this.stopRequests.get(taskId) === stopping) this.stopRequests.delete(taskId);
-    }
-  }
-
-  private async performStop(task: BackgroundTask, reason?: string): Promise<BackgroundTask> {
-    const taskId = task.taskId;
-    const stoppingResult = await this.patchStatusIfNotTerminal(task, 'stopping', {
-      updatedAt: this.nowMs(),
-      ...(reason ? { lastError: { message: reason, code: 'TASK_STOP_REQUESTED' } } : {}),
-    });
-    if (!stoppingResult.patched) return stoppingResult.task;
-    const stopping = stoppingResult.task;
-    await this.emit(stopping, 'stop_requested', { reason });
-    try {
-      await this.stopRuntime?.(stopping, reason);
-      const settled = await this.store.get(taskId);
-      if (settled && isTerminalTaskStatus(settled.status)) return settled;
-      const canceledResult = await this.patchStatusIfNotTerminal(stopping, 'canceled', {
-        endedAt: this.nowMs(),
-        ...(reason ? { lastError: { message: reason, code: 'TASK_CANCELED' } } : {}),
-      });
-      if (!canceledResult.patched) return canceledResult.task;
-      const canceled = canceledResult.task;
-      await this.emit(canceled, 'completed', { status: 'canceled' });
-      return canceled;
-    } catch (error) {
-      const settled = await this.store.get(taskId);
-      if (settled && isTerminalTaskStatus(settled.status)) return settled;
-      const canceledResult = await this.patchStatusIfNotTerminal(stopping, 'canceled', {
-        endedAt: this.nowMs(),
-        lastError: normalizeTaskError(error, 'TASK_STOP_FAILED'),
-      });
-      if (!canceledResult.patched) return canceledResult.task;
-      const canceled = canceledResult.task;
-      await this.emit(canceled, 'completed', { status: 'canceled', stopFailed: true });
-      return canceled;
     }
   }
 

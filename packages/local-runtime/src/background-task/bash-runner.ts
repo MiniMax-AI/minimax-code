@@ -1,20 +1,20 @@
-import type {
-  LocalBashAdapter,
-  LocalBashBackgroundStartResult,
-  LocalBashManagedForegroundResult,
-  LocalBashToolInput,
-  LocalRuntimeToolContext,
+import {
+  localBashResultFromError,
+  readBashExecutionOutcome,
+  resolveLocalBashTiming,
+  validateBashCommand,
+  resolveBashDescription,
+  type LocalBashTiming,
+  type LocalBashAdapter,
+  type LocalBashBackgroundStartResult,
+  type LocalBashManagedForegroundResult,
+  type LocalBashToolInput,
+  type LocalRuntimeToolContext,
 } from '@mavis/agent-tools/desktop';
 
 import type { LocalSessionRecord } from '../sessions/controller.js';
 import type { LocalTaskRunnerHostWithSessionLookup } from '../api/local-task-host.js';
-import {
-  createBackgroundTaskId,
-  normalizeTaskError,
-  type BackgroundTask,
-  type BackgroundTaskPatch,
-  type TaskOutputRef,
-} from './domain.js';
+import { createBackgroundTaskId, type BackgroundTask } from './domain.js';
 import { scheduleLocalBackgroundTaskDelivery } from './delivery.js';
 import { admitBackgroundTask, shutdownBackgroundTasks } from './lifecycle.js';
 import {
@@ -26,6 +26,11 @@ import {
   type LocalBackgroundBashCompletion,
 } from './bash-runner-lifecycle.js';
 import { BackgroundBashOutputWriter } from './bash-output-writer.js';
+import {
+  settleBackgroundBashTask,
+  settleFailedBackgroundBash,
+  withTaskOutputReceipt,
+} from './bash-task-settlement.js';
 import { capBackgroundBashMaxRunMs, resolveBackgroundBashMaxRunMs } from './bash-runner-limits.js';
 import {
   DEFAULT_LOCAL_BACKGROUND_BASH_EXECUTOR,
@@ -166,7 +171,9 @@ export async function runManagedForegroundLocalBash(input: {
       );
       recordSoftYieldMetric(input.host, started.taskId, completion.durationMs, 'completed');
       if (completion.status === 'canceled') {
-        throw managedBashAbortError(input.signal, completion.text);
+        throw Object.assign(managedBashAbortError(input.signal, completion.text), {
+          details: completion.details,
+        });
       }
       return {
         status: 'completed',
@@ -214,16 +221,18 @@ export async function runManagedForegroundLocalBash(input: {
 }
 
 async function startAdmittedBackgroundLocalBash(
-  input: Parameters<typeof startBackgroundLocalBash>[0],
+  input: Parameters<typeof startBackgroundLocalBash>[0] & { softYieldMs?: number },
   controller: AbortController,
   admission: ReturnType<typeof admitBackgroundTask>,
   executionMode: 'explicit_background' | 'managed_foreground',
 ): Promise<StartedLocalBackgroundBash> {
+  validateBashCommand(input.bashInput.command);
+  const timing = resolveLocalBashTiming(input.bashInput.timeout, executionMode);
   const taskId = createBackgroundTaskId();
   const now = input.host.nowMs();
-  const description = commandHead(input.bashInput.command);
+  const description = resolveBashDescription(input.bashInput.description, input.bashInput.command);
   const maxRunMs = capBackgroundBashMaxRunMs(
-    input.maxRunMs ?? resolveBackgroundBashMaxRunMs(input.bashInput.timeout),
+    input.maxRunMs ?? resolveBackgroundBashMaxRunMs(timing.commandTimeoutSeconds),
   );
   await input.host.backgroundTaskService.create({
     taskId,
@@ -240,17 +249,20 @@ async function startAdmittedBackgroundLocalBash(
       command: input.bashInput.command,
       ...(input.bashInput.timeout ? { timeoutSeconds: input.bashInput.timeout } : {}),
       maxRunMs,
+      timing,
       executionMode,
     },
   });
 
-  let startedDetails: Record<string, unknown> | undefined;
+  let startedDetails: Record<string, unknown> | undefined = { description };
   const settled = runBackgroundLocalBashCommand({
     host: input.host,
     parentSession: input.parentSession,
     taskId,
     command: input.bashInput.command,
-    timeout: input.bashInput.timeout,
+    description,
+    timeout: timing.commandTimeoutSeconds,
+    timing,
     maxRunMs,
     executionMode,
     toolCtx: input.toolCtx,
@@ -307,7 +319,9 @@ async function runBackgroundLocalBashCommand(input: {
   parentSession: LocalSessionRecord;
   taskId: string;
   command: string;
+  description: string;
   timeout?: number;
+  timing: LocalBashTiming;
   maxRunMs?: number;
   executionMode: 'explicit_background' | 'managed_foreground';
   toolCtx: LocalRuntimeToolContext;
@@ -329,6 +343,8 @@ async function runBackgroundLocalBashCommand(input: {
   const maxRunMs = capBackgroundBashMaxRunMs(
     input.maxRunMs ?? resolveBackgroundBashMaxRunMs(input.timeout),
   );
+  const timing = { ...input.timing };
+  input.onStartedDetails({ timing });
   let timedOut = false;
   const watchdog = setTimeout(() => {
     if (controller.signal.aborted) return;
@@ -336,7 +352,7 @@ async function runBackgroundLocalBashCommand(input: {
     controller.abort('TIMEOUT');
   }, maxRunMs);
   try {
-    const result = await input.executor.execute({
+    const executed = await input.executor.execute({
       identity: {
         operationClass: input.executionMode,
         invocationId: input.taskId,
@@ -357,9 +373,25 @@ async function runBackgroundLocalBashCommand(input: {
         });
       },
       onOutput: output.push,
-      onDetails: input.onStartedDetails,
+      onDetails: (details) => {
+        Object.assign(timing, details.timing);
+        input.onStartedDetails({ ...details, timing: { ...timing } });
+      },
     });
+    const result = {
+      ...executed,
+      details: {
+        ...executed.details,
+        description: input.description,
+        timing: { ...timing, ...(executed.details?.timing as object) },
+      },
+    };
+    const execution = readBashExecutionOutcome(result.details);
+    if (result.isError || (execution && execution.status !== 'succeeded')) {
+      return await settleFailedBackgroundBash(input, output, result, startedAt, timedOut, maxRunMs);
+    }
     const outputRef = await output.settleSuccess(result);
+    const completed = withTaskOutputReceipt(result, output, outputRef, input.taskId);
     const terminal = await settleBackgroundBashTask({
       host: input.host,
       output,
@@ -369,118 +401,44 @@ async function runBackgroundLocalBashCommand(input: {
       outputRef,
       lastError: undefined,
       metadata: {
-        ...(result.details ? { bashDetails: result.details } : {}),
+        bashDetails: completed.details,
         outputBytes: output.outputBytes,
       },
     });
     try {
-      await input.host.backgroundTaskService.finalizeOutput(input.taskId, result.text);
+      await input.host.backgroundTaskService.finalizeOutput(input.taskId, completed.text);
     } catch (error) {
       output.warn('finalize', error);
     }
     return {
       taskId: input.taskId,
       status: 'succeeded',
-      text: result.text,
-      ...(result.details ? { details: result.details } : {}),
+      text: completed.text,
+      details: completed.details,
       endedAt: terminal.endedAt,
       durationMs: terminal.durationMs,
       outputBytes: output.outputBytes,
     };
   } catch (error) {
-    const aborted = controller.signal.aborted;
-    // A maxRunMs abort is a governance timeout (failed), not a user cancel.
-    const status = timedOut ? 'failed' : aborted ? 'canceled' : 'failed';
-    const errorCode = timedOut ? 'TIMEOUT' : aborted ? 'BASH_CANCELED' : 'BASH_FAILED';
-    const errorText = timedOut
-      ? `Background bash timed out after ${maxRunMs}ms (exceeded maxRunMs): ${formatError(error)}`
-      : `Background bash ${aborted ? 'canceled' : 'failed'}: ${formatError(error)}`;
-    const terminalText = output.streamedOutput
-      ? `\n<bash_status>${errorText}</bash_status>\n`
-      : errorText;
-    const text = output.streamedOutput
-      ? `${output.streamedTextForError}${terminalText}`
-      : errorText;
-    const outputRef = await output.settleFailure(terminalText);
-    const lastError = timedOut
-      ? { message: `Background bash exceeded maxRunMs (${maxRunMs}ms)`, code: 'TIMEOUT' }
-      : normalizeTaskError(aborted ? controller.signal.reason : error, errorCode);
-    const terminal = await settleBackgroundBashTask({
-      host: input.host,
-      output,
-      taskId: input.taskId,
-      startedAt,
-      status,
-      outputRef,
-      lastError,
-      metadata: {
-        outputBytes: output.outputBytes,
-      },
-    });
-    return {
-      taskId: input.taskId,
-      status,
-      text,
-      isError: true,
-      endedAt: terminal.endedAt,
-      durationMs: terminal.durationMs,
-      outputBytes: output.outputBytes,
+    const failed = localBashResultFromError(error, controller.signal);
+    failed.details = {
+      ...failed.details,
+      description: input.description,
+      timing: { ...timing, ...(failed.details?.timing as object) },
     };
+    if (
+      output.streamedOutput &&
+      !readBashExecutionOutcome(
+        error && typeof error === 'object' && 'details' in error ? error.details : undefined,
+      )
+    ) {
+      failed.text = `${output.streamedTextForError}\n${failed.text}`;
+    }
+    return await settleFailedBackgroundBash(input, output, failed, startedAt, timedOut, maxRunMs);
   } finally {
     clearTimeout(watchdog);
     activeBackgroundBash.delete(input.taskId);
   }
-}
-
-async function settleBackgroundBashTask(input: {
-  host: LocalTaskRunnerHostWithSessionLookup;
-  output: BackgroundBashOutputWriter;
-  taskId: string;
-  startedAt: number;
-  status: LocalBackgroundBashCompletion['status'];
-  outputRef?: TaskOutputRef;
-  lastError: BackgroundTaskPatch['lastError'];
-  metadata: Record<string, unknown>;
-}): Promise<{ endedAt: number; durationMs: number }> {
-  const endedAt = input.host.nowMs();
-  const durationMs = Math.max(0, endedAt - input.startedAt);
-  const completion = await input.host.backgroundTaskService.patchIfNotTerminal(input.taskId, {
-    status: input.status,
-    endedAt,
-    ...(input.outputRef ? { outputRef: input.outputRef } : {}),
-    lastError: input.lastError,
-    metadata: {
-      ...input.metadata,
-      durationMs,
-      cacheTtlExceeded: durationMs >= 300_000,
-    },
-  });
-  if (!completion.patched && input.outputRef) {
-    try {
-      await patchTerminalBashOutput(input.host, input.taskId, input.outputRef);
-    } catch (error) {
-      input.output.warn('patch terminal', error);
-    }
-  }
-  return { endedAt, durationMs };
-}
-
-async function patchTerminalBashOutput(
-  host: LocalTaskRunnerHostWithSessionLookup,
-  taskId: string,
-  outputRef: TaskOutputRef,
-): Promise<void> {
-  const existing = await host.backgroundTaskService.get(taskId);
-  if (!existing) return;
-  await host.backgroundTaskService.patch(taskId, {
-    outputRef,
-    endedAt: existing.endedAt ?? host.nowMs(),
-  });
-}
-
-function commandHead(command: string): string {
-  const firstLine = command.trim().split(/\r?\n/, 1)[0] ?? '';
-  return firstLine.length <= 80 ? firstLine : `${firstLine.slice(0, 77)}...`;
 }
 
 function formatError(error: unknown): string {

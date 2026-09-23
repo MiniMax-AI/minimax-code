@@ -1,5 +1,9 @@
 import type { RuntimeTool, RuntimeToolSource } from '@mavis/agent-core/tools';
 import {
+  createLocalBashToolDefinition,
+  resolveLocalBashShell,
+} from '@mavis/agent-tools/desktop';
+import {
   filterCanonicalBuiltinMcpEntries,
   filterCanonicalNativeToolCeiling,
   createMcpInvokeTool,
@@ -22,6 +26,25 @@ import type {
   LocalAgentConfigurationSelection,
   LocalAgentExecutionProfile,
 } from '../preparation/contracts.js';
+
+export function prepareBashTurnTools(admittedTools: readonly RuntimeTool[], background: boolean) {
+  const hasNativeBash = admittedTools.some(
+    (tool) => tool.def.name === 'bash' && (tool.source === undefined || tool.source === 'builtin'),
+  );
+  const bashCapabilities = {
+    background,
+    shell: hasNativeBash ? resolveLocalBashShell() : ('unavailable' as const),
+  };
+  return admittedTools.map((tool) => {
+    if (tool.def.name !== 'bash' || (tool.source !== undefined && tool.source !== 'builtin'))
+      return tool;
+    const definition = createLocalBashToolDefinition(bashCapabilities);
+    return {
+      ...tool,
+      def: { ...tool.def, schema: definition.schema, description: definition.description },
+    };
+  });
+}
 
 export interface LocalTurnRawToolSources {
   readonly nativeTools: readonly RuntimeTool[];
