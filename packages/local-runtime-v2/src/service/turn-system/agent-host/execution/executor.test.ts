@@ -820,6 +820,54 @@ describe("LocalRuntimeTurnExecutor Plugin prompt admission", () => {
 });
 
 describe("LocalRuntimeTurnExecutor Bash output capability", () => {
+  it.each([true, false])(
+    "bounds Bash receipt purpose text (run_in_background=%s)",
+    async (runInBackground) => {
+      const startBackground = vi.fn(async (_ctx: unknown, _input: unknown) => ({
+        status: "started" as const,
+        taskId: "receipt-task",
+      }));
+      const runManagedForeground = vi.fn(async (_ctx: unknown, _input: unknown) => ({
+        status: "auto_promoted" as const,
+        taskId: "receipt-task",
+      }));
+      const tool = new LocalBashTool(
+        "/tmp/workspace",
+        { startBackground, runManagedForeground },
+        { mode: "off" },
+      );
+      const command = "echo " + "x".repeat(100_000);
+      for (const description of [undefined, "说明🙂".repeat(20_000), "Inspect workspace"]) {
+        const result = await tool.execute(
+          {
+            sessionId: "session-1",
+            turnId: "turn-1",
+            canConsumeBackgroundBashOutput: true,
+          },
+          { command, description, timeout: 600, run_in_background: runInBackground },
+        );
+        expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(24 * 1024);
+        expect(result.text).not.toContain("\uFFFD");
+        for (const retained of [
+          'task_id="receipt-task"', "Command limit: 600s", "task_output", "task_stop",
+        ]) {
+          expect(result.text).toContain(retained);
+        }
+        expect(result.text).toContain(
+          description === "Inspect workspace"
+            ? "Purpose: Inspect workspace\n"
+            : "[purpose truncated]",
+        );
+        expect(result.content).toEqual([{ type: "text", text: result.text }]);
+        expect(result.details?.description).toBe(description ?? command);
+        const adapter = runInBackground ? startBackground : runManagedForeground;
+        expect(adapter.mock.lastCall?.[1]).toMatchObject({
+          command, description: description ?? command,
+        });
+      }
+    },
+  );
+
   it.each([
     {
       name: "custom bash-only selector",

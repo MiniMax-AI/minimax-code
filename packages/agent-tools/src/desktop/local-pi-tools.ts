@@ -712,7 +712,12 @@ function backgroundBashToolResult(
       ? ` Command limit: ${timing.commandTimeoutSeconds}s total; yielding does not reset it.`
       : '';
   const purpose =
-    typeof details.description === 'string' ? `Purpose: ${details.description}\n` : '';
+    typeof details.description === 'string'
+      ? `Purpose: ${limitDesktopHeadTailLines(details.description, {
+          maxBytes: 1024,
+          notice: () => '[purpose truncated]',
+        }).text}\n`
+      : '';
   const text = `<bash_background task_id="${taskId}">\n${purpose}${lead}${timingText} The owning conversation will automatically resume when it finishes; use task_output to inspect incremental output, and task_stop to cancel if that tool is available.\n</bash_background>`;
   return {
     tool_name: LocalBashToolDef.name,
