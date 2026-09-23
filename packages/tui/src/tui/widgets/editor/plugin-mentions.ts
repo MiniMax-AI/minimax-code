@@ -93,3 +93,42 @@ export function transformPluginMentions(
     return [{ ...mention, start: mention.start + delta, end: mention.end + delta }];
   });
 }
+
+/** External edits can change several ranges at once; only relocate unambiguous labels. */
+export function transformExternalPluginMentions(
+  previous: string,
+  next: string,
+  mentions: readonly EditorPluginMention[],
+): EditorPluginMention[] {
+  const positions = new Map<string, { before: number[]; after: number[] }>();
+  const occurrences = (text: string, label: string): number[] => {
+    const result: number[] = [];
+    for (
+      let start = text.indexOf(label);
+      start >= 0;
+      start = text.indexOf(label, start + label.length)
+    ) {
+      result.push(start);
+    }
+    return result;
+  };
+  return mentions
+    .flatMap((mention) => {
+      let matches = positions.get(mention.label);
+      if (!matches) {
+        matches = {
+          before: occurrences(previous, mention.label),
+          after: occurrences(next, mention.label),
+        };
+        positions.set(mention.label, matches);
+      }
+      // Inserting/removing a duplicate visible label makes its source identity ambiguous.
+      if (matches.before.length !== matches.after.length) return [];
+      if (matches.before.length === 1) {
+        const start = matches.after[0]!;
+        return [{ ...mention, start, end: start + mention.label.length }];
+      }
+      return transformPluginMentions(previous, next, [mention]);
+    })
+    .sort((a, b) => a.start - b.start);
+}

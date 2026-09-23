@@ -141,7 +141,8 @@ selected independently. Choose a plugin with Tab or Enter, then describe the tas
 The Composer shows `@Name` and retains the plugin identity through editing, undo,
 prompt history, queued-message recovery, saved drafts, and `/edit` after a
 message is sent. Ctrl+C clearing/restoration and external-editor edits retain
-unchanged plugin bindings. Displayed messages remain readable; Runtime retains
+unchanged plugin bindings. If external edits make duplicate labels ambiguous,
+reselect those plugins in the Composer. Displayed messages remain readable; Runtime retains
 the original input separately when needed to recover the plugin identity for editing.
 
 Selection applies to that message. Runtime checks the plugin's effective Skills,

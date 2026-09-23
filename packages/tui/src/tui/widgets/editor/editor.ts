@@ -2,6 +2,7 @@ import {
   decodePluginMentions,
   encodePluginMentions,
   transformPluginMentions,
+  transformExternalPluginMentions,
   validPluginMentions,
   type EditorPluginMention,
 } from './plugin-mentions.js';
@@ -461,7 +462,7 @@ export class Editor implements Component, Focusable {
       expandDraftPastes(encodePluginMentions(draft.text, this.pluginMentions), draft.pastes),
     );
     const normalized = text.replace(/\r\n?/gu, '\n');
-    const mentions = transformPluginMentions(previous.text, normalized, previous.mentions);
+    const mentions = transformExternalPluginMentions(previous.text, normalized, previous.mentions);
     this.setText(encodePluginMentions(normalized, mentions));
   }
 

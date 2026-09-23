@@ -474,6 +474,35 @@ describe('Plugin mention review regressions', () => {
     },
   );
 
+  it('retains an unchanged plugin across multiple external edits without guessing duplicate identities', async () => {
+    const editor = createEditor();
+    editor.setText('[@My Notes](plugin://notes%40local) summarize');
+    const flow = new TuiExternalEditorFlow({
+      editor,
+      tui: { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() },
+      workspaceDir: '/workspace',
+      configuredCommand: 'synthetic-editor',
+      editDraft: async ({ draft }) => 'Please ' + draft + ' tomorrow',
+      isAppStopped: () => false,
+      append: vi.fn(),
+      setHint: vi.fn(),
+      onChanged: vi.fn(),
+    });
+    await flow.open();
+    expect(submittedEditorTransport(editor.captureDraft())).toBe(
+      'Please [@My Notes](plugin://notes%40local) summarize tomorrow',
+    );
+    editor.setText(
+      '[@My Notes](plugin://notes%40local) and [@My Notes](plugin://notes%40official)',
+    );
+    editor.replaceTextUndoable('@My Notes and @My Notes tomorrow');
+    expect(submittedEditorTransport(editor.captureDraft())).toBe(
+      '[@My Notes](plugin://notes%40local) and [@My Notes](plugin://notes%40official) tomorrow',
+    );
+    editor.replaceTextUndoable('@My Notes tomorrow');
+    expect(editor.captureDraft().pluginMentions).toEqual([]);
+  });
+
   it.each(['ordinary', 'batch', 'steering'] as const)(
     'preserves %s display-message identity through storage, projection and /edit',
     async (mode) => {
