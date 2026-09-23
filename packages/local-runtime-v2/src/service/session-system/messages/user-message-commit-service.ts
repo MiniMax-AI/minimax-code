@@ -47,6 +47,8 @@ export interface CommitUserMessageInput {
   /** Pre-generated identity shared by Queue, Display and canonical history. */
   readonly userMessageId?: UserMessageId;
   readonly content?: string;
+  /** Canonical input retained when readable display text hides explicit plugin identities. */
+  readonly editContent?: string;
   /** Display classification independent from Turn/query identity. */
   readonly kind?: string;
   /** Query sidecar identity; absent only for legacy or non-query user Messages. */
@@ -118,6 +120,7 @@ export class UserMessageCommitService {
         msg_id: messageId,
         role: 'user',
         msg_content: input.content ?? '',
+        ...(input.editContent !== undefined ? { editContent: input.editContent } : {}),
         msg_type: 1,
         timestamp: input.timestamp ?? this.nowMs(),
         kind: input.kind,

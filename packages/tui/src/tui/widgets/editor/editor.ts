@@ -455,7 +455,14 @@ export class Editor implements Component, Focusable {
   }
 
   replaceTextUndoable(text: string): void {
-    this.setText(text);
+    // External editors edit expanded visible text, while setText loads a new draft.
+    const draft = this.captureDraft();
+    const previous = decodePluginMentions(
+      expandDraftPastes(encodePluginMentions(draft.text, this.pluginMentions), draft.pastes),
+    );
+    const normalized = text.replace(/\r\n?/gu, '\n');
+    const mentions = transformPluginMentions(previous.text, normalized, previous.mentions);
+    this.setText(encodePluginMentions(normalized, mentions));
   }
 
   invalidate(): void {

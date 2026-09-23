@@ -139,7 +139,10 @@ Type `@` in the Composer to search files and installed, enabled plugins. Plugin
 candidates show their source so packages with the same display name can be
 selected independently. Choose a plugin with Tab or Enter, then describe the task.
 The Composer shows `@Name` and retains the plugin identity through editing, undo,
-prompt history, queued-message recovery, and saved drafts.
+prompt history, queued-message recovery, saved drafts, and `/edit` after a
+message is sent. Ctrl+C clearing/restoration and external-editor edits retain
+unchanged plugin bindings. Displayed messages remain readable; Runtime retains
+the original input separately when needed to recover the plugin identity for editing.
 
 Selection applies to that message. Runtime checks the plugin's effective Skills,
 MCP tools, and App tools again for the turn and asks the Agent to prefer relevant

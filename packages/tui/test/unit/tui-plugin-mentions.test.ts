@@ -1,3 +1,14 @@
+import { TuiInputFlow } from '../../src/tui/controller/interaction/input-flow.js';
+import { TuiExternalEditorFlow } from '../../src/tui/controller/interaction/external-editor-flow.js';
+import { TuiSessionMutationFlow } from '../../src/tui/controller/product/session-mutation-flow.js';
+import { UserMessageTurnDeliveryService } from '../../../local-runtime-v2/src/application/conversation/user-message-turn-delivery.js';
+import { UserMessageCommitService } from '../../../local-runtime-v2/src/service/session-system/messages/user-message-commit-service.js';
+import {
+  normalizeDisplayMessage,
+  decodeDisplayMessage,
+} from '../../../local-runtime-v2/src/service/session-system/messages/repo/codec.js';
+import { toSessionMessageView } from '../../../local-runtime-v2/src/application/session/content-application.js';
+import { normalizeTuiMessage } from '../../src/runtime/stream-events.js';
 import { TuiHistorySearchPanel } from '../../src/tui/features/history/search-panel.js';
 import { TuiQueueFlow } from '../../src/tui/controller/run/queue-flow.js';
 import { TuiRunProjection } from '../../src/tui/state/run-projection.js';
@@ -381,6 +392,188 @@ describe('Plugin mentions from Composer to durable text', () => {
       expect(restored?.content).toBe('@My Notes summarize tomorrow');
       expect(submittedEditorTransport(restored!.editor)).toBe(
         '[@My Notes](plugin://notes%40local) summarize tomorrow',
+      );
+    },
+  );
+});
+
+describe('Plugin mention review regressions', () => {
+  it('clears and restores the actual editor binding with Ctrl+C and Ctrl+-', () => {
+    const editor = createEditor();
+    editor.setText('[@My Notes](plugin://notes%40local) summarize');
+    const flow = new TuiInputFlow({
+      editor,
+      tui: { requestRender: vi.fn() },
+      interaction: { isActive: () => false },
+      liveRunId: () => undefined,
+      hasWaitingMessage: () => false,
+      featureFlow: { isFeatureScreenActive: () => false },
+      composerDraft: {
+        abortClipboardRead: () => false,
+        stashForClear: vi.fn(),
+        hasContent: () => false,
+        restoreClearedDraft: vi.fn(),
+      },
+      setHint: vi.fn(),
+      onChanged: vi.fn(),
+      workspaceDir: '/workspace',
+    } as never);
+    flow.handle('\x03');
+    expect(editor.getText()).toBe('');
+    expect(editor.captureDraft().pluginMentions).toEqual([]);
+    flow.handle('\x1f');
+    expect(submittedEditorTransport(editor.captureDraft())).toBe(
+      '[@My Notes](plugin://notes%40local) summarize',
+    );
+  });
+
+  it.each([false, true])(
+    'keeps external edits and undo bound, including expanded paste: %s',
+    async (withPaste) => {
+      const editor = createEditor();
+      editor.setText('[@My Notes](plugin://notes%40local) summarize');
+      if (withPaste) {
+        const draft = editor.captureDraft();
+        const prefix = '[paste #1] ';
+        editor.restoreDraft({
+          ...draft,
+          text: prefix + draft.text,
+          cursor: prefix.length + draft.text.length,
+          pastes: [{ id: 1, content: 'Expanded text before plugin' }],
+          pasteCounter: 1,
+          pluginMentions: draft.pluginMentions!.map((mention) => ({
+            ...mention,
+            start: mention.start + prefix.length,
+            end: mention.end + prefix.length,
+          })),
+        });
+      }
+      const before = editor.captureDraft();
+      const transport = submittedEditorTransport(before);
+      let rename = false;
+      const flow = new TuiExternalEditorFlow({
+        editor,
+        tui: { start: vi.fn(), stop: vi.fn(), requestRender: vi.fn() },
+        workspaceDir: '/workspace',
+        configuredCommand: 'synthetic-editor',
+        editDraft: async ({ draft }) =>
+          rename ? draft.replace('@My Notes', '@Other Notes') : draft + ' tomorrow',
+        isAppStopped: () => false,
+        append: vi.fn(),
+        setHint: vi.fn(),
+        onChanged: vi.fn(),
+      });
+      await flow.open();
+      expect(submittedEditorTransport(editor.captureDraft())).toBe(transport + ' tomorrow');
+      editor.handleInput('\x1f');
+      expect(editor.captureDraft()).toEqual(before);
+      rename = true;
+      await flow.open();
+      expect(editor.captureDraft().pluginMentions).toEqual([]);
+      expect(submittedEditorTransport(editor.captureDraft())).toBeUndefined();
+    },
+  );
+
+  it.each(['ordinary', 'batch', 'steering'] as const)(
+    'preserves %s display-message identity through storage, projection and /edit',
+    async (mode) => {
+      const canonical =
+        '<user-provided-context>synthetic context</user-provided-context>\n\n[@My Notes](plugin://notes%40local) summarize';
+      const display = '@My Notes summarize';
+      let stored: ReturnType<typeof decodeDisplayMessage> | undefined;
+      const commits = new UserMessageCommitService({
+        makeMessageId: () => 'u1',
+        messages: {
+          commitUserMessage: async (input) => {
+            const row = normalizeDisplayMessage(input.message, {
+              turnId: input.turnId,
+              nowMs: () => 1,
+            });
+            stored = decodeDisplayMessage({
+              sessionId: input.sessionId,
+              messageId: row.msgId,
+              dataJson: row.dataJson,
+              source: null,
+              sourceContextJson: null,
+            } as never);
+            return { message: stored, created: true, firstUserMessageForSession: true };
+          },
+        },
+      });
+      const delivery = new UserMessageTurnDeliveryService({
+        messages: commits,
+        stream: { write: vi.fn() },
+        queryCollapse: {
+          resolveQueryKey: async () => 'q1',
+          start: async () => {
+            throw new Error('Synthetic unavailable sidecar');
+          },
+        },
+      });
+      const message = { content: canonical, attachments: [], displayContent: display };
+      if (mode === 'steering') {
+        await delivery.consumeSteering({
+          sessionId: 's1',
+          turnId: 't1',
+          message: {
+            producerId: 'cli',
+            idempotencyKey: 'fixture',
+            provenance: { source: 'cli' },
+            message: { text: canonical, attachments: [] },
+            delivery: { displayContent: display },
+          },
+        } as never);
+      } else {
+        await delivery.deliver({
+          sessionId: 's1',
+          input: { text: canonical, attachments: [] },
+          provenance: { source: 'cli' },
+          displayContent: display,
+          requestedTurnId: 't1',
+          submit: async () => ({ accepted: true, turnId: 't1' }),
+          ...(mode === 'batch'
+            ? {
+                immediateSendBatch: {
+                  members: [
+                    { message, messageKey: 'batch-1', createdAt: 1, provenance: { source: 'cli' } },
+                  ],
+                },
+              }
+            : {}),
+        } as never);
+      }
+      expect(stored?.msg_content).toBe(display);
+      expect(stored?.editContent).toBe(canonical);
+      const reloaded = normalizeTuiMessage(toSessionMessageView(stored!));
+      expect(reloaded.content).toBe(display);
+      expect(reloaded.editContent).toBe(canonical);
+      const editor = createEditor();
+      const editSessionMessage = vi.fn(async () => ({}));
+      const flow = new TuiSessionMutationFlow({
+        editor,
+        controller: {
+          snapshot: () => ({ session: { sessionId: 's1' } }),
+          getTerminalDurationId: () => undefined,
+          dismissTerminalDuration: vi.fn(),
+        },
+        runtime: {
+          listSessionInputSummaries: async () => [{ userMessageId: 'u1', timestamp: 1 }],
+          listMessagePage: async () => ({ messages: [reloaded], hasMore: false }),
+          editSessionMessage,
+        },
+        surfaceHost: { setChatFocus: vi.fn() },
+        setHint: vi.fn(),
+        append: vi.fn(),
+        onChanged: vi.fn(),
+        hasLiveRun: () => false,
+      } as never);
+      flow.startEdit();
+      await vi.waitFor(() => expect(flow.isEditing()).toBe(true));
+      expect(editor.getText()).toBe(display);
+      editor.handleInput(' tomorrow');
+      await flow.submitEdit(editor.getText(), [], editor.captureDraft());
+      expect(editSessionMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ content: canonical + ' tomorrow' }),
       );
     },
   );

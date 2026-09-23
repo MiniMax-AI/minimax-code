@@ -2,6 +2,8 @@ import type { AppDb } from '../../../../infra/db/client.js';
 
 export interface DisplayMessageRecord extends Record<string, unknown> {
   readonly msg_id?: string;
+  /** Canonical user input preserved when display text hides plugin identities. */
+  readonly editContent?: string;
   /** Stable canonical identity of this completed assistant message, when known. */
   readonly canonical_message_id?: string;
   readonly role?: string;

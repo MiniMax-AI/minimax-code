@@ -481,6 +481,7 @@ export function toSessionMessageView(
   );
   return {
     msgId: maybeString(firstDefined([message.msgId, message.msg_id])) ?? "",
+    ...(typeof message.editContent === "string" ? { editContent: message.editContent } : {}),
     parentMsgId: maybeString(
       firstDefined([message.parentMsgId, message.parent_msg_id]),
     ),

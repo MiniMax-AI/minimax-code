@@ -506,6 +506,7 @@ export class TuiInputFlow {
       this.options.editor.restoreDraft({
         ...this.clearedEditorDraft,
         text: '',
+        pluginMentions: [],
         cursor: 0,
         pastes: [],
         attachmentPlaceholders: [],

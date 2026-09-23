@@ -418,7 +418,10 @@ export class TuiSessionMutationFlow {
     }
     const boundContent = draft ? submittedEditorTransport(draft) ?? content : content;
     const transportContent =
-      rebuildSessionMutationTransport(invocation.targetMessage?.content, boundContent) ?? boundContent;
+      rebuildSessionMutationTransport(
+        invocation.targetMessage?.editContent ?? invocation.targetMessage?.content,
+        boundContent,
+      ) ?? boundContent;
     if (invocation.phase === 'resubmit') {
       this.invocations.set(invocation.sequence, { ...invocation, phase: 'resubmitting' });
       this.options.setHint(sessionMutationText('sessionMutation.hint.editSubmitting'));
@@ -660,7 +663,9 @@ export class TuiSessionMutationFlow {
     this.closeHistoryScreen();
     this.options.setEditTranscriptBoundary?.(targetMessage.id);
     this.invocations.set(sequence, { ...invocation, targetMessage, phase: 'editing' });
-    const content = visibleSessionMutationContent(targetMessage.content);
+    const content = visibleSessionMutationContent(
+      targetMessage.editContent ?? targetMessage.content,
+    );
     const placeholders = this.editAttachmentEntries();
     if (placeholders.length > 0) this.options.editor.restoreMessageDraft(content, placeholders);
     else this.options.editor.setText(content);

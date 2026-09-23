@@ -44,6 +44,7 @@ export type TuiMessagePart =
     };
 
 export interface TuiMessage {
+  editContent?: string;
   id?: string;
   turnId?: string;
   role: TuiMessageRole;
@@ -333,6 +334,7 @@ function normalizeMessage(message: Record<string, unknown>, fallbackTurnId?: str
     tokensBefore: readNumber(message, ['tokensBefore', 'tokens_before']),
     tokensAfter: readNumber(message, ['tokensAfter', 'tokens_after']),
     content: readString(message, ['msg_content', 'msgContent', 'content']),
+    editContent: readString(message, ['editContent']),
     thinking: readString(message, ['thinking_content', 'thinkingContent', 'thinking']),
     thinkingDurationMs: readNumber(message, ['thinking_duration_ms', 'thinkingDurationMs']),
     toolCalls: normalizeToolCalls(readArray(message, ['tool_calls', 'toolCalls'])),
