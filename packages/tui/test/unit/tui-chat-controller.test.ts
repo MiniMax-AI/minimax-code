@@ -2745,6 +2745,49 @@ describe('TuiChatController', () => {
     );
   });
 
+  it.each([false, true])(
+    'rebuilds todos from rewound history with earlier todos=%s',
+    async (keepEarlier) => {
+      const onTodoChange = vi.fn();
+      const earlierTodo = { content: 'Earlier task', status: 'pending' };
+      const getMessages = vi.fn(async () =>
+        keepEarlier
+          ? [
+              {
+                id: 'earlier-todo',
+                turnId: 'earlier-turn',
+                role: 'system' as const,
+                content: JSON.stringify({ eventType: 'todo_updated', todos: [earlierTodo] }),
+              },
+            ]
+          : [],
+      );
+      const controller = new ProductionTuiChatController({
+        runtime: {
+          getSession: vi.fn(async () => ({ sessionId: 'rewound-session' })),
+          getMessages,
+        } as never,
+        transcript: new TranscriptStore(),
+        workspaceDir: '/workspace',
+        onTodoChange,
+      });
+      await controller.loadSessionProjection('rewound-session');
+      controller.applyRuntimeTurnEvent('discarded-turn', {
+        type: 'generic',
+        eventType: 'todo_updated',
+        turnId: 'discarded-turn',
+        data: { todos: [{ content: 'Discarded task', status: 'in_progress' }] },
+      });
+      expect(onTodoChange).toHaveBeenLastCalledWith([
+        { content: 'Discarded task', status: 'in_progress' },
+      ]);
+
+      await controller.reconcileOwnerHistory(true);
+
+      expect(onTodoChange).toHaveBeenLastCalledWith(keepEarlier ? [earlierTodo] : []);
+    },
+  );
+
   it('clears input-adjacent tasks when starting a new session', () => {
     const onTodoChange = vi.fn();
     const controller = new ProductionTuiChatController({

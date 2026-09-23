@@ -281,7 +281,13 @@ export class TuiCommandFlow {
         }
       : options;
     const command = input.trim();
-    if (this.options.sessionMutationFlow?.isEditing?.()) {
+    // Local commands remain commands while editing a historical message.
+    // Skills and explicit message submissions still belong to the edited prompt.
+    const localCommand = !submitOptions.forceMessage && this.catalog.resolve(command);
+    if (
+      this.options.sessionMutationFlow?.isEditing?.() &&
+      (!localCommand || localCommand.invocationKind === 'skill')
+    ) {
       const editDisposition = await this.options.sessionMutationFlow.submitEdit(
         input,
         seed?.resources.attachments,

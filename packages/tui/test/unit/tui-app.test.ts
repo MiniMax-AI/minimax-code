@@ -3557,6 +3557,93 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it.each(["rewind", "edit"] as const)(
+    "removes discarded todos after /history %s",
+    async (action) => {
+      const terminal = new FakeTerminal();
+      const runtime = createRuntime();
+      vi.mocked(runtime.listSessionInputSummaries).mockResolvedValue([
+        { userMessageId: "before-todo", timestamp: 1, fileChangeCount: 0 },
+      ]);
+      vi.mocked(runtime.listMessagePage).mockResolvedValue({
+        messages: [{ id: "before-todo", role: "user", content: "Original prompt" }],
+        hasMore: false,
+      });
+      const app = createTuiApp({ runtime, terminal, version: "0.1.0", workspaceDir: "/workspace" });
+      app.start();
+      try {
+        await app.ready;
+        await app.submit("Seed todo session");
+        app.controller.applyRuntimeTurnEvent("discarded-turn", {
+          type: "generic",
+          eventType: "todo_updated",
+          turnId: "discarded-turn",
+          data: { todos: [{ content: "Discarded todo", status: "in_progress" }] },
+        });
+        expect(stripAnsi(app.tui.render(100).join("\n"))).toContain("Discarded todo");
+        await app.submit("/history");
+        await vi.waitFor(() =>
+          expect(app.surfaceHost.getActiveSurface().id).toBe("session-history:explorer"),
+        );
+        terminal.input?.("\r");
+        terminal.input?.("\x1b[B");
+        if (action === "rewind") terminal.input?.("\x1b[B");
+        terminal.input?.("\r");
+        await vi.waitFor(() =>
+          expect(app.surfaceHost.getActiveSurface().id).toBe(
+            action === "rewind"
+              ? "session-mutation:rewind-confirm"
+              : "session-mutation:rewind-preview",
+          ),
+        );
+        terminal.input?.("\r");
+        if (action === "edit") {
+          await vi.waitFor(() => expect(app.editor.getText()).toBe("Original prompt"));
+          await app.submit("Revised prompt");
+          expect(runtime.editSessionMessage).toHaveBeenCalledOnce();
+        } else {
+          await vi.waitFor(() => expect(runtime.rewindSession).toHaveBeenCalledOnce());
+        }
+        await vi.waitFor(() => expect(app.surfaceHost.getActiveSurface().kind).toBe("chat"));
+        expect(stripAnsi(app.tui.render(100).join("\n"))).not.toContain("Discarded todo");
+      } finally {
+        await app.stop();
+      }
+    },
+  );
+
+  it.each([false, true])("handles exact /rewind locally while editing=%s", async (editing) => {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    vi.mocked(runtime.listSessionInputSummaries).mockResolvedValue([
+      { userMessageId: "before-todo", timestamp: 1, fileChangeCount: 0 },
+    ]);
+    vi.mocked(runtime.listMessagePage).mockResolvedValue({
+      messages: [{ id: "before-todo", role: "user", content: "Original prompt" }],
+      hasMore: false,
+    });
+    const app = createTuiApp({ runtime, terminal, version: "0.1.0", workspaceDir: "/workspace" });
+    app.start();
+    try {
+      await app.ready;
+      await app.submit("Seed session");
+      if (editing) {
+        await app.submit("/edit");
+        await vi.waitFor(() => expect(app.editor.getText()).toBe("Original prompt"));
+      }
+      const sends = vi.mocked(runtime.sendMessage).mock.calls.length;
+      app.editor.setText("/rewind");
+      app.editor.handleInput("\r");
+      await vi.waitFor(() =>
+        expect(app.surfaceHost.getActiveSurface().id).toBe("session-mutation:history"),
+      );
+      expect(runtime.editSessionMessage).not.toHaveBeenCalled();
+      expect(runtime.sendMessage).toHaveBeenCalledTimes(sends);
+    } finally {
+      await app.stop();
+    }
+  });
+
   it("uses Ctrl+T for tasks while Ctrl+O remains scoped to transcript details", async () => {
     const terminal = new FakeTerminal();
     const app = createTuiApp({

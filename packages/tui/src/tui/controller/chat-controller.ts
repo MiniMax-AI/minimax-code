@@ -254,6 +254,7 @@ export class TuiChatController {
         getMessages(current.sessionId),
       ]);
       if (projectionSequence !== this.sessionProjectionSequence) return;
+      this.turnProjection.clearTodos();
       this.transcript.replaceDurableProjection(() => this.turnProjection.hydrateHistory(messages));
       this.durableMessageAnchor = latestHistoryMessageId(messages);
       if (projectionSequence !== this.sessionProjectionSequence) return;
