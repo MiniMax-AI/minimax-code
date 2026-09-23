@@ -446,6 +446,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   ): Promise<boolean> {
     return this.productAccess.selectSessionModel(model, sessionId);
   }
+  setModelFavorite(model: TuiModelSelection, favorite: boolean): Promise<boolean> {
+    return this.productAccess.setModelFavorite(model, favorite);
+  }
   listUserModelProviders() {
     return this.productAccess.listUserModelProviders();
   }

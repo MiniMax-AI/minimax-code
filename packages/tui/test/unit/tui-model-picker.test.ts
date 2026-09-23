@@ -971,3 +971,148 @@ describe("TuiModelPicker", () => {
     );
   });
 });
+
+describe("TuiModelPicker favorites", () => {
+  const CTRL_S = "\x13";
+  const DOWN = "\x1b[B";
+  const catalog = () => [
+    { providerId: "minimax", providerName: "MiniMax", modelId: "MiniMax-M3" },
+    { providerId: "minimax", providerName: "MiniMax", modelId: "MiniMax-M2.7" },
+    {
+      providerId: "deepseek",
+      providerName: "DeepSeek",
+      modelId: "deepseek-v4-pro",
+      favorite: true,
+      favoriteOrder: 1,
+    },
+    {
+      providerId: "kimi",
+      providerName: "Kimi",
+      modelId: "kimi-k3",
+      favorite: true,
+      favoriteOrder: 0,
+      selected: true,
+    },
+  ];
+  const lines = (picker: TuiModelPicker) =>
+    stripAnsi(picker.render(110).join("\n")).split("\n");
+  const indexOf = (rendered: string[], text: string) =>
+    rendered.findIndex((line) => line.includes(text));
+
+  it("lists favorites first in added order and keeps a star on their provider rows", () => {
+    const onSelect = vi.fn();
+    const picker = new TuiModelPicker(catalog(), onSelect, vi.fn(), {
+      onToggleFavorite: vi.fn(async () => true),
+    });
+    const rendered = lines(picker);
+    const favorites = indexOf(rendered, "★ Favorites · 2");
+    expect(favorites).toBeGreaterThanOrEqual(0);
+    expect(favorites).toBeLessThan(indexOf(rendered, "MiniMax · 2"));
+    const kimi = indexOf(rendered, "● kimi-k3");
+    const deepseek = indexOf(rendered, "deepseek-v4-pro");
+    expect(kimi).toBeGreaterThan(favorites);
+    expect(deepseek).toBeGreaterThan(kimi);
+    expect(rendered.join("\n")).toContain("● ★ kimi-k3");
+    expect(rendered.join("\n")).toContain("★ deepseek-v4-pro");
+    expect(rendered.join("\n")).toContain("ctrl+s unfavorite");
+
+    // The selected model is focused on its Favorites row and applies as itself.
+    const focused = rendered.findIndex((line) => line.includes("› "));
+    expect(focused).toBe(kimi);
+    expect(focused).toBeLessThan(indexOf(rendered, "MiniMax · 2"));
+    picker.handleInput("\r");
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "kimi", modelId: "kimi-k3" }),
+    );
+  });
+
+  it("appends a new favorite last and unstars from the group without losing focus", async () => {
+    const onToggleFavorite = vi.fn(async () => true);
+    const onSelect = vi.fn();
+    const picker = new TuiModelPicker(catalog(), onSelect, vi.fn(), { onToggleFavorite });
+
+    picker.handleInput("M2.7");
+    expect(lines(picker).join("\n")).toContain("ctrl+s favorite");
+    picker.handleInput(CTRL_S);
+    expect(onToggleFavorite).toHaveBeenLastCalledWith(
+      expect.objectContaining({ modelId: "MiniMax-M2.7" }),
+      true,
+    );
+    expect(lines(picker).join("\n")).toContain("Search: M2.7");
+    for (let index = 0; index < 4; index += 1) picker.handleInput("\x7f");
+
+    let rendered = lines(picker);
+    expect(rendered.join("\n")).toContain("★ Favorites · 3");
+    const group = rendered.slice(indexOf(rendered, "★ Favorites · 3"), indexOf(rendered, "MiniMax · 2"));
+    expect(group.findIndex((line) => line.includes("MiniMax-M2.7"))).toBeGreaterThan(
+      group.findIndex((line) => line.includes("deepseek-v4-pro")),
+    );
+
+    // Focus starts on the selected model's Favorites row; move to deepseek and unstar.
+    picker.handleInput(DOWN);
+    picker.handleInput(CTRL_S);
+    await Promise.resolve();
+    expect(onToggleFavorite).toHaveBeenLastCalledWith(
+      expect.objectContaining({ modelId: "deepseek-v4-pro" }),
+      false,
+    );
+    rendered = lines(picker);
+    expect(rendered.join("\n")).toContain("★ Favorites · 2");
+    expect(rendered.join("\n")).not.toContain("★ deepseek-v4-pro");
+    picker.handleInput("\r");
+    expect(onSelect).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providerId: "deepseek", modelId: "deepseek-v4-pro" }),
+    );
+  });
+
+  it("filters the Favorites group with the search query", () => {
+    const picker = new TuiModelPicker(catalog(), vi.fn(), vi.fn(), {
+      onToggleFavorite: vi.fn(),
+    });
+    picker.handleInput("deepseek");
+    const rendered = lines(picker).join("\n");
+    expect(rendered).toContain("★ Favorites · 1");
+    expect(rendered).not.toContain("kimi-k3");
+  });
+
+  it("rolls back and explains a failed save without throwing", async () => {
+    const requestRender = vi.fn();
+    const outcomes: Array<() => Promise<boolean>> = [
+      async () => false,
+      async () => {
+        throw new Error("disk full");
+      },
+    ];
+    const onToggleFavorite = vi.fn(() => outcomes.shift()!());
+    const picker = new TuiModelPicker(catalog(), vi.fn(), vi.fn(), {
+      onToggleFavorite,
+      requestRender,
+    });
+
+    picker.handleInput(CTRL_S); // unstar kimi → resolves false
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let rendered = lines(picker).join("\n");
+    expect(rendered).toContain("★ Favorites · 2");
+    expect(rendered).toContain("Couldn't update favorites.");
+
+    picker.handleInput("M3");
+    picker.handleInput(CTRL_S); // star MiniMax-M3 → rejects
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    rendered = lines(picker).join("\n");
+    expect(rendered).not.toContain("★ MiniMax-M3");
+    expect(rendered).toContain("Couldn't update favorites.");
+    for (let index = 0; index < 2; index += 1) picker.handleInput("\x7f");
+    // The rolled-back unstar keeps kimi first, ahead of deepseek.
+    rendered = lines(picker).join("\n");
+    expect(rendered.indexOf("kimi-k3")).toBeLessThan(rendered.indexOf("deepseek-v4-pro"));
+  });
+
+  it("hides the toggle when favorites are unavailable and keeps ctrl+s out of search", () => {
+    const picker = new TuiModelPicker(catalog(), vi.fn(), vi.fn());
+    picker.handleInput(CTRL_S);
+    const rendered = lines(picker).join("\n");
+    expect(rendered).not.toContain("ctrl+s");
+    expect(rendered).toContain("★ Favorites · 2");
+    expect(rendered).not.toMatch(/Search: \S/u);
+  });
+});

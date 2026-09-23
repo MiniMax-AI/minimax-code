@@ -721,6 +721,16 @@ export class TuiFeatureFlow {
           this.closeModelPicker();
           void this.showProviderOnboarding();
         },
+        ...(this.options.runtime.setModelFavorite
+          ? {
+              // The picker updates the row first and rolls back on failure.
+              onToggleFavorite: (model: TuiModel, favorite: boolean) =>
+                this.options.runtime.setModelFavorite?.(
+                  { providerId: model.providerId, modelId: model.modelId },
+                  favorite,
+                ) ?? false,
+            }
+          : {}),
         onDeleteProvider: async (providerId) => {
           if (
             this.modelPicker !== picker ||

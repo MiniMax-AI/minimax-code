@@ -109,6 +109,17 @@ export class TuiProductAccess {
     return this.selectSessionModel(model, sessionId);
   }
 
+  setModelFavorite(
+    model: TuiModelSelection,
+    favorite: boolean,
+  ): Promise<boolean> {
+    return this.context.service("model.favorite").setModelFavorite({
+      providerId: model.providerId,
+      modelId: model.modelId,
+      favorite,
+    });
+  }
+
   selectSessionModel(
     model: TuiModelSelection,
     sessionId: string,

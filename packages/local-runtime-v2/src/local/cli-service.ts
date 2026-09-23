@@ -657,6 +657,19 @@ export class CliService {
     return this.requireCapability("models", "Model").select(input);
   }
 
+  /** Resolves false when the host has no model-favorite store. */
+  async setModelFavorite(
+    input: Parameters<
+      NonNullable<
+        NonNullable<LocalRuntimeApplication["models"]>["setFavorite"]
+      >
+    >[0],
+  ): Promise<boolean> {
+    const models = this.requireCapability("models", "Model");
+    if (!models.setFavorite) return false;
+    return models.setFavorite(input);
+  }
+
   listUserModelProviders() {
     return this.requireCapability(
       "modelProviders",

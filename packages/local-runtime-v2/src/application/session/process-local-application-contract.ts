@@ -244,6 +244,12 @@ export interface LocalRuntimeApplication {
       variant?: string;
       sessionId?: string;
     }): Promise<boolean>;
+    /** Adds or removes a model favorite; absent when the host has no preference store. */
+    setFavorite?(input: {
+      providerId: string;
+      modelId: string;
+      favorite: boolean;
+    }): Promise<boolean>;
   };
   readonly modelProviders?: {
     listProviderPresets(): Promise<readonly ByokProviderPresetView[]>;
