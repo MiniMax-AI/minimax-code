@@ -127,7 +127,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onTodoChange: (items) => tasks.setItems(items),
     onUserSubmissionProjected: () => {
       codexHandoffFlow?.dismiss();
-      followChatBottom();
+      layout.forceFollowBottom();
       if (started && !stopped) tui.requestImmediateRender();
     },
     onSessionLifecycle: (sessionId) => {
@@ -446,7 +446,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       updateChrome(controller.snapshot());
       tui.requestRender();
     },
-    followBottom: () => layout.followBottom(),
+    followBottom: () => layout.forceFollowBottom(),
     requestWelcomeRebuild: () => tui.requestImmediateRender(),
     switchComposerDraft: (sessionKey) =>
       draftLifecycle?.switchSession(sessionKey) ?? Promise.resolve(),

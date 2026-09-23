@@ -13,6 +13,7 @@ import { resolveTuiStartupEnvironmentOption } from "../../src/cli/environment.js
 import { runTuiCli } from "../../src/cli/main.js";
 import { launchTui } from "../../src/tui/launcher.js";
 import { createTuiApp } from "../../src/tui/app.js";
+import { TuiChatLayout } from "../../src/tui/shell/chat-layout.js";
 import type {
   TuiModel,
   TuiQuestionnaireRequest,
@@ -517,6 +518,33 @@ function createRuntime(): TuiRuntime {
 }
 
 describe("createTuiApp", () => {
+  it("force-follows user submissions and Session transitions", async () => {
+    const forceFollowBottom = vi.spyOn(TuiChatLayout.prototype, "forceFollowBottom");
+    const app = createTuiApp({
+      runtime: createRuntime(),
+      terminal: new FakeTerminal(),
+      version: "test",
+      workspaceDir: "/workspace",
+    });
+    app.start();
+
+    try {
+      await app.ready;
+      await app.openSession("session-1");
+
+      forceFollowBottom.mockClear();
+      await app.submit("Continue with the next step");
+      await vi.waitFor(() => expect(forceFollowBottom).toHaveBeenCalled());
+
+      forceFollowBottom.mockClear();
+      await app.openSession("session-2");
+      expect(forceFollowBottom).toHaveBeenCalled();
+    } finally {
+      await app.stop();
+      forceFollowBottom.mockRestore();
+    }
+  });
+
   it.each(["regular", "fullscreen"] as const)(
     "configures /statusline from terminal input and reopens the saved selection in %s mode",
     async (tuiMode) => {
