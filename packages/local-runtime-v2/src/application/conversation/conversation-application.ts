@@ -70,6 +70,8 @@ import {
 } from "./session-stream-delivery.js";
 
 export interface ConversationSendMessageRequest extends SendMessageReq {
+  /** Readable projection supplied by the process-local composer; content retains transport identity. */
+  readonly displayContent?: string;
   /** Process-local caller's Unix-ms deadline; its cancellation owner still enforces it. */
   readonly executionDeadlineAtMs?: number;
   /** Process-local opt-in; emits metadata only, never provider payloads. */
@@ -575,6 +577,9 @@ async function toDirectSendInput(
       input: toAgentHostUserInput(req, text, attachments),
       ...executionOptions,
       provenance: messageProvenance(req),
+      ...(req.displayContent !== undefined
+        ? { displayContent: req.displayContent }
+        : {}),
       ...(materialized.displayAttachments.length > 0
         ? { displayAttachments: materialized.displayAttachments }
         : {}),

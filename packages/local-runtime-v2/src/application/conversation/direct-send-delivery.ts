@@ -26,6 +26,7 @@ export interface DirectSendInput {
   readonly outputContract?: SubmitTurnSubmission['outputContract'];
   readonly executionDeadlineAtMs?: SubmitTurnSubmission['executionDeadlineAtMs'];
   readonly provenance: SubmitTurnSubmission['provenance'];
+  readonly displayContent?: string;
   readonly displayAttachments?: readonly UserMessageAttachment[];
   readonly requestedTurnId?: string;
   readonly hideUserMessage?: boolean;
@@ -388,8 +389,12 @@ async function completeAfterSettlement(
 
 function directSendDisplayOptions(
   input: DirectSendInput,
-): Pick<NonNullable<SubmitTurnSubmission['delivery']>, 'displayAttachments' | 'hideUserMessage'> {
+): Pick<
+  NonNullable<SubmitTurnSubmission['delivery']>,
+  'displayContent' | 'displayAttachments' | 'hideUserMessage'
+> {
   return {
+    ...(input.displayContent !== undefined ? { displayContent: input.displayContent } : {}),
     ...(input.displayAttachments
       ? { displayAttachments: input.displayAttachments.map((attachment) => ({ ...attachment })) }
       : {}),

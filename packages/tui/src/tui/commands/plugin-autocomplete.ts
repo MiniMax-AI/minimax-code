@@ -1,9 +1,11 @@
 import type { McodePluginRuntimeAccess } from '../../plugin/contract.js';
 import type { AutocompleteItem, AutocompleteProvider } from '../widgets/autocomplete.js';
+import { truncateToWidth } from '../engine/public.js';
 import { sanitizeTerminalText } from '../rendering/terminal-text.js';
 
 export interface PluginAutocompleteItem extends AutocompleteItem {
   readonly pluginId: string;
+  readonly groupLabel: string;
 }
 
 /** Product-level plugin candidates share @ with files; plugin state stays in Runtime. */
@@ -52,7 +54,6 @@ export class TuiPluginAutocomplete implements AutocompleteProvider {
               (a, b) =>
                 a.displayName.localeCompare(b.displayName) || a.pluginId.localeCompare(b.pluginId),
             )
-            .slice(0, 8)
             .map((plugin) => {
               const name =
                 sanitizeTerminalText(plugin.displayName)
@@ -64,13 +65,24 @@ export class TuiPluginAutocomplete implements AutocompleteProvider {
                 value: `@${name}`,
                 label: `@${name}`,
                 pluginId: plugin.pluginId,
-                description: sanitizeTerminalText(
-                  `Plugin · ${plugin.marketplace} · ${plugin.description ?? plugin.name}`,
-                ),
+                groupLabel: '  Plugins',
+                description: `${plugin.marketplace} · ${truncateToWidth(
+                  sanitizeTerminalText(plugin.description ?? plugin.name)
+                    .replace(/\s+/gu, ' ')
+                    .trim(),
+                  64,
+                  '…',
+                )}`,
               };
             })
         : [];
-    const combined = [...items, ...(fileSuggestions?.items ?? [])];
+    const combined = [
+      ...items,
+      ...(fileSuggestions?.items ?? []).map((item) => ({
+        ...item,
+        ...(items.length > 0 ? { groupLabel: '  Files' } : {}),
+      })),
+    ];
     return combined.length ? { prefix, items: combined } : null;
   }
 

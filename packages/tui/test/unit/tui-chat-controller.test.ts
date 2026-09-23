@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SendMessageReq } from '@mavis/local-runtime-v2/cli-service';
+import type { CliSendMessageReq, SendMessageReq } from '@mavis/local-runtime-v2/cli-service';
 import { TuiFailure } from '../../src/failure.js';
 import {
   TuiChatController as ProductionTuiChatController,
@@ -20,6 +20,50 @@ class TuiChatController extends ProductionTuiChatController {
 }
 
 describe('TuiChatController', () => {
+  it.each(['display', 'legacy transport'])(
+    'reconciles plugin mentions using %s without duplicate user cells',
+    async (echo) => {
+      const content = '[@Codex 插件](plugin://codex%40official) 这个插件可以干什么';
+      const displayContent = '@Codex 插件 这个插件可以干什么';
+      let turn = 0;
+      const runtime = {
+        createSession: vi.fn(async () => ({ sessionId: 'plugin-session' })),
+        sendMessage: vi.fn(async function* (
+          request: SendMessageReq,
+        ): AsyncGenerator<TuiStreamEvent> {
+          expect(request).toMatchObject({ content, displayContent });
+          const message = {
+            id: `message-${request.turnId}`,
+            turnId: request.turnId,
+            role: 'user' as const,
+            content: echo === 'display' ? request.displayContent : request.content,
+          };
+          yield { type: 'message', message };
+          yield { type: 'message', message };
+          yield { type: 'done', turnId: request.turnId };
+        }),
+        abortSession: vi.fn(async () => true),
+      };
+      const transcript = new TranscriptStore();
+      const controller = new ProductionTuiChatController({
+        runtime: runtime as never,
+        transcript,
+        workspaceDir: '/workspace',
+        createTurnId: () => `plugin-turn-${++turn}`,
+      });
+      await controller.submit(content, { displayContent });
+      expect(transcript.snapshot().filter((cell) => cell.kind === 'user')).toMatchObject([
+        { content: displayContent, sourceMessageId: 'message-plugin-turn-1' },
+      ]);
+      // An intentional repeat in another turn must remain a separate message.
+      await controller.submit(content, { displayContent });
+      expect(transcript.snapshot().filter((cell) => cell.kind === 'user')).toHaveLength(2);
+      const rendered = new TranscriptView(transcript).render(100).join('\n');
+      expect(rendered).not.toContain('plugin://');
+      expect(rendered).not.toContain('\x1b[4m');
+    },
+  );
+
   it('hides plain and namespaced AskUser protocol tools from the transcript', () => {
     expect(isQuestionnaireTool('ask_user')).toBe(true);
     expect(isQuestionnaireTool('functions.AskUser')).toBe(true);

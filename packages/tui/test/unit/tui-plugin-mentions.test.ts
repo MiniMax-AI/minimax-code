@@ -1,3 +1,8 @@
+import { ConversationApplication } from '../../../local-runtime-v2/src/application/conversation/conversation-application.js';
+import { DirectSendDeliveryService } from '../../../local-runtime-v2/src/application/conversation/direct-send-delivery.js';
+import { TuiUserProjection } from '../../src/tui/controller/projection/turn-user-projection.js';
+import { TranscriptStore } from '../../src/tui/transcript/store.js';
+import { visibleWidth } from '../../src/tui/engine/public.js';
 import { TuiInputFlow } from '../../src/tui/controller/interaction/input-flow.js';
 import { TuiExternalEditorFlow } from '../../src/tui/controller/interaction/external-editor-flow.js';
 import { TuiSessionMutationFlow } from '../../src/tui/controller/product/session-mutation-flow.js';
@@ -70,7 +75,7 @@ function createEditor() {
 async function selectPlugin(editor: Editor) {
   editor.handleInput('@');
   await vi.waitFor(() =>
-    expect(stripTerminalSequences(editor.render(80).join('\n'))).toContain('Plugin · local'),
+    expect(stripTerminalSequences(editor.render(80).join('\n'))).toContain('local · notes'),
   );
   editor.handleInput('\t');
   expect(editor.getText()).toBe('@My Notes ');
@@ -80,6 +85,69 @@ async function selectPlugin(editor: Editor) {
 }
 
 describe('Plugin mentions from Composer to durable text', () => {
+  it('carries the display label through Runtime direct-send admission while preserving execution identity', async () => {
+    const submit = vi.fn(async () => ({ accepted: false, reason: 'invalid-input' }));
+    const directSend = new DirectSendDeliveryService({
+      turns: { submit },
+      stream: { reserve: () => ({ discardIfEmpty: vi.fn() }) },
+    } as never);
+    const application = new ConversationApplication({ directSend } as never);
+    const content = '[@Codex 插件](plugin://codex%40official) hello';
+    const displayContent = '@Codex 插件 hello';
+    await application.sendMessage({}, { id: 's1', content, displayContent });
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({
+      input: expect.objectContaining({ text: content }),
+      delivery: expect.objectContaining({ displayContent }),
+    }));
+  });
+
+  it('renders legacy plugin history as plain labels without losing editable transport', () => {
+    const transcript = new TranscriptStore();
+    const message = {
+      role: 'user' as const,
+      content: '[@Codex 插件](plugin://codex%40official) hello',
+    };
+    new TuiUserProjection(transcript).hydrate(message, 'message-1', 'turn-1', 1);
+    expect(transcript.snapshot()[0]?.content).toBe('@Codex 插件 hello');
+    expect(message.content).toContain('plugin://');
+  });
+
+  it('groups plugins and files, bounds wide descriptions, and keeps all matching plugins selectable', async () => {
+    const provider = createTuiAutocomplete([], [], '/workspace', {
+      listInstalledPlugins: async () =>
+        Array.from({ length: 10 }, (_, index) => ({
+          ...makePlugin(`notes-${index}`),
+          description: '读取、生成、重排、填写和处理文件。'.repeat(20),
+        })),
+      listWorkspaceFileTree: async () => [
+        { name: 'notes.md', path: 'notes.md', type: 'file' as const },
+      ],
+    });
+    const suggestions = await provider.getSuggestions(['@'], 0, 1, {
+      signal: new AbortController().signal,
+    });
+    expect(suggestions?.items).toHaveLength(11);
+    expect(suggestions?.items[0]).toMatchObject({ groupLabel: '  Plugins' });
+    expect(suggestions?.items[10]).toMatchObject({ groupLabel: '  Files' });
+    for (const item of suggestions!.items.slice(0, 10)) {
+      expect(visibleWidth(item.description!)).toBeLessThanOrEqual(72);
+      expect(item.description).toContain('…');
+    }
+    const editor = createEditor();
+    editor.setAutocompleteProvider(provider);
+    editor.handleInput('@');
+    await vi.waitFor(() => expect(editor.render(180).join('\n')).toContain('Plugins'));
+    expect(editor.render(180).join('\n')).not.toContain('local · notes');
+    for (const width of [40, 80, 180]) {
+      for (const line of editor.render(width))
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+    for (let index = 0; index < 10; index++) editor.handleInput('\x1b[B');
+    expect(editor.render(80).join('\n')).toContain('Files');
+    editor.handleInput('\t');
+    expect(editor.getText()).toContain('notes.md');
+  });
+
   it('offers enabled plugins alongside files, refreshes state, and preserves file completion', async () => {
     const listInstalledPlugins = vi.fn(async () => [
       makePlugin(),

@@ -1,3 +1,4 @@
+import { parsePluginMentions } from '@mavis/shared/plugin-mention';
 import type { TuiMessage } from '../../../runtime/port.js';
 import {
   formatTuiHistorySubmission,
@@ -34,7 +35,7 @@ export class TuiUserProjection {
       return;
     }
     const visibleContent =
-      message.source === 'code_review' ? '/review' : visibleSessionMutationContent(content);
+      message.source === 'code_review' ? '/review' : visibleUserContent(content);
     this.transcript.upsert({
       id: `history:user:${messageId}`,
       kind: 'user',
@@ -69,7 +70,7 @@ export class TuiUserProjection {
       return false;
     }
     const formatted = formatTuiHistorySubmission(
-      message.source === 'code_review' ? '/review' : visibleSessionMutationContent(content),
+      message.source === 'code_review' ? '/review' : visibleUserContent(content),
       message.attachments ?? [],
     );
     const attachments = toTuiTranscriptAttachments(message.attachments ?? []);
@@ -186,4 +187,13 @@ function mergeTranscriptAttachments(
     ...existing?.[index],
     ...attachment,
   }));
+}
+
+/** Older persisted rows may still contain the durable plugin transport links. */
+function visibleUserContent(content: string): string {
+  let visible = visibleSessionMutationContent(content);
+  for (const mention of parsePluginMentions(visible).reverse()) {
+    visible = visible.slice(0, mention.start) + mention.label + visible.slice(mention.end);
+  }
+  return visible;
 }

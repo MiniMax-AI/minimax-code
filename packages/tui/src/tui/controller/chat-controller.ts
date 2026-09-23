@@ -435,6 +435,7 @@ export class TuiChatController {
           turnId,
           session,
           content,
+          ...(options.displayContent !== undefined ? { displayContent } : {}),
           workspace: this.workspaceDir,
           version: this.version,
           ...(attachments.length > 0 ? { attachments } : {}),
