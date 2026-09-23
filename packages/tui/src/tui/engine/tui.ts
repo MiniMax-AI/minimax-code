@@ -312,6 +312,8 @@ export interface TUI extends Component {
 	renderNow(force?: boolean): void;
 	requestRender(force?: boolean): void;
 	requestImmediateRender(): void;
+	/** Restore rows exposed by a shrinking interactive layout instead of padding them. */
+	requestLayoutRender(): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
@@ -783,6 +785,10 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
+	}
+
+	requestLayoutRender(): void {
+		this.requestImmediateRender();
 	}
 
 	requestImmediateRender(): void {

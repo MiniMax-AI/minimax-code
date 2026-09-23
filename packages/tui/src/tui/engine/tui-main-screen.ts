@@ -129,6 +129,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private previousViewportTop = 0;
 	private resizeTimer: ReturnType<typeof setTimeout> | undefined;
 	private historyReplayPending = false;
+	private layoutRenderPending = false;
+
+	override requestLayoutRender(): void {
+		this.layoutRenderPending = true;
+		super.requestLayoutRender();
+	}
 
 	protected override onTerminalResize(): void {
 		// Some hosts repeat resize notifications while scrolling or reconnecting.
@@ -184,6 +190,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	protected override resetRenderState(): void {
+		this.layoutRenderPending = false;
 		this.cancelResize();
 		this.historyReplayPending = false;
 		this.previousLines = [];
@@ -290,6 +297,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return targetScreenRow - currentScreenRow;
 		};
 
+		const layoutRender = this.layoutRenderPending;
+		this.layoutRenderPending = false;
 		// Render all components to get new lines. Strip OSC 133 zone sentinels before the
 		// differential compare so they never enter previousLines or any terminal write.
 		let newLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
@@ -304,7 +313,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// screen instead. The composer stays at the bottom, historical rows stay unique,
 		// and later output consumes this temporary space before scrolling again.
 		if (
-			!widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
+			!layoutRender && !widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
 			prevViewportTop > 0 && newLines.length > prevViewportTop &&
 			newLines.length < prevViewportTop + height &&
 			this.previousKittyImageIds.size === 0 && !newLines.some(isImageLine)

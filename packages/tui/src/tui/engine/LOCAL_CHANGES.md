@@ -162,3 +162,11 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - User impact: the previous interrupted footer disappears with the submitted message, and the extra no-op render after Enter is avoided.
 - Evidence: `tui-app.test.ts` checks every presented frame across interrupt and resend; `tui-engine-local-deltas.test.ts` checks that a synchronous input render has no second pass.
 - Removal condition: the selected Pi baseline coalesces synchronous input renders while preserving immediate key rendering.
+
+## L041: Restore chat rows after inline completion shrink
+
+- Product contract: closing or filtering an inline completion menu restores the conversation instead of leaving the released rows blank above it. Ordinary activity shrink retains L038's native scrolling behavior.
+- Minimal difference: Editor reports completion row-count changes relative to its last rendered menu, including asynchronous results and grouped-list navigation. The product requests a layout render on shrink in regular mode. Main-screen layout renders skip L038 padding for one frame, allowing L034 reconstruction only when scrolled rows must return; short documents retain differential rendering. Disposal disables the callback before cancellation.
+- Evidence: product VirtualTerminal tests exercise Escape, Tab, Backspace, asynchronous empty results and filtering, compare the complete visible frame, and check unique long history under xterm and an ED 2 clear-to-scrollback model. Short-document and fullscreen cases avoid unnecessary reconstruction; existing activity-shrink regressions remain intact.
+- Boundary: full history reconstruction retains L034's shell-scrollback tradeoff. Emulator tests do not establish native terminal or live-service acceptance.
+- Removal condition: the selected Pi baseline distinguishes inline completion layout shrink from ordinary visible activity shrink.

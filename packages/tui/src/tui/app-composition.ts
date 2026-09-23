@@ -208,6 +208,9 @@ export function createTuiApplicationEditor(
     autocompleteMaxVisible: 8,
     placeholder: composerText('placeholder'),
   });
+  editor.onAutocompleteResize = (previousRows, rows) => {
+    if (tui.mode === 'regular' && rows < previousRows) tui.requestLayoutRender();
+  };
   editor.setAutocompleteProvider(createTuiInitialAutocomplete(workspaceRoots.list(), runtime));
   return editor;
 }

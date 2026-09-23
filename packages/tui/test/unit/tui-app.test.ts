@@ -2968,6 +2968,7 @@ describe("createTuiApp", () => {
 
     app.start();
     await app.ready;
+    const requestLayoutRender = vi.spyOn(app.tui, "requestLayoutRender");
     terminal.input?.("/");
 
     await vi.waitFor(() =>
@@ -2983,6 +2984,7 @@ describe("createTuiApp", () => {
     terminal.input?.("\u001B");
     expect(app.editor.getText()).toBe("/");
     expect(app.editor.focused).toBe(true);
+    expect(requestLayoutRender).not.toHaveBeenCalled();
 
     await app.stop();
   });
@@ -3024,6 +3026,83 @@ describe("createTuiApp", () => {
 
     screen.dispose();
     await app.stop();
+  });
+
+  describe.each([
+    ["xterm", VirtualTerminal],
+    ["clear-to-scrollback terminal", ClearToScrollbackTerminal],
+  ] as const)("autocomplete viewport restoration on %s", (_terminalName, Terminal) => {
+    it.each([
+      ["Escape", "\x1b", "/"],
+      ["Tab", "\t", "/help "],
+      ["Backspace", "\x7f", ""],
+      ["no matches", "zzzzzz", "/zzzzzz"],
+      ["filter to one command", "help", "/help"],
+    ] as const)("restores the conversation viewport when Slash Command autocomplete shrinks via %s", async (_name, input, draft) => {
+      const terminal = new Terminal(80, 24);
+      const app = createTuiApp({
+        runtime: createRuntime(),
+        terminal,
+        version: "0.2.0",
+        workspaceDir: "/workspace",
+        tuiMode: "regular",
+      });
+
+      app.start();
+      try {
+        await app.ready;
+        for (let index = 0; index < 12; index++) await app.submit(`Message ${index}`);
+        app.tui.renderNow();
+        await terminal.flush();
+
+        terminal.sendInput("/");
+        await vi.waitFor(async () => {
+          app.tui.renderNow();
+          await terminal.flush();
+          expect(terminal.getViewport().join("\n")).toContain("Show available commands");
+        });
+        const menuRows = app.editor.render(78).length;
+        terminal.sendInput(input);
+        await vi.waitFor(async () => {
+          app.tui.renderNow();
+          await terminal.flush();
+          expect(app.editor.getText()).toBe(draft);
+          expect(app.editor.render(78).length).toBeLessThan(menuRows);
+          const expected = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).slice(-24);
+          expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(expected);
+        });
+        const history = terminal.getScrollBuffer();
+        for (let index = 0; index < 12; index++) {
+          expect(history.filter((line) => line.trimEnd().endsWith(`› Message ${index}`))).toHaveLength(1);
+        }
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
+  it("dismisses autocomplete in a short document without clearing native history", async () => {
+    const terminal = new VirtualTerminal(80, 100);
+    const app = createTuiApp({ runtime: createRuntime(), terminal, version: "0.2.0", workspaceDir: "/workspace" });
+    const write = vi.spyOn(terminal, "write");
+    app.start();
+    try {
+      await app.ready;
+      terminal.sendInput("/");
+      await vi.waitFor(async () => {
+        app.tui.renderNow();
+        await terminal.flush();
+        expect(terminal.getViewport().join("\n")).toContain("Show available commands");
+      });
+      write.mockClear();
+      terminal.sendInput("\x1b");
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getViewport().join("\n")).not.toContain("Show available commands");
+      expect(write.mock.calls.map(([data]) => data).join("")).not.toContain("\x1b[3J");
+    } finally {
+      await app.stop();
+    }
   });
 
   it("resumes fullscreen tail following when submitting from scrolled history", async () => {
