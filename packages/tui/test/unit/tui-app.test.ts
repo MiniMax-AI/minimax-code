@@ -189,6 +189,13 @@ class FakeTerminal implements Terminal {
   }
 }
 
+// Apple Terminal can save ED 2 clears into scrollback before the renderer clears history.
+class ClearToScrollbackTerminal extends VirtualTerminal {
+  override write(data: string): void {
+    super.write(data.replaceAll("\x1b[2J", `\x1b[${this.rows};1H${"\r\n".repeat(this.rows)}\x1b[2J`));
+  }
+}
+
 function renderTerminalViewport(
   app: ReturnType<typeof createTuiApp>,
   terminal: FakeTerminal,
@@ -6039,6 +6046,93 @@ describe("createTuiApp", () => {
     );
 
     await app.stop();
+  });
+
+  it("does not push the conversation downward after closing /usage", async () => {
+    const terminal = new VirtualTerminal(80, 50);
+    const runtime = createRuntime();
+    vi.mocked(runtime.getAccountStatus).mockResolvedValue({
+      status: "ready",
+      authMode: "managed-login",
+      managedTokenPresent: true,
+      modelSource: "token-plan",
+      tokenPlanQuotaState: "available",
+      tokenPlanSummary: { tier: "Ultra Plan", creditBalance: "100" },
+      tokenPlanQuota: {
+        fiveHour: { remainingPercent: 75, unlimited: false },
+        weekly: { remainingPercent: 50, unlimited: false },
+        video: { remainingCount: 5, totalCount: 5, unlimited: false },
+      },
+      warnings: [],
+    });
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+    });
+
+    app.start();
+    try {
+      await app.ready;
+      for (let index = 0; index < 2; index++) await app.submit(`Message ${index}`);
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getViewport().join("\n")).toContain("Message 1");
+      const firstContentRowBefore = terminal.getViewport().findIndex((line) => line.trim().length > 0);
+
+      await app.submit("/usage");
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getViewport().join("\n")).toContain("Usage");
+
+      terminal.sendInput("\x1b");
+      app.tui.renderNow();
+      await terminal.flush();
+      const viewport = terminal.getViewport().join("\n");
+      expect(viewport).toContain("Message 1");
+      expect(viewport).toContain("Message");
+      expect(app.tui.render(80).findIndex((line) => line.trim().length > 0)).toBe(firstContentRowBefore);
+      expect(terminal.getViewport().findIndex((line) => line.trim().length > 0)).toBe(firstContentRowBefore);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it.each([
+    ['xterm', VirtualTerminal],
+    ['clear-to-scrollback terminal', ClearToScrollbackTerminal],
+  ] as const)('restores unique long history after /usage on %s', async (_name, Terminal) => {
+    const terminal = new Terminal(80, 24);
+    const app = createTuiApp({
+      runtime: createRuntime(),
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+    });
+
+    app.start();
+    try {
+      await app.ready;
+      for (let index = 0; index < 12; index++) await app.submit(`Message ${index}`);
+      await app.submit("/usage");
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getViewport().join("\n")).toContain("Usage");
+
+      terminal.sendInput("\x1b");
+      app.tui.renderNow();
+      await terminal.flush();
+      const history = terminal.getScrollBuffer();
+      for (let index = 0; index < 12; index++) {
+        expect(history.filter((line) => line.trimEnd().endsWith(`› Message ${index}`))).toHaveLength(1);
+      }
+      expect(history.join("\n")).not.toContain("Session usage");
+      expect(terminal.getViewport().join("\n")).toContain("Ask Mcode to do anything");
+      expect(terminal.getViewport().join("\n")).toContain("/workspace");
+    } finally {
+      await app.stop();
+    }
   });
 
   it("uses public Runtime owners for Session inspection commands", async () => {

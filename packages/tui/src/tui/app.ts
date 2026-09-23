@@ -820,8 +820,10 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     activity,
     composer,
   });
-  function requestInteractionRender(): void {
-    if (started && !stopped) tui.requestImmediateRender();
+  function requestInteractionRender(rebuild = false): void {
+    if (!started || stopped) return;
+    if (rebuild) tui.requestRender(true);
+    else tui.requestImmediateRender();
   }
   const controllerReady = controller.initialize();
   const ready = controllerReady.then(async () => {

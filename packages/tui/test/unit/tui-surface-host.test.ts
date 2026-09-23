@@ -70,6 +70,31 @@ function createRecordingPresenter(): {
 }
 
 describe('TuiSurfaceHost', () => {
+  it.each([
+    { mode: 'regular', fullscreenViewport: true, rebuild: true },
+    { mode: 'regular', fullscreenViewport: false, rebuild: false },
+    { mode: 'fullscreen', fullscreenViewport: true, rebuild: false },
+  ] as const)('requests rebuild on interaction close only for a regular full-viewport panel ($mode, $fullscreenViewport)', ({ mode, fullscreenViewport, rebuild }) => {
+    const inline = new TuiInlinePanelHost();
+    const host = createSurfaceHost({
+      chat: { component: inline, focus: component([]) },
+      chatMode: mode,
+      mode: () => mode,
+      setFocus: vi.fn(),
+      requestRender: vi.fn(),
+    });
+    const requestRender = vi.fn();
+    const interaction = new TuiInteractionSurface(inline, host, requestRender);
+    const panel = { ...component(['inspection']), fullscreenViewport };
+
+    interaction.show(panel);
+    requestRender.mockClear();
+    expect(interaction.close(panel)).toBe(true);
+    expect(requestRender).toHaveBeenCalledOnce();
+    if (rebuild) expect(requestRender).toHaveBeenCalledWith(true);
+    else expect(requestRender).toHaveBeenCalledWith();
+  });
+
   it.each(['regular', 'fullscreen'] as const)(
     'passes current terminal size to leaf features in %s',
     (mode) => {
