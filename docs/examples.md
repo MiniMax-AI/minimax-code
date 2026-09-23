@@ -92,6 +92,26 @@ custom_provider:
 
 [Live acceptance](verification.md) separately verified MiniMax Token Plan and one configured BYOK provider. This is not a guarantee for every compatible service.
 
+### Prompt-cache session affinity
+
+A relay that routes prompt-cache hits per session needs to recognize which session a request belongs to. MCode never derives that from the Anthropic `metadata.user_id` field: `metadata` is forwarded only when a caller sets it explicitly, because it is an abuse-detection and attribution field rather than a cache key. The supported mechanism is the `sendSessionAffinityHeaders` compatibility override, declared per model under `compat`:
+
+```yaml
+custom_provider:
+  my-relay:
+    options:
+      apiKey: sk-relay-key
+      baseURL: https://relay.example.com
+    models:
+      MiniMax-M2:
+        compat:
+          sendSessionAffinityHeaders: true
+```
+
+With the override enabled, every request carries the current session id as `x-session-affinity`. An `openai-completions` provider additionally sends the same value as `session_id` and `x-client-request-id`. Key the relay's cache routing on those headers. Requests made with cache retention disabled send no session headers at all; leave the routing fallback in place rather than treating a missing header as a new session.
+
+The override defaults to `false`, so a provider that ignores these headers is unaffected; it is enabled automatically only for endpoints known to require it, such as Fireworks and the Anthropic route of Cloudflare AI Gateway. `compat` accepts further per-model capability overrides, and each value is applied only when it has the declared type, so a quoted `"false"` is discarded rather than read as true. Restart MCode after editing configuration.
+
 ## 3. Search and image input
 
 For a custom BYOK model, declare image input support explicitly when adding the
