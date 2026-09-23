@@ -1,3 +1,4 @@
+import { parsePluginMentions } from '@mavis/shared/plugin-mention';
 import {
   createTuiCommandCatalog,
   matchTuiCommandInput,
@@ -12,7 +13,7 @@ import { TuiLoginRegionPicker } from '../../features/auth/login-region-picker.js
 import { TuiPermissionModePicker } from '../../features/interaction/permission-mode-picker.js';
 import { TuiSettingsPicker } from '../../features/settings/picker.js';
 import { TuiHotkeysPicker } from '../../features/settings/hotkeys-picker.js';
-import { submittedEditorContent, type Editor } from '../../widgets/editor/editor.js';
+import { submittedEditorContent, submittedEditorTransport, type Editor } from '../../widgets/editor/editor.js';
 import type { TuiInteractionSurface } from '../../shell/interaction-surface.js';
 import type { TuiSurfaceHost } from '../../shell/surface-host.js';
 import type { TuiRunProjection } from '../../state/run-projection.js';
@@ -226,10 +227,14 @@ export class TuiCommandFlow {
     // Hidden context may be rebuilt for an edited session-mutation message.
     // Other opaque transport (including /review) belongs to the old text and
     // must not override the user's correction.
-    const transportContent = recoverable?.transportContent &&
+    const pluginTransport = recoverable?.transportContent && parsePluginMentions(recoverable.transportContent).length > 0
+      ? rebuildSessionMutationTransport(recoverable.transportContent, submittedEditorTransport(editor) ?? visibleContent)
+      : undefined;
+    const transportContent = pluginTransport ?? (recoverable?.transportContent &&
+      parsePluginMentions(recoverable.transportContent).length === 0 &&
       (unchangedText || rebuildSessionMutationTransport(recoverable.transportContent, visibleContent))
       ? recoverable.transportContent
-      : undefined;
+      : undefined);
     const transportAttachments = recoverable?.transportAttachments
       ? reconcileRecoveredTransportAttachments(recoverable, resources.attachments)
       : undefined;
@@ -273,7 +278,7 @@ export class TuiCommandFlow {
           requireRuntimeAcceptance: true,
           transportContent:
             options.transportContent ??
-            rebuildSessionMutationTransport(recoveryTransport, input) ??
+            rebuildSessionMutationTransport(recoveryTransport, seed ? submittedEditorTransport(seed.editor) ?? input : input) ??
             recoveryTransport,
           ...(seed?.reviewRequest && !options.reviewRequest
             ? { reviewRequest: seed.reviewRequest }
@@ -507,9 +512,11 @@ export class TuiCommandFlow {
         const bashContext = this.options.bashFlow?.takeContext(
           seed ? seed.sessionId : this.options.controller.snapshot().session?.sessionId,
         );
+        const boundContent = seed ? submittedEditorTransport(seed.editor) : undefined;
+        const messageContent = options.transportContent ?? boundContent;
         const transportContent = bashContext
-          ? `${bashContext}\n\n${options.transportContent ?? command}`
-          : options.transportContent;
+          ? `${bashContext}\n\n${messageContent ?? command}`
+          : messageContent;
         let submission = createTuiSubmissionSnapshot({
           submissionId,
           sessionId: seed ? seed.sessionId : this.options.controller.snapshot().session?.sessionId,

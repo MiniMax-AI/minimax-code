@@ -132,3 +132,22 @@ existing diagnostic-counts projection; raw error text, stacks and session IDs
 are not added to the uploaded ZIP. Offline tests cover persisted tool histories,
 archives, concurrent parent output, side-session cleanup and local diagnostics;
 this does not establish native-terminal or live-model acceptance.
+
+## Select a plugin for a message
+
+Type `@` in the Composer to search files and installed, enabled plugins. Plugin
+candidates show their source so packages with the same display name can be
+selected independently. Choose a plugin with Tab or Enter, then describe the task.
+The Composer shows `@Name` and retains the plugin identity through editing, undo,
+prompt history, queued-message recovery, and saved drafts.
+
+Selection applies to that message. Runtime checks the plugin's effective Skills,
+MCP tools, and App tools again for the turn and asks the Agent to prefer relevant
+capabilities. Selecting a plugin does not install or enable it. An unavailable
+selection is reported to the Agent rather than redirected to a same-named package.
+
+Exec and ACP text prompts can use the durable linked form, for example
+`[@Notes](plugin://notes%40local) summarize these files`. The ID is the package
+name plus its `local` or `official` source; display labels do not determine the
+selection. Legacy whitespace-delimited `@package-name` text remains supported
+when it identifies exactly one effective plugin.

@@ -170,3 +170,10 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Evidence: application tests replay `/theme`, `/settings`, prompt-history search, image-preview dismissal, multi-line draft clearing and completion filtering. Engine tests repeatedly expand/shrink each transient section under xterm and an ED 2 clear-to-scrollback model, compare the complete viewport, verify unique history, and retain positive background-activity scroll preservation. Short documents avoid unnecessary clearing.
 - Boundary: full history reconstruction retains L034's shell-scrollback tradeoff. Emulator tests do not establish native terminal or live-service acceptance.
 - Removal condition: the selected Pi baseline distinguishes transient UI layout shrink from ordinary background content shrink.
+
+## L042: Preserve product mention bindings in prompt history
+
+- Product contract: plugin labels retain their exact identities while browsing history, including restoration of the working draft.
+- Minimal difference: expose a generic history-text decoder and capture/restore the existing undo extension state alongside the history draft. Plugin parsing and identity ownership stay in the product Editor.
+- Evidence: `tui-plugin-mentions.test.ts` covers repeated history navigation, identical display labels with different IDs, working-draft restoration, atomic deletion and undo.
+- Removal condition: the selected Pi baseline supports durable history decoding and draft extension state.

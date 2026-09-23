@@ -356,6 +356,7 @@ export class Editor implements Component, Focusable {
   private history: string[] = [];
   private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
   private historyDraft: EditorState | null = null;
+  private historyDraftExtensionState: unknown;
 
   // Kill ring for Emacs-style kill/yank operations
   private killRing = new KillRing();
@@ -377,6 +378,8 @@ export class Editor implements Component, Focusable {
   // Undo support
   private undoStack = new UndoStack<EditorSnapshot>();
 
+  /** Decode a durable history entry before restoring its editable text. */
+  public transformHistoryText?: (text: string) => string;
   public onSubmit?: (text: string, snapshot: EditorStateSnapshot) => void;
   public onChange?: (text: string) => void;
   public onPaste?: (text: string) => boolean;
@@ -496,6 +499,7 @@ export class Editor implements Component, Focusable {
     if (this.historyIndex === -1 && newIndex >= 0) {
       this.pushUndoSnapshot();
       this.historyDraft = structuredClone(this.state);
+      this.historyDraftExtensionState = this.captureUndoExtensionState?.();
     }
 
     this.historyIndex = newIndex;
@@ -505,6 +509,8 @@ export class Editor implements Component, Focusable {
       this.historyDraft = null;
       if (draft) {
         this.state = draft;
+        this.restoreUndoExtensionState?.(this.historyDraftExtensionState);
+        this.historyDraftExtensionState = undefined;
         this.preferredVisualCol = null;
         this.snappedFromCursorCol = null;
         this.scrollOffset = 0;
@@ -514,7 +520,7 @@ export class Editor implements Component, Focusable {
       }
     } else {
       this.setTextInternal(
-        this.history[this.historyIndex] || '',
+        this.transformHistoryText?.(this.history[this.historyIndex] || '') ?? this.history[this.historyIndex] ?? '',
         direction === -1 ? 'start' : 'end',
       );
     }
@@ -523,6 +529,7 @@ export class Editor implements Component, Focusable {
   private exitHistoryBrowsing(): void {
     this.historyIndex = -1;
     this.historyDraft = null;
+    this.historyDraftExtensionState = undefined;
   }
 
   /** Internal setText that doesn't reset history state - used by navigateHistory */
@@ -1221,6 +1228,8 @@ export class Editor implements Component, Focusable {
     this.onAutocompleteSelect = undefined;
     this.captureUndoExtensionState = undefined;
     this.restoreUndoExtensionState = undefined;
+    this.transformHistoryText = undefined;
+    this.historyDraftExtensionState = undefined;
   }
 
   /**

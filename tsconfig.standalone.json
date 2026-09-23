@@ -328,6 +328,9 @@
       "@mavis/shared/navigation-text": [
         "./packages/shared/src/navigation-text.ts"
       ],
+      "@mavis/shared/plugin-mention": [
+        "./packages/shared/src/plugin-mention.ts"
+      ],
       "@mavis/shared/product-build-identity": [
         "./packages/shared/src/product-build-identity.ts"
       ],

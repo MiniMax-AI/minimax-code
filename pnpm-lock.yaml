@@ -335,6 +335,9 @@ importers:
 
   packages/agent-modules/system-reminder:
     devDependencies:
+      '@mavis/shared':
+        specifier: workspace:^
+        version: link:../../shared
       '@mavis/config':
         specifier: workspace:^
         version: link:../../config

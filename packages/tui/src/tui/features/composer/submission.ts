@@ -51,7 +51,9 @@ export function createTuiSubmissionSnapshot(options: {
     editor: cloneEditorDraft(options.editor),
     content: options.content,
     ...(options.transportContent ? { transportContent: options.transportContent } : {}),
-    attachments: options.resources.attachments.map((attachment) => ({ ...attachment })),
+    attachments: options.resources.attachments.map((attachment) => ({
+      ...attachment,
+    })),
     transportAttachments: (options.transportAttachments ?? options.resources.attachments).map(
       (attachment) => ({ ...attachment }),
     ),
@@ -64,6 +66,7 @@ export function createTuiSubmissionSnapshot(options: {
 function cloneEditorDraft(editor: EditorDraftSnapshot): EditorDraftSnapshot {
   return {
     ...editor,
+    pluginMentions: editor.pluginMentions?.map((mention) => ({ ...mention })),
     pastes: editor.pastes.map((paste) => ({ ...paste })),
     ...(editor.attachmentPlaceholders
       ? {

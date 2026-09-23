@@ -1,3 +1,5 @@
+import { TuiPluginAutocomplete } from '../../commands/plugin-autocomplete.js';
+import type { McodePluginRuntimeAccess } from '../../../plugin/contract.js';
 import type { Component } from '../../rendering/component.js';
 import type { Terminal } from '../../engine/public.js';
 import {
@@ -57,7 +59,9 @@ export interface TuiSteerOptions {
 
 export function createTuiInitialAutocomplete(
   workspace: string | readonly TuiWorkspaceRoot[],
-  workspaceFiles?: Partial<TuiWorkspaceFilePort>,
+  workspaceFiles?: Partial<
+    TuiWorkspaceFilePort & Pick<McodePluginRuntimeAccess, 'listInstalledPlugins'>
+  >,
   builtInCommands: readonly TuiCommand[] = MINIMAX_CODE_DISCOVERABLE_COMMANDS,
 ) {
   return createTuiAutocomplete(builtInCommands, [], workspace, workspaceFiles);
@@ -67,15 +71,20 @@ export function createTuiAutocomplete(
   builtInCommands: readonly TuiCommand[],
   skillCommands: readonly TuiCommand[],
   workspace: string | readonly TuiWorkspaceRoot[],
-  workspaceFiles?: Partial<TuiWorkspaceFilePort>,
+  workspaceFiles?: Partial<
+    TuiWorkspaceFilePort & Pick<McodePluginRuntimeAccess, 'listInstalledPlugins'>
+  >,
   shellCwd?: () => string,
 ): AutocompleteProvider {
-  return new TuiAutocompleteProvider(
-    builtInCommands,
-    skillCommands,
-    workspace,
+  return new TuiPluginAutocomplete(
+    new TuiAutocompleteProvider(
+      builtInCommands,
+      skillCommands,
+      workspace,
+      workspaceFiles,
+      shellCwd,
+    ),
     workspaceFiles,
-    shellCwd,
   );
 }
 
@@ -132,11 +141,9 @@ export class TuiActiveRunFlow {
   private autocompleteHasLiveRun: boolean | undefined;
   private autocompleteSignature: string | undefined;
   private pendingAutocomplete:
-    | { readonly provider: AutocompleteProvider; readonly signature: string }
-    | undefined;
+    { readonly provider: AutocompleteProvider; readonly signature: string } | undefined;
   private contextInspection:
-    | { readonly sessionId: string; readonly panel: TuiReportInspectionPanel }
-    | undefined;
+    { readonly sessionId: string; readonly panel: TuiReportInspectionPanel } | undefined;
 
   constructor(
     private readonly options: {
@@ -569,7 +576,9 @@ class TuiAutocompleteProvider implements AutocompleteProvider {
     builtInCommands: readonly TuiCommand[],
     skillCommands: readonly TuiCommand[],
     workspace: string | readonly TuiWorkspaceRoot[],
-    private readonly workspaceFiles?: Partial<TuiWorkspaceFilePort>,
+    private readonly workspaceFiles?: Partial<
+      TuiWorkspaceFilePort & Pick<McodePluginRuntimeAccess, 'listInstalledPlugins'>
+    >,
     shellCwd?: () => string,
   ) {
     this.workspaceRoots = normalizeAutocompleteRoots(workspace);
@@ -732,7 +741,10 @@ class TuiAutocompleteProvider implements AutocompleteProvider {
     const directory = query ? query.slice(0, -1) : undefined;
     if (this.workspaceFiles?.listWorkspaceFileTreeCandidates) {
       const entries = await this.workspaceFiles.listWorkspaceFileTreeCandidates(
-        { roots: this.workspaceRoots, ...(directory ? { path: directory } : {}) },
+        {
+          roots: this.workspaceRoots,
+          ...(directory ? { path: directory } : {}),
+        },
         signal,
       );
       return entries.flatMap((entry) => this.toMultiRootTreeItem(entry));

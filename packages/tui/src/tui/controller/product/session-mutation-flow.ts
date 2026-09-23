@@ -1,3 +1,4 @@
+import { submittedEditorTransport } from '../../widgets/editor/editor.js';
 import type { TuiChatController } from '../chat-controller.js';
 import type { Component, Focusable } from '../../rendering/component.js';
 import { matchesKey } from '../../engine/public.js';
@@ -415,8 +416,9 @@ export class TuiSessionMutationFlow {
       this.options.onChanged();
       return 'retained';
     }
+    const boundContent = draft ? submittedEditorTransport(draft) ?? content : content;
     const transportContent =
-      rebuildSessionMutationTransport(invocation.targetMessage?.content, content) ?? content;
+      rebuildSessionMutationTransport(invocation.targetMessage?.content, boundContent) ?? boundContent;
     if (invocation.phase === 'resubmit') {
       this.invocations.set(invocation.sequence, { ...invocation, phase: 'resubmitting' });
       this.options.setHint(sessionMutationText('sessionMutation.hint.editSubmitting'));

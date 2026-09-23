@@ -191,6 +191,10 @@
     "./safety-check-v2": {
       "types": "./src/safety-check-v2.ts",
       "import": "./dist/safety-check-v2.js"
+    },
+    "./plugin-mention": {
+      "types": "./src/plugin-mention.ts",
+      "import": "./dist/plugin-mention.js"
     }
   },
   "types": "./src/index.ts",

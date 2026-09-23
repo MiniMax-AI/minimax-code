@@ -173,7 +173,9 @@
       "packages/tui/test/unit/tui/features/settings/theme-picker.test.ts",
       "packages/tui/test/unit/tui/theme/custom-themes.test.ts",
       "packages/tui/test/unit/tui/theme/palettes.test.ts",
-      "packages/tui/test/unit/tui/theme/runtime.test.ts"
+      "packages/tui/test/unit/tui/theme/runtime.test.ts",
+      "packages/tui/test/unit/tui-plugin-mentions.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

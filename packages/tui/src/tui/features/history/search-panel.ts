@@ -1,3 +1,4 @@
+import { decodePluginMentions } from '../../widgets/editor/plugin-mentions.js';
 import { Input, matchesKey } from '../../engine/public.js';
 import type { Component, Focusable } from '../../rendering/component.js';
 import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
@@ -67,8 +68,8 @@ export class TuiHistorySearchPanel implements Component, Focusable {
           const selected = index === this.selectedIndex;
           const prefix = selected ? chalk.bold.hex(colors.signal)('› ') : '  ';
           const value = selected
-            ? chalk.bold.hex(colors.text)(sanitizeTerminalText(entry))
-            : chalk.hex(colors.muted)(sanitizeTerminalText(entry));
+            ? chalk.bold.hex(colors.text)(sanitizeTerminalText(decodePluginMentions(entry).text))
+            : chalk.hex(colors.muted)(sanitizeTerminalText(decodePluginMentions(entry).text));
           return fit(`${prefix}${value}`, safeWidth);
         })
       : [fit(chalk.hex(colors.muted)('  No matching prompts'), safeWidth)];
@@ -82,7 +83,7 @@ export class TuiHistorySearchPanel implements Component, Focusable {
   private matches(): string[] {
     const query = this.searchInput.getValue().trim().toLocaleLowerCase();
     if (!query) return [...this.options.entries];
-    return this.options.entries.filter((entry) => entry.toLocaleLowerCase().includes(query));
+    return this.options.entries.filter((entry) => decodePluginMentions(entry).text.toLocaleLowerCase().includes(query));
   }
 
   private move(direction: -1 | 1): void {
