@@ -5,11 +5,7 @@ import path from 'node:path';
 import spawn from 'cross-spawn';
 import { EnvHttpProxyAgent, fetch } from 'undici';
 import { retryWindowsFileSystemOperation } from '@mavis/shared';
-import {
-  bindMcodeNpmCommandToRuntime,
-  createMcodeNpmRuntimeEnvironment,
-  resolveMcodeNpmDistribution,
-} from './install-source.js';
+import { resolveMcodeNpmDistribution } from './install-source.js';
 import { readMcodeBinEntry, resolveMcodePrefixPackageRoot } from './prefix-update.js';
 import {
   McodeUpdateCancelledError,
@@ -351,9 +347,10 @@ async function defaultInstallArtifact(input: {
   registry: string;
   proxyEnvironment: NodeJS.ProcessEnv;
 }): Promise<void> {
-  let command = {
-    executable: 'npm',
-    args: [
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  await runMcodeUpdateCommand(
+    npm,
+    [
       'install',
       '--global',
       '--prefix',
@@ -365,28 +362,9 @@ async function defaultInstallArtifact(input: {
       '--no-fund',
       '--package-lock=false',
     ],
-    display: 'npm install',
-  };
-  let environment = input.proxyEnvironment;
-  if (process.platform === 'win32') {
-    environment = createMcodeNpmRuntimeEnvironment(environment, process.execPath);
-    // The runtime is prepended for npm's children; keep the caller's npm selection order.
-    const npm = environment.PATH?.split(path.delimiter)
-      .slice(1)
-      .concat(path.dirname(process.execPath))
-      .map((directory) => path.join(directory.replace(/^"|"$/gu, ''), 'npm.cmd'))
-      .find((candidate) => existsSync(candidate));
-    if (!npm) throw new Error('Cannot locate npm.cmd for the MCode update.');
-    command.executable = npm;
-    try {
-      const bound = bindMcodeNpmCommandToRuntime(command, process.execPath);
-      command = { ...bound, args: [...bound.args] };
-    } catch {
-      // Custom npm wrappers can dispatch outside the supported npm layouts.
-      environment = input.proxyEnvironment;
-    }
-  }
-  await runMcodeUpdateCommand(command.executable, command.args, environment, true);
+    input.proxyEnvironment,
+    true,
+  );
 }
 
 async function defaultValidateInstalledVersion(prefix: string, version: string): Promise<void> {

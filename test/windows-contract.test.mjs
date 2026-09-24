@@ -30,7 +30,7 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
     assert.equal(await resolveWslPath(windowsPath), windowsPath);
   });
 
-  it.each(["standard npm", "custom npm wrapper"])("installs and validates a managed update in a complex path with %s", async (npmLayout) => {
+  it.each(["standard npm", "custom npm wrapper", "custom npm wrapper with adjacent CLI"])("installs and validates a managed update in a complex path with %s", async (npmLayout) => {
     const root = mkdtempSync(path.join(tmpdir(), "mcode-update-"));
     temporaryRoots.push(root);
     const fixtureRoot = path.join(root, "package");
@@ -45,6 +45,7 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
       ...process.env,
       npm_config_offline: "true",
       npm_config_update_notifier: "false",
+      npm_config_bin_links: "true",
       npm_config_cache: path.join(root, "cache"),
       npm_config_userconfig: path.join(root, "npmrc"),
     };
@@ -53,10 +54,17 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
     const packed = JSON.parse(execFileSync(process.execPath, [
       npmCli, "pack", "--json", "--ignore-scripts", "--pack-destination", root,
     ], { cwd: fixtureRoot, env: environment, encoding: "utf8", timeout: 30_000 }));
-    if (npmLayout === "custom npm wrapper") {
+    if (npmLayout !== "standard npm") {
       const wrapperRoot = path.join(root, "npm-wrapper");
       mkdirSync(wrapperRoot);
-      writeFileSync(path.join(wrapperRoot, "npm.cmd"), `@echo off\r\necho used> "%~dp0invoked"\r\n"${process.execPath}" "${npmCli}" %*\r\n`);
+      let wrapperCli = npmCli;
+      if (npmLayout === "custom npm wrapper with adjacent CLI") {
+        wrapperCli = path.join(wrapperRoot, "node_modules", "npm", "bin", "npm-cli.js");
+        mkdirSync(path.dirname(wrapperCli), { recursive: true });
+        writeFileSync(wrapperCli, `require(${JSON.stringify(npmCli)});\n`);
+      }
+      environment.npm_config_bin_links = "false";
+      writeFileSync(path.join(wrapperRoot, "npm.cmd"), `@echo off\r\nset "npm_config_bin_links=true"\r\necho used> "%~dp0invoked"\r\n"${process.execPath}" "${wrapperCli}" %*\r\n`);
       const pathKey = Object.keys(environment).filter((key) => key.toLowerCase() === "path").sort()[0];
       const inheritedPath = environment[pathKey];
       for (const key of Object.keys(environment)) {
@@ -100,7 +108,7 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
     const result = await service.apply({ channel: "stable" });
     assert.equal(result.applied, true);
     assert.equal(readFileSync(path.join(installRoot, "current"), "utf8"), "1.2.4\n");
-    if (npmLayout === "custom npm wrapper") {
+    if (npmLayout !== "standard npm") {
       assert.match(readFileSync(path.join(root, "npm-wrapper", "invoked"), "utf8"), /^used/);
     }
   }, 60_000);
