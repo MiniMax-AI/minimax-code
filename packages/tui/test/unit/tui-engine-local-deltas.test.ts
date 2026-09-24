@@ -14,6 +14,11 @@ import {
 import { TuiChatLayout, type TuiChatLayoutParts } from '../../src/tui/shell/chat-layout.js';
 import { VirtualTerminal } from '../pi-084-upstream/virtual-terminal.js';
 
+import { TuiInlinePanelHost } from '../../src/tui/shell/inline-panel.js';
+import { TuiPermissionModePicker } from '../../src/tui/features/interaction/permission-mode-picker.js';
+import { TranscriptView } from '../../src/tui/transcript/view.js';
+import { createTranscriptCell } from '../../src/tui/transcript/model.js';
+
 const passthrough = (value: string): string => value;
 const selectListTheme = {
   selectedPrefix: passthrough,
@@ -81,6 +86,93 @@ function createMutableChatParts(surface: 'welcome' | 'conversation') {
 }
 
 describe('MCode Pi Engine local deltas', () => {
+  describe.each([
+    ['xterm', RecordingVirtualTerminal],
+    ['clear-to-scrollback host', ClearToScrollbackTerminal],
+  ] as const)('%s permission table redraw', (_name, Terminal) => {
+    it.each([
+      [60, '\r'],
+      [100, '\r'],
+      [60, '\x1b'],
+      [100, '\x1b'],
+    ])('keeps tables contiguous at width %i after closing with %j', async (width, key) => {
+      const terminal = new Terminal(width, 24);
+      const tui = new TuiMainScreen(terminal);
+      const interaction = new TuiInlinePanelHost();
+      const cell = createTranscriptCell({
+        id: 'table',
+        kind: 'assistant',
+        status: 'succeeded',
+        createdAtMs: 1,
+        content: [
+          '## Cookbook',
+          '',
+          '| Cookbook | Description |',
+          '| --- | --- |',
+          ...Array.from({ length: 14 }, (_, index) => `| recipe-${index} | Example ${index} |`),
+        ].join('\n'),
+      });
+      const transcript = new TranscriptView(() => [cell]);
+      const empty = new MutableLines();
+      const composer = new MutableLines();
+      composer.lines = [`composer${CURSOR_MARKER}`];
+      const status = new MutableLines();
+      status.lines = ['status'];
+      const layout = new TuiChatLayout(terminal, {
+        surface: () => 'conversation',
+        welcome: empty,
+        transcript,
+        interaction,
+        activity: empty,
+        followUp: empty,
+        composer,
+        status,
+      });
+      tui.addChild(layout);
+      tui.renderNow();
+      await terminal.flush();
+      const original = terminal.getScrollBuffer();
+      const picker = new TuiPermissionModePicker(
+        'default',
+        () => interaction.close(),
+        () => interaction.close(),
+      );
+      interaction.show(picker);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-5);
+      terminal.takeWrites();
+      picker.handleInput(key);
+      tui.renderNow();
+      await terminal.flush();
+      const after = terminal.getScrollBuffer();
+      expect(after).toEqual(original);
+      expect(terminal.getCursorPosition().y).toBe(22);
+      const tableStart = original.findIndex((line) => line.includes('┌'));
+      const tableEnd = original.findIndex((line) => line.includes('└'));
+      expect(tableStart).toBeGreaterThanOrEqual(0);
+      expect(tableEnd).toBeGreaterThan(tableStart);
+      expect(after.slice(tableStart, tableEnd + 1)).toEqual(
+        original.slice(tableStart, tableEnd + 1),
+      );
+      expect(after.filter((line) => line.trim())).toEqual(original.filter((line) => line.trim()));
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getScrollBuffer()).toEqual(after);
+      // Continue streaming the same table while the freed panel rows are reused.
+      cell.content += '\n| recipe-14 | Example 14 |';
+      tui.renderNow();
+      await terminal.flush();
+      const grown = terminal.getScrollBuffer();
+      const grownEnd = grown.findIndex((line) => line.includes('└'));
+      expect(grown.filter((line) => line.includes('recipe-14'))).toHaveLength(1);
+      expect(grownEnd).toBeGreaterThan(tableEnd);
+      expect(grown.slice(tableStart, grownEnd + 1).every((line) => line.trim().length > 0)).toBe(
+        true,
+      );
+    });
+  });
+
   it('does not replay a submitted input frame after a synchronous render', async () => {
     const terminal = new RecordingVirtualTerminal(60, 12);
     const tui = new TuiMainScreen(terminal);
