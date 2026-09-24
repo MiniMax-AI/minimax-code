@@ -345,10 +345,29 @@ describe("Scrollbar interaction boundaries", () => {
     await terminal.waitForRender();
     expect(viewportText(terminal)).toContain("line-60");
 
+    terminal.sendInput("\x1b[<64;10;4M");
+    await terminal.waitForRender();
+    expect(tui.isFollowingOutput).toBe(false);
+
+    terminal.resize(40, 45);
+    await terminal.waitForRender();
+    const resizedTop = tui.viewportTop;
+    expect(tui.isFollowingOutput).toBe(false);
+
     content.appendLine("line-61");
     layout.followBottom();
     tui.requestRender();
     await terminal.waitForRender();
+    expect(tui.viewportTop).toBe(resizedTop);
+
+    terminal.sendInput("\x1b[F");
+    await terminal.waitForRender();
     expect(viewportText(terminal)).toContain("line-61");
+
+    content.appendLine("line-62");
+    layout.followBottom();
+    tui.requestRender();
+    await terminal.waitForRender();
+    expect(viewportText(terminal)).toContain("line-62");
   });
 });

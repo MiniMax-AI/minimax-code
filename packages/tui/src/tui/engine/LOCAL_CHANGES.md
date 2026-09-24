@@ -177,3 +177,10 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Minimal difference: expose a generic history-text decoder and capture/restore the existing undo extension state alongside the history draft. Plugin parsing and identity ownership stay in the product Editor.
 - Evidence: `tui-plugin-mentions.test.ts` covers repeated history navigation, identical display labels with different IDs, working-draft restoration, atomic deletion and undo.
 - Removal condition: the selected Pi baseline supports durable history decoding and draft extension state.
+
+## L043: Preserve detached scrolling across layout changes
+
+- Product contract: a detached fullscreen transcript remains detached when the viewport grows or content shrinks.
+- Minimal difference: `ScrollView.updateLayout` clamps the scroll position without changing follow state. Explicit scrolling and follow requests retain their existing behavior.
+- Evidence: `tui-scrollbar-interaction.test.ts` covers wheel detachment, viewport growth, subsequent output and re-arming with End.
+- Removal condition: the selected Pi baseline preserves follow state through layout clamping.

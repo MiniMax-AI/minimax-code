@@ -49,10 +49,10 @@
     },
     {
       "path": "components/scroll-view.ts",
-      "currentSha256": "6f82fb1f426fdf81ca7058e6a1ea4a94c9ddd8f0e15d69c9020f9c66ca5411dd",
-      "changeIds": ["L035"],
-      "reason": "Allow hosts to reserve a wider always-visible scrollbar gutter while retaining at least one content column.",
-      "behaviorImpact": "The fullscreen transcript reserves three columns; other scroll views retain the default one-column gutter."
+      "currentSha256": "a2d9d5a19b40afd9d5a83f611890b592afc9764d916b24ec6090bbd5b95e21ea",
+      "changeIds": ["L035", "L043"],
+      "reason": "Allow hosts to reserve a wider always-visible scrollbar gutter while retaining at least one content column. Preserve follow state when layout changes clamp the scroll position.",
+      "behaviorImpact": "The fullscreen transcript reserves three columns; other scroll views retain the default one-column gutter. A detached viewport stays detached across layout changes until scrolling or an explicit follow request restores following."
     },
     {
       "path": "components/settings-list.ts",
