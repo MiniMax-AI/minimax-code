@@ -182,5 +182,5 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 
 - Product contract: a detached fullscreen transcript remains detached when the viewport grows or content shrinks.
 - Minimal difference: `ScrollView.updateLayout` clamps the scroll position without changing follow state. Explicit scrolling and follow requests retain their existing behavior.
-- Evidence: `tui-scrollbar-interaction.test.ts` covers wheel detachment, viewport growth, subsequent output and re-arming with End.
+- Evidence: `tui-scrollbar-interaction.test.ts` covers wheel detachment, viewport growth, footer/content shrink, temporarily fitting all content, subsequent output and re-arming with End.
 - Removal condition: the selected Pi baseline preserves follow state through layout clamping.

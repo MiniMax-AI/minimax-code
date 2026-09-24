@@ -307,6 +307,59 @@ describe("Scrollbar interaction boundaries", () => {
     expect(viewportText(terminal)).toContain("composer");
   });
 
+  it.each(["footer shrink", "content shrink", "all content fitting"] as const)(
+    "keeps streaming detached after %s clamps the viewport to the end",
+    async (change) => {
+      const terminal = new VirtualTerminal(40, 15);
+      const empty = { render: () => [], invalidate() {} };
+      let lines = Array.from({ length: 60 }, (_, index) => `answer-${index}`);
+      let footerRows = 4;
+      const layout = new TuiChatLayout(terminal, {
+        surface: () => "conversation",
+        transcript: { ...empty, render: () => [...lines] },
+        welcome: empty,
+        interaction: { ...empty, isActive: () => false },
+        activity: { ...empty, render: () => Array(footerRows).fill("activity") },
+        followUp: empty,
+        composer: { ...empty, render: () => ["composer"] },
+        status: empty,
+      });
+      const tui = new TuiAltScreen(terminal);
+      screens.push(tui);
+      tui.setLayoutRoot(layout.fullscreenLayoutRoot);
+      tui.start();
+      await terminal.waitForRender();
+      terminal.sendInput("\x1b[<64;10;4M");
+      await terminal.waitForRender();
+      expect(tui.isFollowingOutput).toBe(false);
+
+      if (change === "footer shrink") footerRows = 0;
+      else lines = lines.slice(0, change === "content shrink" ? 50 : 0);
+      tui.renderNow();
+      await terminal.flush();
+      const anchor = tui.viewportTop;
+      expect(tui.isFollowingOutput).toBe(false);
+
+      for (let chunk = 0; chunk < 20; chunk++) {
+        lines.push(`streamed-${chunk}`);
+        layout.followBottom();
+        tui.renderNow();
+        await terminal.flush();
+        expect(tui.viewportTop).toBe(anchor);
+        expect(tui.isFollowingOutput).toBe(false);
+      }
+      terminal.sendInput("\x1b[F");
+      await terminal.waitForRender();
+      expect(tui.isFollowingOutput).toBe(true);
+      expect(viewportText(terminal)).toContain("streamed-19");
+      lines.push("resumed-stream");
+      layout.followBottom();
+      tui.renderNow();
+      await terminal.flush();
+      expect(viewportText(terminal)).toContain("resumed-stream");
+    },
+  );
+
   it("preserves a detached transcript position until follow-tail is explicitly re-armed", async () => {
     const terminal = new VirtualTerminal(40, 15);
     const empty = { render: () => [], invalidate() {} };
