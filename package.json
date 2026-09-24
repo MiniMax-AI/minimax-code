@@ -1,6 +1,6 @@
 {
   "name": "minimax-code",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "description": "Standalone MiniMax Code TUI with managed accounts, BYOK models, cloud tools, plugins and ACP.",
