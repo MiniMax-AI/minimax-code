@@ -6,6 +6,12 @@ import spawn from 'cross-spawn';
 import { EnvHttpProxyAgent, fetch } from 'undici';
 import { retryWindowsFileSystemOperation } from '@mavis/shared';
 import {
+  bindMcodeNpmCommandToRuntime,
+  createMcodeNpmRuntimeEnvironment,
+  resolveMcodeNpmDistribution,
+} from './install-source.js';
+import { readMcodeBinEntry, resolveMcodePrefixPackageRoot } from './prefix-update.js';
+import {
   McodeUpdateCancelledError,
   reportMcodeUpdatePhase,
   throwIfMcodeUpdateCancelled,
@@ -21,6 +27,8 @@ import {
   type McodeReleaseManifestV1,
   type McodeUpdateChannel,
 } from './release.js';
+
+export { isManagedMcodeInstallRoot } from './install-source.js';
 
 const DEFAULT_RELEASE_BASE_URL =
   'https://algeng-ali-shanghai-agent-02.oss-cn-shanghai.aliyuncs.com/' +
@@ -289,16 +297,6 @@ export function readMcodeUpdateChannel(installRoot: string): McodeUpdateChannel 
   return parseMcodeUpdateChannel(parsed.channel);
 }
 
-export function isManagedMcodeInstallRoot(installRoot: string): boolean {
-  const metadataFile = path.join(installRoot, 'install.json');
-  try {
-    const metadata = JSON.parse(readFileSync(metadataFile, 'utf8')) as Record<string, unknown>;
-    return metadata.product === 'minimax-code' && metadata.updateOwner === 'mcode-installer';
-  } catch {
-    return false;
-  }
-}
-
 function readInstalledPublicKey(installRoot: string, environment: NodeJS.ProcessEnv): string {
   const explicitFile = environment.MCODE_RELEASE_PUBLIC_KEY_FILE;
   if (explicitFile) return readFileSync(path.resolve(explicitFile), 'utf8');
@@ -353,10 +351,9 @@ async function defaultInstallArtifact(input: {
   registry: string;
   proxyEnvironment: NodeJS.ProcessEnv;
 }): Promise<void> {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  await runMcodeUpdateCommand(
-    npm,
-    [
+  let command = {
+    executable: 'npm',
+    args: [
       'install',
       '--global',
       '--prefix',
@@ -368,17 +365,43 @@ async function defaultInstallArtifact(input: {
       '--no-fund',
       '--package-lock=false',
     ],
-    input.proxyEnvironment,
+    display: 'npm install',
+  };
+  let environment = input.proxyEnvironment;
+  if (process.platform === 'win32') {
+    environment = createMcodeNpmRuntimeEnvironment(environment, process.execPath);
+    const npm = environment.PATH?.split(path.delimiter)
+      .map((directory) => path.join(directory.replace(/^"|"$/gu, ''), 'npm.cmd'))
+      .find((candidate) => existsSync(candidate));
+    if (!npm) throw new Error('Cannot locate npm.cmd for the MCode update.');
+    const bound = bindMcodeNpmCommandToRuntime({ ...command, executable: npm }, process.execPath);
+    command = { ...bound, args: [...bound.args] };
+  }
+  await runMcodeUpdateCommand(
+    command.executable,
+    command.args,
+    environment,
     true,
   );
 }
 
 async function defaultValidateInstalledVersion(prefix: string, version: string): Promise<void> {
-  const executable =
-    process.platform === 'win32'
-      ? path.join(prefix, 'mcode.cmd')
-      : path.join(prefix, 'bin', 'mcode');
-  const output = await runMcodeUpdateCommand(executable, ['--version'], process.env, true);
+  let executable = path.join(prefix, 'bin', 'mcode');
+  let args = ['--version'];
+  if (process.platform === 'win32') {
+    const packageRoot = resolveMcodePrefixPackageRoot(
+      prefix,
+      resolveMcodeNpmDistribution().packageName,
+    );
+    const manifest = JSON.parse(readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
+    const binEntry = readMcodeBinEntry(manifest.bin, 'mcode');
+    if (!binEntry || !existsSync(path.join(prefix, 'mcode.cmd'))) {
+      throw new Error(`Installed MCode launcher is missing or invalid at ${prefix}.`);
+    }
+    executable = process.execPath;
+    args = [path.join(packageRoot, binEntry), '--version'];
+  }
+  const output = await runMcodeUpdateCommand(executable, args, process.env, true);
   if (output.trim() !== version) {
     throw new Error(`Installed MCode version mismatch: expected ${version}, got ${output.trim()}`);
   }
@@ -407,7 +430,7 @@ export function runMcodeUpdateCommand(
       settled = true;
       reject(error);
     });
-    child.once('exit', (code, exitSignal) => {
+    child.once('close', (code, exitSignal) => {
       if (settled) return;
       settled = true;
       if (code === 0) return resolve(Buffer.concat(stdout).toString('utf8'));

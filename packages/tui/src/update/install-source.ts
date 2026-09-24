@@ -2,7 +2,6 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import spawn from 'cross-spawn';
 import { parseMcodeVersion } from './release.js';
-import { isManagedMcodeInstallRoot } from './service.js';
 import type { McodeUpdateOperationOptions } from './progress.js';
 
 export const MCODE_INTERNAL_NPM_REGISTRY = 'https://npmmirror.example.invalid/';
@@ -70,6 +69,16 @@ export interface DetectMcodeInstallSourceDependencies {
   readonly npmGlobalPrefix: () => Promise<string>;
   readonly managedInstall: (installRoot: string) => boolean;
   readonly prefixInstall: () => McodeNpmPrefixInstall | undefined;
+}
+
+export function isManagedMcodeInstallRoot(installRoot: string): boolean {
+  const metadataFile = path.join(installRoot, 'install.json');
+  try {
+    const metadata = JSON.parse(readFileSync(metadataFile, 'utf8')) as Record<string, unknown>;
+    return metadata.product === 'minimax-code' && metadata.updateOwner === 'mcode-installer';
+  } catch {
+    return false;
+  }
 }
 
 export async function detectMcodeInstallSource(
