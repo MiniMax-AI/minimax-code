@@ -55,6 +55,7 @@ import {
 import { detectProcessTerminalCapabilities } from './platform/terminal-capabilities.js';
 import { createTuiTextClipboardWriter } from './platform/terminal-clipboard.js';
 import { TuiTerminalNotifications } from './platform/terminal-notifications.js';
+import { TuiTerminalTitle } from './platform/terminal-title.js';
 import {
   ProcessTerminal,
   type Component,
@@ -119,7 +120,7 @@ export function createTuiChatControllerComposition(options: CreateTuiAppOptions)
  */
 export function createTuiApplicationRenderer(options: CreateTuiAppOptions) {
   const terminal = options.terminal ?? new ProcessTerminal();
-  const capabilities = detectProcessTerminalCapabilities();
+  const capabilities = options.terminalCapabilities ?? detectProcessTerminalCapabilities();
   const openExternalTarget =
     options.openExternalTarget ?? createTuiExternalTargetOpener(options.workspaceDir);
   const writeClipboardText =
@@ -169,8 +170,9 @@ export function createTuiApplicationRenderer(options: CreateTuiAppOptions) {
         return terminal.focused;
       },
     },
-    { settings: options.notifications },
+    { settings: options.notifications, capabilities },
   );
+  const terminalTitle = new TuiTerminalTitle(terminal, capabilities.isTTY);
   themeController = new TuiThemeController({
     ui: tui,
     colorLevel: capabilities.colorLevel,
@@ -184,6 +186,7 @@ export function createTuiApplicationRenderer(options: CreateTuiAppOptions) {
     renderer,
     tui,
     terminalNotifications,
+    terminalTitle,
     themeController,
     openExternalTarget,
     writeClipboardText,
@@ -522,28 +525,6 @@ export function createTuiBusinessEventTracker(options: {
         options.featureFlow.skillCommands().map((command) => command.name.toLocaleLowerCase()),
       ),
   });
-}
-
-/**
- * Sync the OS terminal title with the active session title. Skips writes
- * when the title did not change and when the TUI is suspended, to avoid
- * flicker and to keep the title stable across process suspension.
- */
-export function createTuiTerminalTitleSync(options: {
-  readonly terminal: Terminal;
-  readonly isActive: () => boolean;
-}) {
-  let lastTitle: string | undefined;
-  return (sessionTitle: string | undefined): void => {
-    if (!options.isActive()) return;
-    const title =
-      sessionTitle?.trim() && sessionTitle.toLocaleLowerCase() !== 'new session'
-        ? sessionTitle.trim()
-        : 'Minimax Code';
-    if (title === lastTitle) return;
-    options.terminal.setTitle(title);
-    lastTitle = title;
-  };
 }
 
 /**

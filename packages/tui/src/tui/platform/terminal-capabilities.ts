@@ -1,9 +1,11 @@
 export type TerminalId =
   | 'apple-terminal'
+  | 'cmux'
   | 'ghostty'
   | 'iterm2'
   | 'kitty'
   | 'vscode'
+  | 'warp'
   | 'wezterm'
   | 'windows-terminal'
   | 'unknown';
@@ -83,6 +85,7 @@ function detectColorLevel(
 }
 
 function detectTerminalId(env: Readonly<Record<string, string | undefined>>): TerminalId {
+  if (env.CMUX_SOCKET_PATH || env.TERM_PROGRAM?.toLowerCase() === 'cmux') return 'cmux';
   if (env.WT_SESSION && !isSshSession(env)) return 'windows-terminal';
   const program = env.TERM_PROGRAM?.toLocaleLowerCase();
   if (program === 'apple_terminal') return 'apple-terminal';
@@ -90,6 +93,7 @@ function detectTerminalId(env: Readonly<Record<string, string | undefined>>): Te
   if (program === 'iterm.app') return 'iterm2';
   if (program === 'vscode') return 'vscode';
   if (program === 'wezterm') return 'wezterm';
+  if (program === 'warpterminal') return 'warp';
 
   const term = env.TERM?.toLocaleLowerCase() ?? '';
   if (term.includes('ghostty')) return 'ghostty';

@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TerminalCapabilities } from "../../src/tui/platform/terminal-capabilities.js";
+import {
+  detectTerminalCapabilities,
+  type TerminalCapabilities,
+} from "../../src/tui/platform/terminal-capabilities.js";
 import {
   TuiAltScreen,
   VStack,
@@ -48,6 +51,12 @@ import { TuiFailure } from "../../src/failure.js";
 
 const runtimeEvent = (event: RawTuiRuntimeEvent): TuiRuntimeEvent =>
   normalizeTuiRuntimeEvent(event);
+
+const TERMINAL_CAPABILITIES = detectTerminalCapabilities({
+  platform: "linux",
+  isTTY: true,
+  env: { TERM_PROGRAM: "vscode" },
+});
 
 function planReviewEventRequest(id: string) {
   return {
@@ -2734,6 +2743,7 @@ describe("createTuiApp", () => {
     const app = createTuiApp({
       runtime,
       terminal,
+      terminalCapabilities: TERMINAL_CAPABILITIES,
       version: "0.1.0",
       workspaceDir: "/workspace",
       homeDir: "/home/dev",
@@ -2750,7 +2760,7 @@ describe("createTuiApp", () => {
     expect(conversation).toContain("Say hello");
     expect(conversation).toContain("Hello from the Agent");
     expect(terminal.started).toBe(true);
-    expect(terminal.title).toBe("Minimax Code");
+    expect(terminal.title).toBe("Done | workspace (session-) | MCode");
     expect(runtime.createSession).toHaveBeenCalledWith({
       workspaceDir: "/workspace",
     });
@@ -2799,6 +2809,8 @@ describe("createTuiApp", () => {
     const app = createTuiApp({
       runtime,
       terminal,
+      terminalCapabilities: TERMINAL_CAPABILITIES,
+      terminalTitle: ["session-name"],
       version: "0.1.0",
       workspaceDir: "/workspace",
     });
@@ -2822,10 +2834,79 @@ describe("createTuiApp", () => {
     );
 
     await vi.waitFor(() => expect(terminal.title).toBe(sessionTitle));
+    const titleWrites = terminal.titleUpdates.length;
     await app.submit("/status");
-    expect(terminal.titleUpdates).toEqual(["Minimax Code", sessionTitle]);
+    expect(terminal.titleUpdates).toHaveLength(titleWrites);
+    await app.submit("/rename Renamed session");
+    expect(terminal.title).toBe("Renamed session");
+
+    await app.suspend();
+    expect(terminal.title).toBe("");
+    await app.controller.renameCurrentSession("Renamed while suspended");
+    expect(terminal.title).toBe("");
+    await app.resume();
+    expect(terminal.title).toBe("Renamed while suspended");
 
     await app.stop();
+    expect(terminal.title).toBe("");
+  });
+
+  it.each([
+    ["session.finish", false, 1],
+    ["session.finish", true, 0],
+    ["session.error", true, 1],
+    ["session.abort", false, 0],
+  ] as const)("notifies once for %s with queued=%s", async (type, queued, count) => {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    let handled = false;
+    vi.mocked(runtime.listQueuedMessages).mockResolvedValue(
+      queued
+        ? [{
+            itemId: "queued-1",
+            sessionId: "session-1",
+            status: "queued",
+            content: "Next message",
+          }]
+        : [],
+    );
+    vi.mocked(runtime.watchEvents).mockImplementation(async function* (signal) {
+      const event = runtimeEvent({
+        type,
+        timestamp: Date.now(),
+        source: "runtime",
+        payload: {
+          sessionId: "session-1",
+          turnId: "turn-1",
+          error: "Synthetic failure",
+        },
+      });
+      yield event;
+      yield event;
+      handled = true;
+      await new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+      terminalCapabilities: TERMINAL_CAPABILITIES,
+      notifications: { when: "always", method: "osc9" },
+    });
+    try {
+      await app.ready;
+      await app.openSession("session-1");
+      app.start();
+      await vi.waitFor(() => expect(handled).toBe(true));
+      const notifications = terminal.writes.filter((value) => value.startsWith("\u001b]9;"));
+      expect(notifications).toHaveLength(count);
+      if (count) expect(notifications[0]).toContain("Existing session: Response");
+    } finally {
+      await app.stop();
+    }
   });
 
   it("keeps chat state alive while a regular feature overlay owns the viewport", async () => {

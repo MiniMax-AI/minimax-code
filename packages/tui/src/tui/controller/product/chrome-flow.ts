@@ -27,6 +27,7 @@ import {
   type TuiCommand,
 } from '../../commands/catalog.js';
 import { resolveTuiComposerInputIntent } from '../../commands/input-intent.js';
+import { formatTuiTerminalTitle } from '../../platform/terminal-title.js';
 
 type PresentationSink<K extends keyof TuiVisiblePresentation> = {
   setState(state: TuiVisiblePresentation[K]): void;
@@ -39,7 +40,6 @@ export class TuiChromeFlow {
   private startupHint?: string;
   private compacting = false;
   private llmRetry?: TuiLlmRetryEvent;
-  private lastTerminalTitle?: string;
   private readonly automationStatus = new TuiAutomationStatusStore();
 
   constructor(
@@ -51,7 +51,8 @@ export class TuiChromeFlow {
       readonly keybindings?: TuiKeybindingRegistry;
       readonly isStarted: () => boolean;
       readonly isStopped: () => boolean;
-      readonly setTerminalTitle: (title: string) => void;
+      readonly setTerminalTitle: (title: string | undefined) => void;
+      readonly terminalTitle?: readonly string[] | null;
       readonly connection: () => Pick<TuiState['connection'], 'phase' | 'generation' | 'lastError'>;
       /** Multi-Session state kernel, including the background parent Turn. */
       readonly liveRunId: (snapshot: TuiChatSnapshot) => string | undefined;
@@ -140,7 +141,6 @@ export class TuiChromeFlow {
 
   update(snapshot: TuiChatSnapshot): void {
     if (this.options.isStopped()) return;
-    this.syncTerminalTitle(snapshot);
     const sessionId = snapshot.session?.sessionId;
     if (this.llmRetry && this.llmRetry.sessionId !== sessionId) this.llmRetry = undefined;
     if (
@@ -212,6 +212,19 @@ export class TuiChromeFlow {
       retrying: this.isLlmRetrying(),
       ...(agentCounts ? { agentCounts } : {}),
     });
+    if (this.options.isStarted()) {
+      this.options.setTerminalTitle(
+        formatTuiTerminalTitle(
+          {
+            title: snapshot.session?.title,
+            sessionId: snapshot.session?.sessionId,
+            workspace: this.options.workspace,
+            status: automationStatus.status,
+          },
+          this.options.terminalTitle,
+        ),
+      );
+    }
     const shell = {
       ...presentation.shell,
       agentSeq: automationStatus.seq,
@@ -240,17 +253,5 @@ export class TuiChromeFlow {
     this.options.composer.setState(
       this.startupHint ? { ...composer, hint: this.startupHint, headerHidden: false } : composer,
     );
-  }
-
-  private syncTerminalTitle(snapshot: TuiChatSnapshot): void {
-    if (!this.options.isStarted() || this.options.isStopped()) return;
-    const sessionTitle = snapshot.session?.title?.trim();
-    const nextTitle =
-      sessionTitle && sessionTitle.toLocaleLowerCase() !== 'new session'
-        ? sessionTitle
-        : 'Minimax Code';
-    if (nextTitle === this.lastTerminalTitle) return;
-    this.options.setTerminalTitle(nextTitle);
-    this.lastTerminalTitle = nextTitle;
   }
 }

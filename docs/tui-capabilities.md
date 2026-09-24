@@ -2,6 +2,51 @@
 
 The current capability target is **TUI 0.4.12**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
+## Terminal titles and notifications
+
+Terminal titles show the current state, session name and MCode, for example
+`Needs approval | Fix login | MCode`. Renaming or switching a session updates the
+title. Unnamed sessions use the project name and a short session ID. Titles are
+cleared when MCode exits or suspends and reapplied when it resumes.
+
+Configure these presentation settings in the MCode data directory's `config.yaml`:
+
+```yaml
+tui:
+  terminalTitle: [status, session-name, app-name]
+  notifications:
+    when: unfocused
+    method: auto
+    events: [turn-complete, turn-failed, permission-required, question-required]
+```
+
+Title items can be ordered or omitted; `project-name` is also available. Set
+`terminalTitle` to `null` or `[]` to disable title updates. Unknown items are ignored.
+Notification `when` accepts `unfocused`, `always` or `never`; `method` accepts
+`auto`, `osc9`, `osc777` or `bel`. Omitting `events` enables all four events; `[]`
+disables them. Apply configuration changes by restarting MCode.
+
+Notifications identify the session and suppress duplicates. Completion waits for
+the session's queue to finish; failed turns and requests for input can notify
+independently. Known foreground focus suppresses notifications by default. When
+focus is unknown, delivery is best-effort; cmux manages its own surface focus.
+Automatic delivery uses the detected terminal's notification protocol or falls
+back to a bell. The existing Windows toast bridge is restricted to local Windows
+or WSL interop. Terminal settings and OS notification permissions still apply.
+
+VS Code normally displays a process name in its terminal tabs. To display MCode's
+session titles, use this VS Code setting:
+
+```json
+"terminal.integrated.tabs.title": "${sequence}"
+```
+
+A manually assigned tab title overrides automatic titles. VS Code's bell is a
+terminal-tab indicator, not a guarantee of a desktop notification. See the
+[VS Code terminal appearance documentation](https://code.visualstudio.com/docs/terminal/appearance#_tab-text).
+Inside tmux, OSC notifications require passthrough and support from the outer
+terminal; use `method: bel` for a bell fallback.
+
 The evidence column summarizes the historical TUI 0.3.11 restoration record from 2026-09-11. It does not claim fresh TUI 0.4.12 live-service acceptance. Use [current verification status](verification.md#current-source-verification-status) for checks run against the updated source and explicit NOT RUN boundaries.
 
 | Capability | Implementation | Evidence |

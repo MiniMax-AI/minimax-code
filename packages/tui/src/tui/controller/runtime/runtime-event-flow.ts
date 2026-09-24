@@ -906,7 +906,19 @@ export class TuiRuntimeEventFlow {
     event: TuiSessionLifecycleEvent,
     sessionId: string,
   ): Promise<void> {
-    if (!this.options.notify || !event.turnId || event.type === 'session.abort') return;
+    if (
+      !this.options.notify ||
+      !event.turnId ||
+      this.options.isStopped() ||
+      this.options.controller.snapshot().session?.sessionId !== sessionId ||
+      (event.type !== 'session.finish' && event.type !== 'session.error')
+    )
+      return;
+    // A failed Turn still needs attention when another message remains queued.
+    if (event.type === 'session.error') {
+      this.options.notify('turn-failed', `turn-failed:${sessionId}:${event.turnId}`);
+      return;
+    }
     const [activeRun, queue] = await Promise.allSettled([
       this.options.runtime.getActiveRun(sessionId),
       this.options.queueEnabled
@@ -916,6 +928,7 @@ export class TuiRuntimeEventFlow {
     if (
       activeRun.status === 'rejected' ||
       queue.status === 'rejected' ||
+      this.options.isStopped() ||
       this.options.controller.snapshot().session?.sessionId !== sessionId
     ) {
       return;
@@ -929,8 +942,7 @@ export class TuiRuntimeEventFlow {
       (item) => item.status === 'queued' || item.status === 'running',
     ).length;
     if (!shouldNotifyMcodeTurnComplete({ queuedCount, hasActiveRun })) return;
-    const kind = event.type === 'session.finish' ? 'turn-complete' : 'turn-failed';
-    this.options.notify(kind, `${kind}:${sessionId}:${event.turnId}`);
+    this.options.notify('turn-complete', `turn-complete:${sessionId}:${event.turnId}`);
   }
 
   private async reconcileCurrentSessionFromRuntime(): Promise<boolean> {

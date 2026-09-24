@@ -8,6 +8,7 @@ import {
   writeTuiModeSetting,
   writeTuiThemeSetting,
 } from '../../src/host/tui-settings.js';
+import { readTuiPresentationConfig } from '../../src/tui/shell/status-line-config.js';
 
 const directories: string[] = [];
 
@@ -20,6 +21,29 @@ async function temporaryDataDir(): Promise<string> {
   directories.push(directory);
   return directory;
 }
+
+describe('terminal presentation configuration', () => {
+  it.each(['null', '[]', '[session-name, status]'])(
+    'preserves terminalTitle %s through the config loader',
+    async (title) => {
+      const dataDir = await temporaryDataDir();
+      await writeFile(
+        join(dataDir, 'config.yaml'),
+        `tui:\n  terminalTitle: ${title}\n  notifications:\n    when: unfocused\n    method: bel\n    events: [permission-required, turn-failed]\n`,
+        'utf8',
+      );
+      const settings = await readTuiPresentationConfig(dataDir);
+      expect(settings.terminalTitle).toEqual(
+        title === 'null' ? null : title === '[]' ? [] : ['session-name', 'status'],
+      );
+      expect(settings.notifications).toEqual({
+        when: 'unfocused',
+        method: 'bel',
+        events: ['permission-required', 'turn-failed'],
+      });
+    },
+  );
+});
 
 describe('TUI mode settings', () => {
   it('uses regular mode when no valid explicit setting exists', async () => {

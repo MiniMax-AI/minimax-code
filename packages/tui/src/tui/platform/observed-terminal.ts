@@ -33,6 +33,9 @@ export function createObservedTerminal(
     get kittyProtocolActive() {
       return terminal.kittyProtocolActive;
     },
+    get focused() {
+      return terminal.focused;
+    },
     start: (onInput, onResize) =>
       observeSync('terminal.start.sync', () => terminal.start(onInput, onResize)),
     stop: () => observeSync('terminal.stop.sync', () => terminal.stop()),

@@ -54,6 +54,7 @@ import { parseTuiStatusLineItems as parseStatusItems } from './shell/status-line
 import { showTuiStatusLineSetup } from './controller/product/status-line-setup.js';
 import { showTuiThemeSetup } from './controller/product/theme-setup.js';
 import { TuiCodexHandoffFlow } from './controller/product/codex-handoff-flow.js';
+import { tuiTerminalSessionLabel } from './platform/terminal-title.js';
 
 export type { CreateTuiAppOptions, TuiApp, TuiStopOptions };
 export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
@@ -64,6 +65,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     renderer,
     tui,
     terminalNotifications,
+    terminalTitle,
     themeController,
     openExternalTarget,
     writeClipboardText,
@@ -260,7 +262,14 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     },
     isStopped: () => stopped,
     notify: (kind, key) => {
-      terminalNotifications.notifyOnce(kind, key);
+      terminalNotifications.notifyOnce(
+        kind,
+        key,
+        tuiTerminalSessionLabel({
+          ...controller.snapshot().session,
+          workspace: options.workspaceDir,
+        }),
+      );
     },
     ...delegationFlow.permissionResolvers(liveRunId),
     agentStatusLineItems: options.statusLineItems,
@@ -709,7 +718,14 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     observability: options.observability,
     incidentReporter: options.incidentReporter,
     notify: (kind, key) => {
-      terminalNotifications.notifyOnce(kind, key);
+      terminalNotifications.notifyOnce(
+        kind,
+        key,
+        tuiTerminalSessionLabel({
+          ...controller.snapshot().session,
+          workspace: options.workspaceDir,
+        }),
+      );
     },
   });
   codexHandoffFlow = new TuiCodexHandoffFlow({
@@ -794,7 +810,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     queueEnabled: productFeatures.queue,
     isStarted: () => started,
     isStopped: () => stopped,
-    setTerminalTitle: (title) => terminal.setTitle(title),
+    setTerminalTitle: (title) => terminalTitle.update(title),
+    terminalTitle: options.terminalTitle,
     connection: () => stateStore.snapshot().connection,
     liveRunId,
     runProjection: () => runProjection.snapshot(),
@@ -843,6 +860,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     if (stopped) return stoppedPromise;
     stateStore.dispatch({ type: 'lifecycle/leaveUi' });
     stopped = true;
+    terminalNotifications.dispose();
+    terminalTitle.dispose();
     const bashStopped = bashFlow.stop();
     detachInputFlow();
     composerDraft.abortClipboardRead();
@@ -890,6 +909,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
   async function suspend(): Promise<void> {
     if (!started || stopped || suspended) return;
     suspended = true;
+    terminalNotifications.setActive(false);
+    terminalTitle.setActive(false);
     renderer.stop();
     await draftLifecycle?.suspend();
   }
@@ -897,6 +918,9 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     if (!started || stopped || !suspended) return;
     suspended = false;
     renderer.start();
+    terminalNotifications.setActive(true);
+    terminalTitle.setActive(true);
+    updateChrome(controller.snapshot());
     runtimeEventFlow.restart();
     tui.requestRender(true);
     draftLifecycle?.resume();
@@ -916,6 +940,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     start() {
       if (started || stopped) return;
       started = true;
+      terminalNotifications.setActive(true);
+      terminalTitle.setActive(true);
       updateChrome(controller.snapshot());
       surfaceHost.setChatFocus(editor);
       runtimeEventFlow.start();
