@@ -30,7 +30,7 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
     assert.equal(await resolveWslPath(windowsPath), windowsPath);
   });
 
-  it("installs and validates a managed update in a path with spaces, Unicode and metacharacters", async () => {
+  it.each(["standard npm", "custom npm wrapper"])("installs and validates a managed update in a complex path with %s", async (npmLayout) => {
     const root = mkdtempSync(path.join(tmpdir(), "mcode-update-"));
     temporaryRoots.push(root);
     const fixtureRoot = path.join(root, "package");
@@ -53,6 +53,17 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
     const packed = JSON.parse(execFileSync(process.execPath, [
       npmCli, "pack", "--json", "--ignore-scripts", "--pack-destination", root,
     ], { cwd: fixtureRoot, env: environment, encoding: "utf8", timeout: 30_000 }));
+    if (npmLayout === "custom npm wrapper") {
+      const wrapperRoot = path.join(root, "npm-wrapper");
+      mkdirSync(wrapperRoot);
+      writeFileSync(path.join(wrapperRoot, "npm.cmd"), `@echo off\r\necho used> "%~dp0invoked"\r\n"${process.execPath}" "${npmCli}" %*\r\n`);
+      const pathKey = Object.keys(environment).filter((key) => key.toLowerCase() === "path").sort()[0];
+      const inheritedPath = environment[pathKey];
+      for (const key of Object.keys(environment)) {
+        if (key.toLowerCase() === "path") delete environment[key];
+      }
+      environment.PATH = [wrapperRoot, inheritedPath].filter(Boolean).join(path.delimiter);
+    }
     const artifact = readFileSync(path.join(root, packed[0].filename));
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const manifest = Buffer.from(JSON.stringify({
@@ -89,5 +100,8 @@ describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
     const result = await service.apply({ channel: "stable" });
     assert.equal(result.applied, true);
     assert.equal(readFileSync(path.join(installRoot, "current"), "utf8"), "1.2.4\n");
+    if (npmLayout === "custom npm wrapper") {
+      assert.match(readFileSync(path.join(root, "npm-wrapper", "invoked"), "utf8"), /^used/);
+    }
   }, 60_000);
 });

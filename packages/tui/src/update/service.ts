@@ -370,19 +370,23 @@ async function defaultInstallArtifact(input: {
   let environment = input.proxyEnvironment;
   if (process.platform === 'win32') {
     environment = createMcodeNpmRuntimeEnvironment(environment, process.execPath);
+    // The runtime is prepended for npm's children; keep the caller's npm selection order.
     const npm = environment.PATH?.split(path.delimiter)
+      .slice(1)
+      .concat(path.dirname(process.execPath))
       .map((directory) => path.join(directory.replace(/^"|"$/gu, ''), 'npm.cmd'))
       .find((candidate) => existsSync(candidate));
     if (!npm) throw new Error('Cannot locate npm.cmd for the MCode update.');
-    const bound = bindMcodeNpmCommandToRuntime({ ...command, executable: npm }, process.execPath);
-    command = { ...bound, args: [...bound.args] };
+    command.executable = npm;
+    try {
+      const bound = bindMcodeNpmCommandToRuntime(command, process.execPath);
+      command = { ...bound, args: [...bound.args] };
+    } catch {
+      // Custom npm wrappers can dispatch outside the supported npm layouts.
+      environment = input.proxyEnvironment;
+    }
   }
-  await runMcodeUpdateCommand(
-    command.executable,
-    command.args,
-    environment,
-    true,
-  );
+  await runMcodeUpdateCommand(command.executable, command.args, environment, true);
 }
 
 async function defaultValidateInstalledVersion(prefix: string, version: string): Promise<void> {
