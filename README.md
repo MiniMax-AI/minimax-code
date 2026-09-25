@@ -80,7 +80,7 @@ mcode login --region global
 
 Complete sign-in in your browser, then open `mcode` and use `/status` to check your account and `/provider` to choose a model. Run `mcode logout` to sign out.
 
-Token Plan requires an account with available credits. Builds from this repository and the published npm CLI `@minimax-ai/code@0.4.12` default to `~/.minimax` for user data (or `~/.minimax-<profile>` when a profile is selected). `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can override the data directory. The installer's `~/.minimax-code` installation directory is separate from this choice. See [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
+Token Plan requires an account with available credits. The published npm CLI `@minimax-ai/code@0.4.12` uses `~/.minimax` for user data. Source builds keep existing Linux installations there; new Linux installations use `$XDG_DATA_HOME/minimax` (default `~/.local/share/minimax`). macOS and Windows source builds continue to use `~/.minimax`. A selected profile appends `-<profile>` to the default directory name. `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can override the data directory. The installer's `~/.minimax-code` installation directory is separate from this choice. See [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
 
 <details>
 <summary>Use your own API key (BYOK)</summary>
@@ -197,7 +197,7 @@ rm -rf -- "$HOME/.minimax"
 Remove-Item -LiteralPath "$env:USERPROFILE\.minimax" -Recurse -Force
 ```
 
-A profile uses `~/.minimax-<profile>`; `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can select a different location. Remove only the specific directories you intend to discard, without wildcard deletion. Remove any MCode-specific environment variable assignments you added to shell profiles or user environment settings if you no longer need them.
+A profile appends `-<profile>` to its default directory name. New Linux source installations use `$XDG_DATA_HOME/minimax` (default `~/.local/share/minimax`); `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can select a different location. Remove only the specific directories you intend to discard, without wildcard deletion. Remove any MCode-specific environment variable assignments you added to shell profiles or user environment settings if you no longer need them.
 
 ## What you can do
 

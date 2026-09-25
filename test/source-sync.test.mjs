@@ -749,10 +749,11 @@ test('ordinary CI runs a focused Windows contract while compatibility remains ma
   assert.ok(Object.hasOwn(ci.on, 'pull_request'));
   assert.deepEqual(ci.on.push.branches, ['main']);
   assert.deepEqual(Object.keys(ci.jobs).sort(), ['changes', 'docs', 'verification', 'verify']);
-  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'ubuntu-24.04-arm', 'macos-latest', 'windows-latest']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.node, ['24']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.include, [
     { os: 'ubuntu-latest', node: '24', profile: 'full' },
+    { os: 'ubuntu-24.04-arm', node: '24', profile: 'full' },
     { os: 'windows-latest', node: '24', profile: 'windows' },
   ]);
   assert.equal(ci.jobs.verify.needs, 'changes');
@@ -764,7 +765,7 @@ test('ordinary CI runs a focused Windows contract while compatibility remains ma
   const compatibility = readWorkflow('compatibility');
   assert.deepEqual(Object.keys(compatibility.on).sort(), ['schedule', 'workflow_dispatch']);
   assert.deepEqual(compatibility.jobs.compatibility.strategy.matrix.node, ['22.19.0', '24.2.0', '25', '26']);
-  assert.deepEqual(compatibility.jobs.compatibility.strategy.matrix.os, ['ubuntu-latest', 'macos-latest']);
+  assert.deepEqual(compatibility.jobs.compatibility.strategy.matrix.os, ['ubuntu-latest', 'ubuntu-24.04-arm', 'macos-latest']);
   const audit = readWorkflow('security');
   assert.ok(Object.hasOwn(audit.on, 'pull_request'));
   assert.ok(audit.jobs['source-history-artifact'].steps.some(step => step.run?.includes('gitleaks dir dist')));
