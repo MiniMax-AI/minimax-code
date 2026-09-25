@@ -2,9 +2,11 @@
 
 This project is a source preview. Maintainers prioritize security issues on the default branch; no support period for older versions or response SLA has been committed.
 
-Report vulnerabilities privately through **Security → Advisories → Report a vulnerability** on GitHub. If that entry is not enabled, open an issue without vulnerability details asking maintainers for a private channel. Share reproduction details only after that channel is available. Do not put credentials, exploit details, or real user data in public issues.
+Report vulnerabilities privately by emailing [security.mcode@minimax.io](mailto:security.mcode@minimax.io). You can send reproduction details and redacted evidence directly to this address without opening a public issue first. Do not put credentials, exploit details, or real user data in public issues or community chats.
 
-The release coordinator, @hetaoBackend, coordinates security triage; see [Maintainers](docs/maintainers.md). GitHub private vulnerability reporting is not currently enabled, and no public fallback security email is listed. Until a private channel is available, open an issue without vulnerability details as described above. No response SLA is currently promised.
+If **Security → Advisories → Report a vulnerability** is available on GitHub, you can also use that private reporting channel. If it is unavailable, use the security email above.
+
+The release coordinator, @hetaoBackend, coordinates security triage; see [Maintainers](docs/maintainers.md). No response SLA is currently promised.
 
 Include the affected version, operating system and Node.js version, a minimal reproduction, expected and actual permission boundaries, and necessary redacted evidence. Use synthetic files and dedicated test accounts; do not test other people's accounts or infrastructure.
 
