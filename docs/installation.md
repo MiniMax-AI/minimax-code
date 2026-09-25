@@ -78,9 +78,12 @@ Source builds and the published npm CLI use the same default user data directory
 | CLI artifact | Default user data directory |
 | --- | --- |
 | Published npm `@minimax-ai/code@0.4.12` | `~/.minimax` |
-| Build from this repository | `~/.minimax` |
+| Build from this repository on Linux (new installation) | `$XDG_DATA_HOME/minimax`, or `~/.local/share/minimax` |
+| Existing Linux installation, or macOS / Windows source build | `~/.minimax` |
 
-The npm 0.4.12 default was checked against the [public registry artifact](https://registry.npmjs.org/@minimax-ai/code/0.4.12) on 2026-09-19, with its SHA-512 integrity verified. This applies to that published version, including local npm dependencies; do not infer the default of another release from its version label alone. A selected profile uses `~/.minimax-<profile>`. The source default is defined in [`data-dir.ts`](../packages/tui/src/runtime/data-dir.ts). Login state, provider configuration such as `config.yaml`, caches, and sessions belong to the selected data directory.
+The npm 0.4.12 default was checked against the [public registry artifact](https://registry.npmjs.org/@minimax-ai/code/0.4.12) on 2026-09-19, with its SHA-512 integrity verified. This applies to that published version, including local npm dependencies; do not infer the default of another release from its version label alone. A selected profile appends `-<profile>` to the selected default directory name. The source default is defined in [`data-dir.ts`](../packages/tui/src/runtime/data-dir.ts). Login state, provider configuration such as `config.yaml`, caches, and sessions belong to the selected data directory.
+
+Following the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/latest/), Linux source builds accept only an absolute `XDG_DATA_HOME`; unset, empty, or relative values fall back to `~/.local/share`. Existing `~/.minimax` directories and symlinks remain authoritative, even when XDG also contains data. Older `~/.mavis` installations retain the existing migration to `~/.minimax`; the CLI performs that migration before exporting its runtime directory. Existing installations are not automatically relocated to XDG, so active databases and old shell PATH entries keep their location. New XDG installations retain a `.mavis` compatibility link.
 
 Both accept a non-empty `MINIMAX_DATA_DIR`, falling back to a non-empty `MAVIS_DATA_DIR`, before the default. The [macOS / Linux / WSL installer](https://filecdn.minimax.chat/public/install.sh) installs the npm package under `~/.minimax-code` by default (`MCODE_INSTALL_DIR` changes the installation location). It does not set either data-directory override. Installation files and user data are separate concerns, even when their directories have the same name.
 
@@ -132,7 +135,7 @@ Alternatively, merge this entry into `<data-dir>/tui/keybindings.json`, preservi
 }
 ```
 
-For the default profile this is `~/.minimax/tui/keybindings.json`; [profiles and data-directory overrides](#accounts-and-data) change the path. Create the `tui` directory if needed. After editing the file, run `/reload` while idle with no pending interaction or queued message, or restart MCode. This replaces `Alt+M`; use `["alt+m", "ctrl+x"]` as the value to retain both bindings. `/hotkeys` shows the effective binding.
+For the default profile this is `<data-directory>/tui/keybindings.json` (for example, `~/.minimax/tui/keybindings.json` or `~/.local/share/minimax/tui/keybindings.json`); [profiles and data-directory overrides](#accounts-and-data) change the path. Create the `tui` directory if needed. After editing the file, run `/reload` while idle with no pending interaction or queued message, or restart MCode. This replaces `Alt+M`; use `["alt+m", "ctrl+x"]` as the value to retain both bindings. `/hotkeys` shows the effective binding.
 
 ### Verify the result
 

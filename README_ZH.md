@@ -80,7 +80,7 @@ mcode login --region global
 
 在浏览器中完成登录，再启动 `mcode`，通过 `/status` 检查账号、通过 `/provider` 选择模型。退出登录使用 `mcode logout`。
 
-Token Plan 需要账号与可用额度。从本仓库构建的版本与已发布的 npm CLI `@minimax-ai/code@0.4.12` 均默认将用户数据保存在 `~/.minimax`（选择 profile 时为 `~/.minimax-<profile>`）。`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 可以覆盖数据目录。安装脚本使用的 `~/.minimax-code` 安装目录与数据目录的选择是两回事。查找或删除配置和会话前，请参阅[账号与数据](docs/installation.md#accounts-and-data)。
+Token Plan 需要账号与可用额度。已发布的 npm CLI `@minimax-ai/code@0.4.12` 将用户数据保存在 `~/.minimax`。从本仓库构建的版本会保留 Linux 现有安装的数据目录；Linux 全新安装使用 `$XDG_DATA_HOME/minimax`（默认为 `~/.local/share/minimax`），macOS 和 Windows 仍使用 `~/.minimax`。选择 profile 时，在默认目录名后追加 `-<profile>`。`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 可以覆盖数据目录。安装脚本使用的 `~/.minimax-code` 安装目录与数据目录的选择是两回事。查找或删除配置和会话前，请参阅[账号与数据](docs/installation.md#accounts-and-data)。
 
 <details>
 <summary>使用自己的 API Key（BYOK）</summary>
@@ -197,7 +197,7 @@ rm -rf -- "$HOME/.minimax"
 Remove-Item -LiteralPath "$env:USERPROFILE\.minimax" -Recurse -Force
 ```
 
-profile 使用 `~/.minimax-<profile>`；`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 可以指定其他位置。只删除确定不再需要的具体目录，不要使用通配符批量删除。如果不再需要自行添加的 MCode 环境变量，也请从 shell 配置或用户环境变量设置中移除对应赋值。
+profile 会在默认目录名后追加 `-<profile>`。Linux 全新源码安装使用 `$XDG_DATA_HOME/minimax`（默认为 `~/.local/share/minimax`）；`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 可以指定其他位置。只删除确定不再需要的具体目录，不要使用通配符批量删除。如果不再需要自行添加的 MCode 环境变量，也请从 shell 配置或用户环境变量设置中移除对应赋值。
 
 ## 可以做什么
 

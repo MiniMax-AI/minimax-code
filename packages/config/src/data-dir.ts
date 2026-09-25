@@ -37,8 +37,28 @@ function basenameForProfile(base: string, profile?: string | null): string {
   return profile ? `${base}-${profile}` : base;
 }
 
+/** Default for new Linux installations; existing installations keep their location. */
 export function getPrimaryDataDirPath(homeDir?: string, profile?: string | null): string {
-  return path.join(resolveHomeDir(homeDir), basenameForProfile(NEW_DATA_DIR_BASENAME, profile));
+  const resolvedHomeDir = resolveHomeDir(homeDir);
+  const previousPrimary = path.join(
+    resolvedHomeDir,
+    basenameForProfile(NEW_DATA_DIR_BASENAME, profile),
+  );
+  if (process.platform !== 'linux') return previousPrimary;
+
+  const xdgDataHome = process.env.XDG_DATA_HOME;
+  const dataHome = xdgDataHome && path.isAbsolute(xdgDataHome)
+    ? xdgDataHome
+    : path.join(resolvedHomeDir, '.local', 'share');
+  const primary = path.join(dataHome, basenameForProfile('minimax', profile));
+  // Do not relocate a live database, hide existing data, or mistake an inaccessible
+  // directory / dangling symlink for a fresh install. Older .mavis installations
+  // retain the existing migration to .minimax. A compat link from an earlier XDG
+  // startup must not cause the next startup to switch back to .minimax.
+  if (pathState(previousPrimary).kind !== 'missing') return previousPrimary;
+  const legacy = getLegacyDataDirPath(resolvedHomeDir, profile);
+  if (pathState(legacy).kind !== 'missing' && !isLinkTo(legacy, primary)) return previousPrimary;
+  return primary;
 }
 
 export function getLegacyDataDirPath(homeDir?: string, profile?: string | null): string {
@@ -298,6 +318,13 @@ function resolveDataDirPair(
     return newDir;
   }
 
+  if (newState.kind === 'link' || newState.kind === 'other') {
+    logger.warn(
+      `Primary data dir path ${newDir} exists but is not a directory; using it without migration`,
+    );
+    return newDir;
+  }
+
   if (newState.kind === 'directory') {
     const newContent = contentState(newDir);
     const legacyContent =
@@ -367,13 +394,6 @@ function resolveDataDirPair(
   if (legacyState.kind === 'inaccessible') {
     logger.warn(`Legacy data dir ${legacyDir} is inaccessible; not treating it as missing`);
     return legacyDir;
-  }
-
-  if (newState.kind === 'link' || newState.kind === 'other') {
-    logger.warn(
-      `Primary data dir path ${newDir} exists but is not a directory; using it without migration`,
-    );
-    return newDir;
   }
 
   ensurePrimaryDir(newDir, logger);
