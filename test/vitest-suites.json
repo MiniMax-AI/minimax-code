@@ -61,6 +61,7 @@
       "packages/local-runtime-v2/src/service/model-system/catalog/model-selection.test.ts",
       "packages/local-runtime-v2/src/service/model-system/catalog/provider-presets/provider-presets.service.test.ts",
       "packages/local-runtime-v2/src/service/model-system/connectivity/discover-models.test.ts",
+      "packages/local-runtime-v2/src/service/model-system/connectivity/provider-request.test.ts",
       "packages/local-runtime-v2/src/service/model-system/connectivity/test-connection.test.ts",
       "packages/local-runtime-v2/src/service/model-system/management/service-context.test.ts",
       "packages/local-runtime-v2/src/service/model-system/management/service-input.test.ts",

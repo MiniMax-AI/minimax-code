@@ -628,28 +628,33 @@ describe('LocalModelResolver custom-provider endpoint normalization', () => {
   ] as const)(
     'normalizes an endpoint-form $api URL with the shared connectivity rule',
     async ({ api, baseUrl, expectedBaseUrl }) => {
-      const resolver = new LocalModelResolver({
-        byokConfigGetter: () => ({
-          custom_provider: {
-            work: {
-              api,
-              options: { apiKey: 'custom-user-key', baseURL: baseUrl },
-              models: { model: {} },
+      for (const suffix of ['', '?tenant=a&tenant=b&encoded=%2F#local']) {
+        const resolver = new LocalModelResolver({
+          byokConfigGetter: () => ({
+            custom_provider: {
+              work: {
+                api,
+                options: {
+                  apiKey: 'custom-user-key',
+                  baseURL: `${baseUrl}${suffix}`,
+                },
+                models: { model: {} },
+              },
             },
+          }),
+        });
+
+        const resolved = await resolver.resolveModel({
+          sessionId: 'session-endpoint-base-url',
+          turnId: 'turn-endpoint-base-url',
+          agentConfig: {
+            ...AGENT_CONFIG,
+            model: { provider: 'custom_provider:work', model_id: 'model' },
           },
-        }),
-      });
+        });
 
-      const resolved = await resolver.resolveModel({
-        sessionId: 'session-endpoint-base-url',
-        turnId: 'turn-endpoint-base-url',
-        agentConfig: {
-          ...AGENT_CONFIG,
-          model: { provider: 'custom_provider:work', model_id: 'model' },
-        },
-      });
-
-      expect(resolved.model.baseUrl).toBe(expectedBaseUrl);
+        expect(resolved.model.baseUrl).toBe(`${expectedBaseUrl}${suffix}`);
+      }
     },
   );
 });

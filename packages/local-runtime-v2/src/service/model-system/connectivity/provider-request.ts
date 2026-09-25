@@ -47,10 +47,10 @@ export function buildModelDiscoveryHeaders(input: {
 }
 
 export function providerCompletionUrl(api: ModelProviderApi, baseUrl: string): string {
-  const base = normalizeProviderBaseUrl(api, baseUrl);
-  if (api === 'anthropic-messages') return `${base}/v1/messages`;
-  if (api === 'openai-responses') return `${base}/responses`;
-  return `${base}/chat/completions`;
+  const [base, suffix] = splitProviderUrlSuffix(normalizeProviderBaseUrl(api, baseUrl));
+  if (api === 'anthropic-messages') return `${base}/v1/messages${suffix}`;
+  if (api === 'openai-responses') return `${base}/responses${suffix}`;
+  return `${base}/chat/completions${suffix}`;
 }
 
 /**
@@ -61,25 +61,41 @@ export function providerCompletionUrl(api: ModelProviderApi, baseUrl: string): s
  * OpenAI-style candidates.
  */
 export function providerModelsUrls(api: ModelProviderApi, baseUrl: string): [string, ...string[]] {
-  const base = normalizeProviderBaseUrl(api, baseUrl);
-  if (api !== 'anthropic-messages') return [`${base}/models`];
-  const primary = `${base}/v1/models`;
-  const fallbacks = [`${base}/models`, originModelsUrl(base)].filter((url): url is string =>
-    Boolean(url),
+  const normalized = normalizeProviderBaseUrl(api, baseUrl);
+  const [base, suffix] = splitProviderUrlSuffix(normalized);
+  if (api !== 'anthropic-messages') return [`${base}/models${suffix}`];
+  const primary = `${base}/v1/models${suffix}`;
+  const fallbacks = [`${base}/models${suffix}`, originModelsUrl(normalized)].filter(
+    (url): url is string => Boolean(url),
   );
   return [primary, ...new Set(fallbacks)];
 }
 
 function originModelsUrl(base: string): string | undefined {
   try {
-    return `${new URL(base).origin}/models`;
+    const [path, suffix] = splitProviderUrlSuffix(base);
+    return `${new URL(path).origin}/models${suffix}`;
   } catch {
     return undefined;
   }
 }
 
 export function normalizeProviderBaseUrl(api: ModelProviderApi, baseUrl: string): string {
-  let base = baseUrl.replace(/\/+$/u, '');
+  const [path, suffix] = splitProviderUrlSuffix(baseUrl);
+  return `${normalizeProviderBasePath(api, path)}${suffix}`;
+}
+
+// Keep the raw query (including repeated keys and encoding) and fragment outside
+// path edits. Preserve fragments for config consumers; HTTP fetch omits them.
+// Splitting instead of reserializing also preserves existing base URL spelling
+// and leaves validation/error handling to the existing callers.
+function splitProviderUrlSuffix(baseUrl: string): [string, string] {
+  const index = baseUrl.search(/[?#]/u);
+  return index < 0 ? [baseUrl, ''] : [baseUrl.slice(0, index), baseUrl.slice(index)];
+}
+
+function normalizeProviderBasePath(api: ModelProviderApi, path: string): string {
+  let base = path.replace(/\/+$/u, '');
   if (api === 'anthropic-messages') {
     if (base.endsWith('/v1/messages')) base = base.slice(0, -'/v1/messages'.length);
     else if (base.endsWith('/messages')) base = base.slice(0, -'/messages'.length);
