@@ -52,7 +52,7 @@
     "@types/node": "^20",
     "@types/ws": "^8.18.1",
     "ghostty-web": "^0.4.0",
-    "knip": "^6.27.0",
+    "knip": "^6.37.0",
     "node-pty": "^1.0.0",
     "typescript": "^5",
     "vitest": "^2"
