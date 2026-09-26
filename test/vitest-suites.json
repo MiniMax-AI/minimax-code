@@ -178,7 +178,17 @@
       "packages/tui/test/unit/tui/theme/palettes.test.ts",
       "packages/tui/test/unit/tui/theme/runtime.test.ts",
       "packages/tui/test/unit/tui-plugin-mentions.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts",
+      "packages/agent-modules/context-manager/test/provider-budget.test.ts",
+      "packages/agent-tools/test/desktop/local-bash-output.test.ts",
+      "packages/agent-tools/test/desktop/local-bash-timeout.test.ts",
+      "packages/agent-tools/test/desktop/local-memory.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/compaction/context-compaction.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/compact-context.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/compaction/automatic-context-compactor.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/compaction/execution/checkpoint-prompt.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/compaction/execution/checkpoint-provider.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/compaction/local-context-compactor.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

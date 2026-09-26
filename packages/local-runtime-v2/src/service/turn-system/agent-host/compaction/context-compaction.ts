@@ -203,15 +203,11 @@ export function createAutomaticContextCompactionHook(
         reason: describeUnknownError(error),
         ...compactionTokenUsageMetadata(providerTokenUsage.snapshot()),
       });
-      if (requiresProviderAdmissionFailure(error)) {
-        const failures = lifecycle.failed ? [error, lifecycle.error] : [error];
-        return {
-          type: 'abort',
-          reason: `context_compaction_failed:${failures.map(describeUnknownError).join(' | ')}`,
-        };
-      }
-      // Automatic compaction is optional maintenance. Its failure is recorded
-      // above, while the parent Turn continues with the pre-compaction history.
+      // Automatic compaction is optional maintenance and always fails open:
+      // the failure is recorded above while the parent Turn continues with the
+      // pre-compaction history, and the Provider stays the final admission
+      // authority. This includes POST_ADMISSION_FAILED — a local estimate must
+      // never wedge a session that the Provider would accept.
       return {
         type: 'skip',
         reason: lifecycle.failed
@@ -269,12 +265,14 @@ const CHECKPOINT_CANDIDATES = new Set<CheckpointAttemptMetadata['candidate']>([
 const CHECKPOINT_ATTEMPT_OUTCOMES = new Set<CheckpointAttemptMetadata['outcome']>([
   'generated',
   'input_too_large',
+  'output_exhausted',
   'aborted',
   'failed',
 ]);
 const STABLE_COMPACTION_FAILURES = [
   ['INVALID_HISTORY', 'tool_trim'],
   ['INVALID_CHECKPOINT', 'llm_checkpoint'],
+  ['CHECKPOINT_PROVIDER_FAILED', 'llm_checkpoint'],
   ['COMPACTION_INPUT_TOO_LARGE', 'llm_checkpoint'],
   ['POST_ADMISSION_FAILED', 'post_admission'],
 ] as const;
@@ -447,6 +445,10 @@ const COMPACTION_SIZE_DIAGNOSTIC_FIELDS = [
   ['protectedSerializedBytes', 'protected_serialized_bytes'],
   ['providerInputLimit', 'provider_input_limit'],
   ['maxSerializedInputBytes', 'max_serialized_input_bytes'],
+  ['beforeInputTokens', 'before_input_tokens'],
+  ['beforeSerializedBytes', 'before_serialized_bytes'],
+  ['afterInputTokens', 'after_input_tokens'],
+  ['afterSerializedBytes', 'after_serialized_bytes'],
 ] as const;
 
 /** Content-free sizing facts attached by the compaction algorithm, when present. */
@@ -492,15 +494,6 @@ function captureStableCompactionFailure(
   } catch {
     return undefined;
   }
-}
-
-function requiresProviderAdmissionFailure(error: unknown): boolean {
-  const failure = captureStableCompactionFailure(error);
-  // COMPACTION_INPUT_TOO_LARGE is a local-estimate rejection, not a Provider
-  // verdict. It fails open (skip): the Turn continues with the pre-compaction
-  // history and the Provider stays the final authority on admission, so an
-  // over-strict local estimate can never permanently wedge a session.
-  return failure?.[0] === 'POST_ADMISSION_FAILED';
 }
 
 function captureCheckpointAttemptMetadata(value: unknown): CheckpointAttemptMetadata | undefined {

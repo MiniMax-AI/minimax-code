@@ -24,3 +24,11 @@ Output includes `report.json`, `candidates/`, and `.private-review`. Candidates 
 5. Scan complete history and current source before creating the public PR. Include public changes, validation results, and capability descriptions, never private review reports.
 
 After accepted public changes are ported back, subsequent three-way comparisons should show them as synchronized or cleanly mergeable while retaining standalone adaptations. Synchronization is not a blind overwrite: conflicts, missing source, and new files require maintainer judgment.
+
+## Selective release updates
+
+A bounded release update can port reviewed behavior without adopting unrelated
+runtime ownership migrations or private service integrations. Keep the existing
+three-way baseline until the entire target revision has been reviewed; record
+the selected revision, included behavior and excluded boundaries separately.
+See the [0.5.5 review](source-sync-0.5.5.md) for the current selective update.

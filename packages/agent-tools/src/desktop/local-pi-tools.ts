@@ -456,7 +456,7 @@ export class LocalBashTool implements ToolImpl<
       workspaceRoot: this.workspaceRoot,
       runtime: this.hostTrashRuntime,
       envPolicy: this.envPolicy,
-      timeoutSeconds: resolveForegroundTimeout(input),
+      timeoutSeconds: resolveForegroundTimeout({ timeout: timing.commandTimeoutSeconds }),
       ...(signal ? { signal } : {}),
     });
     if (hostTrashResult) {
@@ -505,7 +505,7 @@ export class LocalBashTool implements ToolImpl<
     ) {
       const managed = await this.backgroundAdapter.runManagedForeground(
         ctx,
-        rest,
+        foregroundInput,
         DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS,
         signal,
       );

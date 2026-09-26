@@ -215,6 +215,7 @@ async function openAutomaticCheckpoint(
     maxOutputTokens: checkpointMaxOutputTokens(
       DEFAULT_COMPACTION_SETTINGS.reserveTokens,
       input.maxTokens ?? input.model.maxTokens,
+      input.model.contextWindow,
     ),
     ...(input.maxSerializedInputBytes === undefined
       ? {}

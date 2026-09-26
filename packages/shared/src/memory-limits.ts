@@ -26,6 +26,12 @@ export const MEMORY_CLEANUP_TRIGGER_BYTES = 18 * 1024; // 18KB
  */
 export const MEMORY_INJECTION_CAP_CHARS = MEMORY_HARD_LIMIT_BYTES;
 
+/** 每轮自动注入的全部 V1 记忆块共用的字符预算，包含正文、包装和分隔符。 */
+export const MEMORY_CONTEXT_CAP_CHARS = 16 * 1024;
+
+/** 原生 memory 工具单次返回的字节预算。 */
+export const MEMORY_TOOL_OUTPUT_MAX_BYTES = 16 * 1024;
+
 /**
  * Maximum characters of the .summary.md (compressed index) to inject.
  * Kept small so it fits alongside the tail without blowing out the token budget.

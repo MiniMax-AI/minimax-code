@@ -195,6 +195,10 @@
     "./plugin-mention": {
       "types": "./src/plugin-mention.ts",
       "import": "./dist/plugin-mention.js"
+    },
+    "./memory-limits": {
+      "types": "./src/memory-limits.ts",
+      "import": "./dist/memory-limits.js"
     }
   },
   "types": "./src/index.ts",
