@@ -25,7 +25,7 @@ import type { SubagentCheckpointStateSource } from './contracts.js';
 export class LocalContextCompactor implements ContextCompactor {
   constructor(
     private readonly checkpointState?: SubagentCheckpointStateSource,
-    private readonly logger?: Pick<PiTurnRunnerLogger, 'error'>,
+    private readonly logger?: Pick<PiTurnRunnerLogger, 'warn' | 'error'>,
     private readonly promptSnapshots?: PromptSnapshotSource,
   ) {}
 
@@ -44,6 +44,9 @@ export class LocalContextCompactor implements ContextCompactor {
       checkpointState: this.checkpointState,
       logger: this.logger,
       promptSnapshots: this.promptSnapshots,
+    });
+    logManualReplacementGrowthBestEffort(this.logger, input.sessionId, decision, {
+      providerInputLimit: preparation.providerInputLimit,
     });
     return completedManualCompaction(preparation.history, decision);
   }
@@ -73,7 +76,7 @@ async function runManualPolicy(options: {
   readonly hooks?: ContextCompactionHooks;
   readonly preparation: ReturnType<typeof prepareManualCompaction>;
   readonly checkpointState?: SubagentCheckpointStateSource;
-  readonly logger?: Pick<PiTurnRunnerLogger, 'error'>;
+  readonly logger?: Pick<PiTurnRunnerLogger, 'warn' | 'error'>;
   readonly promptSnapshots?: PromptSnapshotSource;
 }) {
   const { input, hooks, preparation } = options;
@@ -83,6 +86,10 @@ async function runManualPolicy(options: {
     limits: manualLimits(input, preparation.providerInputLimit),
     measurePair: async (pair) => preparation.measurer.measurePair(pair),
     allowLegacyToolTrim: false,
+    // An explicit user request always commits a validly generated checkpoint.
+    // Growth is possible on short histories (checkpoint output cap plus host
+    // appendix) and stays bounded; it is observed below, never intercepted.
+    finalAdmission: 'bypass',
     checkpoint: manualCheckpoint({
       input,
       hooks,
@@ -139,6 +146,7 @@ function manualCheckpoint({
         maxOutputTokens: checkpointMaxOutputTokens(
           DEFAULT_COMPACTION_SETTINGS.reserveTokens,
           input.maxTokens ?? input.model.maxTokens,
+          input.model.contextWindow,
         ),
         ...(input.maxSerializedInputBytes === undefined
           ? {}
@@ -166,7 +174,7 @@ function manualCheckpoint({
 function manualSubagentCapture(
   sessionId: string,
   checkpointState: SubagentCheckpointStateSource | undefined,
-  logger: Pick<PiTurnRunnerLogger, 'error'> | undefined,
+  logger: Pick<PiTurnRunnerLogger, 'warn' | 'error'> | undefined,
 ): Pick<CompactContextInput, 'captureSubagents' | 'onSubagentCaptureFailure'> {
   if (!checkpointState) return {};
   return {
@@ -180,6 +188,43 @@ function manualSubagentCapture(
         '[local-runtime-v2] subagent checkpoint state capture failed',
       ),
   };
+}
+
+/**
+ * Manual compaction commits without the final admission gate, so a replacement
+ * larger than the original history is possible on short histories. The commit
+ * stands (explicit user request); growth only leaves a content-free trace.
+ */
+function logManualReplacementGrowthBestEffort(
+  logger: Pick<PiTurnRunnerLogger, 'warn' | 'error'> | undefined,
+  sessionId: string,
+  decision: CompactContextDecision,
+  limits: { readonly providerInputLimit: number },
+): void {
+  try {
+    const { before, after } = decision.measurement;
+    if (
+      after.inputTokens <= before.inputTokens &&
+      after.serializedBytes <= before.serializedBytes
+    ) {
+      return;
+    }
+    logger?.warn?.(
+      {
+        event: 'manual_compaction_replacement_grew',
+        session_id: sessionId,
+        method: decision.method,
+        provider_input_limit: limits.providerInputLimit,
+        before_input_tokens: before.inputTokens,
+        before_serialized_bytes: before.serializedBytes,
+        after_input_tokens: after.inputTokens,
+        after_serialized_bytes: after.serializedBytes,
+      },
+      '[local-runtime-v2] manual compaction replacement grew',
+    );
+  } catch {
+    // Observability must never change the compaction outcome.
+  }
 }
 
 function completedManualCompaction(

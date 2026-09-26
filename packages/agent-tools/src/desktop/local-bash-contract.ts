@@ -30,7 +30,7 @@ export function createLocalBashToolDefinition(
   const base = Clone(LocalBashToolDef.schema);
   const schema = capabilities.background ? base : Type.Omit(base, ['run_in_background']);
   schema.properties.timeout.description = capabilities.background
-    ? `Total command timeout in seconds. Foreground with automatic backgrounding: default/max ${MAX_MANAGED_BASH_TIMEOUT_SECONDS}s, including foreground time. Explicit background: uses the specified timeout, or a 30-minute limit if omitted.`
+    ? `Total command timeout in seconds. Foreground with automatic backgrounding: default/max ${MAX_MANAGED_BASH_TIMEOUT_SECONDS}s, including foreground time. Explicit background: uses the specified timeout, or a 1-hour runtime limit if omitted.`
     : `Timeout in seconds. Foreground: default ${DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS}s; values above ${MAX_FOREGROUND_BASH_TIMEOUT_SECONDS}s are capped.`;
   return {
     ...LocalBashToolDef,

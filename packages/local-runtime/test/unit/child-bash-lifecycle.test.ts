@@ -220,7 +220,7 @@ describe('child Bash lifecycle', () => {
 });
 
 describe('real child Bash boundaries', () => {
-  it('keeps the 600 second command deadline across the actual 60 second soft yield', async () => {
+  it('keeps the 3600 second command deadline across the actual 60 second soft yield', async () => {
     const { dataDir, host, lifecycle, service, controller } = await fixture();
     const session = {
       ...parentSessionRecord(dataDir),
@@ -251,10 +251,10 @@ describe('real child Bash boundaries', () => {
         commandTimerStartedAt: number;
         commandDeadlineAt: number;
       };
-      expect(timing.commandTimeoutSeconds).toBe(600);
+      expect(timing.commandTimeoutSeconds).toBe(3600);
       expect(timing.commandTimerStartedAt).toBeGreaterThanOrEqual(startedAt);
-      expect(timing.commandDeadlineAt - timing.commandTimerStartedAt).toBe(600_000);
-      expect(timing.commandDeadlineAt - Date.now()).toBeLessThan(550_000);
+      expect(timing.commandDeadlineAt - timing.commandTimerStartedAt).toBe(3_600_000);
+      expect(timing.commandDeadlineAt - Date.now()).toBeLessThan(3_550_000);
       const taskId = String(receipt.details?.task_id);
       expect(await lifecycle.poll({ ...poll, wait: true })).toContain(taskId);
       expect((await service.readOutput(toolContext('child'), taskId)).content).toContain(
@@ -262,7 +262,7 @@ describe('real child Bash boundaries', () => {
       );
       expect((await service.get(taskId))?.metadata?.bashDetails).toMatchObject({
         timing: {
-          commandTimeoutSeconds: 600,
+          commandTimeoutSeconds: 3600,
           commandTimerStartedAt: timing.commandTimerStartedAt,
           commandDeadlineAt: timing.commandDeadlineAt,
         },

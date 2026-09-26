@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { homedir } from 'node:os';
 import path from 'node:path';
 import spawn from 'cross-spawn';
-import { EnvHttpProxyAgent, fetch } from 'undici';
 import { retryWindowsFileSystemOperation } from '@mavis/shared';
 import { resolveMcodeNpmDistribution } from './install-source.js';
 import { readMcodeBinEntry, resolveMcodePrefixPackageRoot } from './prefix-update.js';
@@ -321,13 +320,13 @@ async function defaultFetchBytes(
   url: string,
   options: { signal?: AbortSignal; proxyEnvironment?: NodeJS.ProcessEnv } = {},
 ): Promise<Buffer> {
-  const dispatcher = new EnvHttpProxyAgent({
-    httpProxy: options.proxyEnvironment?.HTTP_PROXY ?? options.proxyEnvironment?.http_proxy,
-    httpsProxy: options.proxyEnvironment?.HTTPS_PROXY ?? options.proxyEnvironment?.https_proxy,
-    noProxy: options.proxyEnvironment?.NO_PROXY ?? options.proxyEnvironment?.no_proxy,
-  });
+  const [{ default: undici }, { createTuiNetworkDispatcher }] = await Promise.all([
+    import('undici'),
+    import('../cli/network-proxy.js'),
+  ]);
+  const dispatcher = createTuiNetworkDispatcher(options.proxyEnvironment);
   try {
-    const response = await fetch(url, {
+    const response = await undici.fetch(url, {
       signal: options.signal,
       dispatcher,
       redirect: 'error',

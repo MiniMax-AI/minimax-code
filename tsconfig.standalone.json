@@ -316,6 +316,9 @@
       "@mavis/shared/media-asset-meta": [
         "./packages/shared/src/media-asset-meta.ts"
       ],
+      "@mavis/shared/memory-limits": [
+        "./packages/shared/src/memory-limits.ts"
+      ],
       "@mavis/shared/metrics-proxy": [
         "./packages/shared/src/metrics-proxy.ts"
       ],
