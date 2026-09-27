@@ -778,6 +778,21 @@ describe('custom provider API key reveal', () => {
 });
 
 describe('custom providers', () => {
+  it('discovers a new provider with its draft key before any model or configuration is saved', async () => {
+    const h = makeHarness({});
+    const before = JSON.stringify(h.config);
+    h.setDiscoverResult({ ok: true, models: [{ modelId: 'new-model' }] });
+    await expect(h.service.discoverUserModelsCandidate({
+      name: 'Draft gateway', baseUrl: 'https://draft.example/v1',
+      apiKey: 'synthetic-draft-key', apiFormat: 'openai-completions',
+    })).resolves.toEqual([{ modelId: 'new-model' }]);
+    expect(h.discoverCalls).toEqual([expect.objectContaining({
+      baseUrl: 'https://draft.example/v1', apiKey: 'synthetic-draft-key', api: 'openai-completions',
+    })]);
+    expect(JSON.stringify(h.config)).toBe(before);
+    expect(h.testCalls).toEqual([]);
+  });
+
   it('tests and discovers an edit candidate without mutating config or cache', async () => {
     const h = makeHarness({
       custom_provider: {

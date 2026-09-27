@@ -276,11 +276,10 @@ export interface LocalRuntimeApplication {
       models?: readonly ProcessLocalModelInput[];
       saveAndUse?: boolean;
     }): Promise<unknown>;
-    discoverCandidate(input: {
-      providerId: string;
-      expectedRevision: string;
-      baseUrl: string;
-    }): Promise<readonly { modelId: string; displayName?: string }[]>;
+    discoverCandidate(input: { baseUrl: string } & (
+      | { providerId: string; expectedRevision: string }
+      | { name: string; apiKey: string; apiFormat: string }
+    )): Promise<readonly { modelId: string; displayName?: string }[]>;
     saveCandidate(input: {
       candidate: {
         providerId?: string;

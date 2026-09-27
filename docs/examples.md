@@ -28,6 +28,8 @@ Use `/model` in the interactive TUI to select a model or choose **+ Add 3rd-part
 
 Preset IDs come from models.dev and do not select entries in the bundled inference registry. Onboarding saves the chosen URL under `custom_provider`; subsequent requests use that saved URL.
 
+In **Custom provider**, enter the name, Base URL, protocol, and API key first. Then choose **Import models from /models** to fetch the list using that key. Search and select a model to test; a successful test saves all imported models and selects the chosen one. Importing alone does not save configuration. If discovery fails or returns no models, retry, press **Esc** to edit the key, or choose **Enter a model ID manually**. Saved connections also support **refresh models** in `/provider`.
+
 Before adding a custom provider, set a key in your current shell rather than putting it in command arguments or source:
 
 ```bash

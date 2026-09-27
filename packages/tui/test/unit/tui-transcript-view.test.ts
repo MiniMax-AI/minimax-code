@@ -1327,6 +1327,44 @@ describe('TranscriptView', () => {
     }
   });
 
+  it.each(['Run highlight reproduction script', '中文 English', '克隆仓库并查看渲染逻辑'])(
+    'renders the Bash recap %s as prose while highlighting the command below',
+    (description) => {
+      const original = getTuiThemeSnapshot();
+      const palette =
+        original.appearance === 'light' ? MINIMAX_CODE_LIGHT_THEME : MINIMAX_CODE_DARK_THEME;
+      applyTuiRenderTheme(MINIMAX_CODE_DARK_THEME, 3);
+      try {
+        const view = new TranscriptView(
+          () => [
+            createTranscriptCell({
+              id: 'bash-recap',
+              kind: 'tool',
+              status: 'succeeded',
+              title: 'bash',
+              content: JSON.stringify({ command: 'node repro.mjs', description }),
+              detail: 'one\ntwo',
+              createdAtMs: 1,
+            }),
+          ],
+          { displayModes: previewDisplayModes },
+        );
+        const rendered = view.render(120);
+        const ansi = createTuiChalk({ colorLevel: 3 });
+        expect(stripVTControlCharacters(rendered[0]!)).toBe(
+          `└ • Ran  ${description} · 2 output lines`,
+        );
+        expect(rendered[0]).toContain(ansi.hex(tuiColors.text)(description));
+        expect(rendered[0]).not.toContain(
+          ansi.bold.hex(tuiColors.accent)(description.split(' ')[0]!),
+        );
+        expect(rendered.slice(1).join('\n')).toContain(ansi.bold.hex(tuiColors.accent)('node'));
+      } finally {
+        applyTuiRenderTheme(palette, original.colorLevel);
+      }
+    },
+  );
+
   it('trims the shell command but keeps the output count when the row is narrow', () => {
     const view = new TranscriptView(() => [
       createTranscriptCell({

@@ -15,6 +15,7 @@ export interface TranscriptToolEvidenceOptions {
 
 export interface TranscriptToolEvidence {
   readonly summary?: string;
+  readonly summaryKind?: 'description' | 'command';
   readonly lines: readonly string[];
   readonly handlesDetail: boolean;
 }
@@ -222,9 +223,11 @@ function presentShellEvidence(
     }
   }
 
+  const description = parseToolArguments(cell.content).description;
   return {
+    summaryKind: description ? 'description' : 'command',
     summary: composeShellSummary(
-      parseToolArguments(cell.content).description || command,
+      description || command,
       shellOutputSummary(output.length, cell.status),
     ),
     lines,
