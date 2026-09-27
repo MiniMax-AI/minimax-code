@@ -271,7 +271,7 @@ This repository also hosts issue reporting for the MiniMax Code desktop app. The
 | [Discord](https://minimax.io/discord) | Community discussion and feedback. |
 | [Feishu feedback group QR code](https://cdn.hailuoai.com/hailuo-video-web/public_assets/minimax_code_feishu_group_url.png) | Chinese-language community feedback. Scan with Feishu, or find the QR code in the Chinese desktop app under the user menu → **Contact us → Feishu**. |
 
-Follow [MiniMax on X](https://twitter.com/MiniMax_AI) for updates. Keep vulnerability details, credentials, and private project content out of public issues and community chats.
+Follow [MiniMax on X](https://x.com/MiniMaxAgent) for updates. Keep vulnerability details, credentials, and private project content out of public issues and community chats.
 
 ## License
 
