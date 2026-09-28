@@ -410,6 +410,7 @@ export async function launchTui(
         homeDir: homeDirectory,
         terminal,
         tuiMode,
+        clearScrollbackOnStart: Boolean(options.sessionId?.trim() || options.continueLatestSession),
         persistTuiMode: (mode) => (dependencies.writeTuiMode ?? writeTuiModeSetting)(dataDir, mode),
         ...(theme ? { theme } : {}),
         persistTheme: (value) =>

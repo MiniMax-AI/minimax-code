@@ -200,6 +200,10 @@ class FakeTerminal implements Terminal {
 
 // Apple Terminal can save ED 2 clears into scrollback before the renderer clears history.
 class ClearToScrollbackTerminal extends VirtualTerminal {
+  override clearScreen(): void {
+    this.write("\x1b[2J\x1b[H");
+  }
+
   override write(data: string): void {
     super.write(data.replaceAll("\x1b[2J", `\x1b[${this.rows};1H${"\r\n".repeat(this.rows)}\x1b[2J`));
   }
@@ -14831,6 +14835,85 @@ describe("createTuiApp", () => {
       expect(app.editor.getText()).toBe("Fresh Session Draft");
       await app.stop();
     } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.each([
+  ["xterm", VirtualTerminal],
+  ["clear-to-scrollback terminal", ClearToScrollbackTerminal],
+] as const)("startup banner anchor on %s", (_name, Terminal) => {
+  it.each([
+    ["explicit session", { sessionId: "existing" }, "regular", 2],
+    ["continue", { continueLatestSession: true }, "regular", 2],
+    ["long session", { sessionId: "existing" }, "regular", 20],
+    ["new session", {}, "regular", 0],
+    ["fullscreen session", { sessionId: "existing" }, "fullscreen", 2],
+  ] as const)("rebuilds %s without stale transcript above the banner", async (_scenario, resume, mode, count) => {
+    const dataDir = await mkdtemp(join(tmpdir(), "mcode-banner-startup-"));
+    const terminal = new Terminal(100, 50);
+    // Model the inherited terminal after the old process exits: both native
+    // scrollback and the viewport still contain the previous conversation.
+    terminal.write(Array.from({ length: 80 }, (_, i) => `OLD TRANSCRIPT ${i}\r\n`).join(""));
+    await terminal.flush();
+    const runtime = createRuntime();
+    runtime.listBackgroundTasks = vi.fn(async () => []);
+    vi.mocked(runtime.listSessions).mockResolvedValue([
+      { sessionId: "existing", workspaceDir: "/workspace", updatedAt: 10 },
+    ]);
+    const messages = Array.from({ length: count }, (_, i) => ({
+      id: `restored-${i}`, role: "user" as const, content: `Restored message ${i}`,
+    }));
+    vi.mocked(runtime.getMessages).mockResolvedValue(messages);
+    vi.mocked(runtime.listMessagePage).mockResolvedValue({ messages, hasMore: false });
+    let app: ReturnType<typeof createTuiApp> | undefined;
+    const running = launchTui(
+      { version: "0.5.7", dataDir, terminal, workspaceDir: "/workspace", tuiMode: mode, ...resume },
+      {
+        createObservability,
+        readTelemetryEnabled: () => false,
+        installProcessGuards: () => () => undefined,
+        loadRuntimeLifecycle: async () => ({
+          createTuiRuntime: async () => ({ adapter: runtime }) as never,
+          shutdownTuiRuntime: async () => false,
+        }),
+        loadUpdateApplication: async () =>
+          ({ inspect: async () => ({ status: "up-to-date" }) }) as never,
+        createApp: (options) => {
+          app = createTuiApp({ ...options, productFeatures: { queue: false } });
+          return app;
+        },
+        writeExitMessage: () => undefined,
+      },
+    );
+    try {
+      await vi.waitFor(() => expect(app?.editor.disableSubmit).toBe(false));
+      app!.tui.renderNow();
+      await terminal.flush();
+      const history = terminal.getScrollBuffer().join("\n");
+      if (mode === "regular" && count > 0) {
+        expect(history).not.toContain("OLD TRANSCRIPT");
+        expect(history.match(/Tips for getting started/gu)).toHaveLength(1);
+        const banner = history.indexOf("Tips for getting started");
+        for (let i = 0; i < count; i++) {
+          const line = `› Restored message ${i}`;
+          expect(terminal.getScrollBuffer().filter((row) => row.trim() === line), line).toHaveLength(1);
+          expect(history.indexOf(line)).toBeGreaterThan(banner);
+        }
+        expect(app!.controller.snapshot().session?.sessionId).toBe("existing");
+      } else if (mode === "regular") {
+        expect(history).toContain("OLD TRANSCRIPT 0");
+      }
+      // Alternate-screen startup must leave the underlying shell buffer alone.
+      if (mode === "fullscreen") {
+        await app!.suspend();
+        await terminal.flush();
+        expect(terminal.getScrollBuffer().join("\n")).toContain("OLD TRANSCRIPT 0");
+      }
+    } finally {
+      await app?.stop();
+      await running;
       await rm(dataDir, { recursive: true, force: true });
     }
   });

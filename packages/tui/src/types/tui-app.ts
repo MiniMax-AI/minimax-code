@@ -37,6 +37,8 @@ export interface CreateTuiAppOptions extends TuiUpdateOptions {
   terminal?: Terminal;
   terminalCapabilities?: TerminalCapabilities;
   tuiMode?: TuiMode;
+  /** Rebuild terminal history when restoring a Session at process startup. */
+  clearScrollbackOnStart?: boolean;
   persistTuiMode?: (mode: TuiMode) => void;
   /** Saved theme selection, e.g. `aurora` or `aurora/dark`. */
   theme?: string;
