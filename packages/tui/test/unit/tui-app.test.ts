@@ -1533,6 +1533,25 @@ describe("createTuiApp", () => {
     );
   });
 
+  it.each(["stop", "suspend"] as const)("waits for output cleanup before %s completes", async (operation) => {
+    let release: () => void = () => {};
+    const flushed = new Promise<void>((resolve) => { release = resolve; });
+    const drainOutput = vi.fn(() => flushed);
+    const terminal = Object.assign(new FakeTerminal(), { drainOutput });
+    const app = createTuiApp({ runtime: createRuntime(), terminal, version: "0.1.0", workspaceDir: "/workspace" });
+    app.start();
+    await app.ready;
+    let finished = false;
+    const result = app[operation]().then(() => { finished = true; });
+    await vi.waitFor(() => expect(drainOutput).toHaveBeenCalledOnce());
+    expect(finished).toBe(false);
+    expect(terminal.stopped).toBe(true);
+    release();
+    await result;
+    expect(finished).toBe(true);
+    await app.stop();
+  });
+
   it("shows the Runtime initialization error text when the Session catalog is unavailable", async () => {
     const runtime = createRuntime();
     vi.mocked(runtime.listSessions).mockRejectedValue(

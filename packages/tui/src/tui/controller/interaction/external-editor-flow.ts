@@ -17,7 +17,7 @@ interface ExternalEditorDraft {
 
 interface ExternalEditorTuiLifecycle {
   start(): void;
-  stop(): void;
+  stop(): void | Promise<void>;
   requestRender(force?: boolean): void;
 }
 
@@ -63,8 +63,9 @@ export class TuiExternalEditorFlow {
       if (shouldResumeTui) {
         this.options.setHint('External editor open · save and close to return.');
         this.options.onChanged();
-        this.options.tui.stop();
+        await this.options.tui.stop();
       }
+      if (this.options.isAppStopped()) return;
       const edited = await (this.options.editDraft ?? editTuiDraftInExternalEditor)({
         command,
         draft: original,

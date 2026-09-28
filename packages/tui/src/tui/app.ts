@@ -746,7 +746,10 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     addInputListener: (listener) => renderer.addInputListener(listener),
     renderLifecycle: {
       start: () => renderer.start(),
-      stop: () => renderer.stop(),
+      stop: async () => {
+        renderer.stop();
+        await terminal.drainOutput?.();
+      },
       requestRender: (force) => tui.requestRender(force),
     },
     editor,
@@ -896,6 +899,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     }
     await terminal.drainInput(1000).catch(() => undefined);
     renderer.dispose();
+    await terminal.drainOutput?.().catch(() => undefined);
     await draftStopPromise;
     await bashStopped;
     stateStore.dispatch({ type: 'lifecycle/stopped' });
@@ -912,6 +916,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     terminalNotifications.setActive(false);
     terminalTitle.setActive(false);
     renderer.stop();
+    await terminal.drainOutput?.();
     await draftLifecycle?.suspend();
   }
   async function resume(): Promise<void> {

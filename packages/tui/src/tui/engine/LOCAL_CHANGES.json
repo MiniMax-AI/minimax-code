@@ -148,10 +148,10 @@
     },
     {
       "path": "terminal.ts",
-      "currentSha256": "3f53e011ddd18872691c9fe21d9f2309995a74eeb0a1f7f6023a9cc9e7b13553",
-      "changeIds": ["L014", "L028"],
-      "reason": "Use the package-aware native module resolver for Windows virtual-terminal input initialization. 终端焦点报告生命周期",
-      "behaviorImpact": "Packaged Windows builds retain modified-key escape sequences such as Shift+Tab instead of silently falling back to plain keys. 焦点报告转发给 Host，cmux 抑制策略仍归 Host。"
+      "currentSha256": "11fca3d510dc827a2a91d05425aeb9ddf3a1829ce1f57415a3c000a8d9a9fd17",
+      "changeIds": ["L014", "L028", "L044"],
+      "reason": "Use the package-aware native module resolver for Windows virtual-terminal input initialization. 终端焦点报告生命周期 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
+      "behaviorImpact": "Packaged Windows builds retain modified-key escape sequences such as Shift+Tab instead of silently falling back to plain keys. 焦点报告转发给 Host，cmux 抑制策略仍归 Host。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."
     },
     {
       "path": "tui-alt-screen.ts",
@@ -163,18 +163,39 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "9d5c2b83b6b3f0b614f9746a398025eb2c9d324a83959138e77728a08679939c",
-      "changeIds": ["L005", "L017", "L027", "L033", "L034", "L037", "L038", "L039", "L041"],
+      "currentSha256": "f57eab79552763ae29bc39e2ced4c7905eb44fa163f538ba3ff6000136e0f493",
+      "changeIds": [
+        "L005",
+        "L017",
+        "L027",
+        "L033",
+        "L034",
+        "L037",
+        "L038",
+        "L039",
+        "L041",
+        "L044"
+      ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
-      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
-      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored."
+      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
+      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored. Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."
     },
     {
       "path": "tui.ts",
-      "currentSha256": "96591553bc244dbe431de5bff46f57a874d83cd5fe623c94b47b637f83afcec0",
-      "changeIds": ["L005", "L015", "L023", "L027", "L028", "L031", "L040", "L041"],
-      "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。",
-      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。"
+      "currentSha256": "6bfb2095855d00532bfc96a4be57e0c974e0d8d06137bbba1e865986483e7005",
+      "changeIds": [
+        "L005",
+        "L015",
+        "L023",
+        "L027",
+        "L028",
+        "L031",
+        "L040",
+        "L041",
+        "L044"
+      ],
+      "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
+      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."
     },
     {
       "path": "utils.ts",

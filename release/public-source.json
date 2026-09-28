@@ -3320,6 +3320,7 @@
     "packages/tui/test/unit/tui-stream-events.test.ts",
     "packages/tui/test/unit/tui-surface-host.test.ts",
     "packages/tui/test/unit/tui-terminal-image-paste.test.ts",
+    "packages/tui/test/unit/tui-terminal-output.test.ts",
     "packages/tui/test/unit/tui-terminal-presentation.test.ts",
     "packages/tui/test/unit/tui-terminal-text-paste.test.ts",
     "packages/tui/test/unit/tui-thinking-preview.test.ts",

@@ -33,6 +33,10 @@ export function createObservedTerminal(
     get kittyProtocolActive() {
       return terminal.kittyProtocolActive;
     },
+    get outputPending() {
+      return terminal.outputPending;
+    },
+    drainOutput: () => terminal.drainOutput?.() ?? Promise.resolve(),
     get focused() {
       return terminal.focused;
     },

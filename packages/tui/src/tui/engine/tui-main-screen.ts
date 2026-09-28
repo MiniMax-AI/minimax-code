@@ -158,7 +158,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	override stop(options: TuiStopOptions = {}): void {
 		// Restore the ordered document before handing the main screen back to its host.
 		this.cancelResize();
-		if (this.historyReplayPending && !this.stopped) this.renderNow();
+		// Ordinary stop must retain the latest transcript even when output is held.
+		// Mode switches already captured the current render state before stop.
+		if (!this.stopped && (this.historyReplayPending || (!options.preserveScreen && this.hasPendingRender()))) {
+			this.doRender();
+		}
 		super.stop(options);
 	}
 
