@@ -24,6 +24,8 @@ import {
 import { taskIdFromTurnId, taskTurnId } from '../background-task/turn-id.js';
 import { isLocalDirectTaskPurpose } from '../sessions/session-policy.js';
 import {
+  admitAppendActivation,
+  type AppendAdmission,
   createAppendTaskRow,
   persistActivatedAppendAdmissionFailure,
   registerAppendCompletion,
@@ -137,6 +139,7 @@ async function appendLocalTask(args: {
   const requestedTurnId = taskTurnId(candidateTaskId);
   let admittedTaskId: string | undefined;
   let createdCandidateTaskRow = false;
+  let admission: AppendAdmission | undefined;
   let steered: ConversationSteerResult;
   try {
     steered = await steerChild({
@@ -164,6 +167,7 @@ async function appendLocalTask(args: {
               { status: 409, code: 'TASK_APPEND_ACTIVE_TURN_UNMAPPED', taskId: sourceTaskId },
             );
           }
+          admission = admitAppendActivation(host, candidateTaskId, childSessionId);
           try {
             await createAppendTaskRow({
               host,
@@ -176,6 +180,7 @@ async function appendLocalTask(args: {
             createdCandidateTaskRow = true;
             admittedTaskId = candidateTaskId;
           } catch (error) {
+            admission.release('row_persist_failed');
             host.matrixLogger?.warn(
               { sessionId: childSessionId, turnId: requestedTurnId },
               `task_append could not persist task ${candidateTaskId} before Turn delivery: ${
@@ -202,6 +207,7 @@ async function appendLocalTask(args: {
         error,
       });
     }
+    admission?.release('activation_failed');
     throw error;
   }
 
@@ -232,6 +238,7 @@ async function appendLocalTask(args: {
       childSessionId,
       completion: steered.completion,
       sourceTask,
+      admission,
     });
   }
   return { taskId: admittedTaskId, mode: steered.mode };

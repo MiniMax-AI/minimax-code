@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 
-import { normalizeAbortSource } from '@mavis/agent-core/pi-turn-runner';
+import { pausesQueueOnAbort } from '../queue-pause-on-abort.js';
 
 import { createUserMessageId, isQueueMessageSource } from '../../../session-system/index.js';
 import type {
@@ -439,7 +439,7 @@ async function persistRequeue(
       toBatchRequeueInput(batch, session.agentName, messages),
     );
     if (result === undefined) throw new Error('Immediate-send batch enqueue rejected');
-    // A user-stop abort that fell back to the queue must leave the queue
+    // A user stop or session leave that fell back to the queue must leave the queue
     // paused exactly like Stop over pending items: settlement may have judged
     // the pause with an empty queue before this detached requeue landed, and
     // without the pause a later wake would auto-dispatch the instruction the
@@ -450,7 +450,7 @@ async function persistRequeue(
     // absorbed by the queue's clientRequestId replay / itemId restore, so the
     // replay costs one write and buys back the lost pause. Pausing real
     // queued items at settlement stays with the execution coordinator.
-    if (normalizeAbortSource(batch.abortReason) === 'user_stop') {
+    if (pausesQueueOnAbort(batch.abortReason)) {
       await options.queue.pauseIfPending({
         sessionId: batch.sessionId,
         cause: 'user-stop',

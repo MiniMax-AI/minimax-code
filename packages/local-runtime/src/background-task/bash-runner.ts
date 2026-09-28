@@ -229,6 +229,9 @@ async function startAdmittedBackgroundLocalBash(
   validateBashCommand(input.bashInput.command);
   const timing = resolveLocalBashTiming(input.bashInput.timeout, executionMode);
   const taskId = createBackgroundTaskId();
+  // Claim the row for this process before it exists durably, so a Session stop
+  // cascade can tell "our task" from a row owned by another client process.
+  admission.identify(taskId);
   const now = input.host.nowMs();
   const description = resolveBashDescription(input.bashInput.description, input.bashInput.command);
   const maxRunMs = capBackgroundBashMaxRunMs(

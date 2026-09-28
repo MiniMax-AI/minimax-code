@@ -590,8 +590,46 @@ export interface TurnSystemSessionCapabilities {
   };
 }
 
+/**
+ * Narrow seam for the user-stop cascade, implemented by the local Runtime
+ * composition. TurnSystem deliberately holds no background-task knowledge.
+ */
+export interface UserStopCascadePort {
+  /**
+   * Runs before the abort. Resolving `undefined` means "do not cascade" (child
+   * worker Session, unknown Session, or the hook itself failed).
+   */
+  begin(sessionId: string): Promise<UserStopCascadeRun | undefined>;
+}
+
+/**
+ * How a stop came to be accepted: the controller's identity check passed (it ran
+ * `onAccepted`), or nothing was running at all. A rejected stop is neither.
+ */
+export type UserStopAcceptance = 'controller_accepted' | 'not_running';
+
+export interface UserStopCascadeRun {
+  /**
+   * Side effects a stop may only have once it is accepted (pausing the Goal).
+   * Idempotent; must never throw; resolves after the pause attempt.
+   */
+  accept(how: UserStopAcceptance): Promise<void>;
+  /** Detached follow-up; must never throw and never block the stop response. */
+  complete(result: AbortTurnResult): void;
+  /**
+   * The abort itself failed, so there is nothing to cascade from. Releases the
+   * delivery window `begin` opened; must never throw.
+   */
+  cancel(reason: string): void;
+}
+
 export interface InitializeTurnSystemOptions {
   readonly db: AppDb;
+  /**
+   * Host-injected user-stop cascade. Absent in embeddings/tests, which then keep
+   * exactly today's behaviour: a stop aborts the Turn and nothing else.
+   */
+  readonly userStop?: UserStopCascadePort;
   readonly logger?: {
     info(fields: Record<string, unknown>, message: string): void;
     warn(fields: Record<string, unknown>, message: string): void;

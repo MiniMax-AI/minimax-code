@@ -353,7 +353,7 @@ export class ConversationApplication {
         sessionId: req.id,
         ...(req.turnId ? { turnId: req.turnId } : {}),
         reason: req.reason ?? "user",
-        ...(abortSource === "user_stop"
+        ...(abortSource === "user_stop" || abortSource === "session_leave"
           ? {
               onAccepted: () => this.pauseActiveGoalForAbort(req.id),
             }

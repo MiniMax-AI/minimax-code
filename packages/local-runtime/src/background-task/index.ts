@@ -7,6 +7,14 @@ export { LocalBackgroundTaskService } from './service.js';
 export type { LocalBackgroundTaskServiceOptions } from './service.js';
 export { FsLocalTaskOutputStore, SqliteLocalBackgroundTaskStore } from './store.js';
 export { abortAllBackgroundLocalBashTasks } from './bash-runner.js';
+export { createUserStopCascade } from './user-stop-cascade.js';
+export type {
+  UserStopCascade,
+  UserStopCascadeDependencies,
+  UserStopCascadeHandle,
+  UserStopAbortResult,
+} from './user-stop-cascade.js';
+export type { StoppedTaskRecord, StoppedTaskStatus } from './session-cascade.js';
 
 export function createLocalBackgroundTaskService(
   dataDir: string | (() => string),

@@ -196,7 +196,14 @@
       "packages/tui/test/unit/tui/controller/projection/turn-output-rate.test.ts",
       "packages/local-runtime-v2/src/application/session/content-timing.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-hooks.test.ts",
-      "packages/tui/test/unit/tui-hook-system-message.test.ts"
+      "packages/tui/test/unit/tui-hook-system-message.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/execution/execution.coordinator.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/execution/queue-pause-on-abort.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/execution/steering/steering-requeue.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/execution/turn-execution.service.test.ts",
+      "packages/local-runtime-v2/test/integration/session-stop-cascade.integration.test.ts",
+      "packages/local-runtime/test/unit/local-background-task-user-stop-cascade.test.ts",
+      "packages/local-runtime/test/unit/local-task-append.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

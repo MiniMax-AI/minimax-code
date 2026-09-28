@@ -109,6 +109,12 @@ export type RunTurnCaller =
 /** Bounded origin of a cancelled Pi turn. Unknown values collapse to `unknown`. */
 export type AbortSource =
   | 'user_stop'
+  /**
+   * Leaving a conversation (TUI `/clear`, switching Sessions). Keeps the Goal and
+   * Queue pause effects of `user_stop`, but is NOT a stop: it must not cascade
+   * into the Session's background work, which is expected to keep running.
+   */
+  | 'session_leave'
   | 'immediate_send'
   | 'input_safety'
   | 'output_safety'
@@ -118,6 +124,7 @@ export type AbortSource =
 export function normalizeAbortSource(value: unknown): AbortSource {
   switch (value) {
     case 'user_stop':
+    case 'session_leave':
     case 'immediate_send':
     case 'input_safety':
     case 'output_safety':

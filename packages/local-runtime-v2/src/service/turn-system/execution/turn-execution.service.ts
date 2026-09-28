@@ -6,8 +6,14 @@ import type {
   AgentHostUserInput,
   CompactionOutcome,
 } from '../agent-host/contracts.js';
+import { normalizeAbortSource } from '@mavis/agent-core/pi-turn-runner';
 import type {
   AbortTurnInput,
+  AbortTurnResult,
+  InitializeTurnSystemOptions,
+  UserStopAcceptance,
+  UserStopCascadePort,
+  UserStopCascadeRun,
   ActivateTurnResult,
   DirectTurnSubmission,
   QueueTurnSubmission,
@@ -38,6 +44,17 @@ export interface TurnExecutionServiceOptions {
   readonly submissionPreparation?: TurnSubmissionPreparation;
   readonly nowMs?: () => number;
   readonly makeTurnId?: () => string;
+  /**
+   * Host-injected user-stop cascade. TurnSystem deliberately knows nothing about
+   * background tasks; the local Runtime composition supplies this seam so an
+   * explicit user stop can also tear down the Session's background work.
+   */
+  readonly userStop?: UserStopCascadePort;
+  /**
+   * Same logger TurnSystem already hands to its sibling components. Optional so
+   * embeddings and tests stay silent; only the user-stop skip path uses it.
+   */
+  readonly logger?: Pick<NonNullable<InitializeTurnSystemOptions['logger']>, 'info'>;
 }
 
 /** Durable admission, in-process ownership, and AgentHost execution only. */
@@ -82,10 +99,55 @@ export function createTurnExecutionService(
       );
       return result.entered ? result.value : { status: 'closing' };
     },
-    abort: (input) => {
+    abort: async (input) => {
       const activeTurnId = options.controller.activeTurnId(input.sessionId);
-      if (!input.turnId || !activeTurnId || input.turnId === activeTurnId) pending.stop(input);
-      return options.controller.abort(input);
+      // One identity rule for everything a stop may touch: it targets the current
+      // Turn when it names no Turn, nothing is running, or it names the running
+      // one. A stop that names an older Turn is rejected by the controller as
+      // `turn-mismatch` (HTTP 409) before any side effect, so it must not open a
+      // window, pause the Goal or cascade either — otherwise it would kill the
+      // background work of the newer Turn the user is actually looking at.
+      const targetsCurrentTurn = !input.turnId || !activeTurnId || input.turnId === activeTurnId;
+      if (targetsCurrentTurn) pending.stop(input);
+      // Open the suppression window BEFORE aborting, so a task driven terminal by
+      // the abort cannot slip a delivery through. The Goal is NOT paused here: only
+      // an accepted stop may do that (controller `onAccepted`, or `not-running`).
+      const cascade = targetsCurrentTurn
+        ? await beginUserStopCascade(options, input)
+        : skipStaleUserStopCascade(options, input, activeTurnId);
+      let result: AbortTurnResult;
+      try {
+        result = await options.controller.abort(withUserStopAcceptance(input, cascade));
+      } catch (error) {
+        // `begin` already opened the Session's delivery window. Without a result
+        // there is no cascade to run, but the window must still be released —
+        // otherwise every later completion notice of this Session would be held
+        // as `busy` for the life of the process, worse than having no cascade.
+        // The stop request itself keeps failing exactly as it did before.
+        releaseUserStopCascade(cascade, 'abort_failed');
+        throw error;
+      }
+      if (result.status === 'turn-mismatch') {
+        // Race: the check above saw no conflict, but a newer Turn took over before
+        // the abort landed, so the controller rejected it. Same outcome as a
+        // stale stop — release the window, cascade nothing, and never `accept`:
+        // a rejected stop must leave the Goal exactly as it was.
+        releaseUserStopCascade(cascade, 'turn_mismatch');
+        return result;
+      }
+      if (result.status === 'not-running') {
+        // Nothing was running, so the controller had no identity to check and
+        // never ran `onAccepted` — the stop is accepted as is. The Goal must be
+        // paused here, BEFORE the cascade stops tasks: a terminal task wakes the
+        // queue, and a live Goal would otherwise start a new Turn on its own.
+        await acceptUserStopCascade(cascade, 'not_running');
+      }
+      // Detached on purpose: the cascade is a follow-up action and the stop
+      // response must not wait for background teardown. `not-running` still
+      // cascades: that is exactly the "Turn already finished but background work
+      // is still running" case this feature exists for.
+      cascade?.complete(result);
+      return result;
     },
     activeTurnId: (sessionId) => options.controller.activeTurnId(sessionId),
   };
@@ -96,6 +158,103 @@ interface TurnExecutionContext {
   readonly nowMs: () => number;
   readonly makeTurnId: () => string;
   readonly pending: PendingSubmissions;
+}
+
+/**
+ * Starts the user-stop cascade for an explicit stop only.
+ *
+ * `session_leave` (TUI `/clear` and Session switching) deliberately does NOT
+ * cascade: it pauses the old Session's Goal and Queue exactly like today, but
+ * leaving a conversation must not kill the background build still running in it.
+ */
+async function beginUserStopCascade(
+  options: TurnExecutionServiceOptions,
+  input: AbortTurnInput,
+): Promise<UserStopCascadeRun | undefined> {
+  if (!options.userStop) return undefined;
+  if (normalizeAbortSource(input.reason) !== 'user_stop') return undefined;
+  try {
+    return await options.userStop.begin(input.sessionId);
+  } catch {
+    // The stop itself is authoritative and must succeed even if the cascade
+    // cannot start; this degrades to today's behaviour (no cascade).
+    return undefined;
+  }
+}
+
+/**
+ * A stop naming an older Turn never cascades. Logged only when it WOULD have
+ * cascaded (an explicit `user_stop` with the seam wired): that is the case worth
+ * explaining later — e.g. a phone that still shows the previous Turn — while
+ * every other stale abort stays as quiet as before.
+ */
+function skipStaleUserStopCascade(
+  options: TurnExecutionServiceOptions,
+  input: AbortTurnInput,
+  activeTurnId: string | undefined,
+): undefined {
+  if (!options.userStop || normalizeAbortSource(input.reason) !== 'user_stop') return undefined;
+  try {
+    options.logger?.info(
+      {
+        event: 'user_stop_cascade_skipped',
+        session_id: input.sessionId,
+        requested_turn_id: input.turnId,
+        active_turn_id: activeTurnId,
+        reason: 'stale_turn_id',
+      },
+      'User stop names an older Turn; not cascading',
+    );
+  } catch {
+    // Diagnostics must never change the outcome of a stop.
+  }
+  return undefined;
+}
+
+/**
+ * Runs the cascade's accepted-stop side effects from inside the controller's own
+ * `onAccepted`, i.e. only after its identity check passed. The caller's original
+ * `onAccepted` (ConversationApplication's Goal pause) runs first and unchanged;
+ * the cascade's pause is idempotent, so the overlap is harmless, and paths that
+ * pass no `onAccepted` at all (IM `/stop`) now pause the Goal too.
+ */
+function withUserStopAcceptance(
+  input: AbortTurnInput,
+  cascade: UserStopCascadeRun | undefined,
+): AbortTurnInput {
+  if (!cascade) return input;
+  return {
+    ...input,
+    onAccepted: async () => {
+      await input.onAccepted?.();
+      await acceptUserStopCascade(cascade, 'controller_accepted');
+    },
+  };
+}
+
+/** The port contract says `accept` never throws; guard anyway so a stop cannot fail on it. */
+async function acceptUserStopCascade(
+  cascade: UserStopCascadeRun | undefined,
+  how: UserStopAcceptance,
+): Promise<void> {
+  try {
+    await cascade?.accept(how);
+  } catch {
+    // Swallowed on purpose: accepting is a best-effort side effect of the stop.
+  }
+}
+
+/**
+ * Releases a cascade whose abort failed. The port contract says `cancel` never
+ * throws; guarding anyway keeps a contract violation from replacing the abort's
+ * own error, which the caller rethrows unchanged. The implementation logs.
+ */
+function releaseUserStopCascade(cascade: UserStopCascadeRun | undefined, reason: string): void {
+  try {
+    cascade?.cancel(reason);
+  } catch {
+    // Swallowed on purpose: the original abort failure is what must surface.
+  }
 }
 
 interface SubmitTurnPolicy {

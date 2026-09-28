@@ -3892,6 +3892,8 @@ function defaultCompatibility(
       bindRuntimeOwner: vi.fn(),
       recover: vi.fn(async () => undefined),
       pollRecovery: vi.fn(async () => false),
+      // No cascade in this fixture: `begin` declining keeps today's stop behaviour.
+      userStop: { begin: vi.fn(async () => undefined) },
     },
     conversation: {
       bind: async (service) => {

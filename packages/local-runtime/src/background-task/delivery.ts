@@ -1,9 +1,11 @@
 import type { LocalTaskRunnerHostWithSessionLookup } from '../api/local-task-host.js';
 import { requireTaskConversation } from '../api/local-task-host.js';
+import { logger } from '../common/logger.js';
 import { isLocalChildWorkerSession } from '../sessions/session-policy.js';
 import { isTerminalTaskStatus, type BackgroundTask } from './domain.js';
 import { startConversationBackgroundTaskDeliveryTurn } from './conversation-delivery.js';
 import { createDeliveryTaskPreview, selectDeliveryBatch } from './delivery-batch.js';
+import { isTaskDeliverySuppressed, isUserStopWindowOpen } from './user-stop-suppression.js';
 
 const DELIVERY_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
 const DELIVERY_BURST_WINDOW_MS = 60_000;
@@ -66,6 +68,16 @@ async function deliverBatch(
 ): Promise<LocalBackgroundTaskDeliveryResult> {
   const session = await host.getSessionById(ownerSessionId);
   if (closedHosts.has(host) || !session || isLocalChildWorkerSession(session)) return 'skipped';
+  // Gate 1 (Session): a user stop for this Session is still collecting its target
+  // tasks, so we cannot yet tell targets from unrelated new work. Hold the whole
+  // batch as `busy` — which the scheduler retries (1s/2s/5s, then cooldown) — and
+  // NOT `skipped`, which is dequeued without a reschedule and would permanently
+  // lose the completion notice of a new task that happened to finish in the window.
+  if (isUserStopWindowOpen(host, ownerSessionId)) {
+    recordDeliverySuppressed(host, 'user_stop_window');
+    logDeliverySuppressed(host, ownerSessionId, taskIds, 'user_stop_window');
+    return 'busy';
+  }
   const reservation = reserveDeliveryTurn(host, ownerSessionId);
   if (!reservation) {
     try {
@@ -84,21 +96,50 @@ async function deliverBatch(
     const candidates = await Promise.all(
       taskIds.map((taskId) => host.backgroundTaskService.get(taskId)),
     );
+    // Gate 2 (task): a task the user stopped never wakes this Session again, for
+    // the life of the process. This is the primary "no wake-up" guarantee and does
+    // not depend on the cascade finishing: it also covers a stop that timed out and
+    // finished much later, and retries/cooldown batches scheduled before the stop.
+    // Suppressed terminals stay undelivered, so the next turn's background reminder
+    // still reports them — no information is lost.
+    const suppressedIds = taskIds.filter((taskId) => isTaskDeliverySuppressed(host, taskId));
+    if (suppressedIds.length > 0) {
+      recordDeliverySuppressed(host, 'user_stop_target', suppressedIds.length);
+      logDeliverySuppressed(host, ownerSessionId, suppressedIds, 'user_stop_target');
+    }
     const unreadIds = new Set(
       candidates
         .filter(
           (task): task is BackgroundTask =>
-            shouldDeliverTask(task) && task.ownerSessionId === ownerSessionId,
+            shouldDeliverTask(task) &&
+            task.ownerSessionId === ownerSessionId &&
+            !isTaskDeliverySuppressed(host, task.taskId),
         )
         .map((task) => task.taskId),
     );
     const tasks = previews.filter((task) => unreadIds.has(task.taskId));
+    // Every candidate was suppressed or already consumed: nothing to say, and a
+    // retry would say the same thing, so `skipped` (no reschedule) is correct.
     if (closedHosts.has(host) || tasks.length === 0) return 'skipped';
+    // Gate 1 again, after every await above. A stop that begins while this batch
+    // was reading the snapshot or re-reading its tasks opened the window after the
+    // first check, and its targets may not be registered yet — e.g. the Turn had
+    // ended and only background work remained, which is exactly what a user stop
+    // is for. Known bound: the few synchronous steps between this check and the
+    // ingress accepting the steer are not covered; that gap is sub-millisecond.
+    if (isUserStopWindowOpen(host, ownerSessionId)) {
+      recordDeliverySuppressed(host, 'user_stop_window_recheck');
+      logDeliverySuppressed(host, ownerSessionId, taskIds, 'user_stop_window_recheck');
+      return 'busy';
+    }
     const result = await startConversationBackgroundTaskDeliveryTurn({
       host,
       conversation: requireTaskConversation(host),
       ownerSessionId,
       tasks,
+      // `batchTaskIds` only forms the retry-stable idempotency key; the message's
+      // `origin.taskIds` is built from `tasks`, so suppressed siblings are never
+      // named to the model even though they still key this batch.
       batchTaskIds: taskIds,
       observedTerminalCount: snapshot.terminalTotal,
     });
@@ -107,6 +148,45 @@ async function deliverBatch(
   } finally {
     // Release the reserved window itself, even if the lookup crossed into a newer window.
     if (!delivered) reservation.delivered = Math.max(0, reservation.delivered - 1);
+  }
+}
+
+/** Why a batch was held back after a user stop; also the metric/log `reason` label. */
+type DeliverySuppressionReason =
+  | 'user_stop_window'
+  | 'user_stop_window_recheck'
+  | 'user_stop_target';
+
+function recordDeliverySuppressed(
+  host: LocalTaskRunnerHostWithSessionLookup,
+  reason: DeliverySuppressionReason,
+  count = 1,
+): void {
+  try {
+    host.metricsClient?.counter('background_task_delivery_suppressed_total', count, { reason });
+  } catch {
+    // Telemetry must not turn a deliberate suppression into a retry storm.
+  }
+}
+
+function logDeliverySuppressed(
+  host: LocalTaskRunnerHostWithSessionLookup,
+  ownerSessionId: string,
+  taskIds: readonly string[],
+  reason: DeliverySuppressionReason,
+): void {
+  try {
+    logger.info(
+      {
+        event: 'background_task_delivery_suppressed',
+        sessionId: ownerSessionId,
+        taskIds: [...taskIds],
+        reason,
+      },
+      'Suppressed local background task delivery after a user stop',
+    );
+  } catch {
+    // Diagnostics must not change the delivery result or abandon retries.
   }
 }
 

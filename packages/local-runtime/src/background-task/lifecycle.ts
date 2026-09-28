@@ -3,6 +3,12 @@ import type { LocalTaskRunnerHostWithSessionLookup } from '../api/local-task-hos
 interface ActiveBackgroundTask {
   readonly settled: Promise<void>;
   readonly abort?: (reason: string) => void;
+  /**
+   * Durable row identity, published by the runner once the row exists. Admission
+   * happens before `createBackgroundTaskId()`, so this stays undefined during the
+   * short setup window and the task is simply not claimed yet.
+   */
+  taskId?: string;
 }
 
 interface HostBackgroundTaskState {
@@ -13,6 +19,14 @@ interface HostBackgroundTaskState {
 export interface BackgroundTaskAdmission {
   bind(settled: Promise<void>): void;
   release(): void;
+  /**
+   * Claim the durable task row for this process. Only claimed tasks may be
+   * stopped by a Session cascade: `performStop` writes `canceled` whether or not
+   * `stopRuntime` actually reached a live runner, so stopping a row owned by
+   * another client process (shared data directory) would mark it canceled while
+   * it keeps running there. Unclaimed rows are skipped instead.
+   */
+  identify(taskId: string): void;
 }
 
 const hostStates = new WeakMap<LocalTaskRunnerHostWithSessionLookup, HostBackgroundTaskState>();
@@ -49,7 +63,29 @@ export function admitBackgroundTask(
       bound = true;
       resolve();
     },
+    identify: (taskId) => {
+      active.taskId = taskId;
+    },
   };
+}
+
+/**
+ * Whether this process admitted (and therefore can actually stop) the task.
+ *
+ * The entry is removed as soon as the task settles, so a terminal task always
+ * answers `false`; callers only need this for non-terminal rows, which are the
+ * ones a cascade would otherwise mis-cancel.
+ */
+export function isBackgroundTaskAdmittedHere(
+  host: LocalTaskRunnerHostWithSessionLookup,
+  taskId: string,
+): boolean {
+  const state = hostStates.get(host);
+  if (!state) return false;
+  for (const task of state.active) {
+    if (task.taskId === taskId) return true;
+  }
+  return false;
 }
 
 export function beginBackgroundTaskShutdown(

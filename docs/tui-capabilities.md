@@ -99,6 +99,33 @@ report a failed command. Stop failures and incomplete logs are reported separate
 An optional `description` supplies the TUI summary while execution and permission
 checks continue to use the original command.
 
+## Stopping a conversation and its background work
+
+An explicit user stop (Esc in the TUI) also cancels background Bash commands and
+subagents owned by that conversation in the current process, including activated
+`task_append` continuations and work spawned by their child turns. Completion
+notices for those tasks no longer automatically wake the conversation. Their
+terminal results remain unread so the next turn can inspect them through the
+background-task reminder and `task_output`.
+
+Leaving a conversation with `/clear` or a session switch still stops its current
+turn and pauses its Goal and queued instructions, but leaves background work
+running. This pause also applies when unconsumed steering must fall back to the
+queue after a history-write failure. A stop rejected because it names an older
+turn does not cancel the current turn's background work.
+
+Only locally owned running tasks are canceled; tasks held by another runtime
+process are left alone. Child cleanup follows the task's owning child turn, so a
+later continuation in the same child session is preserved. Delivery suppression
+is held in process memory. If a turn does not release within the abort timeout,
+work created later during its shutdown is outside the stop boundary. A delivery
+already being admitted can also race with a stop.
+
+Offline regression tests cover cascade ownership, delivery suppression, late
+task creation, repeated stops, append completion/shutdown, and queue fallback.
+The host integration tests use a scripted runner and real background processes;
+they do not establish live-model or cross-platform acceptance.
+
 ## Skill directory links
 
 Workspace `.agents/skills`, `.claude/skills`, and `.minimax/skills` support

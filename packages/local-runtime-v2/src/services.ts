@@ -917,6 +917,7 @@ async function initializeRuntimeTurnSystem(
   });
   return initializeTurnSystem({
     db: input.options.db,
+    userStop: input.options.compatibility.backgroundTasks.userStop,
     ...(input.options.logger ? { logger: input.options.logger } : {}),
     sessions: input.sessionSystem,
     processStartedAtMs: input.processStartedAtMs,
