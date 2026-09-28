@@ -1,5 +1,8 @@
 # Examples
 
+Try the [Pocket Pet walkthrough](../examples/pocket-pet) for a visual example with two real requests: add a focus timer, then change pause to a long press. It includes a starter, finished implementation, and tests. No hardware is required.
+
+
 Build the project using the [installation guide](installation.md). Run the `pnpm mcode` commands below from the source root. For interactive tasks, open the target project directory and launch the built CLI by absolute path.
 
 ## 1. Edit code and run tests

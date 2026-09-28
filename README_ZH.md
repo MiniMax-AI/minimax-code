@@ -7,7 +7,7 @@
 </p>
 
 <h1 align="center">MiniMax Code</h1>
-<p align="center">A terminal coding agent with MiniMax, your own models, and tools beyond code.</p>
+<p align="center">把一句话，做成能运行的东西。用 MiniMax 或自己的模型，在终端里构建、验证、继续改进。</p>
 <p align="center">
   <a href="#快速开始">Get started</a> ·
   <a href="docs/README.md">Documentation</a> ·
@@ -21,11 +21,13 @@
   <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
 </p>
 
-在终端里读懂项目、修改代码并运行测试。使用 MiniMax 账号或自己的模型，把搜索、插件和多模态工具接入同一个工作流。
+给一个会眨眼的小宠物加上番茄钟，再追问一句：“长按才能暂停，结束时跳舞。”看代码变成可以亲手操作的结果。
 
-[![MiniMax Code 真实 TUI：修复 clamp、查看代码 diff 并运行测试](docs/assets/tui-demo.png)](docs/demo.md)
+[![Pocket Pet：从会眨眼到会陪你专注](docs/assets/pocket-pet-demo.png)](docs/demo.md)
 
-<p align="center"><a href="docs/demo.md">观看 20 秒真实演示 →</a> · 真实终端输出回放，已压缩等待时间</p>
+<p align="center"><a href="docs/demo.md">看真实 CLI 执行与浏览器演示 →</a> · <a href="examples/pocket-pet">自己做一次 →</a></p>
+
+**无需硬件。** 示例在本地浏览器运行，不需要前端依赖。让 CLI 修改代码需要 MiniMax 账号及可用额度，或你自己的兼容模型 API；模型调用可能产生费用。完成版可直接运行，无需模型账号。
 
 ## 快速开始
 
@@ -102,7 +104,26 @@ mcode
 
 </details>
 
-### 3. 完成第一个任务
+### 3. 做一个自己的桌面宠物
+
+克隆仓库，把起始工程复制到独立目录：
+
+```bash
+git clone https://github.com/MiniMax-AI/minimax-code.git
+cd minimax-code
+node examples/pocket-pet/setup.mjs ../my-pocket-pet
+cd ../my-pocket-pet
+node serve.mjs
+```
+
+打开 `http://127.0.0.1:4173`。另开一个终端，在 `my-pocket-pet` 目录运行 `mcode`，依次粘贴[第一条提示词](examples/pocket-pet/README.md#first-request)和[追加需求](examples/pocket-pet/README.md#change-the-requirement)，每次修改后刷新浏览器。
+
+想先体验成品？在仓库根目录运行 `node examples/pocket-pet/serve.mjs finished`，打开同一地址。加上 `?demo=1` 可体验有明确标识的 10 秒演示模式。
+
+[完整教程与使用条件](examples/pocket-pet) · [小型代码修复示例](examples/clamp) · [模型、搜索与工具](docs/examples.md)
+
+
+### 在自己的项目中使用
 
 进入要处理的项目目录：
 
@@ -211,13 +232,6 @@ profile 使用 `~/.minimax-<profile>`；`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 
 
 账号、更新、反馈与诊断能力也在。托管工具需要网络和相应授权，详细边界见 [能力与服务边界](docs/tui-capabilities.md)。
 
-## 试一试
-
-在示例目录启动 TUI，输入：
-
-> Read clamp.mjs and clamp.test.mjs. Run node --test to reproduce the failure, fix clamp without changing the tests, then run the tests again.
-
-这个 [可复现的小项目](examples/clamp) 就是上方演示使用的任务。[更多示例](docs/examples.md) 包括切换模型、执行真实搜索，以及使用自己的图片输入。
 
 ## 从源码构建
 

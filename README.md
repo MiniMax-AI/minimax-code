@@ -7,7 +7,7 @@
 </p>
 
 <h1 align="center">MiniMax Code</h1>
-<p align="center">A terminal coding agent with MiniMax, your own models, and tools beyond code.</p>
+<p align="center">Turn a prompt into something that works. Build, test, and keep iterating from your terminal—with MiniMax or your own model.</p>
 <p align="center">
   <a href="#quick-start">Get started</a> ·
   <a href="docs/README.md">Documentation</a> ·
@@ -21,11 +21,13 @@
   <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
 </p>
 
-Understand a project, make changes, and run tests from your terminal. Use your MiniMax account or bring your own model, with search, plugins, and multimodal tools in the same workflow.
+Give a blinking pocket pet a focus timer. Then ask: “Make pause a long press, and celebrate when the timer ends.” Watch a request become something you can actually use.
 
-[![Real MiniMax Code TUI output: fixing clamp, inspecting the diff, and running tests](docs/assets/tui-demo.png)](docs/demo.md)
+[![Pocket Pet: from a blinking face to a working focus companion](docs/assets/pocket-pet-demo.png)](docs/demo.md)
 
-<p align="center"><a href="docs/demo.md">Watch the 20-second demo →</a> · Real terminal output, with pauses shortened</p>
+<p align="center"><a href="docs/demo.md">Watch the real CLI run and browser demo →</a> · <a href="examples/pocket-pet">Build it yourself →</a></p>
+
+**No hardware required.** The example runs locally in your browser, with no frontend dependencies. Asking the CLI to edit code requires a MiniMax account with available credits or your own compatible model API; model calls may incur charges. The finished example runs without a model account.
 
 ## Quick start
 
@@ -102,7 +104,26 @@ Providers added this way are stored under `custom_provider` in the active profil
 
 </details>
 
-### 3. Run your first task
+### 3. Build the pocket pet
+
+Clone this repository and copy the starter into a separate directory:
+
+```bash
+git clone https://github.com/MiniMax-AI/minimax-code.git
+cd minimax-code
+node examples/pocket-pet/setup.mjs ../my-pocket-pet
+cd ../my-pocket-pet
+node serve.mjs
+```
+
+Open `http://127.0.0.1:4173`. In a second terminal, open `mcode` in `my-pocket-pet` and paste [the first prompt](examples/pocket-pet/README.md#first-request), then [the follow-up](examples/pocket-pet/README.md#change-the-requirement). Refresh the browser after each change.
+
+Prefer to try the result first? From the repository root, run `node examples/pocket-pet/serve.mjs finished` and open the same URL. Add `?demo=1` for the visibly labeled 10-second mode.
+
+[Full walkthrough and requirements](examples/pocket-pet) · [Small code-repair example](examples/clamp) · [Models, search, and tools](docs/examples.md)
+
+
+### Work in your own project
 
 Open the project you want to work on:
 
@@ -211,13 +232,6 @@ A profile uses `~/.minimax-<profile>`; `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` ca
 
 Account features, updates, feedback, and diagnostics are also included. Managed tools require network access and the relevant authorization. See [capabilities and service boundaries](docs/tui-capabilities.md) for details.
 
-## Try it
-
-Start the TUI in a copy of the example project and enter:
-
-> Read clamp.mjs and clamp.test.mjs. Run node --test to reproduce the failure, fix clamp without changing the tests, then run the tests again.
-
-The [small, reproducible project](examples/clamp) is the same task used in the demo above. [More examples](docs/examples.md) cover switching models, calling real search, and using your own image inputs.
 
 ## Build from source
 

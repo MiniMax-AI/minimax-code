@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pocket Pet · MiniMax Code</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <a href="https://github.com/MiniMax-AI/minimax-code">MiniMax Code</a
+      ><span>ONE PROMPT. SOMETHING REAL.</span>
+    </header>
+    <main>
+      <section class="intro">
+        <p class="eyebrow">A LITTLE COMPANY FOR YOUR DESK</p>
+        <h1>A little focus.<br />A little company.</h1>
+        <p class="description">
+          A Pomodoro buddy: click <b>Start</b> for a 25-minute focus session. To
+          pause, <b>press and hold</b> the button (or hold Space/Enter) for 0.8
+          seconds while the bar fills, so a stray tap won’t break your focus.
+          Click <b>Resume</b> to continue and <b>Reset</b> when it’s done.
+        </p>
+        <p class="note">
+          An editable, local browser project.<br />No hardware needed.
+        </p>
+      </section>
+      <section class="device-area" aria-label="Pocket Pet">
+        <div class="device">
+          <div class="device-top">
+            <span>POCKET / PET</span><span class="power">● ONLINE</span>
+          </div>
+          <div class="screen">
+            <div
+              class="pet"
+              role="img"
+              aria-label="A friendly blinking pixel pet"
+            >
+              <div class="eyes"><i></i><i></i></div>
+              <div class="mouth"></div>
+              <div class="cheeks"><i></i><i></i></div>
+            </div>
+            <p id="status" aria-live="polite">Ready to focus?</p>
+            <div id="timer" class="timer" role="timer" aria-label="Timer">
+              25:00
+            </div>
+            <p id="demo-badge" class="demo-badge" hidden>
+              DEMO MODE · 10 SECONDS
+            </p>
+          </div>
+          <div class="controls">
+            <button id="action" type="button">Start</button>
+            <div class="speaker" aria-hidden="true">▰ ▰ ▰</div>
+          </div>
+          <p id="hint" class="hint">
+            Click Start for a 25-minute focus session.
+          </p>
+        </div>
+        <div class="shadow"></div>
+      </section>
+    </main>
+    <footer>
+      <span>Built to be changed.</span
+      ><span>github.com/MiniMax-AI/minimax-code</span>
+    </footer>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
