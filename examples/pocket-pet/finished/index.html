@@ -8,29 +8,44 @@
   </head>
   <body>
     <header>
-      <a href="https://github.com/MiniMax-AI/minimax-code">MiniMax Code</a
-      ><span>ONE PROMPT. SOMETHING REAL.</span>
+      <a class="brand" href="https://github.com/MiniMax-AI/minimax-code"
+        ><span class="brand-mark" aria-hidden="true">m</span>MiniMax Code</a
+      ><span class="header-note">A SMALL IDEA, MADE REAL.</span>
     </header>
     <main>
       <section class="intro">
-        <p class="eyebrow">A LITTLE COMPANY FOR YOUR DESK</p>
-        <h1>A little focus.<br />A little company.</h1>
+        <p class="eyebrow">
+          <span aria-hidden="true">✳</span> MEET YOUR POCKET PET
+        </p>
+        <h1>Small friend.<br /><em>Big focus.</em></h1>
         <p class="description">
-          A Pomodoro buddy: click <b>Start</b> for a 25-minute focus session. To
-          pause, <b>press and hold</b> the button (or hold Space/Enter) for 0.8
-          seconds while the bar fills, so a stray tap won’t break your focus.
-          Click <b>Resume</b> to continue and <b>Reset</b> when it’s done.
+          A little company for the thing<br class="desktop-break" />
+          you’ve been meaning to do.
         </p>
-        <p class="note">
-          An editable, local browser project.<br />No hardware needed.
-        </p>
+        <nav class="modes" aria-label="Session duration">
+          <a id="focus-mode" href="?" aria-current="page">25 min focus</a
+          ><a id="quick-mode" href="?demo=1"
+            >Try in 10 seconds <span aria-hidden="true">↗</span></a
+          >
+        </nav>
+        <p class="mode-note">Switching modes starts a fresh session.</p>
+        <div class="project-note">
+          <span class="note-star" aria-hidden="true">↳</span>
+          <p>
+            A browser pet. A real timer.<br />Built to be changed with MiniMax
+            Code.
+          </p>
+        </div>
       </section>
       <section class="device-area" aria-label="Pocket Pet">
         <div class="device">
           <div class="device-top">
-            <span>POCKET / PET</span><span class="power">● ONLINE</span>
+            <span>POCKET / PET</span><span class="power"><i></i> READY</span>
           </div>
           <div class="screen">
+            <div class="screen-label">
+              <span>YOUR FOCUS BUDDY</span><span aria-hidden="true">▰ ▰ ▰</span>
+            </div>
             <div
               class="pet"
               role="img"
@@ -39,29 +54,56 @@
               <div class="eyes"><i></i><i></i></div>
               <div class="mouth"></div>
               <div class="cheeks"><i></i><i></i></div>
+              <div class="sparks" aria-hidden="true">
+                <i>✦</i><i>✦</i><i>✧</i><i>✧</i>
+              </div>
             </div>
-            <p id="status" aria-live="polite">Ready to focus?</p>
-            <div id="timer" class="timer" role="timer" aria-label="Timer">
+            <p id="status" aria-live="polite">Ready when you are.</p>
+            <div
+              id="timer"
+              class="timer"
+              role="timer"
+              aria-label="Time remaining"
+            >
               25:00
             </div>
-            <p id="demo-badge" class="demo-badge" hidden>
-              DEMO MODE · 10 SECONDS
-            </p>
+            <div
+              class="session-track"
+              role="progressbar"
+              aria-label="Session progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <i></i>
+            </div>
+            <p id="demo-badge" class="demo-badge" hidden>10-SECOND DEMO</p>
           </div>
           <div class="controls">
-            <button id="action" type="button">Start</button>
-            <div class="speaker" aria-hidden="true">▰ ▰ ▰</div>
+            <button id="action" type="button" aria-describedby="hint">
+              Start
+            </button>
+            <div class="speaker" aria-hidden="true">
+              <i></i><i></i><i></i><i></i>
+            </div>
           </div>
-          <p id="hint" class="hint">
-            Click Start for a 25-minute focus session.
-          </p>
+          <div class="device-bottom">
+            <span>ONE THING AT A TIME.</span><span aria-hidden="true">✳</span>
+          </div>
         </div>
-        <div class="shadow"></div>
+        <div class="shadow" aria-hidden="true"></div>
+        <p id="hint" class="hint">Tap Start. I’ll keep you company.</p>
+        <p class="keyboard-note">
+          Keyboard friendly: <kbd>Space</kbd> / <kbd>Enter</kbd>
+        </p>
       </section>
     </main>
     <footer>
-      <span>Built to be changed.</span
-      ><span>github.com/MiniMax-AI/minimax-code</span>
+      <span>Made for your browser. No hardware needed.</span
+      ><a
+        href="https://github.com/MiniMax-AI/minimax-code/tree/main/examples/pocket-pet"
+        >Get the source <span aria-hidden="true">↗</span></a
+      >
     </footer>
     <script type="module" src="app.js"></script>
   </body>

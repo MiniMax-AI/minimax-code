@@ -25,7 +25,7 @@ Give a blinking pocket pet a focus timer. Then ask: “Make pause a long press, 
 
 [![Pocket Pet: from a blinking face to a working focus companion](docs/assets/pocket-pet-demo.png)](docs/demo.md)
 
-<p align="center"><a href="docs/demo.md">Watch the real CLI run and browser demo →</a> · <a href="examples/pocket-pet">Build it yourself →</a></p>
+<p align="center"><a href="docs/demo.md">Watch the build story and browser demo →</a> · <a href="examples/pocket-pet">Build it yourself →</a></p>
 
 **No hardware required.** The example runs locally in your browser, with no frontend dependencies. Asking the CLI to edit code requires a MiniMax account with available credits or your own compatible model API; model calls may incur charges. The finished example runs without a model account.
 

@@ -27,35 +27,54 @@ let hold = idleHold();
 let raf = 0;
 let swallowClick = false; // the click that follows a completed hold must not resume
 
-if (demo) $("#demo-badge").hidden = false;
+if (demo) {
+  $("#demo-badge").hidden = false;
+  $("#focus-mode").removeAttribute("aria-current");
+  $("#quick-mode").setAttribute("aria-current", "page");
+}
+const progress = $(".session-track");
+const power = $(".power");
+let feedbackUntil = 0;
+function setText(element, value) {
+  if (element.textContent !== value) element.textContent = value;
+}
 
 const copy = {
-  idle: [
-    "Ready to focus?",
-    "Start",
-    demo
-      ? "DEMO MODE: a 10-second session. Click Start."
-      : "Click Start for a 25-minute focus session.",
-  ],
+  idle: ["Ready when you are.", "Start", "Tap Start. I’ll keep you company."],
   running: [
-    "Focusing… I’m right here.",
+    "You’ve got this.",
     "Hold to pause",
-    `Press and hold (or hold Space/Enter) for ${HOLD_MS / 1000}s to pause.`,
+    `Need a breather? Hold for ${HOLD_MS / 1000} seconds.`,
   ],
-  paused: [
-    "Paused. Take a breath.",
-    "Resume",
-    "Click Resume to pick up where you left off.",
-  ],
-  done: ["Done! Nice work.", "Reset", "Click Reset for another session."],
+  paused: ["Take your time.", "Resume", "Tap Resume whenever you’re ready."],
+  done: ["Look at you go!", "Reset", "One small win. Ready for another?"],
 };
 
 function render(now = Date.now()) {
   const [s, label, h] = copy[state.status];
-  status.textContent = s;
-  action.textContent = label;
-  hint.textContent = h;
-  timerEl.textContent = formatMMSS(remaining(state, now));
+  setText(status, s);
+  setText(action, label);
+  setText(
+    hint,
+    now < feedbackUntil && state.status === "running"
+      ? "Still focused! Hold a little longer to pause."
+      : h,
+  );
+  const left = remaining(state, now);
+  setText(timerEl, formatMMSS(left));
+  const fraction = 1 - left / state.durationMs;
+  progress.style.setProperty("--progress", fraction);
+  const percent = String(Math.round(fraction * 100));
+  if (progress.getAttribute("aria-valuenow") !== percent)
+    progress.setAttribute("aria-valuenow", percent);
+  const powerLabel = {
+    idle: "READY",
+    running: "FOCUS",
+    paused: "REST",
+    done: "NICE!",
+  }[state.status];
+  if (power.lastChild.textContent !== " " + powerLabel)
+    power.lastChild.textContent = " " + powerLabel;
   const p = holdProgress(hold, now);
   action.style.setProperty("--hold", p);
   action.classList.toggle("holding", hold.startedAt !== null);
@@ -104,7 +123,12 @@ action.addEventListener("click", () => {
     swallowClick = false;
     return;
   }
-  if (state.status === "running") return;
+  if (state.status === "running") {
+    feedbackUntil = Date.now() + 1800;
+    render();
+    return;
+  }
+  feedbackUntil = 0;
   state = toggle(state, Date.now());
   loop();
 });
@@ -139,6 +163,7 @@ action.addEventListener("keyup", (e) => {
   }
 });
 
+action.addEventListener("blur", abortHold);
 window.addEventListener("blur", abortHold);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) abortHold();

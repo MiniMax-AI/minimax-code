@@ -16,7 +16,7 @@ From the repository root:
 node examples/pocket-pet/serve.mjs finished
 ```
 
-Open `http://127.0.0.1:4173`. Click **Start** for a 25-minute focus session. While running, hold the button for 0.8 seconds to pause; **Resume** is an ordinary click. Space and Enter work with the focused button. Completion triggers a short celebration; **Reset** prepares another session.
+Open `http://127.0.0.1:4173`. The mode links switch between a normal session and the 10-second demo; switching modes resets the timer. Click **Start** for a 25-minute focus session. While running, hold the button for 0.8 seconds to pause; **Resume** is an ordinary click. Space and Enter work with the focused button. Completion triggers a short celebration; **Reset** prepares another session.
 
 For a quick demonstration, open `http://127.0.0.1:4173/?demo=1`. The screen explicitly labels its **10-second demo mode**. It is not a sped-up 25-minute session. Stop the server with Ctrl+C before starting another copy.
 
@@ -54,6 +54,6 @@ Refresh again. Confirm a short tap leaves the timer running; a hold pauses it; a
 node --test examples/pocket-pet/finished/timer.test.mjs examples/pocket-pet/finished/hold.test.mjs
 ```
 
-The shipped `finished/` reference is based on a real MiniMax Code 0.5.8 BYOK session, followed by maintainer browser verification and any documented cleanup. The starter was designed beforehand. This demonstrates the agent modifying an existing project; it is not a claim that the CLI generated the entire design from an empty directory. See [recording details](../../docs/demo.md).
+The shipped `finished/` reference is based on a real MiniMax Code 0.5.8 BYOK session, followed by maintainer visual polish and browser verification. The shipped reference has a revised design, a session progress bar, short-tap feedback, and visible mode links; these are documented maintainer additions beyond the two prompts. The starter was designed beforehand. This demonstrates the agent modifying an existing project; it is not a claim that the CLI generated the entire design from an empty directory. See [recording details](../../docs/demo.md).
 
 The example keeps state in memory. Reloading resets the timer. It is an educational example, not an alarm service guaranteed to run while a computer sleeps.
