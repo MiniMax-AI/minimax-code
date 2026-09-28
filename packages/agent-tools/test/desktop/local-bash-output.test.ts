@@ -129,7 +129,8 @@ describe('LocalBashTool — foreground output truncation', () => {
 
   it('caps a large nonzero-exit result while preserving the error ToolResult status', async () => {
     const tool = new LocalBashTool(workspace, undefined, { mode: 'off' });
-    const script = `for(let i=0;i<400;i++) console.error('error-row-'+i+'-'+'e'.repeat(90)); process.exit(7)`;
+    // Let pending stderr writes drain before exiting with the intended error code.
+    const script = `for(let i=0;i<400;i++) console.error('error-row-'+i+'-'+'e'.repeat(90)); process.exitCode = 7`;
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
     const result = await tool.execute(SESSION_CTX, { command });
 
@@ -142,6 +143,9 @@ describe('LocalBashTool — foreground output truncation', () => {
     expect(result.text).not.toContain('error-row-200-');
     expect(result.text).toContain('Command exited with code 7');
     expect(result.text).toContain('desktop bash output truncated');
+    const fullOutput = await readFile(result.details?.fullOutputPath as string, 'utf8');
+    expect(fullOutput.split('\n').filter(Boolean)).toHaveLength(400);
+    expect(fullOutput).toContain('error-row-200-');
     expect(result.details?.desktop_output_truncation).toMatchObject({
       truncated: true,
       has_more: true,
