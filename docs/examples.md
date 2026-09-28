@@ -170,6 +170,8 @@ See [capability coverage](tui-capabilities.md) for custom MCP, managed connector
 
 ## 4. Manage plugins
 
+Synchronous Hooks can show [TUI-only messages](hooks.md) with `systemMessage`, including notices after a normal Stop.
+
 Open `/plugins` inside the TUI, or run `mcode plugin` from a shell to open that panel. For a source build, use `pnpm mcode plugin` from the source root instead; the commands below use the installed `mcode` executable.
 
 The panel combines the **official** catalog and **local** plugin directories. Use `Tab` / `Shift+Tab` to switch between All Plugins, Installed, Official, and Local; type to search and use the arrow keys to select a row.

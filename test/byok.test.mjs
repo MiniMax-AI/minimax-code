@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   rmSync,
   existsSync,
   readFileSync,
@@ -154,6 +155,18 @@ test(
             : "Unexpected external request",
         );
       } finally {
+        // Hook snapshots deliberately use read-only directories. Restore only
+        // this isolated fixture's directory permissions before removing it.
+        const hookCache = path.join(dataDir, "v2", "plugin-hook-cache");
+        if (existsSync(hookCache)) {
+          const writable = (directory) => {
+            chmodSync(directory, 0o700);
+            for (const entry of readdirSync(directory, { withFileTypes: true })) {
+              if (entry.isDirectory()) writable(path.join(directory, entry.name));
+            }
+          };
+          writable(hookCache);
+        }
         rmSync(fixtureDir, { recursive: true, force: true });
       }
     });
@@ -431,6 +444,30 @@ test(
       "--effort", "medium", "--timeout", "20s", "--max-steps", "1"]),
     /Available levels: low, high, max/);
     assert.equal(requests.length, beforeInvalidEffort, "Invalid effort must fail before transport");
+    // Real Plugin packages exercise command execution and all three output adapters.
+    const hookMarkers = ["minimax", "claude", "codex"].map((format) => {
+      const name = `hook-notice-${format}`;
+      const root = path.join(dataDir, "plugins", name);
+      const manifestDir = format === "minimax" ? ".minimax-plugin" : `.${format}-plugin`;
+      mkdirSync(path.join(root, manifestDir), { recursive: true });
+      mkdirSync(path.join(root, "hooks"));
+      const marker = `HOOK_DISPLAY_ONLY_${format.toUpperCase()}`;
+      const manifest = format === "minimax" ? {
+        schemaVersion: 1, name, version: "1.0.0", description: "Synthetic Hook display fixture",
+        author: "Test", icon: "icon.png", category: "Code", exampleQueries: ["Reply OK"],
+        apps: [], mcpServers: [], skills: [], hooks: ["hooks/hooks.json"],
+      } : { name, version: "1.0.0" };
+      writeFileSync(path.join(root, manifestDir, "plugin.json"), JSON.stringify(manifest));
+      writeFileSync(path.join(root, "icon.png"), Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5N8AAAAASUVORK5CYII=", "base64"));
+      writeFileSync(path.join(root, "hooks", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
+        type: "command", command: 'node "${PLUGIN_ROOT}/notice.cjs"', timeout: 5,
+      }] }] } }));
+      writeFileSync(path.join(root, "notice.cjs"),
+        `process.stdout.write(JSON.stringify({systemMessage: ${JSON.stringify(marker)}}));`);
+      return marker;
+    });
+    const beforeFirst = requests.length;
     const modelArgs = ["--model", `${selected.providerId}/fixture-model`];
     // The first run must work through the saved default, without --model or managed login.
     const first = await run([
@@ -442,6 +479,9 @@ test(
       "1",
     ]);
     assert.match(first, /LOCAL_BYOK_OK/);
+    assert.equal(requests.slice(beforeFirst).filter((r) => r.body.stream).length, 1,
+      "Display-only Hooks must not start another model request");
+    for (const marker of hookMarkers) assert.ok(!first.includes(marker));
     await assert.rejects(run([
       'exec', 'Managed model still requires its own login',
       '--model', 'minimax/MiniMax-M3', '--timeout', '20s', '--max-steps', '1',
@@ -470,6 +510,34 @@ test(
         requests.map((r) => ({ url: r.url, keys: Object.keys(r.body) })),
       ),
     );
+    assert.equal(requests.slice(beforeResume).filter((r) => r.body.stream).length, 1);
+    for (const marker of hookMarkers) {
+      assert.ok(!second.includes(marker), "Hook notices must not become the final answer");
+      assert.ok(!JSON.stringify(requests.slice(beforeResume)).includes(marker),
+        "The resumed provider request must not contain Hook display messages");
+    }
+    const displayDb = new Database(dbPath, { readonly: true });
+    try {
+      const notices = displayDb.prepare("SELECT data_json FROM local_runtime_message_rows").all()
+        .map((row) => JSON.parse(row.data_json))
+        .filter((message) => typeof message.msg_content === "string" &&
+          hookMarkers.some((marker) => message.msg_content.includes(marker)));
+      assert.equal(notices.length, 2, "Both turns must persist a Hook notice before CLI shutdown");
+      assert.notEqual(notices[0].msg_id, notices[1].msg_id);
+      for (const message of notices) {
+        const notice = JSON.parse(message.msg_content);
+        assert.equal(notice.eventType, "runtime.warning");
+        assert.equal(notice.category, "system-message");
+        for (const marker of hookMarkers) assert.ok(notice.message.includes(marker));
+      }
+    } finally { displayDb.close(); }
+    const historyRoot = path.join(dataDir, "v2", "sessions");
+    const canonicalFiles = readdirSync(historyRoot, { recursive: true }).filter((file) => file.endsWith("messages.jsonl"));
+    assert.ok(canonicalFiles.length > 0);
+    const canonical = canonicalFiles.map((file) => readFileSync(path.join(historyRoot, file), "utf8")).join("\n");
+    assert.ok(canonical.includes("SOURCE_REPOSITORY_TEST"));
+    for (const marker of hookMarkers) assert.ok(!canonical.includes(marker),
+      "Canonical history used by subsequent turns and compaction must not contain Hook notices");
     const toolStart = requests.length;
     await run([
       "exec",

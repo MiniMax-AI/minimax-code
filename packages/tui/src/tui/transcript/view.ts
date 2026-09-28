@@ -726,9 +726,9 @@ function renderCell(
   }
 
   if (cell.kind === 'warning') {
-    return [
-      ...new Text(chalk.hex(colors.warning)(`! Warning  ${cell.content}`), 2, 0).render(width),
-    ];
+    const title = sanitizeTerminalText(cell.title ?? 'Warning');
+    const content = sanitizeTerminalText(cell.content);
+    return [...new Text(chalk.hex(colors.warning)(`! ${title}  ${content}`), 2, 0).render(width)];
   }
 
   return [...new Text(cell.content, 2, 0).render(width)];

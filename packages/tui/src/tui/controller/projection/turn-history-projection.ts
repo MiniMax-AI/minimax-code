@@ -5,6 +5,7 @@ import { isQuestionnaireTool, type TuiToolProjection } from './turn-tool-project
 import type { TuiTodoProjection } from './turn-todo-projection.js';
 import type { TuiUserProjection } from './turn-user-projection.js';
 import { projectTuiReviewMessage } from '../../../review/projection.js';
+import { projectHookSystemMessage } from './turn-hook-message-projection.js';
 
 interface HydrateTuiHistoryOptions {
   messages: readonly TuiMessage[];
@@ -29,9 +30,16 @@ export function hydrateTuiHistory(options: HydrateTuiHistoryOptions): void {
       todoProjection.apply(turnId, systemEvent.data);
       return;
     }
-    // Runtime warnings remain available in durable events for diagnostics, but
-    // TUI intentionally leaves their product presentation to a future UX design.
-    if (systemEvent?.eventType === 'runtime.warning') return;
+    if (systemEvent?.eventType === 'runtime.warning') {
+      const hookMessage = projectHookSystemMessage({
+        ...systemEvent,
+        messageId: message.id,
+        turnId,
+        timestamp,
+      });
+      if (hookMessage) transcript.upsert(hookMessage);
+      return;
+    }
     if (isCompactionMessage(message)) {
       const status =
         message.kind === 'compaction_start'

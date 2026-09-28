@@ -21,6 +21,21 @@ const previewDisplayModes = {
 };
 
 describe('TranscriptView', () => {
+  it('renders Hook warning titles and multiline text without terminal controls', () => {
+    const view = new TranscriptView(() => [createTranscriptCell({
+      id: 'hook', kind: 'warning', status: 'succeeded', createdAtMs: 1,
+      title: 'Hook · Stop\x1b]2;FORGED\x07', content: '报告已生成\nSafe\x1b]52;c;PRIVATE\x07',
+    }), createTranscriptCell({ id: 'old-warning', kind: 'warning', content: 'Existing warning', createdAtMs: 2 })]);
+    const rendered = view.render(30).join('\n');
+    expect(stripVTControlCharacters(rendered)).toContain('Hook · Stop');
+    expect(stripVTControlCharacters(rendered)).toContain('报告已生成');
+    expect(stripVTControlCharacters(rendered)).toContain('Safe');
+    expect(stripVTControlCharacters(rendered).replace(/\s+/gu, ' ')).toContain('Warning Existing warning');
+    expect(rendered).not.toContain('FORGED');
+    expect(rendered).not.toContain('PRIVATE');
+    expect(rendered).not.toContain('\x07');
+  });
+
   it.each(['assistant', 'assistant-preamble', 'thinking'] as const)(
     'removes control strings from %s content without changing stored model output',
     (kind) => {

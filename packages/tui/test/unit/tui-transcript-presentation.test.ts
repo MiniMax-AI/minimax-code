@@ -4,6 +4,17 @@ import { createTranscriptCell } from '../../src/tui/transcript/model.js';
 import { TranscriptPresentationController } from '../../src/tui/transcript/presentation/state.js';
 
 describe('TranscriptPresentationController', () => {
+  it('uses the sanitized Hook title in presentation and search', () => {
+    const presentation = presentTranscriptCell(createTranscriptCell({
+      id: 'hook', kind: 'warning', status: 'succeeded', createdAtMs: 1,
+      title: 'Hook · Stop\x1b]2;PRIVATE\x07', content: 'Report ready',
+    }));
+    expect(presentation.title).toBe('Hook · Stop');
+    expect(presentation.searchText).toContain('hook · stop');
+    expect(presentation.searchText).not.toContain('private');
+    expect(presentation.rawText).toBe('Report ready');
+  });
+
   it('uses the run timer format in duration summaries and search text', () => {
     const presentation = presentTranscriptCell(
       createTranscriptCell({

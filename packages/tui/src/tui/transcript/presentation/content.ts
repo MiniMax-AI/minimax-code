@@ -74,7 +74,7 @@ function transcriptCellTitle(cell: TranscriptCell): string {
   if (cell.kind === 'compaction') return cell.title ?? 'Context compacted';
   if (cell.kind === 'usage') return 'Usage';
   if (cell.kind === 'inspection') return cell.inspection?.title ?? cell.title ?? 'Inspection';
-  if (cell.kind === 'warning') return 'Warning';
+  if (cell.kind === 'warning') return sanitizeTerminalText(cell.title ?? 'Warning');
   if (cell.kind === 'error') return 'Error';
   if (cell.kind === 'diff') return 'Changes';
   if (cell.kind === 'final-summary') return 'Summary';

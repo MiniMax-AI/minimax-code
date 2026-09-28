@@ -7,6 +7,7 @@ import type {
 import type { TranscriptStore } from '../../transcript/store.js';
 import type { TuiTodoItem } from '../../todo/model.js';
 import { hydrateTuiHistory } from './turn-history-projection.js';
+import { projectHookSystemMessage } from './turn-hook-message-projection.js';
 import { TuiLiveTurnProjection } from './turn-live-projection.js';
 import { TuiToolProjection } from './turn-tool-projection.js';
 import { TuiTodoProjection } from './turn-todo-projection.js';
@@ -157,6 +158,16 @@ export class TuiTurnProjection {
       return undefined;
     }
     if (event.type === 'generic') {
+      const hookMessage = projectHookSystemMessage({
+        ...event,
+        turnId: event.turnId ?? turnId,
+        timestamp: event.timestamp ?? this.now(),
+      });
+      if (hookMessage) {
+        this.transcript.upsert(hookMessage);
+        this.keepPendingSteersTrailing();
+        this.onChange();
+      }
       if (
         event.eventType === 'todo_updated' &&
         this.todoProjection.apply(event.turnId ?? turnId, event.data)

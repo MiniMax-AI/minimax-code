@@ -16,6 +16,8 @@ export interface RuntimeWarningEventInput {
   readonly runtimeSeq: number;
   readonly message: string;
   readonly source: string;
+  /** Producer-owned category; consumers must not infer it from message text. */
+  readonly category?: string;
   readonly code?: string;
   readonly pluginName?: string;
   readonly hookEvent?: string;
@@ -39,6 +41,7 @@ export function buildRuntimeWarningEvent(input: RuntimeWarningEventInput): Strea
       eventType: RUNTIME_WARNING_EVENT_TYPE,
       message: input.message,
       source: input.source,
+      ...(input.category ? { category: input.category } : {}),
       ...(input.code ? { code: input.code } : {}),
       ...(input.pluginName ? { pluginName: input.pluginName } : {}),
       ...(input.hookEvent ? { hookEvent: input.hookEvent } : {}),

@@ -122,12 +122,17 @@ export async function emitLocalPluginHookWarnings(input: {
     const uniqueWarnings = [
       ...new Map(
         warnings.map((warning) => [
-          `${warning.message}\u0000${warning.terminalSequence ?? ''}`,
+          `${warning.category}\u0000${warning.message}\u0000${warning.terminalSequence ?? ''}`,
           warning,
         ]),
       ).values(),
     ]
-      .filter((warning) => !seen.has(warningDedupeKey(input, warning)))
+      // Each Hook invocation may intentionally repeat a user-facing message.
+      // Only diagnostics/control notices are deduplicated across invocations.
+      .filter(
+        (warning) =>
+          warning.category === 'system-message' || !seen.has(warningDedupeKey(input, warning)),
+      )
       .slice(0, MAX_PLUGIN_HOOK_WARNINGS_PER_EVENT);
     if (uniqueWarnings.length === 0) return;
     try {
@@ -141,6 +146,7 @@ export async function emitLocalPluginHookWarnings(input: {
             runtimeSeq: reporter.nextRuntimeSeq(),
             message: warning.message,
             source: 'plugin-hook',
+            category: warning.category,
             hookEvent: input.event,
             ...(warning.code ? { code: warning.code } : {}),
             ...(warning.pluginName ? { pluginName: warning.pluginName } : {}),
@@ -148,7 +154,9 @@ export async function emitLocalPluginHookWarnings(input: {
           });
         }),
       );
-      for (const warning of uniqueWarnings) seen.add(warningDedupeKey(input, warning));
+      for (const warning of uniqueWarnings.filter((item) => item.category !== 'system-message')) {
+        seen.add(warningDedupeKey(input, warning));
+      }
     } catch {
       // Warning delivery is best-effort and must not alter Hook control flow.
     }
