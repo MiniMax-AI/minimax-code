@@ -28,30 +28,47 @@ export function checkWindowsSourceLocation({
   if (!/^[a-z]:\\$/iu.test(root) || root.startsWith("\\\\")) {
     return fail("The checkout root is not a local drive-letter path.");
   }
-  // `fsutil` accepts a drive letter more reliably than a root path with a
-  // trailing backslash across Windows runner images.
   const volume = root.slice(0, 2);
 
-  let driveType;
-  let volumeInfo;
+  let disk;
   try {
-    driveType = execFile("fsutil", ["fsinfo", "drivetype", volume], {
+    // CIM exposes numeric drive types and filesystem identifiers independent of
+    // display language. fsutil prints localized text (e.g. "E: - Fixed Drive")
+    // and its volumeinfo command can require elevation. Query CIM directly so
+    // ordinary contributor shells use the same structured policy as CI.
+    // Only the validated drive letter above is interpolated, never the cwd.
+    const output = execFile("powershell.exe", [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+      "$ErrorActionPreference = 'Stop'; " +
+        `Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='${volume}'" | ` +
+        "Select-Object DeviceID, DriveType, FileSystem | ConvertTo-Json -Compress",
+    ], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15_000,
+      windowsHide: true,
     });
-    volumeInfo = execFile("fsutil", ["fsinfo", "volumeinfo", volume], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    disk = JSON.parse(output.trim());
+    if (
+      !disk || Array.isArray(disk) ||
+      typeof disk.DeviceID !== "string" ||
+      disk.DeviceID.toUpperCase() !== volume.toUpperCase() ||
+      !Number.isInteger(disk.DriveType) ||
+      disk.DriveType < 0 || disk.DriveType > 6 ||
+      typeof disk.FileSystem !== "string"
+    ) {
+      throw new Error("CIM returned incomplete or unexpected volume information");
+    }
   } catch (error) {
     const detail = error instanceof Error ? ` (${error.message})` : "";
     return fail(`Windows could not verify the checkout volume${detail}.`);
   }
 
-  if (!allowNonFixed && !/:\s*DRIVE_FIXED(?:\r?\n|$)/iu.test(driveType)) {
+  // Win32_LogicalDisk.DriveType: 3 = local disk, 4 = network drive.
+  if (!allowNonFixed && disk.DriveType !== 3) {
     return fail("The checkout volume is not a local fixed drive.");
   }
-  if (!/:\s*NTFS(?:\r?\n|$)/iu.test(volumeInfo)) {
+  if (disk.FileSystem.toUpperCase() !== "NTFS") {
     return fail("The checkout volume is not formatted as NTFS.");
   }
 

@@ -20,7 +20,7 @@ afterEach(() => {
 
 describe.skipIf(process.platform !== "win32")("Windows source contract", () => {
   it("accepts the Windows checkout on a local NTFS volume", () => {
-    assert.deepEqual(checkWindowsSourceLocation(), {
+    assert.deepEqual(checkWindowsSourceLocation({ allowNonFixed: false }), {
       ok: true,
       skipped: false,
     });
