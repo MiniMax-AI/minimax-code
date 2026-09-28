@@ -1544,6 +1544,28 @@ const MINIMAX_MODELS: Record<string, ModelConfig> = {
     },
     capabilities: MINIMAX_M3_FILE_API_CAPABILITIES,
   },
+  "MiniMax-M3.1-Flash-Preview": {
+    name: "M3.1-Flash-Preview",
+    attachment: true,
+    reasoning: true,
+    tool_call: true,
+    temperature: true,
+    modalities: { input: ["text", "image", "video"], output: ["text"] },
+    limit: { context: 512000, output: 128000 },
+    contextWindowOptions: [512000, 1000000],
+    contextWindowOptionHints: { "1000000": "higher_usage" },
+    options: { reasoningSummary: "auto" },
+    thinking: {
+      effortOptions: ["default", "low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "default",
+    },
+    thinking_config: { mode: "forced_on" },
+    variants: {
+      "none-thinking": { thinking: { type: "disabled" } },
+      thinking: { thinking: { type: "adaptive" } },
+    },
+    capabilities: MINIMAX_M3_FILE_API_CAPABILITIES,
+  },
   "MiniMax-M2.7-highspeed": {
     name: "MiniMax-M2.7-highspeed",
     attachment: false,

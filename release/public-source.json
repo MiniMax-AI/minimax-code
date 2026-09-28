@@ -480,6 +480,7 @@
     "packages/config/src/tool-result-compaction-config.ts",
     "packages/config/src/tui-config.ts",
     "packages/config/src/tui-status-line-write.ts",
+    "packages/config/test/builtin-model-fallback.test.ts",
     "packages/config/test/config-file-permissions.test.ts",
     "packages/config/test/config-update-preservation.test.ts",
     "packages/config/test/managed-preset-sync.test.ts",
