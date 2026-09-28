@@ -164,6 +164,8 @@ export class EventBridge {
   private awaitingMessageId: boolean = false;
   /** Wall-clock ms when the first thinking_delta of the current msg arrived. */
   private thinkingStartMs: number | undefined;
+  /** First nonempty text/thinking/tool token; excludes first-token wait from throughput. */
+  private firstTokenMs: number | undefined;
   /** Wall-clock ms when thinking ended (first non-thinking delta or message_end). */
   private thinkingEndMs: number | undefined;
   /** Whether the current message has already produced a non-thinking delta. */
@@ -361,6 +363,7 @@ export class EventBridge {
     this.activeAssistantMessageId = undefined;
     this.chunkIndex = 0;
     this.thinkingStartMs = undefined;
+    this.firstTokenMs = undefined;
     this.thinkingEndMs = undefined;
     this.thinkingClosed = false;
     this.awaitingMessageId = true;
@@ -397,6 +400,14 @@ export class EventBridge {
           }),
         ],
       };
+    }
+    if (
+      this.firstTokenMs === undefined &&
+      (('delta' in update && update.delta !== '') ||
+        ((update.kind === 'toolcall_start' || update.kind === 'toolcall_delta') &&
+          update.toolName !== undefined))
+    ) {
+      this.firstTokenMs = this.now();
     }
     if (
       update.kind === 'toolcall_start' ||
@@ -587,11 +598,18 @@ export class EventBridge {
       this.ctx.includeDetailedUsage === true
         ? this.ctx.requestDurationMs?.(event.message)
         : undefined;
+    const decodeDurationMs =
+      this.ctx.includeDetailedUsage === true && this.firstTokenMs !== undefined
+        ? Math.max(0, this.now() - this.firstTokenMs)
+        : undefined;
     const usage: TokenUsage = {
       ...(extractAssistantUsage(event.message, this.contextWindow) ?? {
         total_tokens: 0,
         context_window: this.contextWindow,
       }),
+      ...(decodeDurationMs !== undefined && Number.isFinite(decodeDurationMs)
+        ? { decode_duration_ms: decodeDurationMs }
+        : {}),
       ...(typeof requestDurationMs === 'number' &&
       Number.isFinite(requestDurationMs) &&
       requestDurationMs > 0

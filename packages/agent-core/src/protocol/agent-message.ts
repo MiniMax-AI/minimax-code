@@ -127,12 +127,10 @@ export interface TokenUsage {
   input_tokens?: number;
   /** Provider-reported generated tokens for this physical request. */
   output_tokens?: number;
-  /**
-   * Physical provider request duration measured at the stream wrapper.
-   * Consumers use the elapsed duration directly instead of reconstructing
-   * throughput from downstream chunk timestamps, which may be buffered.
-   */
+  /** Full physical provider request duration, including first-token wait. */
   request_duration_ms?: number;
+  /** First nonempty text/thinking/tool token to message_end, excluding tool execution. */
+  decode_duration_ms?: number;
   /**
    * Cached prompt tokens reused across turns (provider-specific). Optional so
    * legacy producers/consumers stay compatible; Pi providers surface this via

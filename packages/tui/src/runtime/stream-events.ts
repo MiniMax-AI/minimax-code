@@ -86,6 +86,7 @@ export interface TuiTokenUsage {
   outputTokens?: number;
   reasoningTokens?: number;
   requestDurationMs?: number;
+  decodeDurationMs?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
 }
@@ -369,6 +370,7 @@ function normalizeTokenUsage(
     outputTokens: readNumber(usage, ['output_tokens', 'outputTokens']),
     reasoningTokens: readNumber(usage, ['reasoning', 'reasoning_tokens', 'reasoningTokens']),
     requestDurationMs: readNumber(usage, ['request_duration_ms', 'requestDurationMs']),
+    decodeDurationMs: readNumber(usage, ['decode_duration_ms', 'decodeDurationMs']),
     cacheReadTokens: readNumber(usage, ['cache_read', 'cacheRead', 'cache_read_tokens']),
     cacheWriteTokens: readNumber(usage, ['cache_write', 'cacheWrite', 'cache_write_tokens']),
   });

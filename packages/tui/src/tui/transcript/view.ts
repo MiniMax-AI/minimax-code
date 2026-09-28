@@ -1,3 +1,4 @@
+import { formatTokensPerSecond } from '../rendering/output-rate.js';
 import { Markdown, Text } from '../engine/public.js';
 import { projectAssistantContentForTerminal } from '../../application/assistant-content.js';
 import { formatTuiDuration } from '../rendering/duration.js';
@@ -578,7 +579,7 @@ function renderCell(
   if (cell.kind === 'turn-duration') {
     const label = cell.status === 'cancelled' ? 'Interrupted after' : 'Completed in';
     const outputRate = isPositiveFinite(cell.outputTokensPerSecond)
-      ? ` · ⚡ ${cell.outputTokensPerSecondEstimated === true ? '~' : ''}${cell.outputTokensPerSecond.toFixed(1)} tok/s`
+      ? ` · ⚡ ${cell.outputTokensPerSecondEstimated === true ? '~' : ''}${formatTokensPerSecond(cell.outputTokensPerSecond)} tok/s`
       : '';
     const summary = chalk.hex(colors.muted)(
       `  └ ${label} ${formatTuiDuration((cell.durationMs ?? 0) / 1_000)}${outputRate}`,

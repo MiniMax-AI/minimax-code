@@ -188,7 +188,11 @@
       "packages/local-runtime-v2/src/service/turn-system/compaction/automatic-context-compactor.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/compaction/execution/checkpoint-prompt.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/compaction/execution/checkpoint-provider.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/compaction/local-context-compactor.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/compaction/local-context-compactor.test.ts",
+      "packages/agent-core/test/unit/event-bridge/decode-timing.test.ts",
+      "packages/tui/test/unit/tui-stream-events.test.ts",
+      "packages/tui/test/unit/tui/controller/projection/turn-output-rate.test.ts",
+      "packages/local-runtime-v2/src/application/session/content-timing.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

@@ -96,7 +96,7 @@ export class TuiChatController {
     this.runCoordinator = options.runCoordinator ?? new TuiRunCoordinator(options.runtime);
     this.retirementWarningTimeoutMs = options.retirementWarningTimeoutMs ?? 5_000;
     this.now = options.now ?? Date.now;
-    this.outputRate = new TuiTurnOutputRate({ now: this.now });
+    this.outputRate = new TuiTurnOutputRate();
     this.onChange = options.onChange;
     this.onTurnAccepted = options.onTurnAccepted;
     this.onUserSubmissionProjected = options.onUserSubmissionProjected;

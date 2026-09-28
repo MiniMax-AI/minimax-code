@@ -2,6 +2,20 @@
 
 The current capability target is **TUI 0.4.12**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
+## Output speed
+
+The activity line and completed-turn summary show provider output tokens divided by
+model generation time. Timing starts at the first nonempty text, reasoning, or tool
+token and ends when the model finishes, excluding first-token wait and tool execution.
+Multiple responses in a turn use total tokens divided by total generation time.
+
+Speed appears after the first response with both provider usage and generation timing;
+streaming text is not estimated. Confirmed speed stays visible during later requests
+and tools, duplicate messages do not count twice, and a new turn resets the samples.
+Messages without generation timing are excluded. Values below 10 tok/s use one decimal
+place; higher values are rounded to integers. Batched provider events measure the
+observed generation window, not server hardware throughput.
+
 ## Terminal titles and notifications
 
 Terminal titles show the current state, session name and MCode, for example

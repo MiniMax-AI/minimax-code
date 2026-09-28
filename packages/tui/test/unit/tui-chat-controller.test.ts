@@ -71,7 +71,7 @@ describe('TuiChatController', () => {
     expect(isQuestionnaireTool('read_file')).toBe(false);
   });
 
-  it('shows estimated output throughput while a text response is still streaming', async () => {
+  it('waits for provider usage before showing output throughput', async () => {
     let nowMs = 0;
     let releaseResponse: (() => void) | undefined;
     const responseGate = new Promise<void>((resolve) => {
@@ -110,7 +110,7 @@ describe('TuiChatController', () => {
             turnId: 'turn-live-output-rate',
             role: 'assistant',
             content: 'hello world',
-            usage: { outputTokens: 126, requestDurationMs: 2_000 },
+            usage: { outputTokens: 126, requestDurationMs: 7_000, decodeDurationMs: 2_000 },
           },
         };
         yield { type: 'done', turnId: 'turn-live-output-rate' };
@@ -130,8 +130,8 @@ describe('TuiChatController', () => {
     await vi.waitFor(() =>
       expect(controller.snapshot()).toMatchObject({
         activeTurnId: 'turn-live-output-rate',
-        outputTokensPerSecond: 2,
-        outputTokensPerSecondEstimated: true,
+        outputTokensPerSecond: undefined,
+        outputTokensPerSecondEstimated: undefined,
       }),
     );
     const snapshot = controller.snapshot();
@@ -151,7 +151,7 @@ describe('TuiChatController', () => {
       workspace: '/workspace',
     });
     const line = new TuiActivityLine(presentation.activity, { animate: false });
-    expect(line.render(120).join('\n')).toContain('⚡ ~2.0 tok/s');
+    expect(line.render(120).join('\n')).not.toContain('tok/s');
 
     releaseResponse?.();
     await submission;
@@ -182,7 +182,7 @@ describe('TuiChatController', () => {
             turnId: 'turn-output-rate',
             role: 'assistant',
             content: 'hello',
-            usage: { outputTokens: 126, requestDurationMs: 2_000 },
+            usage: { outputTokens: 126, requestDurationMs: 7_000, decodeDurationMs: 2_000 },
           },
         };
         yield { type: 'done', turnId: 'turn-output-rate' };
@@ -200,7 +200,7 @@ describe('TuiChatController', () => {
     await controller.submit('Say hello');
 
     const view = new TranscriptView(() => transcript.snapshot());
-    expect(view.render(80).join('\n')).toContain('⚡ 63.0 tok/s');
+    expect(view.render(80).join('\n')).toContain('⚡ 63 tok/s');
   });
 
   it('accumulates provider output throughput for one turn and resets it for the next', () => {
@@ -231,7 +231,7 @@ describe('TuiChatController', () => {
         id: 'message-1',
         turnId: 'turn-1',
         role: 'assistant',
-        usage: { outputTokens: 126, requestDurationMs: 2_000 },
+        usage: { outputTokens: 126, requestDurationMs: 7_000, decodeDurationMs: 2_000 },
       },
     });
 
@@ -270,7 +270,7 @@ describe('TuiChatController', () => {
       timestamp: 2_000,
     });
 
-    expect(controller.snapshot().outputTokensPerSecond).toBeGreaterThan(0);
+    expect(controller.snapshot().outputTokensPerSecond).toBeUndefined();
     expect(onChange).toHaveBeenCalledOnce();
   });
 
