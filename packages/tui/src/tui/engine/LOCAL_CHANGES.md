@@ -225,3 +225,13 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Evidence: `tui-scrollback-stability.test.ts` covers idle/one-row overlay output, physical cursor changes, force refresh, resize roundtrips, close/reopen, short-conversation background state and footer changes, unique warning emission, and real transcript replacement. Independent emulator checks cover account notice height changes, image fallback and lifecycle boundaries.
 - Boundary: retained native welcome rows keep their emitted status; the current visible welcome and footer render current state. This does not change content-review decisions, runtime warning events or native-host guarantees.
 - Removal condition: upstream provides differential isolated overlays and prelude-aware native-history alignment.
+
+
+## L047: Preserve output identity and deferred main-buffer geometry
+
+- Product contract: admitting an optimistic user message keeps its emitted history identity, including long prompts. Consecutive resizes preserve every output row even while writes are held or the fullscreen renderer owns the terminal. Switching modes snapshots main state after any final resize flush.
+- Minimal difference: MainScreen tracks physical geometry separately from the last rendered frame and exposes the same resize calculation for an inactive saved main state. The base renderer forwards physical resize events to its owner before scheduling frames. Reflow that still fits on screen repaints in place; only potentially scrolled reflow needs an archived snapshot. Row alignment ignores declared layout padding and recognizes retained row identities when a source block id changes.
+- Product integration: the transcript keeps canonical store ids while carrying an optional emitted-row identity across admission. ChatLayout publishes its outer padding. The interactive renderer observes inactive main-buffer resizes and captures state after stop has flushed pending output.
+- Evidence: actual application submission tests cover three terminal sizes and a 120-line prompt. Scrollback tests cover five held-output resize sequences, three fullscreen resize sequences and a mode switch with a pending resized frame. Existing IME tests assert cursor position at synchronized frame boundaries after short-document width changes; overlay reflow tests retain overflowed history.
+- Boundary: resize tracking models the existing local emulator host behavior. Native remote-host and cross-platform acceptance remain separate; genuinely unalignable history still starts a labelled snapshot.
+- Removal condition: upstream retains emitted row identity through admission and tracks physical main-buffer geometry across deferred frames and renderer ownership changes.

@@ -285,7 +285,7 @@ export class TranscriptView implements Component {
     const rendered = content;
     if (unit.kind === 'cell' && !unit.cell.id.startsWith('projection-fold:')) {
       for (let row = 0; row < rendered.length; row += 1) {
-        anchors.push({ id: JSON.stringify([key, row]), row, blockId: unit.cell.id });
+        anchors.push({ id: JSON.stringify([`cell:${unit.cell.scrollbackId ?? unit.cell.id}`, row]), row, blockId: unit.cell.id });
       }
     }
     this.unitCache.set(key, {
@@ -373,6 +373,7 @@ function renderUnitSignature(
       if (revision !== undefined) return JSON.stringify([cell.id, revision]);
       return JSON.stringify([
         cell.id,
+        cell.scrollbackId,
         cell.kind,
         cell.status,
         cell.title,
@@ -515,7 +516,7 @@ function renderReadGroup(
       );
     }
     for (let row = start; row < lines.length; row += 1) {
-      anchors.push({ id: JSON.stringify([`cell:${cell.id}`, row - start]), row, blockId: cell.id });
+      anchors.push({ id: JSON.stringify([`cell:${cell.scrollbackId ?? cell.id}`, row - start]), row, blockId: cell.id });
     }
   });
   return lines;

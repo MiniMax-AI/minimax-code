@@ -4,6 +4,7 @@ import {
   TuiMainScreen,
   type Component,
 } from "../../src/tui/engine/public.js";
+import { McodeInteractiveRenderer } from "../../src/tui/renderer/interactive-renderer.js";
 import { TuiChatLayout } from "../../src/tui/shell/chat-layout.js";
 import { TuiWelcome } from "../../src/tui/shell/welcome/component.js";
 import { TuiTaskPanel } from "../../src/tui/shell/task-panel.js";
@@ -1069,4 +1070,149 @@ describe("short conversations with the product welcome", () => {
       );
     },
   );
+});
+
+describe("main-buffer geometry across deferred frames", () => {
+  it.each([
+    [24, 8, 24],
+    [24, 8, 30],
+    [24, 8, 16],
+    [24, 30, 24],
+    [24, 30, 8],
+  ])(
+    "preserves every history row while output is held through %i -> %i -> %i rows",
+    async (initial, intermediate, final) => {
+      class HeldTerminal extends RecordingTerminal {
+        outputPending = false;
+        release: (() => void) | undefined;
+        drainOutput(): Promise<void> {
+          return new Promise((resolve) => {
+            this.release = resolve;
+          });
+        }
+      }
+      const terminal = new HeldTerminal(100, initial);
+      const f = fixture(terminal);
+      f.tui.start();
+      try {
+        for (let i = 0; i < 80; i++) f.store.upsert(step(i));
+        await f.render();
+        terminal.outputPending = true;
+        terminal.resize(100, intermediate);
+        terminal.resize(100, final);
+        terminal.outputPending = false;
+        terminal.release?.();
+        expectNoReplay(await f.render());
+        // A delayed resize-settle frame must also preserve the same history.
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        expectNoReplay(await f.render());
+        const history = terminal.getScrollBuffer();
+        for (let i = 0; i < 80; i++) {
+          const token = `STEP_${String(i).padStart(3, "0")}`;
+          expect(
+            history.filter((line) => line.includes(token)),
+            token,
+          ).toHaveLength(1);
+        }
+        expect(terminal.getViewport().join("\n")).toContain("composer");
+      } finally {
+        terminal.outputPending = false;
+        terminal.release?.();
+        f.tui.stop();
+      }
+    },
+  );
+
+  it.each([
+    [24, 8, 24],
+    [24, 8, 30],
+    [24, 8, 16],
+  ])(
+    "preserves inactive main history after fullscreen resize %i -> %i -> %i rows",
+    async (initial, intermediate, final) => {
+      const terminal = new RecordingTerminal(100, initial);
+      const f = fixture(terminal);
+      const owner = new McodeInteractiveRenderer({ terminal });
+      owner.ui.addChild(f.layout);
+      for (let i = 0; i < 80; i++) f.store.upsert(step(i));
+      owner.start();
+      const render = async () => {
+        owner.ui.renderNow();
+        await terminal.flush();
+      };
+      try {
+        await render();
+        owner.switchMode("fullscreen");
+        await render();
+        terminal.resize(100, intermediate);
+        await render();
+        terminal.resize(100, final);
+        await render();
+        terminal.takeWrites();
+        owner.switchMode("regular");
+        await render();
+        expectNoReplay(terminal.takeWrites());
+        const history = terminal.getScrollBuffer();
+        for (let i = 0; i < 80; i++) {
+          const token = `STEP_${String(i).padStart(3, "0")}`;
+          expect(
+            history.filter((line) => line.includes(token)),
+            token,
+          ).toHaveLength(1);
+        }
+        expect(terminal.getViewport().join("\n")).toContain("composer");
+      } finally {
+        owner.stop();
+      }
+    },
+  );
+});
+
+describe("mode switch with a pending main frame", () => {
+  it("captures main state after stop flushes pending resized output", async () => {
+    class HeldTerminal extends RecordingTerminal {
+      outputPending = false;
+      release: (() => void) | undefined;
+      drainOutput(): Promise<void> {
+        return new Promise((resolve) => {
+          this.release = resolve;
+        });
+      }
+    }
+    const terminal = new HeldTerminal(100, 24);
+    const f = fixture(terminal);
+    const owner = new McodeInteractiveRenderer({ terminal });
+    owner.ui.addChild(f.layout);
+    for (let i = 0; i < 80; i++) f.store.upsert(step(i));
+    owner.start();
+    const render = async () => {
+      owner.ui.renderNow();
+      await terminal.flush();
+    };
+    try {
+      await render();
+      terminal.outputPending = true;
+      terminal.resize(100, 12);
+      for (let i = 80; i < 90; i++) f.store.upsert(step(i));
+      owner.switchMode("fullscreen");
+      await render();
+      terminal.outputPending = false;
+      terminal.release?.();
+      await render();
+      owner.switchMode("regular");
+      await render();
+      const history = terminal.getScrollBuffer();
+      for (let i = 0; i < 90; i++) {
+        const token = `STEP_${String(i).padStart(3, "0")}`;
+        expect(
+          history.filter((line) => line.includes(token)),
+          token,
+        ).toHaveLength(1);
+      }
+    } finally {
+      terminal.outputPending = false;
+      terminal.release?.();
+      owner.stop();
+    }
+  });
 });

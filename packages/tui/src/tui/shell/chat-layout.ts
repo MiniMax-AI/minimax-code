@@ -284,6 +284,7 @@ export class TuiChatLayout implements Component {
         this.scrollbackLayout = {
           anchors: welcome.map((_, row) => ({ id: JSON.stringify(['welcome', row]), row })),
           blocks: new Set(),
+          horizontalPadding: frame.horizontalPadding,
           bodyEnd: welcome.length + notice.length,
         };
       }
@@ -314,6 +315,7 @@ export class TuiChatLayout implements Component {
       const offset = prelude.length - transcript.length;
       this.scrollbackLayout = {
         blocks: transcriptLayout.blocks,
+        horizontalPadding: frame.horizontalPadding,
         containsBlock: transcriptLayout.containsBlock,
         // The native viewport can start inside the welcome while a short transcript
         // is still entirely on screen. Background chrome/footer updates need an anchor

@@ -150,16 +150,9 @@ export class McodeInteractiveRenderer {
     const clearOnShrink = previous.getClearOnShrink();
     const onDebug = previous.onDebug;
     const wasStarted = this.started;
-    if (previous instanceof TuiMainScreen) {
-      this.mainScreenRenderState = previous.captureRenderState();
-    }
-
     const next = this.createRenderer(mode, showHardwareCursor);
     next.setClearOnShrink(clearOnShrink);
     next.onDebug = onDebug;
-    if (next instanceof TuiMainScreen && this.mainScreenRenderState) {
-      next.restoreRenderState(this.mainScreenRenderState);
-    }
     for (const component of components) next.addChild(component);
     this.mountFullscreenLayout(next);
 
@@ -171,6 +164,14 @@ export class McodeInteractiveRenderer {
       if (wasStarted) {
         previousStopAttempted = true;
         previous.stop({ preserveScreen: true });
+      }
+      // stop() can flush a pending resized frame. Capture the physical main
+      // buffer only after that flush, before the next renderer takes ownership.
+      if (previous instanceof TuiMainScreen) {
+        this.mainScreenRenderState = previous.captureRenderState();
+      }
+      if (next instanceof TuiMainScreen && this.mainScreenRenderState) {
+        next.restoreRenderState(this.mainScreenRenderState);
       }
       previous.setFocus(null);
       next.setFocus(focus);
@@ -289,12 +290,18 @@ export class McodeInteractiveRenderer {
         : undefined),
   ): TuiMainScreen | TuiAltScreen {
     if (mode === 'fullscreen') {
-      return new TuiAltScreen(
+      const renderer = new TuiAltScreen(
         this.options.terminal,
         showHardwareCursor,
         this.options.logDirectory,
         this.options.altScreen,
       );
+      renderer.onResize = (width, height) => {
+        if (this.mainScreenRenderState) {
+          TuiMainScreen.resizeRenderState(this.mainScreenRenderState, width, height);
+        }
+      };
+      return renderer;
     }
     return new TuiMainScreen(this.options.terminal, showHardwareCursor, this.options.logDirectory);
   }

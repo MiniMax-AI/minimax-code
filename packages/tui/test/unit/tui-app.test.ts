@@ -538,6 +538,77 @@ function createRuntime(): TuiRuntime {
 }
 
 describe("createTuiApp", () => {
+  it.each([
+    [190, 48, 1],
+    [100, 24, 1],
+    [60, 12, 1],
+    [100, 24, 120],
+  ])(
+    "does not start a transcript snapshot when the first prompt is admitted at %ix%i (%i lines)",
+    async (columns, rows, lineCount) => {
+      class RecordingTerminal extends VirtualTerminal {
+        output = "";
+        override write(data: string): void {
+          this.output += data;
+          super.write(data);
+        }
+      }
+      const terminal = new RecordingTerminal(columns, rows);
+      const runtime = createRuntime();
+      let releaseRun: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseRun = resolve;
+      });
+      vi.mocked(runtime.sendMessage).mockImplementation(
+        async function* sendMessage() {
+          await gate;
+          yield { type: "done" };
+        },
+      );
+      const app = createTuiApp({
+        runtime,
+        terminal,
+        version: "0.1.0",
+        workspaceDir: "/workspace",
+        tuiMode: "regular",
+      });
+      app.start();
+      try {
+        await app.ready;
+        app.tui.renderNow();
+        await terminal.flush();
+        expect(terminal.output).not.toContain("Transcript refreshed");
+        terminal.output = "";
+        const prompts =
+          lineCount === 1
+            ? ["hello"]
+            : Array.from(
+                { length: lineCount },
+                (_, i) => `PROMPT_ROW_${String(i).padStart(3, "0")}`,
+              );
+        app.editor.setText(prompts.join("\n"));
+        terminal.sendInput("\r");
+        await vi.waitFor(() =>
+          expect(runtime.sendMessage).toHaveBeenCalledTimes(1),
+        );
+        app.tui.renderNow();
+        await terminal.flush();
+        expect(terminal.output).not.toContain("Transcript refreshed");
+        for (const prompt of prompts) {
+          expect(
+            terminal
+              .getScrollBuffer()
+              .filter((line) => line.trim().endsWith(prompt)),
+            prompt,
+          ).toHaveLength(1);
+        }
+      } finally {
+        releaseRun?.();
+        await app.stop();
+      }
+    },
+  );
+
   it("force-follows user submissions, /new, and Session transitions", async () => {
     const forceFollowBottom = vi.spyOn(TuiChatLayout.prototype, "forceFollowBottom");
     const app = createTuiApp({

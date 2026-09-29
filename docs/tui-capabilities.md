@@ -15,10 +15,14 @@ released rows temporarily remain blank between the transcript and footer; new
 output consumes that space. Tables and code blocks remain contiguous. Short
 conversations also anchor the welcome rows, so background status changes and
 footer completion do not replay the banner or duplicate existing warnings.
+Accepting a submitted message retains its emitted row identity, so the first
+prompt does not introduce a refresh boundary or duplicate a long message.
 
 When an unrelated transcript replaces the current projection, a labelled refresh
 boundary separates the retained output from the new document. Resize and forced
-redraw preserve pending output and native history. Explicit resume-start history
+redraw preserve pending output and native history, including consecutive resizes
+while output is held or fullscreen mode is active. Mode changes preserve the main
+state after its final pending frame is flushed. Explicit resume-start history
 clearing remains a separate startup policy. Native image history is retained until
 the terminal itself evicts it.
 

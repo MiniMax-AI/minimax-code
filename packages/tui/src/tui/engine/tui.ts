@@ -32,6 +32,8 @@ export interface ScrollbackLayout {
 	containsBlock?(id: string): boolean;
 	/** First footer row. Rows before this belong to the transcript. */
 	readonly bodyEnd: number;
+	/** Layout-owned leading spaces, excluded when matching emitted row content. */
+	readonly horizontalPadding?: number;
 }
 
 export interface Component {
@@ -365,6 +367,8 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
+	/** Observes physical geometry even when rendering is deferred by output backpressure. */
+	public onResize?: (columns: number, rows: number) => void;
 	private renderRequested = false;
 	private hasRenderedFrame = false;
 	private outputDrainPending = false;
@@ -738,7 +742,10 @@ export abstract class TuiBase extends Container implements TUI {
 		this.beforeTerminalStart();
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
-			() => this.onTerminalResize(),
+			() => {
+				this.onResize?.(this.terminal.columns, this.terminal.rows);
+				this.onTerminalResize();
+			},
 		);
 		this.afterTerminalStart();
 		this.hideHardwareCursor();
