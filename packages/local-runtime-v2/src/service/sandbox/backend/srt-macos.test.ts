@@ -1487,6 +1487,17 @@ async function expectMandatoryDenySurface(
   }
 }
 
+/**
+ * Probes must measure the sandbox, not the caller's shell. Every probe spawns a
+ * real process and resolves its command through `PATH`, so inheriting the
+ * ambient one lets a wrapper ahead of `/bin` decide what `rm` means — for
+ * example the recoverable-delete shim MCode installs into agent shells, whose
+ * trash move the sandbox then denies, turning a correct allow-probe into a
+ * reported sandbox regression. Pin the probes to the system binaries they
+ * actually use (`cat`, `rm`, `rmdir`, `find`, `mv`, `printf`, `git`, `true`).
+ */
+const PROBE_PATH = "/usr/bin:/bin";
+
 async function expectProbeResult(
   command: string,
   filesystem: SandboxInvocationFilesystemPolicy,
@@ -1520,7 +1531,7 @@ async function runProbe(
       cwd: fixture.workspace,
       baseEnv: {
         HOME: process.env.HOME ?? "/var/empty",
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        PATH: PROBE_PATH,
       },
       sandboxTempDir: fixture.sessionTemp,
       commandId,
@@ -1593,7 +1604,7 @@ function createGitProbeFixture(): GitProbeFixture {
 function gitProbeEnv(fixture: GitProbeFixture): Record<string, string> {
   return {
     HOME: fixture.home,
-    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    PATH: PROBE_PATH,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_AUTHOR_NAME: "probe",
     GIT_AUTHOR_EMAIL: "probe@example.invalid",
@@ -1712,7 +1723,7 @@ async function wrapProfile(
     await profileBackend.wrap({
       command: "true",
       cwd: profileFixture,
-      baseEnv: { PATH: process.env.PATH },
+      baseEnv: { PATH: PROBE_PATH },
       sandboxTempDir: profileFixture,
       commandId: opaqueId,
       commandText: opaqueId,
