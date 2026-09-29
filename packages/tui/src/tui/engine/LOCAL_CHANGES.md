@@ -215,3 +215,13 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Evidence: engine and application regressions verify host scroll position, unique emitted rows, Todo completion, grouped reads and long-turn/turn-window eviction, contiguous tables, transient panels, cursor placement, bounded caches, oversized footers, resize bursts, image-resource lifetime, forced refresh, and mode-state restore under xterm and an ED 2 clear-to-scrollback model.
 - Boundary: old native rows retain their historical text and wrapping. Explicit resume-start clearing is unchanged. Native remote-host and cross-platform acceptance remain separate from local emulator verification.
 - Removal condition: the selected upstream engine supports immutable native output with bounded anchored live projections.
+
+
+## L046: Avoid idle overlay output and short-conversation replay
+
+- Product contract: unchanged isolated overlays emit no frame bytes. Changed text rows repaint in place; cursor-only movement still updates IME position. Short conversations retain native scroll position when background connection/account status or footer height changes while the welcome occupies history.
+- Minimal difference: MainScreen caches one normalized overlay frame and its physical cursor visibility. Entry, exit, forced refresh, restore and each geometry transition invalidate the cache; image changes retain full-frame repaint. Base cursor-hiding control paths update the visibility cache so nested panels and coalesced preference changes restore the cursor.
+- Short conversations: ChatLayout publishes welcome row anchors in document mode. With block metadata, prelude anchors have no block identity and are excluded from transcript-replacement detection. Shared welcome rows cannot hide a new session or projection eviction. The existing immutable-history alignment and body/footer padding apply before the first transcript row reaches native history.
+- Evidence: `tui-scrollback-stability.test.ts` covers idle/one-row overlay output, physical cursor changes, force refresh, resize roundtrips, close/reopen, short-conversation background state and footer changes, unique warning emission, and real transcript replacement. Independent emulator checks cover account notice height changes, image fallback and lifecycle boundaries.
+- Boundary: retained native welcome rows keep their emitted status; the current visible welcome and footer render current state. This does not change content-review decisions, runtime warning events or native-host guarantees.
+- Removal condition: upstream provides differential isolated overlays and prelude-aware native-history alignment.

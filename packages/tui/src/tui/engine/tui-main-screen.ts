@@ -137,6 +137,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private scrollbackLayout: ScrollbackLayout | undefined;
 	private segmentHeader = false;
 	private overlayScreenActive = false;
+	private overlayFrame: {
+		width: number;
+		height: number;
+		lines: string[];
+		cursor: { row: number; col: number } | null;
+		showCursor: boolean;
+	} | undefined;
 	private overlayScreenWidth = 0;
 	private overlayMainReflowed = false;
 	private renderingMainOnStop = false;
@@ -198,6 +205,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	restoreRenderState(state: TuiMainScreenRenderState): void {
+		this.overlayFrame = undefined;
 		this.cancelResize();
 		this.resizePending = false;
 		this.previousLines = state.previousLines.map((line) => (isImageLine(line) ? "" : line));
@@ -214,6 +222,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	protected override resetRenderState(): void {
+		this.overlayFrame = undefined;
 		// A forced repaint still owns an existing physical screen. Retain its
 		// coordinates and anchors so refreshing cannot append a duplicate frame.
 		this.cancelResize();
@@ -304,10 +313,17 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return this.deleteKittyImages(ids);
 	}
 
+	protected override hideHardwareCursor(): void {
+		super.hideHardwareCursor();
+		// Overlay entry and preference changes can hide it between rendered frames.
+		if (this.overlayFrame) this.overlayFrame.showCursor = false;
+	}
+
 	private renderOverlayScreen(): void {
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		if (!this.overlayScreenActive) {
+			this.overlayFrame = undefined;
 			this.terminal.write("\x1b[?1049h");
 			this.overlayScreenActive = true;
 			this.overlayScreenWidth = this.previousWidth > 0 ? this.previousWidth : width;
@@ -317,20 +333,44 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const lines = this.compositeOverlays(background, width, height).slice(-height);
 		const cursor = this.extractCursorPosition(lines, height);
 		this.applyLineResets(lines);
+		const previous = this.overlayFrame;
+		const showCursor = cursor !== null && this.getShowHardwareCursor();
+		const cursorChanged = previous?.cursor?.row !== cursor?.row ||
+			previous?.cursor?.col !== cursor?.col || previous?.showCursor !== showCursor;
+		let changedRows: number[] = [];
+		for (let row = 0; row < height; row++) {
+			if (!previous || (previous.lines[row] ?? "") !== (lines[row] ?? "")) changedRows.push(row);
+		}
+		if (changedRows.length === 0 && !cursorChanged) return;
+		// Image placements may span multiple rows. Preserve the existing full-frame
+		// repaint for changed image screens until those placements can be diffed.
+		if (changedRows.length > 0 && (lines.some(isImageLine) || previous?.lines.some(isImageLine))) {
+			changedRows = Array.from({ length: height }, (_, row) => row);
+		}
 		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 		output.append("\x1b[?2026h");
-		for (let row = 0; row < height; row++) {
+		for (const row of changedRows) {
 			output.append(`\x1b[${row + 1};1H\x1b[2K${lines[row] ?? ""}`);
 		}
+		// Row writes move the physical cursor even when its logical target is stable.
+		// Hidden cursors still need positioning for IME candidate windows.
 		if (cursor) output.append(`\x1b[${cursor.row + 1};${cursor.col + 1}H`);
-		output.append(cursor && this.getShowHardwareCursor() ? "\x1b[?25h" : "\x1b[?25l");
+		if (!previous || previous.showCursor !== showCursor) {
+			output.append(showCursor ? "\x1b[?25h" : "\x1b[?25l");
+		}
 		output.append("\x1b[?2026l");
 		output.flush();
+		this.overlayFrame = { width, height, lines, cursor, showCursor };
 	}
 
 	private updateOverlayMainGeometry(): void {
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		// Invalidate on every geometry transition, including resize roundtrips
+		// coalesced before the next rendered frame.
+		if (this.overlayFrame && (this.overlayFrame.width !== width || this.overlayFrame.height !== height)) {
+			this.overlayFrame = undefined;
+		}
 		// The inactive main buffer still resizes. Track its cursor-based origin
 		// independently of the cursor used by the transient overlay screen.
 		const oldCursor = Math.max(0, this.hardwareCursorRow - this.previousViewportTop);
@@ -361,6 +401,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.updateOverlayMainGeometry();
 			this.terminal.write("\x1b[?1049l");
 			this.overlayScreenActive = false;
+			this.overlayFrame = undefined;
 		}
 		const overlayMainReflowed = this.overlayMainReflowed;
 		this.overlayMainReflowed = false;
@@ -407,8 +448,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const evictedVisibleBlock = !!currentBlocks && oldScrollbackLayout?.anchors.some(
 			({ row, blockId }) => row >= prevViewportTop && blockId !== undefined &&
 				!currentBlocks.has(blockId) && nextScrollbackLayout?.containsBlock?.(blockId));
-		const replacedTranscript = !!nextScrollbackLayout && !!oldScrollbackLayout?.anchors.length &&
-			(evictedVisibleBlock || !oldScrollbackLayout.anchors.some(({ id }) => currentAnchorIds.has(id)));
+		// Prelude anchors keep short conversations stable, but a shared welcome must
+		// not disguise replacement of every transcript block (for example /new).
+		const oldTranscriptAnchors = oldScrollbackLayout?.blocks
+			? oldScrollbackLayout.anchors.filter(({ blockId }) => blockId !== undefined)
+			: oldScrollbackLayout?.anchors;
+		const replacedTranscript = !!nextScrollbackLayout && !!oldTranscriptAnchors?.length &&
+			(evictedVisibleBlock || !oldTranscriptAnchors.some(({ id }) => currentAnchorIds.has(id)));
 		let anchored = false;
 		if (!overlayMainReflowed && !replacedTranscript && nextScrollbackLayout && oldScrollbackLayout && this.viewportLayouts[0]?.component === this.children[0] && prevViewportTop > 0 &&
 			this.previousLines.every((line) => isImageLine(line) || visibleWidth(line) <= width)) {

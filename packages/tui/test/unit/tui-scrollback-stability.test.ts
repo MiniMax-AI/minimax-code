@@ -5,6 +5,7 @@ import {
   type Component,
 } from "../../src/tui/engine/public.js";
 import { TuiChatLayout } from "../../src/tui/shell/chat-layout.js";
+import { TuiWelcome } from "../../src/tui/shell/welcome/component.js";
 import { TuiTaskPanel } from "../../src/tui/shell/task-panel.js";
 import { createTranscriptCell } from "../../src/tui/transcript/model.js";
 import { TranscriptStore } from "../../src/tui/transcript/store.js";
@@ -17,6 +18,12 @@ class RecordingTerminal extends VirtualTerminal {
   override write(data: string): void {
     this.writes.push(data);
     super.write(data);
+  }
+  override hideCursor(): void {
+    this.write("\x1b[?25l");
+  }
+  override showCursor(): void {
+    this.write("\x1b[?25h");
   }
   takeWrites(): string {
     const result = this.writes.join("");
@@ -57,15 +64,17 @@ function fixture(
   const activity = new Lines(["Running"]);
   const tui = new TuiMainScreen(terminal);
   const empty = new Lines();
+  const welcome = new Lines(["WELCOME"]);
+  const composer = new Lines([`composer${CURSOR_MARKER}`]);
   const layout = new TuiChatLayout(terminal, {
     surface: () => "conversation",
-    welcome: new Lines(["WELCOME"]),
+    welcome,
     transcript: view,
     interaction: empty,
     activity,
     tasks,
     followUp: empty,
-    composer: new Lines([`composer${CURSOR_MARKER}`]),
+    composer,
     status: new Lines(["status"]),
   });
   tui.addChild(layout);
@@ -74,7 +83,18 @@ function fixture(
     await terminal.flush();
     return terminal.takeWrites();
   };
-  return { terminal, store, view, tasks, activity, tui, layout, render };
+  return {
+    terminal,
+    store,
+    view,
+    tasks,
+    activity,
+    tui,
+    layout,
+    welcome,
+    composer,
+    render,
+  };
 }
 
 function step(index: number, title = "Bash", turnId = "long-turn") {
@@ -757,6 +777,296 @@ describe("isolated overlay width reflow", () => {
       } finally {
         tui.stop();
       }
+    },
+  );
+});
+
+describe("isolated overlay differential output", () => {
+  function panelFixture() {
+    const terminal = new RecordingTerminal(100, 30);
+    const f = fixture(terminal);
+    const panel = new Lines(
+      Array.from(
+        { length: 30 },
+        (_, row) => `PANEL_ROW_${row} ${"x".repeat(80)}`,
+      ),
+    );
+    const show = () =>
+      f.tui.showOverlay(panel, {
+        width: "100%",
+        maxHeight: "100%",
+        row: 0,
+        col: 0,
+      });
+    return { ...f, panel, show };
+  }
+
+  it("emits no bytes when background activity changes behind an unchanged panel", async () => {
+    const f = panelFixture();
+    await f.render();
+    const handle = f.show();
+    await f.render();
+    const before = f.terminal.getViewport();
+    for (let i = 0; i < 20; i++) {
+      f.activity.lines = [`Running ${i}`];
+      expect(await f.render()).toBe("");
+    }
+    expect(f.terminal.getViewport()).toEqual(before);
+    handle.hide();
+    await f.render();
+    expect(f.terminal.getViewport().join("\n")).toContain("Running 19");
+  });
+
+  it("writes only a changed row and erases the old longer text", async () => {
+    const f = panelFixture();
+    f.show();
+    await f.render();
+    f.panel.lines[10] = "short";
+    const output = await f.render();
+    expect(output).toContain("\x1b[11;1H\x1b[2K");
+    expect(output).not.toContain("PANEL_ROW_");
+    expect(Buffer.byteLength(output)).toBeLessThan(200);
+    expect(f.terminal.getViewport().map((line) => line.trimEnd())).toEqual(
+      f.panel.lines,
+    );
+  });
+
+  it("moves the IME cursor and updates visibility without repainting identical text", async () => {
+    const f = panelFixture();
+    f.panel.lines[5] = `ab${CURSOR_MARKER}cd`;
+    f.show();
+    await f.render();
+    f.panel.lines[5] = `abc${CURSOR_MARKER}d`;
+    const moved = await f.render();
+    expect(moved).not.toContain("\x1b[2K");
+    expect(f.terminal.getCursorPosition()).toEqual({ x: 3, y: 5 });
+    f.tui.setShowHardwareCursor(true);
+    const shown = await f.render();
+    expect(shown).toContain("\x1b[?25h");
+    expect(shown).not.toContain("\x1b[2K");
+    expect(await f.render()).toBe("");
+  });
+
+  it("invalidates cached rows for a forced repaint", async () => {
+    const f = panelFixture();
+    f.show();
+    await f.render();
+    f.terminal.write("\x1b[2J");
+    await f.terminal.flush();
+    f.terminal.takeWrites();
+    f.tui.renderNow(true);
+    await f.terminal.flush();
+    expect(f.terminal.getViewport().map((line) => line.trimEnd())).toEqual(
+      f.panel.lines,
+    );
+    expect(f.terminal.takeWrites()).toContain("PANEL_ROW_29");
+  });
+
+  it("repaints all rows after a resize roundtrip with no intermediate overlay frame", async () => {
+    const f = panelFixture();
+    f.tui.start();
+    try {
+      await f.render();
+      f.show();
+      await f.render();
+      f.terminal.resize(100, 8);
+      f.terminal.resize(100, 30);
+      const output = await f.render();
+      expect(f.terminal.getViewport().map((line) => line.trimEnd())).toEqual(
+        f.panel.lines,
+      );
+      expect(output).toContain("PANEL_ROW_29");
+      expect(await f.render()).toBe("");
+    } finally {
+      f.tui.stop();
+    }
+  });
+
+  it("repaints an identical panel after leaving and re-entering the alternate buffer", async () => {
+    const f = panelFixture();
+    await f.render();
+    const handle = f.show();
+    await f.render();
+    handle.hide();
+    await f.render();
+    f.show();
+    const output = await f.render();
+    expect(output).toContain("\x1b[?1049h");
+    expect(f.terminal.getViewport().map((line) => line.trimEnd())).toEqual(
+      f.panel.lines,
+    );
+    expect(await f.render()).toBe("");
+  });
+});
+
+describe("overlay physical cursor visibility", () => {
+  it.each(["nested panel", "coalesced preference toggle"])(
+    "restores the cursor after %s hides it between identical frames",
+    async (action) => {
+      const f = fixture(new RecordingTerminal(100, 24));
+      f.tui.setShowHardwareCursor(true);
+      const show = () =>
+        f.tui.showOverlay(new Lines([`text${CURSOR_MARKER}`]), {
+          row: 0,
+          col: 0,
+          width: "100%",
+          maxHeight: "100%",
+        });
+      show();
+      await f.render();
+      if (action === "nested panel") show();
+      else {
+        f.tui.setShowHardwareCursor(false);
+        f.tui.setShowHardwareCursor(true);
+      }
+      const output = await f.render();
+      expect(output).toContain("\x1b[?25l");
+      expect(output).toContain("\x1b[?25h");
+      expect(output).not.toContain("\x1b[2K");
+      expect(await f.render()).toBe("");
+    },
+  );
+});
+
+describe("background updates while welcome occupies native history", () => {
+  it.each(["header status", "footer completion"])(
+    "does not replay the welcome and warnings after %s changes without input",
+    async (change) => {
+      const f = fixture(new RecordingTerminal(100, 24));
+      f.welcome.lines = Array.from(
+        { length: 24 },
+        (_, row) => `WELCOME_${row}`,
+      );
+      f.composer.lines = ["draft line", `composer${CURSOR_MARKER}`];
+      for (let i = 0; i < 4; i++)
+        f.store.upsert(
+          createTranscriptCell({
+            id: `warning-${i}`,
+            kind: "warning",
+            status: "succeeded",
+            content:
+              "Content review did not return a usable result, so this response stopped. Unreviewed output was withheld. Retry; if this persists, use /feedback to report the review failure.",
+            createdAtMs: i,
+          }),
+        );
+      await f.render();
+      f.terminal.scrollLines(-5);
+      const before = f.terminal.getScrollPosition().viewport;
+      if (change === "header status") f.welcome.lines[1] = "WELCOME_1 Ready";
+      else f.composer.lines = [`composer${CURSOR_MARKER}`];
+      expectNoReplay(await f.render());
+      expect(f.terminal.getScrollPosition().viewport).toBe(before);
+      const history = f.terminal.getScrollBuffer();
+      expect(history.filter((line) => line.includes("WELCOME_0"))).toHaveLength(
+        1,
+      );
+      expect(
+        history.filter((line) => line.includes("Content review")),
+      ).toHaveLength(4);
+      expectNoReplay(await f.render());
+    },
+  );
+});
+
+describe("short conversations with the product welcome", () => {
+  it.each([12, 16, 24, 30])(
+    "preserves one warning through background connection and footer updates at %i rows",
+    async (rows) => {
+      const terminal = new RecordingTerminal(100, rows);
+      const tui = new TuiMainScreen(terminal);
+      const shell = {
+        version: "0.1.0",
+        workspace: "/workspace",
+        runtimeStatus: "ready" as const,
+      };
+      const welcome = new TuiWelcome(shell);
+      const store = new TranscriptStore();
+      const empty = new Lines();
+      const followUp = new Lines([
+        "Queued 1",
+        "Queued 2",
+        "Queued 3",
+        "Queued 4",
+      ]);
+      tui.addChild(
+        new TuiChatLayout(terminal, {
+          surface: () => (store.length ? "conversation" : "welcome"),
+          welcome,
+          transcript: new TranscriptView(store),
+          interaction: empty,
+          activity: empty,
+          followUp,
+          composer: new Lines([`composer${CURSOR_MARKER}`]),
+          status: new Lines(["status"]),
+        }),
+      );
+      const render = async () => {
+        tui.renderNow();
+        await terminal.flush();
+        return terminal.takeWrites();
+      };
+      await render();
+      welcome.setState({ ...shell, runtimeStatus: "offline" });
+      expect(await render()).not.toContain("Transcript refreshed");
+      store.upsert(
+        createTranscriptCell({
+          id: "warning",
+          kind: "warning",
+          content: "REVIEW_STOP_SENTINEL",
+          status: "succeeded",
+          createdAtMs: 1,
+        }),
+      );
+      expect(await render()).not.toContain("Transcript refreshed");
+      terminal.scrollLines(-3);
+      const before = terminal.getScrollPosition().viewport;
+      for (const runtimeStatus of [
+        "ready",
+        "offline",
+        "error",
+        "ready",
+      ] as const) {
+        welcome.setState({ ...shell, runtimeStatus });
+        followUp.lines = [];
+        const output = await render();
+        expect(output).not.toContain("Transcript refreshed");
+        expect(terminal.getScrollPosition().viewport).toBe(before);
+        expect(
+          terminal
+            .getScrollBuffer()
+            .filter((line) => line.includes("REVIEW_STOP_SENTINEL")),
+        ).toHaveLength(1);
+      }
+      store.upsert(
+        createTranscriptCell({
+          id: "next-warning",
+          kind: "warning",
+          content: "NEXT_REVIEW_STOP_SENTINEL",
+          status: "succeeded",
+          createdAtMs: 2,
+        }),
+      );
+      expect(await render()).not.toContain("Transcript refreshed");
+      expect(
+        terminal
+          .getScrollBuffer()
+          .filter((line) => line.includes("NEXT_REVIEW_STOP_SENTINEL")),
+      ).toHaveLength(1);
+      store.remove("warning");
+      store.remove("next-warning");
+      store.upsert(
+        createTranscriptCell({
+          id: "new-session",
+          kind: "assistant",
+          content: "NEW_SESSION_SENTINEL",
+          status: "succeeded",
+          createdAtMs: 3,
+        }),
+      );
+      expect(await render()).toContain("Transcript refreshed");
+      expect(terminal.getScrollBuffer().join("\n")).toContain(
+        "NEW_SESSION_SENTINEL",
+      );
     },
   );
 });
