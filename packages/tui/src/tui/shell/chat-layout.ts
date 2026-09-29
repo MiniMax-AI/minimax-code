@@ -2,6 +2,7 @@ import {
   LAYOUT_NODE,
   ScrollView,
   type Terminal,
+  type ScrollbackLayout,
   type TuiMouseEvent,
   VStack,
 } from '../engine/public.js';
@@ -41,6 +42,12 @@ interface MouseAwareComponent extends Component {
 }
 
 export class TuiChatLayout implements Component {
+  private scrollbackLayout: ScrollbackLayout | undefined;
+
+  getScrollbackLayout(): ScrollbackLayout | undefined {
+    return this.scrollbackLayout;
+  }
+
   private viewportLayoutKey: string | undefined;
 
   getViewportLayoutKey(): string | undefined {
@@ -176,6 +183,7 @@ export class TuiChatLayout implements Component {
   }
 
   render(width: number): string[] {
+    this.scrollbackLayout = undefined;
     const frame = resolveChatFrame(width, this.terminal.rows);
     const surface = this.getSurface();
     const renderPart = (component: Component): readonly string[] =>
@@ -242,7 +250,7 @@ export class TuiChatLayout implements Component {
     // section participates here so new controls cannot silently leave blank rows.
     const viewportLayout = [
       surface, interactionActive, interaction.length, composer.length, followUp.length,
-      goal.length, notice.length, tasks.length, status.length,
+      goal.length, notice.length, status.length,
     ];
     if (surface === 'welcome') {
       if (interactionActive) {
@@ -294,6 +302,16 @@ export class TuiChatLayout implements Component {
     this.viewportLayoutKey = JSON.stringify([...viewportLayout, welcome.length]);
     const prelude = joinWelcomeAndTranscript(welcome, transcript);
     const bodyEntries = [prelude, transcript.length > 0 ? [''] : []];
+    const transcriptLayout = this.parts.transcript.getScrollbackLayout?.();
+    if (this.viewport() === 'document' && transcriptLayout) {
+      const offset = prelude.length - transcript.length;
+      this.scrollbackLayout = {
+        blocks: transcriptLayout.blocks,
+        containsBlock: transcriptLayout.containsBlock,
+        anchors: transcriptLayout.anchors.map((anchor) => ({ ...anchor, row: anchor.row + offset })),
+        bodyEnd: bodyEntries.reduce((sum, lines) => sum + lines.length, 0),
+      };
+    }
     return this.fitDocumentFrame([...bodyEntries, ...footerEntries]);
   }
 

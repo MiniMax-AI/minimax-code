@@ -19,6 +19,17 @@ import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth
 /**
  * Component interface - all components must implement this
  */
+export interface ScrollbackLayout {
+	/** Stable row identities in the last rendered document (never inferred from text). */
+	readonly anchors: readonly { readonly id: string; readonly row: number; readonly blockId?: string }[];
+	/** Source blocks still present, including blocks whose current view has no rows. */
+	readonly blocks?: ReadonlySet<string>;
+	/** Test current source membership to distinguish projection eviction from deletion. */
+	containsBlock?(id: string): boolean;
+	/** First footer row. Rows before this belong to the transcript. */
+	readonly bodyEnd: number;
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -30,9 +41,13 @@ export interface Component {
 	/**
 	 * Opt into preserving native scrolling when only background content shrinks.
 	 * Return a key for the last rendered transient layout (menus, editor, banners).
-	 * A changed or missing key restores exposed document rows instead of padding.
+	 * Anchored document layouts additionally preserve their emitted history across
+	 * transient changes; unclassified layouts require an unchanged historical prefix.
 	 */
 	getViewportLayoutKey?(): string | undefined;
+
+	/** Opt into immutable native history with an editable, anchored viewport. */
+	getScrollbackLayout?(): ScrollbackLayout | undefined;
 
 	/**
 	 * Optional handler for keyboard input when component has focus

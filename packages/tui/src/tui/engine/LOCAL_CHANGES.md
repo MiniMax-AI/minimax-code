@@ -118,6 +118,8 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 
 ## L034: Regular viewport reconstruction after document changes
 
+> L045 supersedes this entry's native-history reconstruction and clearing policy; the original behavior below is retained as historical context.
+
 - Product contract: after running content or a feature panel closes, show the complete current chat viewport with its Composer and status line. Every current-session row must occur once in native history.
 - Minimal difference: when a shorter document would move the viewport origin backwards, or changed visible text is already in scrollback, clear and replay the complete current projection, except for addressable text-only shrink covered by L038. Compare changed historical rows without terminal sequences so style-only updates preserve scrollback. Other updates retain differential rendering and genuine resize retains the existing delayed history replay.
 - Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement. L038 keeps freed visible rows temporarily blank instead of reconstructing unchanged history.
@@ -141,6 +143,8 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 
 ## L038: Preserve native scrolling during visible content shrink
 
+> L045 supersedes this entry's native-history reconstruction and clearing policy; the original behavior below is retained as historical context.
+
 - Product contract: settling visible activity rows must not clear native scrollback or pin a scrolled host viewport to the top. The Composer and status remain at the bottom, and historical content remains unique.
 - Minimal difference: when terminal geometry, the text already in scrollback and the declared transient layout keys are unchanged, absorb visible text-only shrink with blank rows at the current screen boundary before cursor extraction and differential rendering. L041 makes this an explicit background-content policy; unclassified layouts restore exposed rows. Subsequent output consumes the space before advancing native history. Ignore redundant same-size resize notifications without cancelling a genuine pending resize replay.
 - Boundary: padding is confined to the active screen. Historical text replacement/removal, real resize, overlays and image reflow retain the structural reconstruction path. Blank rows can temporarily separate native history from the visible tail; this is preferable to clearing and replaying the terminal's scrollback during ordinary completion. No mouse capture is enabled in regular mode.
@@ -148,6 +152,8 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Removal condition: the selected Pi baseline preserves host scrolling and unique history through visible shrink.
 
 ## L039: Erase regular viewport redraws in place
+
+> L045 supersedes this entry's native-history reconstruction and clearing policy; the original behavior below is retained as historical context.
 
 - Product contract: repainting the visible regular-mode screen must not append the previous transcript, Composer or status line to native history.
 - Minimal difference: viewport-only full redraws home the cursor, erase each screen row with EL 2 using cursor-down movement, and return home before painting. This avoids ED 2, which saves the old screen to scrollback in Apple Terminal. Full structural reconstruction still clears and rebuilds history.
@@ -164,6 +170,8 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Removal condition: the selected Pi baseline coalesces synchronous input renders while preserving immediate key rendering.
 
 ## L041: Restore chat rows after transient layout shrink
+
+> L045 supersedes this entry's native-history reconstruction and clearing policy; the original behavior below is retained as historical context.
 
 - Product contract: shrinking a transient UI region restores the conversation instead of leaving released rows blank above it. Background activity shrink with unchanged transient layout retains L038's native scrolling behavior.
 - Minimal difference: components may expose the layout key of their last rendered frame. MainScreen permits L038 padding only when every root explicitly supplies the same key and no overlay was present. ChatLayout includes every transient section's height and interaction state, while SurfaceHost includes the active feature. Unknown or changed layouts use L034 reconstruction only when scrolled rows must return. Keys are captured with native render state and cleared on reset. This replaces the earlier completion-specific resize callback and full-viewport close exception.
@@ -187,9 +195,22 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 
 ## L044: Keep terminal backpressure off the input loop
 
+> L045 supersedes this entry's native-history reconstruction and clearing policy; the original behavior below is retained as historical context.
+
 - Product contract: slow or paused POSIX terminal output must not block input or cancellation during long Regular-mode history reconstruction.
 - Minimal difference: `terminal.ts` serializes POSIX TTY output through asynchronous, bounded `fs.write` operations, preserves partial UTF-8 writes, and reports output failures through the existing stdout error path. Controls share the same queue. `tui.ts` defers subsequent frames until output drains and then renders the latest model once. Ordinary stop queues any deferred final frame before terminal cleanup; mode switches preserve their previously captured render state. Mandatory final resize replay remains ordered before cleanup.
 - Host integration: the observed terminal forwards the output state; shutdown, suspension and external-editor handoff drain queued output before another process owns the terminal. Input draining starts its idle window after keyboard-disable output is sent, and editor handoff rechecks shutdown after the drain.
 - Evidence: terminal-output regressions cover held/partial writes, input dispatch, control ordering, transient and permanent failures, frame coalescing, final transcript preservation, keyboard input draining and editor handoff/shutdown races; application tests cover shutdown/suspend drains. A local macOS PTY with 10,000 synthetic history rows and a paused consumer no longer blocks the input loop while reconstructing history.
 - Boundary: history reconstruction still transmits the complete ordered document. A stalled connection can delay visible output; it no longer synchronously stalls the JavaScript event loop. Windows and non-TTY output retain their existing writer. Native remote SSH and native Windows acceptance remain separate.
 - Removal condition: the upstream terminal writer provides ordered asynchronous POSIX TTY writes and its render scheduler observes output backpressure.
+
+
+## L045: Preserve regular-mode output snapshots
+
+- Product contract: automatic projection folding and footer completion preserve host scrolling and shell history. Native scrollback records emitted snapshots; it is not a mutable copy of the latest canonical projection.
+- Minimal difference: an optional `ScrollbackLayout` carries stable transcript row identities and a body/footer boundary through the public component API. MainScreen aligns a bounded logical cache at a shared nonblank row with unchanged text. Read groups identify individual member rows rather than the group's changing first cell. Later edits to already-emitted history do not replay it. Reclaimed rows remain between body and footer, preserving tables and the input cursor.
+- Reconstruction: an unmatched projection commits the old visible body, erases addressable rows in place, and starts a labelled snapshot. It never emits ED 3 or uses ED 2. Footer overflow retains its physical offset; newly appended body rows are emitted before replacing the footer. Historical Kitty resources are not freed by a viewport repaint.
+- Geometry: resize uses the hardware cursor's screen row to determine the retained origin. Safe anchors preserve every pending row, including a burst arriving during resize; an unalignable reflow starts a labelled snapshot. Forced redraw and regular/fullscreen state transfers retain physical coordinates and anchors.
+- Evidence: engine and application regressions verify host scroll position, unique emitted rows, Todo completion, grouped reads and long-turn/turn-window eviction, contiguous tables, transient panels, cursor placement, bounded caches, oversized footers, resize bursts, image-resource lifetime, forced refresh, and mode-state restore under xterm and an ED 2 clear-to-scrollback model.
+- Boundary: old native rows retain their historical text and wrapping. Explicit resume-start clearing is unchanged. Native remote-host and cross-platform acceptance remain separate from local emulator verification.
+- Removal condition: the selected upstream engine supports immutable native output with bounded anchored live projections.

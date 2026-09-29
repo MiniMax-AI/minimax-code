@@ -48,12 +48,21 @@ const TOOL_ROW_CONNECTOR_WIDTH = 2;
 const MIN_SHELL_COMMAND_WIDTH = 12;
 
 export class TranscriptView implements Component {
+  private scrollbackAnchors: { id: string; row: number; blockId: string }[] = [];
+  private renderedBlockIds: ReadonlySet<string> = new Set();
+  private sourceContainsBlock: ((id: string) => boolean) | undefined;
+
+  getScrollbackLayout() {
+    return { anchors: this.scrollbackAnchors, blocks: this.renderedBlockIds, containsBlock: this.sourceContainsBlock, bodyEnd: this.frameCache?.lines.length ?? 0 };
+  }
+
   private readonly unitCache = new Map<
     string,
     {
       signature: string;
       width: number;
       lines: readonly string[];
+      anchors: readonly { id: string; row: number; blockId: string }[];
     }
   >();
   private readonly markdownComponents = new Map<string, Markdown>();
@@ -132,6 +141,13 @@ export class TranscriptView implements Component {
       ? undefined
       : (sourceCells as TranscriptProjectionSource);
     const sourceRevision = source?.revision;
+    let sourceIds: Set<string> | undefined;
+    this.sourceContainsBlock = source
+      ? (id) => source.locateCell(id) !== undefined
+      : (id) => {
+          sourceIds ??= new Set((sourceCells as readonly TranscriptCell[]).map((cell) => cell.id));
+          return sourceIds.has(id);
+        };
     if (this.frameCache && this.frameCache.source !== source) this.invalidate();
     const presentationRevision = this.displayModes.revision;
     if (
@@ -169,14 +185,19 @@ export class TranscriptView implements Component {
             ' ',
           ]
         : [];
+    this.scrollbackAnchors = [];
+    this.renderedBlockIds = new Set(projection.cells.map((cell) => cell.id));
     units.forEach((unit, index) => {
       const next = units[index + 1];
       const key = renderUnitKey(unit);
       activeUnitKeys.add(key);
       const rendered = this.renderUnit(unit, next, normalizedWidth, unitSignatures[index] ?? '');
       const connectedToNext = isConnectedRenderUnit(unit, next);
-      lines.push(...rendered);
-      if (next && rendered.length > 0 && !connectedToNext && !isPendingSteerUnit(next)) {
+      for (const anchor of rendered.anchors) {
+        this.scrollbackAnchors.push({ ...anchor, row: lines.length + anchor.row });
+      }
+      lines.push(...rendered.lines);
+      if (next && rendered.lines.length > 0 && !connectedToNext && !isPendingSteerUnit(next)) {
         lines.push(' ');
       }
     });
@@ -232,7 +253,7 @@ export class TranscriptView implements Component {
     next: TranscriptRenderUnit | undefined,
     width: number,
     dataSignature: string,
-  ): readonly string[] {
+  ): { lines: readonly string[]; anchors: readonly { id: string; row: number; blockId: string }[] } {
     const connectedToNext = isConnectedRenderUnit(unit, next);
     const key = renderUnitKey(unit);
     const presentationSignature = this.presentationSignature(unit);
@@ -242,16 +263,17 @@ export class TranscriptView implements Component {
     const cached = this.unitCache.get(key);
     if (cached?.width === width && cached.signature === signature) {
       this.frameUnitCacheHits += 1;
-      return cached.lines;
+      return cached;
     }
     this.frameUnitCacheMisses += 1;
+    const anchors: { id: string; row: number; blockId: string }[] = [];
     const content =
       unit.kind === 'cell' &&
       (unit.cell.kind === 'assistant' || unit.cell.kind === 'assistant-preamble')
         ? this.renderAssistant(unit.cell, width)
         : unit.kind === 'read-group'
           ? renderReadGroup(unit.cells, width, connectedToNext, (cell) =>
-              this.resolveDisplayMode(cell),
+              this.resolveDisplayMode(cell), anchors,
             )
           : renderCell(
               unit.cell,
@@ -261,12 +283,18 @@ export class TranscriptView implements Component {
               this.workspaceDir,
             );
     const rendered = content;
+    if (unit.kind === 'cell' && !unit.cell.id.startsWith('projection-fold:')) {
+      for (let row = 0; row < rendered.length; row += 1) {
+        anchors.push({ id: JSON.stringify([key, row]), row, blockId: unit.cell.id });
+      }
+    }
     this.unitCache.set(key, {
       signature,
       width,
       lines: rendered,
+      anchors,
     });
-    return rendered;
+    return { lines: rendered, anchors };
   }
 
   private renderAssistant(cell: TranscriptCell, width: number): readonly string[] {
@@ -402,6 +430,7 @@ function renderReadGroup(
   width: number,
   connectedToNext: boolean,
   resolveDisplayMode: (cell: TranscriptCell) => ReturnType<typeof resolveTranscriptCellDisplayMode>,
+  anchors: { id: string; row: number; blockId: string }[],
 ): string[] {
   const entries = groupedToolEntries(cells);
   const running = entries.filter(
@@ -443,6 +472,7 @@ function renderReadGroup(
     const displayMode = resolveDisplayMode(cell);
     if (displayMode === 'collapsed') return;
 
+    const start = lines.length;
     const isLast = index === entries.length - 1;
     const tail =
       cell.status === 'pending' || cell.status === 'running'
@@ -483,6 +513,9 @@ function renderReadGroup(
                 cell.status === 'succeeded' ? 'head' : 'tail',
               )),
       );
+    }
+    for (let row = start; row < lines.length; row += 1) {
+      anchors.push({ id: JSON.stringify([`cell:${cell.id}`, row - start]), row, blockId: cell.id });
     }
   });
   return lines;
