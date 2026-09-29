@@ -348,6 +348,37 @@ describe('TuiChatController', () => {
     await expect(sending).resolves.toBe('succeeded');
   });
 
+  it('dismisses only older turn-scoped ephemeral errors when a Runtime turn starts', () => {
+    const transcript = new TranscriptStore();
+    for (const cell of [
+      { id: 'old-terminal-error', turnId: 'old-turn', ephemeral: true },
+      { id: 'current-terminal-error', turnId: 'current-turn', ephemeral: true },
+      { id: 'local-action-error', ephemeral: true },
+      { id: 'historical-error', turnId: 'old-turn' },
+    ]) {
+      transcript.upsert({
+        ...cell,
+        kind: 'error',
+        status: 'failed',
+        content: cell.id,
+        createdAtMs: 1,
+      });
+    }
+    const controller = new ProductionTuiChatController({
+      runtime: {} as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+
+    controller.beginRuntimeTurn('current-turn', 2);
+
+    expect(transcript.snapshot().map((cell) => cell.id)).toEqual([
+      'current-terminal-error',
+      'local-action-error',
+      'historical-error',
+    ]);
+  });
+
   it('keeps the previous duration while projecting a steer for the current turn', () => {
     const transcript = new TranscriptStore();
     transcript.upsert({

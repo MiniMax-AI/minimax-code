@@ -4455,6 +4455,66 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it.each(["/retry", "Continue the task"])(
+    "dismisses a previous terminal failure when %s succeeds and history refreshes",
+    async (submission) => {
+      const terminal = new FakeTerminal();
+      const runtime = createRuntime();
+      let handled = false;
+      vi.mocked(runtime.watchEvents).mockImplementation(async function* (signal) {
+        yield runtimeEvent({
+          type: "session.error",
+          timestamp: Date.now(),
+          source: "runtime",
+          payload: {
+            sessionId: "session-1",
+            turnId: "failed-turn",
+            error: "provider unavailable",
+            errorCode: 50151,
+          },
+        });
+        handled = true;
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+      });
+      const app = createTuiApp({
+        runtime,
+        terminal,
+        version: "0.1.0",
+        workspaceDir: "/workspace",
+      });
+      try {
+        await app.ready;
+        await app.openSession("session-1");
+        app.start();
+        await vi.waitFor(() => expect(handled).toBe(true));
+        expect(app.tui.render(100).join("\n")).toContain("Code: 50151");
+        // The failure must survive reconciliation until another run starts.
+        await app.controller.refreshCurrentSessionHistory();
+        expect(app.tui.render(100).join("\n")).toContain("Run /retry");
+
+        await app.submit(submission);
+        vi.mocked(runtime.getMessages).mockResolvedValue([
+          {
+            id: "recovered-answer",
+            role: "assistant",
+            content: "Hello from the Agent",
+            turnId: "recovered-turn",
+          },
+        ]);
+        await app.controller.refreshCurrentSessionHistory();
+        const rendered = app.tui.render(100).join("\n");
+        expect(rendered).toContain("Hello from the Agent");
+        expect(rendered).not.toContain("Code: 50151");
+        expect(rendered).not.toContain("Run /retry");
+        expect(app.transcript.latestSettledFailure()).toBeUndefined();
+      } finally {
+        await app.stop();
+      }
+    },
+  );
+
   it("uses Runtime retry-continuation when a terminal failure has no local submission snapshot", async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();

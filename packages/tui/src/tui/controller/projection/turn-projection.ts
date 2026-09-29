@@ -63,6 +63,11 @@ export class TuiTurnProjection {
     changed = this.removePreviousTerminalDuration(turnId) || changed;
     // One-time feedback survives history refreshes, so dismiss it when a new run starts.
     for (const cell of this.transcript.snapshot()) {
+      // Runtime terminal errors survive history reconciliation, but belong only
+      // to the failed run. Otherwise a successful retry can reproject them again.
+      if (cell.kind === 'error' && cell.ephemeral && cell.turnId && cell.turnId !== turnId) {
+        changed = this.transcript.remove(cell.id) || changed;
+      }
       if (
         cell.kind === 'shell' &&
         cell.ephemeral &&
