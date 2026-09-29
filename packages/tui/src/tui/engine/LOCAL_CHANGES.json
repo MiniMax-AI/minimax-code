@@ -163,7 +163,7 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "e7458ff5c3123e89883bcc3c10a21694e8949d75bb483ca98a208693fb3162b4",
+      "currentSha256": "0095b75384b9f99cc979e55c5ef40a94c58d79ea9e9394ad978ad61f0c2db3d8",
       "changeIds": [
         "L005",
         "L017",
@@ -175,17 +175,15 @@
         "L039",
         "L041",
         "L044",
-        "L045",
-        "L046",
-        "L047"
+        "L045"
       ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
-      "reason": "Align bounded regular-mode projections with emitted row identities and preserve native history across folding, footer shrink, redraw and resize. Diff isolated overlay frames and align short conversations at welcome rows. Preserve admitted row identity and observe deferred or inactive main-buffer resizes.",
-      "behaviorImpact": "Native scrollback retains emitted snapshots and pre-launch shell history. Automatic folding and footer updates preserve scrolling; unmatched projections archive the visible body and start a labelled snapshot. Resize retains pending rows, forced redraw retains physical state, and historical image resources survive viewport repaints. Transient overlays use a separate terminal buffer and return to main on close or stop, preserving main geometry across resize. Unchanged overlays emit no frame bytes; text changes repaint only affected rows. Background welcome and footer updates retain short-conversation history without replaying the banner or warnings. First submission does not replay existing output. Every physical resize is retained through backpressure and fullscreen ownership; short frames that still fit avoid a snapshot marker."
+      "reason": "Align bounded regular-mode projections with emitted row identities and preserve native history across folding, footer shrink, redraw and resize.",
+      "behaviorImpact": "Native scrollback retains emitted snapshots and pre-launch shell history. Automatic folding and footer updates preserve scrolling; unmatched projections archive the visible body and start a labelled snapshot. Resize retains pending rows, forced redraw retains physical state, and historical image resources survive viewport repaints. Transient overlays use a separate terminal buffer and return to main on close or stop, preserving main geometry across resize."
     },
     {
       "path": "tui.ts",
-      "currentSha256": "660739ee74e61ba1e4deadb6f026ba116d080c03e6d350ff0230f7a838d4809a",
+      "currentSha256": "03ef4b80122f127860dddf6c4ff51643f4b7ec47c8ce18d0e1855d27ce77ec57",
       "changeIds": [
         "L005",
         "L015",
@@ -196,12 +194,10 @@
         "L040",
         "L041",
         "L044",
-        "L045",
-        "L046",
-        "L047"
+        "L045"
       ],
-      "reason": "Expose bounded row anchors, source-block retention and the transcript/footer boundary for regular-mode output snapshots. Distinguish prelude anchors and expose physical cursor hiding to cached renderers. Publish layout padding and physical resize observations for inactive main state.",
-      "behaviorImpact": "Regular renderers can distinguish projection eviction from retained-block presentation changes. Prelude rows cannot mask transcript replacement; nested overlays and coalesced cursor preference changes restore cursor visibility. Owners observe physical geometry before render scheduling, and row anchors can ignore only layout-owned leading padding."
+      "reason": "Expose bounded row anchors, source-block retention and the transcript/footer boundary for regular-mode output snapshots.",
+      "behaviorImpact": "Regular renderers can distinguish projection eviction from retained-block presentation changes."
     },
     {
       "path": "utils.ts",

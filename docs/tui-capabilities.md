@@ -12,27 +12,17 @@ The live application view remains the source for the current transcript.
 Long turns keep a bounded live projection. Dropping its oldest cells does not replay
 the welcome banner or erase earlier output. When activity or Todo panels shrink,
 released rows temporarily remain blank between the transcript and footer; new
-output consumes that space. Tables and code blocks remain contiguous. Short
-conversations also anchor the welcome rows, so background status changes and
-footer completion do not replay the banner or duplicate existing warnings.
-Accepting a submitted message retains its emitted row identity, so the first
-prompt does not introduce a refresh boundary or duplicate a long message.
+output consumes that space. Tables and code blocks remain contiguous.
 
 When an unrelated transcript replaces the current projection, a labelled refresh
 boundary separates the retained output from the new document. Resize and forced
-redraw preserve pending output and native history, including consecutive resizes
-while output is held or fullscreen mode is active. Mode changes preserve the main
-state after its final pending frame is flushed. Explicit resume-start history
+redraw preserve pending output and native history. Explicit resume-start history
 clearing remains a separate startup policy. Native image history is retained until
 the terminal itself evicts it.
 
 Transient overlays use an alternate buffer so opening, nesting or resizing panels
 cannot place menu rows in native history. Closing the last overlay restores the
 main buffer and reconciles background output; terminal shutdown also restores it.
-Unchanged overlay frames produce no terminal output. Text changes update only
-affected rows, while cursor changes preserve IME positioning and visibility.
-Forced redraws and geometry changes invalidate that frame cache; image changes
-retain full-frame repaint.
 
 ## Output speed
 
@@ -234,19 +224,25 @@ area, including short Rewind previews and scope pickers. Closing a panel restore
 the current conversation. Closing, replacing or shrinking a transient region
 restores the exposed chat rows. This includes inline selectors such as `/theme`,
 completion menus, multi-line drafts, image previews, queued messages, task and
-Goal summaries, welcome notices and status rows. Short documents refresh in place.
-When background content shrinks, released rows remain between the document body
-and footer, preserving the Composer position and native scroll history. Subsequent
-output reuses that space. Welcome rows participate in this alignment even before
-any transcript row has reached history, so asynchronous connection changes and
-footer completion do not start a new transcript snapshot.
+Goal summaries, welcome notices and status rows. Short documents refresh in place;
+history is reconstructed only when the smaller layout needs to bring scrolled
+rows back into view. This rule follows the rendered layout, including asynchronous
+updates, rather than requiring each close handler to request a special redraw.
+When background running content shrinks entirely within the current screen and
+the transient layout stays unchanged, the renderer keeps native scrollback and
+the Composer position stable.
+Freed rows temporarily remain blank at the top of the active screen and subsequent
+output reuses them. This avoids resetting the host's scroll position when a turn
+finishes. Redundant resize notifications with unchanged dimensions do not rebuild
+history. Viewport-only redraws erase rows in place so terminals that save a cleared
+screen to scrollback, including Apple Terminal, do not retain the old Composer,
+status line or duplicate transcript rows.
 
-Redundant resize notifications with unchanged dimensions do not rebuild history.
-Viewport redraws erase addressable rows in place. The immutable-history and
-labelled-snapshot rules in [Regular-mode terminal history](#regular-mode-terminal-history)
-also apply when a document is replaced or cannot be aligned after reflow. Already
-emitted native rows keep their historical text and wrapping; redraws retain shell
-history rather than clearing it.
+When a change removes or replaces text already in scrollback, the renderer still
+reconstructs the current session to avoid stale or duplicate history. Real resizes
+and image layout changes also retain the existing reconstruction behavior. A
+reconstruction clears earlier shell scrollback and can reset the host's scroll
+position; ordinary updates keep native scrolling and selection behavior.
 
 Rewind and Fork history-loading hints disappear as soon as their lists are ready.
 Returning from a cancelled operation must not leave a stale loading message in the

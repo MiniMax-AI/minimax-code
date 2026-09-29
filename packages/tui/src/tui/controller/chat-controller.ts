@@ -372,7 +372,6 @@ export class TuiChatController {
     if (!isRetryContinuation) {
       this.transcript.upsert({
         id: `user:${turnId}`,
-        ...(optimisticCell ? { scrollbackId: optimisticCell.scrollbackId ?? optimisticCell.id } : {}),
         kind: 'user',
         status: 'pending',
         content: formatTuiSubmission(displayContent, attachments),
