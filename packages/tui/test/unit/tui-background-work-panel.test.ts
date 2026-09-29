@@ -375,6 +375,7 @@ describe('Tasks in the regular terminal viewport', () => {
         expect(terminal.getViewport()).toEqual(
           afterShrink,
         );
+        const historyAfterShrink = terminal.getScrollBuffer();
         const presenter = new TuiOverlayRegularFeaturePresenter(terminal, tui, () =>
           tui.requestRender(),
         );
@@ -387,10 +388,8 @@ describe('Tasks in the regular terminal viewport', () => {
         handle.close();
         tui.renderNow();
         await terminal.flush();
-        expect(terminal.getViewport()).toEqual(
-          [...chatLines, 'COMPOSER', 'STATUS'].slice(-terminal.rows),
-        );
-        expect(terminal.getScrollBuffer()).toEqual([...chatLines, 'COMPOSER', 'STATUS']);
+        expect(terminal.getViewport()).toEqual(afterShrink);
+        expect(terminal.getScrollBuffer()).toEqual(historyAfterShrink);
         handle = presenter.show(panel, panel);
         tui.setFocus(handle.focus);
         tui.renderNow();
@@ -428,8 +427,13 @@ describe('Tasks in the regular terminal viewport', () => {
           await terminal.flush();
           expect(terminal.getScrollBuffer().join('\n')).not.toContain('task-row-');
         });
-        for (const line of chatLines)
-          expect(terminal.getScrollBuffer().filter((row) => row === line)).toHaveLength(1);
+        const history = terminal.getScrollBuffer();
+        const boundary = history.findLastIndex((line) => line.startsWith('── Transcript refreshed'));
+        const currentSnapshot = history.slice(boundary + 1).filter(Boolean);
+        expect(currentSnapshot).toEqual([...chatLines, 'COMPOSER', 'STATUS']);
+        if (shrinkRows === 15) {
+          expect(history.slice(0, boundary)).toEqual(historyAfterShrink.slice(0, boundary));
+        }
         expect(terminal.getViewport().join('\n')).toContain('STATUS');
       } finally {
         tui.stop();

@@ -136,8 +136,17 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private hadOverlays = false;
 	private scrollbackLayout: ScrollbackLayout | undefined;
 	private segmentHeader = false;
+	private overlayScreenActive = false;
+	private overlayScreenWidth = 0;
+	private overlayMainReflowed = false;
+	private renderingMainOnStop = false;
 
 	protected override onTerminalResize(): void {
+		if (this.overlayScreenActive) {
+			this.updateOverlayMainGeometry();
+			this.requestRender();
+			return;
+		}
 		// Some hosts repeat resize notifications while scrolling or reconnecting.
 		// An unchanged geometry must not clear and replay native scrollback.
 		if (this.previousWidth === this.terminal.columns && this.previousHeight === this.terminal.rows) return;
@@ -159,14 +168,17 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	override stop(options: TuiStopOptions = {}): void {
-		// Flush pending output before handing the main screen back to its host.
-		this.cancelResize();
-		// Ordinary stop must retain the latest transcript even when output is held.
-		// Mode switches already captured the current render state before stop.
-		if (!this.stopped && (this.resizePending || (!options.preserveScreen && this.hasPendingRender()))) {
-			this.doRender();
+		this.renderingMainOnStop = true;
+		try {
+			// Flush the main document and exit 1049 before returning terminal ownership.
+			this.cancelResize();
+			if (!this.stopped && (this.overlayScreenActive || this.resizePending || (!options.preserveScreen && this.hasPendingRender()))) {
+				this.doRender();
+			}
+			super.stop(options);
+		} finally {
+			this.renderingMainOnStop = false;
 		}
-		super.stop(options);
 	}
 
 	captureRenderState(): TuiMainScreenRenderState {
@@ -292,8 +304,66 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return this.deleteKittyImages(ids);
 	}
 
+	private renderOverlayScreen(): void {
+		const width = this.terminal.columns;
+		const height = this.terminal.rows;
+		if (!this.overlayScreenActive) {
+			this.terminal.write("\x1b[?1049h");
+			this.overlayScreenActive = true;
+			this.overlayScreenWidth = this.previousWidth > 0 ? this.previousWidth : width;
+		}
+		this.updateOverlayMainGeometry();
+		const background = this.render(width).slice(-height).map((line) => isImageLine(line) ? "" : line.replace(OSC133_ZONE_PREFIX, ""));
+		const lines = this.compositeOverlays(background, width, height).slice(-height);
+		const cursor = this.extractCursorPosition(lines, height);
+		this.applyLineResets(lines);
+		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
+		output.append("\x1b[?2026h");
+		for (let row = 0; row < height; row++) {
+			output.append(`\x1b[${row + 1};1H\x1b[2K${lines[row] ?? ""}`);
+		}
+		if (cursor) output.append(`\x1b[${cursor.row + 1};${cursor.col + 1}H`);
+		output.append(cursor && this.getShowHardwareCursor() ? "\x1b[?25h" : "\x1b[?25l");
+		output.append("\x1b[?2026l");
+		output.flush();
+	}
+
+	private updateOverlayMainGeometry(): void {
+		const width = this.terminal.columns;
+		const height = this.terminal.rows;
+		// The inactive main buffer still resizes. Track its cursor-based origin
+		// independently of the cursor used by the transient overlay screen.
+		const oldCursor = Math.max(0, this.hardwareCursorRow - this.previousViewportTop);
+		if (this.previousHeight > 0 && height !== this.previousHeight) {
+			if (height < this.previousHeight) this.previousViewportTop += Math.max(0, oldCursor - height + 1);
+			else if (oldCursor === this.previousHeight - 1) {
+				this.previousViewportTop = Math.max(0, this.previousViewportTop - (height - this.previousHeight));
+			}
+		}
+		if (this.overlayScreenWidth !== width && this.previousLines.some((line) =>
+			!isImageLine(line) && visibleWidth(line) > Math.min(width, this.overlayScreenWidth))) {
+			this.overlayMainReflowed = true;
+		}
+		this.overlayScreenWidth = width;
+		this.previousHeight = height;
+	}
+
 	protected doRender(): void {
 		if (this.stopped) return;
+		// Transient screens must never enter native history, even when the host
+		// shrinks before delivering its resize notification. Keep them on 1049.
+		if (!this.renderingMainOnStop && this.hasOverlay()) {
+			this.renderOverlayScreen();
+			return;
+		}
+		const returningFromOverlay = this.overlayScreenActive;
+		if (returningFromOverlay) {
+			this.updateOverlayMainGeometry();
+			this.terminal.write("\x1b[?1049l");
+			this.overlayScreenActive = false;
+		}
+		const overlayMainReflowed = this.overlayMainReflowed;
+		this.overlayMainReflowed = false;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
@@ -340,7 +410,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const replacedTranscript = !!nextScrollbackLayout && !!oldScrollbackLayout?.anchors.length &&
 			(evictedVisibleBlock || !oldScrollbackLayout.anchors.some(({ id }) => currentAnchorIds.has(id)));
 		let anchored = false;
-		if (!replacedTranscript && nextScrollbackLayout && oldScrollbackLayout && this.viewportLayouts[0]?.component === this.children[0] && prevViewportTop > 0 &&
+		if (!overlayMainReflowed && !replacedTranscript && nextScrollbackLayout && oldScrollbackLayout && this.viewportLayouts[0]?.component === this.children[0] && prevViewportTop > 0 &&
 			this.previousLines.every((line) => isImageLine(line) || visibleWidth(line) <= width)) {
 			const currentRows = new Map(nextScrollbackLayout.anchors.map(({ id, row }) => [id, row]));
 			let match: { before: number; after: number } | undefined;
@@ -411,7 +481,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// screen instead. The composer stays at the bottom, historical rows stay unique,
 		// and later output consumes this temporary space before scrolling again.
 		if (
-			(stableLayout || anchored || !nextScrollbackLayout) && ((!widthChanged && !heightChanged && !this.resizePending) || anchored) &&
+			(stableLayout || anchored || !nextScrollbackLayout) && ((!widthChanged && !heightChanged && !this.resizePending) || anchored || (returningFromOverlay && !overlayMainReflowed)) &&
 			prevViewportTop > 0 && newLines.length > prevViewportTop &&
 			newLines.length < prevViewportTop + height &&
 			!this.hasImageAtOrBelow(this.previousLines, prevViewportTop) && !this.hasImageAtOrBelow(newLines, prevViewportTop)
@@ -432,11 +502,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 		}
 
-		// Composite overlays into the rendered lines (before differential compare)
-		if (this.hasOverlayEntries) {
-			newLines = this.compositeOverlays(newLines, width, height);
-		}
-
 		// Extract cursor position before applying line resets (marker must be found first)
 		let cursorPos = this.extractCursorPosition(newLines, height);
 
@@ -453,7 +518,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				viewportOnly = false;
 			}
 			const start = viewportOnly ? prevViewportTop : 0;
-			if (clear && !viewportOnly && this.previousLines.length > 0 && (prevViewportTop > 0 || replacedTranscript) && !this.segmentHeader) {
+			if (clear && !viewportOnly && this.previousLines.length > 0 && (prevViewportTop > 0 || replacedTranscript || overlayMainReflowed) && !this.segmentHeader) {
 				this.segmentHeader = true;
 				newLines.unshift(segmentLabel.slice(0, width));
 				if (cursorPos) cursorPos = { ...cursorPos, row: cursorPos.row + 1 };
@@ -471,8 +536,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				// Before starting a new snapshot, commit the old visible transcript.
 				// Otherwise a projection with no overlap would silently discard rows
 				// that had been displayed but had not reached native history yet.
-				const archiveRows = !viewportOnly && (prevViewportTop > 0 || replacedTranscript)
-					? widthChanged ? height : Math.min(height, Math.max(0, previousBodyEnd - prevViewportTop)) : 0;
+				const archiveRows = !viewportOnly && (prevViewportTop > 0 || replacedTranscript || overlayMainReflowed)
+					? widthChanged || overlayMainReflowed ? height : Math.min(height, Math.max(0, previousBodyEnd - prevViewportTop)) : 0;
 				if (archiveRows > 0) {
 					for (let row = archiveRows; row < height; row++) {
 						output.append(`\x1b[${row + 1};1H\x1b[2K`);
@@ -537,10 +602,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Preserve the emitted prefix only when it can still be aligned. A genuine
 		// reflow without a safe anchor starts a labelled snapshot rather than dropping
 		// pending output by painting only the final screenful.
-		const resizeOriginPreserved = anchored || this.previousLines.slice(0, prevViewportTop).every((line, row) =>
-			visibleWidth(line) <= width && stripTerminalSequences(line) === stripTerminalSequences(newLines[row] ?? ""));
+		const resizeOriginPreserved = !overlayMainReflowed && (anchored || this.previousLines.slice(0, prevViewportTop).every((line, row) =>
+			visibleWidth(line) <= width && stripTerminalSequences(line) === stripTerminalSequences(newLines[row] ?? "")));
 		if (replacedTranscript) {
 			fullRender(true);
+			return;
+		}
+		if (returningFromOverlay) {
+			fullRender(true, resizeOriginPreserved);
 			return;
 		}
 		if (this.resizePending) {

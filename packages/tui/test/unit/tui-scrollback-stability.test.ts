@@ -560,3 +560,203 @@ describe("projection reads between physical frames", () => {
     expect(history.some((line) => line.includes("STEP_269"))).toBe(true);
   });
 });
+
+describe("isolated regular overlays", () => {
+  it("does not treat a forced first overlay frame as a width reflow", async () => {
+    const f = fixture(new RecordingTerminal(100, 24));
+    for (let i = 0; i < 60; i++) f.store.upsert(step(i));
+    await f.render();
+    const before = f.terminal.getScrollBuffer();
+    const overlay = f.tui.showOverlay(new Lines(["TRANSIENT_PANEL"]));
+    f.tui.renderNow(true);
+    await f.terminal.flush();
+    f.terminal.takeWrites();
+    overlay.hide();
+    expectNoReplay(await f.render());
+    expect(f.terminal.getScrollBuffer()).toEqual(before);
+  });
+
+  it("returns the main buffer on stop with a pending render and does not re-enter after stop", async () => {
+    const f = fixture(new RecordingTerminal(100, 24));
+    for (let i = 0; i < 30; i++) f.store.upsert(step(i));
+    await f.render();
+    f.tui.showOverlay(new Lines(["TRANSIENT_PANEL"]), {
+      width: "100%",
+      maxHeight: "100%",
+      row: 0,
+    });
+    await f.render();
+    f.store.upsert(step(30));
+    f.tui.requestRender();
+    f.tui.stop();
+    await f.terminal.flush();
+    const output = f.terminal.takeWrites();
+    expect(output).toContain("\x1b[?1049l");
+    expect(output).not.toContain("\x1b[?1049h");
+    expect(f.terminal.getScrollBuffer().join("\n")).not.toContain(
+      "TRANSIENT_PANEL",
+    );
+    expect(
+      f.terminal.getScrollBuffer().filter((line) => line.includes("STEP_030")),
+    ).toHaveLength(1);
+    f.tui.renderNow();
+    expect(f.terminal.takeWrites()).toBe("");
+  });
+
+  it("tracks shrink and grow events even when no overlay frame is rendered between them", async () => {
+    const f = fixture(new RecordingTerminal(100, 24));
+    for (let i = 0; i < 60; i++) f.store.upsert(step(i));
+    f.tui.start();
+    try {
+      await f.render();
+      const overlay = f.tui.showOverlay(new Lines(["TRANSIENT_PANEL"]), {
+        width: "100%",
+        maxHeight: "100%",
+        row: 0,
+      });
+      await f.render();
+      f.terminal.resize(100, 8);
+      f.terminal.resize(100, 24);
+      overlay.hide();
+      await f.render();
+      const history = f.terminal.getScrollBuffer();
+      expect(history.join("\n")).not.toContain("TRANSIENT_PANEL");
+      expect(history.join("\n")).not.toContain("Transcript refreshed");
+      for (let i = 0; i < 60; i++) {
+        expect(
+          history.filter((line) =>
+            line.includes(`STEP_${String(i).padStart(3, "0")}`),
+          ),
+        ).toHaveLength(1);
+      }
+      expect(f.terminal.getViewport().at(-1)?.trim()).toBe("status");
+    } finally {
+      f.tui.stop();
+    }
+  });
+});
+
+describe("isolated overlay width reflow", () => {
+  it.each([12, 40])(
+    "preserves wrapping main text through overlay width roundtrip with %i body rows",
+    async (count) => {
+      const terminal = new RecordingTerminal(100, 24);
+      const tui = new TuiMainScreen(terminal);
+      const body = Array.from(
+        { length: count },
+        (_, i) => `WIDE_TOKEN_${String(i).padStart(3, "0")} ${"x".repeat(70)}`,
+      );
+      const component = new Lines([
+        ...body,
+        `composer${CURSOR_MARKER}`,
+        "status",
+      ]);
+      tui.addChild(component);
+      tui.start();
+      try {
+        tui.renderNow();
+        await terminal.flush();
+        terminal.takeWrites();
+        const overlay = tui.showOverlay(new Lines(["TRANSIENT_OVERLAY"]), {
+          width: "100%",
+          maxHeight: "100%",
+          row: 0,
+          col: 0,
+        });
+        tui.renderNow();
+        await terminal.flush();
+        terminal.resize(30, 24);
+        tui.renderNow();
+        await terminal.flush();
+        terminal.resize(100, 24);
+        tui.renderNow();
+        await terminal.flush();
+        overlay.hide();
+        tui.renderNow();
+        await terminal.flush();
+        const history = terminal.getScrollBuffer();
+        expect(history.join("\n")).not.toContain("TRANSIENT_OVERLAY");
+        for (let i = 0; i < count; i++)
+          expect(
+            history.some((line) =>
+              line.includes(`WIDE_TOKEN_${String(i).padStart(3, "0")}`),
+            ),
+            `old row ${i}`,
+          ).toBe(true);
+        const boundary = history.findLastIndex((line) =>
+          line.startsWith("── Transcript refreshed"),
+        );
+        expect(boundary).toBeGreaterThanOrEqual(0);
+        expect(history.slice(boundary + 1).filter(Boolean)).toEqual([
+          ...body,
+          "composer",
+          "status",
+        ]);
+      } finally {
+        tui.stop();
+      }
+    },
+  );
+
+  it.each([12, 40])(
+    "archives old wrapping text before changed document resumes after overlay width roundtrip (%i)",
+    async (count) => {
+      const terminal = new RecordingTerminal(100, 24);
+      const tui = new TuiMainScreen(terminal);
+      const body = Array.from(
+        { length: count },
+        (_, i) => `WIDE_TOKEN_${String(i).padStart(3, "0")} ${"x".repeat(70)}`,
+      );
+      const component = new Lines([
+        ...body,
+        `composer${CURSOR_MARKER}`,
+        "status",
+      ]);
+      tui.addChild(component);
+      tui.start();
+      try {
+        tui.renderNow();
+        await terminal.flush();
+        terminal.takeWrites();
+        const overlay = tui.showOverlay(new Lines(["TRANSIENT_OVERLAY"]), {
+          width: "100%",
+          maxHeight: "100%",
+          row: 0,
+          col: 0,
+        });
+        tui.renderNow();
+        await terminal.flush();
+        terminal.resize(30, 24);
+        tui.renderNow();
+        await terminal.flush();
+        terminal.resize(100, 24);
+        tui.renderNow();
+        await terminal.flush();
+        component.lines = ["NEW_BODY", `composer${CURSOR_MARKER}`, "status"];
+        overlay.hide();
+        tui.renderNow();
+        await terminal.flush();
+        const history = terminal.getScrollBuffer();
+        expect(history.join("\n")).not.toContain("TRANSIENT_OVERLAY");
+        for (let i = 0; i < count; i++)
+          expect(
+            history.some((line) =>
+              line.includes(`WIDE_TOKEN_${String(i).padStart(3, "0")}`),
+            ),
+            `old row ${i}`,
+          ).toBe(true);
+        const boundary = history.findLastIndex((line) =>
+          line.startsWith("── Transcript refreshed"),
+        );
+        expect(boundary).toBeGreaterThanOrEqual(0);
+        expect(history.slice(boundary + 1).filter(Boolean)).toEqual([
+          "NEW_BODY",
+          "composer",
+          "status",
+        ]);
+      } finally {
+        tui.stop();
+      }
+    },
+  );
+});

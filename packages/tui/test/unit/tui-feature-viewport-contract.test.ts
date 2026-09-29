@@ -220,8 +220,22 @@ describe.each(Object.entries(factories))('%s regular viewport lifecycle', (_name
         await vi.waitFor(async () => {
           await terminal.flush();
           const expected = [...chat(), ...Array(Math.max(0, rows - chat().length)).fill('')];
-          expect(terminal.getViewport()).toEqual(expected.slice(-rows));
-          expect(terminal.getScrollBuffer()).toEqual(expected);
+          const visible = terminal.getViewport().filter(Boolean);
+          expect(visible).toEqual(chat().slice(-visible.length));
+          const history = terminal.getScrollBuffer().filter(Boolean);
+          const boundary = history.findIndex((line) => line.startsWith('── Transcript refreshed'));
+          if (chatCount === 80 && rows === 8) {
+            // Deletion reached native history: retain the old snapshot, then label
+            // the current document. Transient panels must occur in neither segment.
+            expect(history.slice(0, boundary)).toEqual([
+              ...Array.from({ length: 80 }, (_, index) => `BACKGROUND-${index}`),
+              'COMPOSER', 'STATUS',
+            ]);
+            expect(history.slice(boundary + 1)).toEqual(chat());
+          } else {
+            expect(boundary).toBe(-1);
+            expect(history).toEqual(expected.filter(Boolean));
+          }
         });
       } finally {
         host.dispose();

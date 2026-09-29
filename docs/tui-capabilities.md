@@ -20,6 +20,10 @@ redraw preserve pending output and native history. Explicit resume-start history
 clearing remains a separate startup policy. Native image history is retained until
 the terminal itself evicts it.
 
+Transient overlays use an alternate buffer so opening, nesting or resizing panels
+cannot place menu rows in native history. Closing the last overlay restores the
+main buffer and reconciles background output; terminal shutdown also restores it.
+
 ## Output speed
 
 The activity line and completed-turn summary show provider output tokens divided by

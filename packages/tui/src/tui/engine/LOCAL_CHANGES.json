@@ -163,7 +163,7 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "ba062254468194ab92576dbdf342a96180e68c999a3763b206b49cef191ad523",
+      "currentSha256": "0095b75384b9f99cc979e55c5ef40a94c58d79ea9e9394ad978ad61f0c2db3d8",
       "changeIds": [
         "L005",
         "L017",
@@ -179,7 +179,7 @@
       ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
       "reason": "Align bounded regular-mode projections with emitted row identities and preserve native history across folding, footer shrink, redraw and resize.",
-      "behaviorImpact": "Native scrollback retains emitted snapshots and pre-launch shell history. Automatic folding and footer updates preserve scrolling; unmatched projections archive the visible body and start a labelled snapshot. Resize retains pending rows, forced redraw retains physical state, and historical image resources survive viewport repaints."
+      "behaviorImpact": "Native scrollback retains emitted snapshots and pre-launch shell history. Automatic folding and footer updates preserve scrolling; unmatched projections archive the visible body and start a labelled snapshot. Resize retains pending rows, forced redraw retains physical state, and historical image resources survive viewport repaints. Transient overlays use a separate terminal buffer and return to main on close or stop, preserving main geometry across resize."
     },
     {
       "path": "tui.ts",
