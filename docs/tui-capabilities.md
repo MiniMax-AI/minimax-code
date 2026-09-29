@@ -2,28 +2,6 @@
 
 The current capability target is **TUI 0.4.12**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
-## Regular-mode terminal history
-
-Regular mode preserves native terminal history, including shell output from before
-MCode started. Rows already emitted into scrollback are snapshots of what was shown
-at that time; folding, completed tools and later edits do not rewrite those rows.
-The live application view remains the source for the current transcript.
-
-Long turns keep a bounded live projection. Dropping its oldest cells does not replay
-the welcome banner or erase earlier output. When activity or Todo panels shrink,
-released rows temporarily remain blank between the transcript and footer; new
-output consumes that space. Tables and code blocks remain contiguous.
-
-When an unrelated transcript replaces the current projection, a labelled refresh
-boundary separates the retained output from the new document. Resize and forced
-redraw preserve pending output and native history. Explicit resume-start history
-clearing remains a separate startup policy. Native image history is retained until
-the terminal itself evicts it.
-
-Transient overlays use an alternate buffer so opening, nesting or resizing panels
-cannot place menu rows in native history. Closing the last overlay restores the
-main buffer and reconciles background output; terminal shutdown also restores it.
-
 ## Output speed
 
 The activity line and completed-turn summary show provider output tokens divided by

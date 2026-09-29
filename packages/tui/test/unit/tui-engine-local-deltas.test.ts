@@ -146,7 +146,7 @@ describe('MCode Pi Engine local deltas', () => {
       tui.renderNow();
       await terminal.flush();
       const after = terminal.getScrollBuffer();
-      expect(after.filter((line) => line.trim())).toEqual(original.filter((line) => line.trim()));
+      expect(after).toEqual(original);
       expect(terminal.getCursorPosition().y).toBe(22);
       const tableStart = original.findIndex((line) => line.includes('┌'));
       const tableEnd = original.findIndex((line) => line.includes('└'));
@@ -155,7 +155,6 @@ describe('MCode Pi Engine local deltas', () => {
       expect(after.slice(tableStart, tableEnd + 1)).toEqual(
         original.slice(tableStart, tableEnd + 1),
       );
-      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
       expect(after.filter((line) => line.trim())).toEqual(original.filter((line) => line.trim()));
       tui.renderNow();
       await terminal.flush();
@@ -353,9 +352,8 @@ describe('MCode Pi Engine local deltas', () => {
         await terminal.flush();
 
         const logicalDocument = layout.render(terminal.columns).map((line) => line.replace(CURSOR_MARKER, ''));
-        const visible = terminal.getViewport().filter((line) => line.trim());
-        expect(visible).toEqual(logicalDocument.filter((line) => line.trim()).slice(-visible.length));
-        expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
+        expect(terminal.getViewport()).toEqual(logicalDocument.slice(-terminal.rows));
+        expect(terminal.getScrollBuffer()).toEqual(expected);
         for (const line of history) {
           expect(terminal.getScrollBuffer().filter((row) => row.trim() === line)).toHaveLength(1);
         }
@@ -384,7 +382,7 @@ describe('MCode Pi Engine local deltas', () => {
       tui.renderNow();
       await terminal.flush();
 
-      expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
+      expect(terminal.getScrollBuffer()).toEqual(expected);
       expect(terminal.takeWrites()).not.toContain('\x1b[3J');
     });
 
@@ -421,14 +419,14 @@ describe('MCode Pi Engine local deltas', () => {
         tui.renderNow();
         await terminal.flush();
 
-        expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
+        expect(terminal.getScrollBuffer()).toEqual(expected);
         expect(terminal.getViewport().join('\n')).not.toContain('Overlay contents');
         if (historyRows < terminal.rows) expect(terminal.takeWrites()).not.toContain('\x1b[3J');
         // Hidden overlays remain registered; removing one must keep the restored frame.
         handle.hide();
         tui.renderNow();
         await terminal.flush();
-        expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
+        expect(terminal.getScrollBuffer()).toEqual(expected);
       }
     });
 
@@ -453,9 +451,8 @@ describe('MCode Pi Engine local deltas', () => {
       tui.renderNow();
       await terminal.flush();
 
-      expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
-      const visible = terminal.getViewport().filter((line) => line.trim());
-      expect(visible).toEqual(component.lines.filter((line) => line.trim()).slice(-visible.length));
+      expect(terminal.getScrollBuffer()).toEqual(expected);
+      expect(terminal.getViewport()).toEqual(component.lines.slice(-terminal.rows));
     });
 
     it('tracks layout changes even when they produce an identical frame', async () => {
@@ -482,9 +479,8 @@ describe('MCode Pi Engine local deltas', () => {
       tui.renderNow();
       await terminal.flush();
 
-      expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
-      const visible = terminal.getViewport().filter((line) => line.trim());
-      expect(visible).toEqual(component.lines.filter((line) => line.trim()).slice(-visible.length));
+      expect(terminal.getScrollBuffer()).toEqual(expected);
+      expect(terminal.getViewport()).toEqual(component.lines.slice(-terminal.rows));
     });
 
     it('preserves a scrolled host viewport when only chat activity settles', async () => {
@@ -538,7 +534,7 @@ describe('MCode Pi Engine local deltas', () => {
     }
   });
 
-  it('separates corrected history from the retained output snapshot after visible shrink', async () => {
+  it('still reconstructs corrected history after a viewport shrink was absorbed', async () => {
     const terminal = new RecordingVirtualTerminal(60, 12);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -555,12 +551,11 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
     expect(terminal.takeWrites()).not.toContain('\x1b[3J');
 
-    const retained = terminal.getScrollBuffer();
     component.lines[0] = 'Corrected answer';
     tui.renderNow();
     await terminal.flush();
-    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer()).toEqual([...retained, '── Transcript refreshed · earlier output retained ──', 'Corrected answer', ...answer.slice(1), 'composer', 'status']);
+    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).toEqual(['Corrected answer', ...answer.slice(1), 'composer', 'status']);
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 10 });
   });
 
@@ -572,7 +567,7 @@ describe('MCode Pi Engine local deltas', () => {
     }
   });
 
-  it('retains the old snapshot behind an explicit boundary when unanchored history changes', async () => {
+  it('rebuilds when a transient collapse changes rows already in scrollback', async () => {
     const terminal = new RecordingVirtualTerminal(40, 5);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -596,11 +591,11 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
 
     const writes = terminal.takeWrites();
-    expect(writes).not.toContain('\x1b[2J');
-    expect(writes).not.toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer().slice(0, 2)).toEqual(['header', 'activity-1']);
-    expect(terminal.getViewport()).toEqual(['── Transcript refreshed · earlier output'.slice(0, 40), 'header', 'status', 'composer', '']);
-    expect(terminal.getScrollBuffer().filter((line) => line === 'header')).toHaveLength(2);
+    expect(writes).toContain('\x1b[2J\x1b[H');
+    expect(writes).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).not.toContain('activity-1');
+    expect(terminal.getViewport()).toEqual(['header', 'status', 'composer', '', '']);
+    expect(terminal.getScrollBuffer().filter((line) => line === 'header')).toHaveLength(1);
     expect(tui.fullRedraws).toBe(2);
   });
 
@@ -678,7 +673,7 @@ describe('MCode Pi Engine local deltas', () => {
         );
         expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 42 });
         expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-        expect(terminal.getScrollBuffer().filter((line) => line.trim())).toEqual(expected.filter((line) => line.trim()));
+        expect(terminal.getScrollBuffer()).toEqual(expected);
         if (added <= activityRows) component.lines.splice(-2, 0, `New answer ${added}`);
       }
       expect(terminal.getScrollBuffer()).not.toContain('');
@@ -706,7 +701,7 @@ describe('MCode Pi Engine local deltas', () => {
     expect(terminal.getScrollBuffer()).toEqual([...answer, ...more, 'composer']);
   });
 
-  it.each([0, 30])('separates changed unanchored history and retains all %i newly appended rows', async (growth) => {
+  it.each([0, 30])('rebuilds changed scrollback text even when the document grows by %i rows', async (growth) => {
     const terminal = new RecordingVirtualTerminal(67, 24);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -717,7 +712,6 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
     terminal.takeWrites();
 
-    const retained = terminal.getScrollBuffer();
     component.lines = [
       'Recovered context',
       ...Array.from({ length: growth }, (_, index) => `Recovered row ${index}`),
@@ -729,8 +723,8 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
 
     const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
-    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
-    expect(terminal.getScrollBuffer()).toEqual([...retained, '── Transcript refreshed · earlier output retained ──', ...expected]);
+    expect(terminal.takeWrites()).toContain('\x1b[3J');
+    expect(terminal.getScrollBuffer()).toEqual(expected);
     expect(terminal.getViewport()).toEqual(expected.slice(-terminal.rows));
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 22 });
 
@@ -740,7 +734,6 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
     expect(terminal.takeWrites()).not.toContain('\x1b[3J');
     expect(terminal.getScrollBuffer()).toEqual([
-      ...retained, '── Transcript refreshed · earlier output retained ──',
       ...expected.slice(0, -2), 'Next response', 'composer', 'status',
     ]);
   });
@@ -758,17 +751,14 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
 
-    expect(terminal.getScrollBuffer().filter(Boolean)).toEqual([
-      ...Array.from({ length: 100 }, (_, i) => `Old line ${i}`),
-      '── Transcript refreshed · earlier output retained ──', 'answer', 'composer',
-    ]);
-    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 2 });
+    expect(terminal.getScrollBuffer().filter(Boolean)).toEqual(['answer', 'composer']);
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 1 });
   });
 
   it.each([
     ['xterm', RecordingVirtualTerminal],
     ['clear-to-scrollback host', ClearToScrollbackTerminal],
-  ] as const)('repaints the resized tail without replaying native scrollback on %s', async (_name, Terminal) => {
+  ] as const)('previews the resized tail and restores ordered scrollback on %s', async (_name, Terminal) => {
     const terminal = new Terminal(67, 44);
     const tui = new TuiMainScreen(terminal);
     const component = new MutableLines();
@@ -798,13 +788,13 @@ describe('MCode Pi Engine local deltas', () => {
         'composer',
       ]);
 
-      // A redundant notification must not restart or clear the settled viewport.
+      // A redundant notification must not discard the pending genuine resize replay.
       terminal.resize(60, 30);
 
       await new Promise<void>((resolve) => setTimeout(resolve, 200));
       tui.renderNow();
       await terminal.flush();
-      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
       expect(terminal.getScrollBuffer()).toEqual([
         ...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`),
         'composer',

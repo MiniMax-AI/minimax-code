@@ -142,7 +142,6 @@ export {
   type OverlayOptions,
   type OverlayUnfocusOptions,
   type SizeValue,
-  type ScrollbackLayout,
   type TUI,
   type TuiInputListener,
   type TuiInputListenerResult,

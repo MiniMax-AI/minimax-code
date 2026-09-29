@@ -3172,10 +3172,8 @@ describe("createTuiApp", () => {
           await terminal.flush();
           expect(app.editor.getText()).toBe(draft);
           expect(app.editor.render(78).length).toBeLessThan(menuRows);
-          // Released footer rows remain blank instead of replaying native history.
-          const visible = terminal.getViewport().map((line) => line.trimEnd()).filter((line) => line.trim());
-          const document = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).filter((line) => line.trim());
-          expect(visible).toEqual(document.slice(-visible.length));
+          const expected = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).slice(-24);
+          expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(expected);
         });
         const history = terminal.getScrollBuffer();
         for (let index = 0; index < 12; index++) {
@@ -6399,9 +6397,8 @@ describe("createTuiApp", () => {
       app.tui.renderNow();
       await terminal.flush();
       expect(app.interaction.isActive()).toBe(false);
-      const visible = terminal.getViewport().map((line) => line.trimEnd()).filter((line) => line.trim());
-      const document = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).filter((line) => line.trim());
-      expect(visible).toEqual(document.slice(-visible.length));
+      const expected = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).slice(-24);
+      expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(expected);
       for (let index = 0; index < 12; index++) {
         expect(terminal.getScrollBuffer().filter((line) => line.trimEnd().endsWith(`› Message ${index}`))).toHaveLength(1);
       }
@@ -6434,9 +6431,8 @@ describe("createTuiApp", () => {
       await terminal.flush();
       if (kind === "multiline draft") expect(app.editor.getText()).toBe("");
       else expect(app.editor.getAttachmentPreview()).toBeUndefined();
-      const visible = terminal.getViewport().map((line) => line.trimEnd()).filter((line) => line.trim());
-      const document = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).filter((line) => line.trim());
-      expect(visible).toEqual(document.slice(-visible.length));
+      const expected = app.tui.render(80).map((line) => stripAnsi(line).trimEnd()).slice(-24);
+      expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(expected);
     } finally {
       await app.stop();
     }
@@ -6487,7 +6483,7 @@ describe("createTuiApp", () => {
       expect(viewport).toContain("Message 1");
       expect(viewport).toContain("Message");
       expect(app.tui.render(80).findIndex((line) => line.trim().length > 0)).toBe(firstContentRowBefore);
-      expect(terminal.getViewport().findIndex((line) => line.trim().length > 0)).toBeLessThanOrEqual(firstContentRowBefore);
+      expect(terminal.getViewport().findIndex((line) => line.trim().length > 0)).toBe(firstContentRowBefore);
     } finally {
       await app.stop();
     }
@@ -12068,7 +12064,7 @@ describe("createTuiApp", () => {
       terminal.write = (data) => {
         write(data);
         screen.feed(data);
-        if (data.includes("\x1b[?2026l")) frames.push(screen.viewportText());
+        if (data.includes("\x1b[?2026l")) frames.push(screen.text());
       };
       const runtime = createRuntime();
       const busEvents: TuiRuntimeEvent[] = [];
@@ -12181,7 +12177,7 @@ describe("createTuiApp", () => {
         );
         expect(app.editor.getText()).toBe("");
         app.tui.renderNow();
-        expect(screen.viewportText()).toContain("Interrupted after");
+        expect(screen.text()).toContain("Interrupted after");
 
         terminal.input?.("\x1b");
         terminal.input?.("\x1b");
@@ -12189,12 +12185,12 @@ describe("createTuiApp", () => {
           expect(app.editor.getText()).toBe("Original query"),
         );
         app.tui.renderNow();
-        expect(screen.viewportText()).not.toContain("Interrupted after");
+        expect(screen.text()).not.toContain("Interrupted after");
 
         if (action === "cancel") {
           terminal.input?.("\x1b");
           app.tui.renderNow();
-          expect(screen.viewportText()).toContain("Interrupted after");
+          expect(screen.text()).toContain("Interrupted after");
           expect(runtime.editSessionMessage).not.toHaveBeenCalled();
           return;
         }
@@ -12213,9 +12209,9 @@ describe("createTuiApp", () => {
             action === "failed-submit-cancel" ||
             action === "new-operation-cancel"
           ) {
-            expect(screen.viewportText()).toContain("Interrupted after");
+            expect(screen.text()).toContain("Interrupted after");
           } else {
-            expect(screen.viewportText()).not.toContain("Interrupted after");
+            expect(screen.text()).not.toContain("Interrupted after");
           }
           return;
         }
@@ -12230,16 +12226,16 @@ describe("createTuiApp", () => {
         if (action === "early-rewind") {
           // Inspect the actual screen while the edit RPC is still pending.
           expect(finishEdit).toBeDefined();
-          expect(screen.viewportText()).not.toContain("Interrupted after");
+          expect(screen.text()).not.toContain("Interrupted after");
           finishEdit?.();
           await vi.waitFor(() => expect(app.editor.getText()).toBe(""));
           app.tui.renderNow();
         }
         expect(runtime.editSessionMessage).toHaveBeenCalledOnce();
-        expect(screen.viewportText()).toContain("Edited query");
-        expect(screen.viewportText()).not.toContain("Interrupted after");
+        expect(screen.text()).toContain("Edited query");
+        expect(screen.text()).not.toContain("Interrupted after");
         if (action === "fast-completion")
-          expect(screen.viewportText()).toContain("Completed in 2s");
+          expect(screen.text()).toContain("Completed in 2s");
         expect(
           frames.filter((frame) => frame.includes("Interrupted after")),
         ).toEqual([]);
@@ -14375,7 +14371,7 @@ describe("createTuiApp", () => {
   });
 
   it.each([1, 100])(
-    "settles an auto-drained follow-up of %i lines with current viewport and retained history",
+    "settles an auto-drained follow-up of %i lines with unique terminal history",
     async (lineCount) => {
       const queuedText = Array.from(
         { length: lineCount },
@@ -14469,9 +14465,7 @@ describe("createTuiApp", () => {
           .map((line) => line.trimEnd())
           .join("\n")
           .trimEnd();
-        const visible = screen.viewportText().split("\n").filter((line) => line.trim());
-        const current = expected.split("\n").filter((line) => line.trim());
-        expect(visible).toEqual(current.slice(-visible.length));
+        expect(screen.text()).toBe(expected);
       };
       app.start();
       try {
