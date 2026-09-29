@@ -181,11 +181,7 @@ export function createV1SessionCompatibility(
       capability: diffCapability,
       rewind: diffRewind,
       inputNavigation: {
-        listSessionDiffs: async (sessionId) =>
-          (await diffStore.listBySession(sessionId)).map((record) => ({
-            ...(record.assistantMessageId ? { assistantMessageId: record.assistantMessageId } : {}),
-            filePaths: record.fileChanges.map((change) => change.file),
-          })),
+        listSessionDiffs: (sessionId) => diffStore.listFilePathsBySession(sessionId),
       },
       pruneExpired: async (cutoffMs, batchSize) => {
         await diffStore.pruneExpired(cutoffMs, batchSize);

@@ -441,7 +441,8 @@ export interface HistoryRewindInput {
   readonly rewindTurnDiff?: boolean;
   /**
    * Display can commit a user row before its Turn reaches Canonical History.
-   * This fallback is accepted only when that whole Turn is absent canonically.
+   * Accepted when the Turn is absent canonically, or its only records are hidden
+   * background cadence reminders in the active generation before user persistence.
    */
   readonly displayOnlyBoundary?: {
     readonly turnId: string;

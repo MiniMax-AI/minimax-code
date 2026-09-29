@@ -204,10 +204,10 @@ export function createAutomaticContextCompactionHook(
         ...compactionTokenUsageMetadata(providerTokenUsage.snapshot()),
       });
       // Automatic compaction is optional maintenance and always fails open:
-      // the failure is recorded above while the parent Turn continues with the
-      // pre-compaction history, and the Provider stays the final admission
-      // authority. This includes POST_ADMISSION_FAILED — a local estimate must
-      // never wedge a session that the Provider would accept.
+      // the parent Turn continues with pre-compaction history to the payload
+      // transform. Final byte admission runs there after Files API conversion;
+      // a pre-transform footprint must not reject a compact file reference.
+      // This also applies to POST_ADMISSION_FAILED.
       return {
         type: 'skip',
         reason: lifecycle.failed

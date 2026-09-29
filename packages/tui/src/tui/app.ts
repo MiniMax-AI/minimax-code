@@ -823,7 +823,12 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     activePermission: () => Boolean(interactionFlow.permission()),
     activeQuestionnaire: () => Boolean(interactionFlow.questionnaire()),
     agentInteraction: () => interactionFlow.agentReadback(),
-    ...(agentStatusEnabled ? { agentCounts: () => delegationFlow.agentCounts() } : {}),
+    ...(agentStatusEnabled
+      ? {
+          agentCounts: () => delegationFlow.agentCounts(),
+          backgroundTaskCount: () => delegationFlow.backgroundTaskCount(),
+        }
+      : {}),
     attachmentCount: () =>
       composerDraft.snapshot().attachments.length +
       sessionMutationFlow.retainedEditAttachments().length,

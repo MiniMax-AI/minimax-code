@@ -9,6 +9,8 @@ import { wrapInternalContext } from '@mavis/goal';
 import type { PromptReadSnapshot } from '@mavis/agent-runtime';
 import { describe, expect, it, vi } from 'vitest';
 
+import { buildLocalRequestPayloadTransform } from '../agent-host/assembly/local-turn-payload-transform.js';
+import { createAutomaticContextCompactionHook } from '../agent-host/compaction/context-compaction.js';
 import { readCompactionCompatibility } from './compat.js';
 import {
   AutomaticContextCompactor,
@@ -969,6 +971,9 @@ describe('AutomaticContextCompactor request boundaries', () => {
       thinkingLevel: 'off' as const,
     };
 
+    expect(
+      automaticCompactor().probeBeforeLlm({ ...input, maxSerializedInputBytes: serializedBytes }),
+    ).toMatchObject({ shouldStart: false });
     await expect(
       automaticCompactor().compactBeforeLlm({
         ...input,
@@ -1204,3 +1209,77 @@ async function expectBuiltinCheckpointPrompt(
   ).resolves.toMatchObject({ status: 'completed', method: 'llm_checkpoint' });
   expect(vi.mocked(streamFn).mock.calls[0]?.[1]?.systemPrompt).toBe(CHECKPOINT_SYSTEM_PROMPT);
 }
+
+describe('AutomaticContextCompactor byte failure protection', () => {
+  it.each(['initial', 'iteration'] as const)(
+    'defers byte admission to the final payload after failed compaction in %s',
+    async (phase) => {
+      const messages: AgentMessage[] = [
+        {
+          role: 'user',
+          timestamp: 1,
+          content: [
+            { type: 'text', text: 'Inspect /assets/recording.mov' },
+            { type: 'image', mimeType: 'video/quicktime', data: 'x'.repeat(8_192) },
+          ],
+        },
+      ];
+      const original = structuredClone(messages);
+      const model: Model<'anthropic-messages'> = {
+        id: 'byok-video',
+        name: 'BYOK video',
+        api: 'anthropic-messages',
+        provider: 'custom_provider:legacy',
+        baseUrl: 'https://example.invalid',
+        reasoning: false,
+        input: ['text', 'image'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+      };
+      const input = {
+        sessionId: 'session-byte-failure',
+        turnId: 'turn-byte-failure',
+        phase,
+        messages,
+        model,
+        thinkingLevel: 'off' as const,
+      };
+      const compactor = automaticCompactor();
+      expect(compactor.probeBeforeLlm(input).shouldStart).toBe(false);
+      expect(compactor.probeBeforeLlm({ ...input, maxSerializedInputBytes: 4_096 })).toMatchObject({
+        shouldStart: true,
+      });
+      const lifecycle = {
+        completeCommittedHistory: vi.fn(async () => undefined),
+        failCommittedHistory: vi.fn(async () => undefined),
+      };
+      const hook = createAutomaticContextCompactionHook(
+        { automatic: compactor, lifecycle },
+        { sessionId: input.sessionId, turnId: input.turnId, turnSequence: 1 },
+        'lease-byte-failure',
+        { maxSerializedInputBytes: 4_096 },
+      );
+      // No stream is configured: checkpoint generation fails before any upstream call.
+      await expect(hook({ ...input, canonicalMessages: messages })).resolves.toEqual({
+        type: 'skip',
+        reason: 'context_compaction_failed',
+      });
+      const transform = buildLocalRequestPayloadTransform(
+        {
+          agentConfig: { model: {} },
+          llm: { model, maxRequestBodyBytes: 4_096 },
+          sessionId: input.sessionId,
+          signal: new AbortController().signal,
+        },
+        {},
+      );
+      await expect(transform({ messages: structuredClone(messages) }, model)).rejects.toMatchObject(
+        { code: 'REQUEST_BODY_TOO_LARGE' },
+      );
+      expect(lifecycle.failCommittedHistory).toHaveBeenCalledOnce();
+      expect(lifecycle.completeCommittedHistory).not.toHaveBeenCalled();
+      expect(messages).toEqual(original);
+    },
+  );
+});

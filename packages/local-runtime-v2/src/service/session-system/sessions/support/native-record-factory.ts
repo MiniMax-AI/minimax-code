@@ -1,3 +1,5 @@
+import { getConfig } from '@mavis/config';
+
 import { mkdir } from 'node:fs/promises';
 
 import type { SessionRepository } from '../repo/contract.js';
@@ -103,7 +105,14 @@ export function createNativeSessionRecordService(
     runLocation: options.runLocation ?? {
       resolve: async (value, workspaceDir) => {
         const input = readLocalRunLocationInput(value);
-        return input ? applyLocalRunLocation(input, workspaceDir, nowMs) : undefined;
+        return input
+          ? applyLocalRunLocation(
+              input,
+              workspaceDir,
+              nowMs,
+              getConfig().worktreeRefreshBeforeCreate,
+            )
+          : undefined;
       },
     },
     titlePolicy: options.titlePolicy,

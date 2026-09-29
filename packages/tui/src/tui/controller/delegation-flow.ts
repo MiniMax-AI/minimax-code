@@ -74,6 +74,11 @@ export class TuiDelegationFlow {
   private settledBackgroundDeliveryTaskIds = new Set<string>();
   private backgroundDeliveryTaskIdsByTurn = new Map<string, Set<string>>();
   private settledRootTurnKeys = new Set<string>();
+  /**
+   * Request sequence a successful Task list must exceed before a settled root Turn may report
+   * zero background Tasks: a command yielded just before settle may postdate the last list.
+   */
+  private backgroundTaskListBarrier: number | undefined;
 
   constructor(private readonly options: TuiDelegationFlowOptions) {}
 
@@ -112,6 +117,22 @@ export class TuiDelegationFlow {
       active: unsettledMemberIds.size,
       total: snapshot.summary.total,
     };
+  }
+
+  /**
+   * Machine-status count of the root's active background Tasks (bash/workflow/custom): queued,
+   * running or stopping, as listed by the Runtime. Bash still owned by its foreground tool call is
+   * not counted, and sub-Agent Tasks stay in `agentCounts()`.
+   */
+  backgroundTaskCount(): number {
+    const current = this.options.currentSession();
+    if (!current || this.rootSessionId !== current.sessionId) return 0;
+    const active = this.backgroundTasks.filter(
+      (task) =>
+        !task.foreground &&
+        (task.status === 'queued' || task.status === 'running' || task.status === 'stopping'),
+    ).length;
+    return this.backgroundTaskListBarrier === undefined ? active : Math.max(active, 1);
   }
 
   snapshot(): TuiAgentTeamSnapshot {
@@ -363,6 +384,9 @@ export class TuiDelegationFlow {
       ) {
         this.rootRunActive = false;
         this.backgroundTaskTerminalPollPending = true;
+        if (this.options.runtime.listBackgroundTasks) {
+          this.backgroundTaskListBarrier = this.backgroundTaskRequestSequence;
+        }
       }
       this.scheduleBackgroundTaskPoll(current.sessionId);
     }
@@ -653,9 +677,17 @@ export class TuiDelegationFlow {
       this.stopped ||
       requestSequence !== this.backgroundTaskRequestSequence ||
       this.rootSessionId !== rootSessionId ||
-      this.options.currentSession()?.sessionId !== ownerSessionId ||
-      sameBackgroundTasks(this.backgroundTasks, tasks)
+      this.options.currentSession()?.sessionId !== ownerSessionId
     ) {
+      return false;
+    }
+    const barrierCleared =
+      this.backgroundTaskListBarrier !== undefined &&
+      requestSequence > this.backgroundTaskListBarrier;
+    if (barrierCleared) this.backgroundTaskListBarrier = undefined;
+    if (sameBackgroundTasks(this.backgroundTasks, tasks)) {
+      // Unchanged Tasks only need the status line to drop its settle barrier.
+      if (barrierCleared) this.options.onChanged();
       return false;
     }
     this.backgroundTasks = tasks.map((task) => ({ ...task }));
@@ -671,7 +703,8 @@ export class TuiDelegationFlow {
       this.options.currentSession()?.sessionId !== ownerSessionId ||
       (!this.rootRunActive &&
         !hasPendingBackgroundTaskAttention(this.backgroundTasks) &&
-        !this.backgroundTaskTerminalPollPending) ||
+        !this.backgroundTaskTerminalPollPending &&
+        this.backgroundTaskListBarrier === undefined) ||
       !this.options.runtime.listBackgroundTasks
     ) {
       return;
@@ -756,6 +789,7 @@ export class TuiDelegationFlow {
     this.settledBackgroundDeliveryTaskIds.clear();
     this.backgroundDeliveryTaskIdsByTurn.clear();
     this.settledRootTurnKeys.clear();
+    this.backgroundTaskListBarrier = undefined;
     this.clearWatcherRetry();
     this.clearBackgroundTaskPoll();
     this.options.onAgentTeamChanged?.(this.projection.snapshot());
@@ -821,7 +855,8 @@ function sameBackgroundTasks(
         task.command === candidate.command &&
         task.updatedAtMs === candidate.updatedAtMs &&
         task.deliveredAtMs === candidate.deliveredAtMs &&
-        task.lastError === candidate.lastError
+        task.lastError === candidate.lastError &&
+        task.foreground === candidate.foreground
       );
     })
   );

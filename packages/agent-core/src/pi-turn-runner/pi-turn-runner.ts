@@ -185,7 +185,7 @@ export class PiTurnRunner {
       // history.flushTail() at message / tool boundaries, and run onStepEnd. A single queue keeps
       // RuntimeEvent ordering identical to the old monolithic runner. The later `events.drain()`
       // waits for this queue.
-      const events = subscribeEvents(agent, turn, history);
+      const events = subscribeEvents(agent, turn, history, this.now);
 
       // Step 6: Wire cancellation. If the caller's signal is already aborted, do not start
       // the Agent: unsubscribe, drain queued events, and emit the terminal `aborted` frame. Otherwise,

@@ -480,6 +480,7 @@
     "packages/config/src/index.ts",
     "packages/config/src/local-model-provider-write.ts",
     "packages/config/src/local-runtime-auth-context.ts",
+    "packages/config/src/minimax-model-catalog.ts",
     "packages/config/src/model-availability.ts",
     "packages/config/src/opencode-config.ts",
     "packages/config/src/permission-config.ts",

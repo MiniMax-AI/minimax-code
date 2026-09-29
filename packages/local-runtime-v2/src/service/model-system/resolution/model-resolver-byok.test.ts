@@ -44,7 +44,7 @@ describe('MiniMax API BYOK planning', () => {
     ).toThrow('apiKey is not configured');
   });
 
-  it('uses fallback, catalog, and user-owned context overrides without managed limits', () => {
+  it('uses configured catalog limits and valid user-owned context overrides', () => {
     const fallback = planMinimaxApiResolution({
       byok: { minimax_api: { apiKey: ' key ' } },
       providerConfig: undefined,
@@ -84,13 +84,18 @@ describe('MiniMax API BYOK planning', () => {
         },
         providerConfig: {
           minimax: {
-            models: { 'MiniMax-M3': { limit: { context: 30, output: 40 } } },
+            models: {
+              'MiniMax-M3': {
+                limit: { context: 30, output: 40 },
+                contextWindowOptions: [30, 1_000_000],
+              },
+            },
           },
         },
         modelId: 'MiniMax-M3',
         catalog: { contextWindow: 10, maxTokens: 20, fromCatalog: true },
       }),
-    ).toMatchObject({ contextWindow: 1_000_000, maxTokens: 128_000 });
+    ).toMatchObject({ contextWindow: 1_000_000, maxTokens: 40 });
   });
 });
 

@@ -4,6 +4,8 @@
 // (they are part of the Config surface); the back edge here is type-only, so
 // there is no runtime import cycle.
 
+import { MINIMAX_MODELS } from './minimax-model-catalog.js';
+
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,6 +14,7 @@ import { restrictConfigFileSync, writePrivateConfigFileSync } from './private-co
 
 import type {
   CustomProvidersConfig,
+  ModelConfig,
   MinimaxApiConfig,
   ModelsConfig,
   ProviderConfig,
@@ -37,31 +40,58 @@ export function parseModelContextLimits(raw: unknown): Record<string, number> | 
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
-/** Apply user-owned managed Context selections without mutating the official snapshot. */
+/** Apply user-owned Context selections without mutating the official snapshot. */
+function applyModelContextLimits<
+  T extends { limit?: { context?: number }; contextWindowOptions?: number[] },
+>(models: Record<string, T>, contextLimits: Record<string, number> | undefined): Record<string, T> {
+  if (!contextLimits) return models;
+  return Object.fromEntries(
+    Object.entries(models).map(([modelId, model]) => {
+      const context = contextLimits[modelId];
+      return [
+        modelId,
+        context !== undefined && model.contextWindowOptions?.includes(context)
+          ? { ...model, limit: { ...model.limit, context } }
+          : model,
+      ];
+    }),
+  );
+}
+
+/** The API route shares the managed catalog, with its own user Context selections. */
+export function minimaxApiModels<
+  T extends {
+    enabled?: boolean;
+    limit?: { context?: number };
+    contextWindowOptions?: ModelConfig['contextWindowOptions'];
+  },
+>(config: {
+  provider?: Record<string, { models?: Record<string, T>; catalogModels?: Record<string, T> }>;
+  minimax_api?: { modelContextLimits?: Record<string, number> };
+}): Record<string, T | ModelConfig> {
+  const provider = config.provider?.minimax;
+  const models = provider?.catalogModels ?? provider?.models ?? MINIMAX_MODELS;
+  return applyModelContextLimits(
+    Object.fromEntries(Object.entries(models).filter(([, model]) => model.enabled !== false)),
+    config.minimax_api?.modelContextLimits,
+  );
+}
+
+/** Keep the shared catalog before applying managed-only user Context selections. */
 export function applyManagedMinimaxContextLimits(
   provider: ModelsConfig,
   contextLimits: Record<string, number> | undefined,
 ): ModelsConfig {
   const minimax = provider.minimax;
-  if (!minimax?.models || !contextLimits) return provider;
-
-  let changed = false;
-  const models = Object.fromEntries(
-    Object.entries(minimax.models).map(([modelId, model]) => {
-      const context = contextLimits[modelId];
-      if (
-        context === undefined ||
-        !model.contextWindowOptions?.includes(context) ||
-        model.limit?.context === context
-      ) {
-        return [modelId, model];
-      }
-      changed = true;
-      return [modelId, { ...model, limit: { ...model.limit, context } }];
-    }),
-  );
-
-  return changed ? { ...provider, minimax: { ...minimax, models } } : provider;
+  if (!minimax?.models) return provider;
+  return {
+    ...provider,
+    minimax: {
+      ...minimax,
+      catalogModels: minimax.models,
+      models: applyModelContextLimits(minimax.models, contextLimits),
+    },
+  };
 }
 
 export function parseCustomProvidersConfig(raw: unknown): CustomProvidersConfig | undefined {

@@ -86,6 +86,7 @@ describe('Vela build-mode status-line contract', () => {
       agentRequestId: 'permission-789',
       agentActiveCount: 2,
       agentTotalCount: 3,
+      agentBackgroundCount: 1,
     };
     const rendered = render(config.statusLineItems, state);
 
@@ -95,7 +96,7 @@ describe('Vela build-mode status-line contract', () => {
       `[V] seq=z state=perm session=${resolveTuiAgentRef('session-123')} ` +
         `turn=${resolveTuiAgentRef('turn-456')} request=${resolveTuiAgentRef(
           'permission-789',
-        )} agents=2/3`,
+        )} agents=2/3 background=1`,
     );
     expect(rendered).not.toContain('~/repo');
     expect(rendered).not.toContain('Context');

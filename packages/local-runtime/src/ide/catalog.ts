@@ -8,6 +8,7 @@ export type IdeAppFamily =
   | 'finder'
   | 'terminal'
   | 'iterm2'
+  | 'ghostty'
   | 'warp'
   | 'trae'
   | 'xcode'
@@ -98,6 +99,13 @@ export const IDE_CATALOG: IdeCatalogEntry[] = [
     family: 'iterm2',
     binaries: [],
     macAppNames: ['iTerm.app', 'iTerm2.app'],
+  },
+  {
+    id: 'ghostty',
+    name: 'Ghostty',
+    family: 'ghostty',
+    binaries: ['ghostty'],
+    macAppNames: ['Ghostty.app'],
   },
   {
     id: 'warp',

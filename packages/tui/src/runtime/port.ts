@@ -584,6 +584,8 @@ export interface TuiBackgroundTask {
   readonly endedAtMs?: number;
   readonly deliveredAtMs?: number;
   readonly lastError?: string;
+  /** Bash still owned by its foreground tool call (not auto-promoted to the background). */
+  readonly foreground?: true;
 }
 
 export interface TuiBackgroundTaskCapability {

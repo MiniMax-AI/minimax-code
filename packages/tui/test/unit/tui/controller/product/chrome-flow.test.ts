@@ -212,6 +212,7 @@ describe("TuiChromeFlow agent status sequence", () => {
   it("increments only when the semantic tuple changes and resets on session switch", () => {
     let interaction: TuiAgentInteractionReadback | undefined;
     let agentCounts = { active: 0, total: 0 };
+    let backgroundTasks = 0;
     const shells: TuiShellState[] = [];
     const setTerminalTitle = vi.fn();
     const shellSink = {
@@ -238,6 +239,7 @@ describe("TuiChromeFlow agent status sequence", () => {
         interaction?.kind === "questionnaire" || interaction?.kind === "plan",
       agentInteraction: () => interaction,
       agentCounts: () => agentCounts,
+      backgroundTaskCount: () => backgroundTasks,
       attachmentCount: () => 0,
       expandedDraft: () => "",
       selectedModel: () => undefined,
@@ -262,6 +264,7 @@ describe("TuiChromeFlow agent status sequence", () => {
       agentStatus: "ready",
       agentActiveCount: 0,
       agentTotalCount: 0,
+      agentBackgroundCount: 0,
     });
 
     agentCounts = { active: 2, total: 3 };
@@ -271,6 +274,13 @@ describe("TuiChromeFlow agent status sequence", () => {
       agentActiveCount: 2,
       agentTotalCount: 3,
     });
+
+    backgroundTasks = 1;
+    flow.update(snapshot("session-1"));
+    expect(shells.at(-1)).toMatchObject({ agentSeq: "2", agentBackgroundCount: 1 });
+    backgroundTasks = 0;
+    flow.update(snapshot("session-1"));
+    expect(shells.at(-1)).toMatchObject({ agentSeq: "3", agentBackgroundCount: 0 });
 
     interaction = {
       kind: "permission",
@@ -285,7 +295,7 @@ describe("TuiChromeFlow agent status sequence", () => {
     flow.update(interactingSnapshot);
     expect(setTerminalTitle).toHaveBeenLastCalledWith("Needs approval | workspace (session-) | MCode");
     expect(shells.at(-1)).toMatchObject({
-      agentSeq: "2",
+      agentSeq: "4",
       agentStatus: "perm",
       agentRequestId: "permission-1",
     });
@@ -295,7 +305,7 @@ describe("TuiChromeFlow agent status sequence", () => {
     flow.update(interactingSnapshot);
     expect(setTerminalTitle).toHaveBeenLastCalledWith("Working | workspace (session-) | MCode");
     expect(shells.at(-1)).toMatchObject({
-      agentSeq: "3",
+      agentSeq: "5",
       agentStatus: "run",
       agentRunId: "turn-1",
     });

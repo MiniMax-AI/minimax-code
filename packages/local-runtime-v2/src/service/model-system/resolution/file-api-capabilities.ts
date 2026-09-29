@@ -32,39 +32,40 @@ export function normalizeLocalFileApiCapabilities(
   };
 }
 
+/** Client protection budgets, not claims about a Provider's actual transport limits. */
+const DEFAULT_LOCAL_MULTIMODAL_LIMITS = {
+  max_image_bytes_inline: 10_485_760,
+  max_video_bytes_inline: 52_428_800,
+  max_request_body_bytes: 67_108_864,
+  max_attachments_count: 4,
+} as const;
+
+type MultimodalLimits = Pick<IModelCapabilities, keyof typeof DEFAULT_LOCAL_MULTIMODAL_LIMITS>;
+
+/** Shared by ModelRef construction and live resolution of legacy ModelRefs. */
 export function normalizeLocalMultimodalLimitCapabilities(
-  capabilities: CapabilityConfig | undefined,
-): Pick<
-  IModelCapabilities,
-  | 'max_image_bytes_inline'
-  | 'max_video_bytes_inline'
-  | 'max_request_body_bytes'
-  | 'max_attachments_count'
-> {
-  const maxImage = normalizePositiveByteLimit(capabilities?.max_image_bytes_inline);
-  const maxVideo = normalizePositiveByteLimit(capabilities?.max_video_bytes_inline);
-  const maxBody = normalizePositiveByteLimit(capabilities?.max_request_body_bytes);
-  const maxCount = normalizePositiveCountLimit(capabilities?.max_attachments_count);
+  capabilities: Pick<CapabilityConfig, keyof MultimodalLimits> | undefined,
+): Required<MultimodalLimits> {
   return {
-    ...(maxImage !== undefined ? { max_image_bytes_inline: maxImage } : {}),
-    ...(maxVideo !== undefined ? { max_video_bytes_inline: maxVideo } : {}),
-    ...(maxBody !== undefined ? { max_request_body_bytes: maxBody } : {}),
-    ...(maxCount !== undefined ? { max_attachments_count: maxCount } : {}),
+    max_image_bytes_inline:
+      normalizePositiveByteLimit(capabilities?.max_image_bytes_inline) ??
+      DEFAULT_LOCAL_MULTIMODAL_LIMITS.max_image_bytes_inline,
+    max_video_bytes_inline:
+      normalizePositiveByteLimit(capabilities?.max_video_bytes_inline) ??
+      DEFAULT_LOCAL_MULTIMODAL_LIMITS.max_video_bytes_inline,
+    max_request_body_bytes:
+      normalizePositiveByteLimit(capabilities?.max_request_body_bytes) ??
+      DEFAULT_LOCAL_MULTIMODAL_LIMITS.max_request_body_bytes,
+    max_attachments_count: Number(
+      normalizePositiveByteLimit(capabilities?.max_attachments_count) ??
+        DEFAULT_LOCAL_MULTIMODAL_LIMITS.max_attachments_count,
+    ),
   };
 }
 
 function normalizePositiveByteLimit(value: unknown): number | string | undefined {
-  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : undefined;
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) && parsed > 0 ? trimmed : undefined;
-}
-
-function normalizePositiveCountLimit(value: unknown): number | undefined {
-  let parsed = Number.NaN;
-  if (typeof value === 'number') parsed = value;
-  if (typeof value === 'string' && value.trim()) parsed = Number(value.trim());
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+  const candidate = typeof value === 'string' ? value.trim() : value;
+  if (typeof candidate !== 'number' && typeof candidate !== 'string') return undefined;
+  const parsed = Number(candidate);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? candidate : undefined;
 }

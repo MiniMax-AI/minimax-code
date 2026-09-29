@@ -63,6 +63,7 @@ export class TuiChromeFlow {
       readonly activeQuestionnaire: () => boolean;
       readonly agentInteraction: () => TuiAgentInteractionReadback | undefined;
       readonly agentCounts?: () => { readonly active: number; readonly total: number };
+      readonly backgroundTaskCount?: () => number;
       readonly attachmentCount: () => number;
       readonly expandedDraft: () => string;
       readonly inputCommands?: () => readonly TuiCommand[];
@@ -200,6 +201,7 @@ export class TuiChromeFlow {
       })(),
     });
     const agentCounts = this.options.agentCounts?.();
+    const backgroundTasks = this.options.backgroundTaskCount?.();
     const automationStatus = this.automationStatus.reconcile({
       snapshot,
       connection,
@@ -211,6 +213,7 @@ export class TuiChromeFlow {
       compacting: this.compacting,
       retrying: this.isLlmRetrying(),
       ...(agentCounts ? { agentCounts } : {}),
+      ...(backgroundTasks !== undefined ? { backgroundTasks } : {}),
     });
     if (this.options.isStarted()) {
       this.options.setTerminalTitle(
@@ -234,6 +237,7 @@ export class TuiChromeFlow {
       ...(automationStatus.requestId ? { agentRequestId: automationStatus.requestId } : {}),
       agentActiveCount: automationStatus.activeAgents,
       agentTotalCount: automationStatus.totalAgents,
+      agentBackgroundCount: automationStatus.backgroundTasks,
     };
     // The welcome header remains visible above the conversation transcript.
     this.options.welcome.setState(shell);

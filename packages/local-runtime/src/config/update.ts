@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getConfig, getConfigPath, MINIMAX_API_MODEL_CATALOG, resetConfig } from '@mavis/config';
+import { getConfig, getConfigPath, minimaxApiModels, resetConfig } from '@mavis/config';
 import yaml from 'js-yaml';
 import lockfile from 'proper-lockfile';
 
@@ -25,6 +25,7 @@ const LOCAL_CONFIG_MUTABLE_FIELDS = new Set([
   'thinking',
   'memory',
   'review',
+  'worktreeRefreshBeforeCreate',
   'agents',
 ]);
 
@@ -128,12 +129,6 @@ export async function compareAndSetLocalModelContext(
   ) {
     throw new LocalConfigValidationError('Invalid MiniMax model context target');
   }
-  if (
-    input.providerId === 'minimax_api' &&
-    !MINIMAX_API_MODEL_CATALOG[modelId]?.contextWindowOptions?.includes(input.contextLimit)
-  ) {
-    throw new LocalConfigValidationError('Invalid MiniMax API context limit');
-  }
   const configPath = getConfigPath();
   let release: (() => Promise<void>) | undefined;
   try {
@@ -147,11 +142,17 @@ export async function compareAndSetLocalModelContext(
     const raw = readLocalRawConfig(configPath);
     resetConfig();
     const currentConfig = getConfig() as LocalRuntimeConfig;
-    const currentContext =
+    const model =
       input.providerId === 'minimax'
-        ? currentConfig.provider?.minimax?.models?.[modelId]?.limit?.context
-        : currentMinimaxApiContext(currentConfig, modelId);
-    if (currentContext !== input.expectedContextLimit) {
+        ? currentConfig.provider?.minimax?.models?.[modelId]
+        : minimaxApiModels(currentConfig)[modelId];
+    if (
+      input.providerId === 'minimax_api' &&
+      !model?.contextWindowOptions?.includes(input.contextLimit)
+    ) {
+      throw new LocalConfigValidationError('Invalid MiniMax API context limit');
+    }
+    if (model?.limit?.context !== input.expectedContextLimit) {
       return { updated: false, config: currentConfig };
     }
     if (!(await beforeCommit(currentConfig))) {
@@ -184,14 +185,6 @@ export async function compareAndSetLocalModelContext(
   } finally {
     await release?.().catch(() => undefined);
   }
-}
-
-function currentMinimaxApiContext(config: LocalRuntimeConfig, modelId: string): number | undefined {
-  const model = MINIMAX_API_MODEL_CATALOG[modelId];
-  const override = config.minimax_api?.modelContextLimits?.[modelId];
-  return override !== undefined && model?.contextWindowOptions?.includes(override)
-    ? override
-    : model?.limit?.context;
 }
 
 // ── BYOK dedicated write path ──────────────────────────────────────────────
@@ -337,7 +330,7 @@ function applyLocalConfigUpdate(raw: Record<string, unknown>, body: Record<strin
       return;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'put')) {
-      if (field === 'review.mode') {
+      if (field === 'review.mode' || field === 'worktreeRefreshBeforeCreate') {
         throw new LocalConfigValidationError(`Unsupported config update operation for ${field}`);
       }
       const [target, key] = resolvePath(raw, field);
@@ -414,6 +407,10 @@ function validateLocalConfigValue(field: string, value: unknown): unknown {
   if (field === 'permissionMode') {
     if (typeof value === 'string' && LOCAL_PERMISSION_MODES.has(value)) return value;
     throw new LocalConfigValidationError(`Invalid permissionMode "${String(value)}"`);
+  }
+  if (field === 'worktreeRefreshBeforeCreate') {
+    if (typeof value === 'boolean') return value;
+    throw new LocalConfigValidationError('Invalid worktreeRefreshBeforeCreate');
   }
   if (field === 'review.mode') {
     return validateReviewMode(value);

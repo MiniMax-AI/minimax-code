@@ -75,7 +75,12 @@ export async function emitTerminal(turn: turnState, reason: TurnTerminationReaso
   }
 }
 
-export function subscribeEvents(agent: Agent, turn: turnState, history: turnHistory): eventSub {
+export function subscribeEvents(
+  agent: Agent,
+  turn: turnState,
+  history: turnHistory,
+  nowMs: () => number,
+): eventSub {
   let pendingMessageID: Promise<string> | undefined;
   let queue: Promise<void> = Promise.resolve();
   let forcedTermination: TurnTerminationReason | undefined;
@@ -254,10 +259,10 @@ export function subscribeEvents(agent: Agent, turn: turnState, history: turnHist
     }
   };
 
-  const writeAgentEvent = async (event: AgentEvent): Promise<void> => {
+  const writeAgentEvent = async (event: AgentEvent, observedAtMs: number): Promise<void> => {
     let out: Awaited<ReturnType<typeof turn.bridge.processEvent>>;
     try {
-      out = await turn.bridge.processEvent(event);
+      out = await turn.bridge.processEvent(event, observedAtMs);
     } catch (err) {
       turn.metrics.recordDegradation('event_bridge', 'translation', err);
       throw err;
@@ -297,14 +302,14 @@ export function subscribeEvents(agent: Agent, turn: turnState, history: turnHist
     }
   };
 
-  const onAgentEvent = async (event: AgentEvent): Promise<void> => {
+  const onAgentEvent = async (event: AgentEvent, observedAtMs: number): Promise<void> => {
     let discardMessage = false;
     try {
       if (event.type === 'message_end') {
         discardMessage = (await applyAfterLlmControl(event)) === 'discard';
         if (discardMessage) discardAssistantMessage(event);
       }
-      if (!discardMessage) await writeAgentEvent(event);
+      if (!discardMessage) await writeAgentEvent(event, observedAtMs);
     } catch (err) {
       turn.logger.error(
         {
@@ -354,10 +359,13 @@ export function subscribeEvents(agent: Agent, turn: turnState, history: turnHist
   };
 
   const unsubscribe = agent.subscribe((event: AgentEvent) => {
+    // Capture before queueing or awaiting response hooks so decode timing only
+    // spans model events, not caller-side control or delivery work.
+    const observedAtMs = nowMs();
     // Serialize caller-side work even when Pi emits events from parallel
     // tool completions. History delivery failures reject the current Pi
     // listener; the resolved queue link still lets Pi's failure events drain.
-    const queued = queue.then(() => onAgentEvent(event));
+    const queued = queue.then(() => onAgentEvent(event, observedAtMs));
     queue = queued.catch(() => undefined);
     return queued;
   });

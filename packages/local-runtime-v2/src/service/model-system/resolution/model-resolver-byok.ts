@@ -1,5 +1,5 @@
 import type { Api } from '@earendil-works/pi-ai';
-import { MINIMAX_API_MODEL_CATALOG, getRuntimeRegion } from '@mavis/config';
+import { minimaxApiModels, getRuntimeRegion } from '@mavis/config';
 
 import type {
   LocalByokProviderConfig,
@@ -50,19 +50,16 @@ export function planMinimaxApiResolution(input: {
   if (!apiKey) {
     throw new Error('LocalModelResolver: minimax_api apiKey is not configured.');
   }
-  const catalogModel = MINIMAX_API_MODEL_CATALOG[input.modelId];
-  const contextOverride = config.modelContextLimits?.[input.modelId];
-  const contextLimit =
-    contextOverride !== undefined && catalogModel?.contextWindowOptions?.includes(contextOverride)
-      ? contextOverride
-      : catalogModel?.limit?.context;
+  const catalogModel = minimaxApiModels({ provider: input.providerConfig, minimax_api: config })[
+    input.modelId
+  ];
   return {
     provider: MINIMAX_API_PROVIDER_ID,
     api: 'anthropic-messages',
     apiKey,
     baseUrl: config.baseURL?.trim() || defaultMinimaxApiBaseUrl(),
     contextWindow:
-      contextLimit ??
+      catalogModel?.limit?.context ??
       (input.catalog.fromCatalog
         ? input.catalog.contextWindow
         : BYOK_FALLBACK_MODEL_LIMITS.contextWindow),

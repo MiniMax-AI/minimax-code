@@ -14,7 +14,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
@@ -320,17 +320,18 @@ function defaultSuffix(): string {
 
 async function copySourceOverlay(input: SourceOverlayInput): Promise<void> {
   const { sourceDir, targetDir, excludedSourceRoots, sourceDiffBase, bestEffort } = input;
+  const pathspec = workspacePathspec(sourceDir, excludedSourceRoots);
   await copyTrackedPatch({
     sourceDir,
     targetDir,
-    args: ['diff', '--binary', '--cached', sourceDiffBase],
+    args: ['diff', '--binary', '--cached', sourceDiffBase, ...pathspec],
     updateIndex: true,
     bestEffort,
   });
   await copyTrackedPatch({
     sourceDir,
     targetDir,
-    args: ['diff', '--binary'],
+    args: ['diff', '--binary', ...pathspec],
     updateIndex: false,
     bestEffort,
   });
@@ -405,6 +406,8 @@ async function verifyCopiedWorkspace(input: WorkspaceVerificationInput): Promise
   if (sourceFingerprint !== expectedFingerprint) {
     throw new ForkWorktreeUnavailableError('Source workspace changed during Fork');
   }
+  // Excluded overlays stay at HEAD in the target. Keep its full fingerprint so
+  // ownership probes and cleanup still detect any later target mutation.
   const targetFingerprint = await fingerprint(targetDir);
   if (targetFingerprint !== expectedFingerprint) {
     throw new ForkWorktreeUnavailableError('Fork worktree content verification failed');
@@ -685,6 +688,18 @@ function isOptionalBoolean(value: unknown): value is boolean | undefined {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+function workspacePathspec(cwd: string, excludedRoots: readonly string[]): readonly string[] {
+  if (excludedRoots.length === 0) return [];
+  return [
+    '--',
+    '.',
+    ...excludedRoots.map(
+      (root) => `:(top,exclude,literal)${relative(cwd, root).split(sep).join('/')}`,
+    ),
+  ];
+}
+
 async function fingerprint(
   cwd: string,
   excludedRoots: readonly string[] = [],
@@ -696,24 +711,30 @@ async function fingerprint(
     untrackedFingerprint(cwd, excludedRoots),
   ]);
   const hash = createHash('sha256').update(head).update('\0').update(status).update('\0');
-  await streamGit(['diff', '--binary', sourceBase?.diffBase ?? 'HEAD'], cwd, async (stdout) => {
-    // Match the original execFile UTF-8 decoding; the stream decoder joins characters split across chunks.
-    stdout.setEncoding('utf8');
-    for await (const chunk of stdout) hash.update(chunk);
-  });
+  await streamGit(
+    ['diff', '--binary', sourceBase?.diffBase ?? 'HEAD', ...workspacePathspec(cwd, excludedRoots)],
+    cwd,
+    async (stdout) => {
+      // Match the original execFile UTF-8 decoding; the stream decoder joins characters split across chunks.
+      stdout.setEncoding('utf8');
+      for await (const chunk of stdout) hash.update(chunk);
+    },
+  );
   return hash.update('\0').update(untracked).digest('hex');
 }
 
 async function filteredStatus(cwd: string, excludedRoots: readonly string[] = []): Promise<string> {
-  const records = (await git(['status', '--porcelain=v1', '--untracked-files=all', '-z'], cwd))
-    .split('\0')
-    .filter(Boolean);
-  return records
-    .filter((record) => {
-      const path = record.slice(3);
-      return !excludedRoots.some((root) => isWithin(root, resolve(cwd, path)));
-    })
-    .join('\0');
+  const output = await git(
+    [
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all',
+      '-z',
+      ...workspacePathspec(cwd, excludedRoots),
+    ],
+    cwd,
+  );
+  return output.split('\0').filter(Boolean).join('\0');
 }
 
 async function untrackedFingerprint(
@@ -742,12 +763,11 @@ async function untrackedEntries(
   cwd: string,
   excludedRoots: readonly string[] = [],
 ): Promise<readonly string[]> {
-  const output = await git(['ls-files', '--others', '--exclude-standard', '-z'], cwd);
-  return output
-    .split('\0')
-    .filter(Boolean)
-    .filter((entry) => !excludedRoots.some((root) => isWithin(root, resolve(cwd, entry))))
-    .sort();
+  const output = await git(
+    ['ls-files', '--others', '--exclude-standard', '-z', ...workspacePathspec(cwd, excludedRoots)],
+    cwd,
+  );
+  return output.split('\0').filter(Boolean).sort();
 }
 
 async function gitWithInput(

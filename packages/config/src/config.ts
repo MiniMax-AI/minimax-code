@@ -1,3 +1,4 @@
+import { MINIMAX_MODELS } from "./minimax-model-catalog.js";
 import {
   resolveRunawayGuardConfig,
   type RunawayGuardSettings,
@@ -495,11 +496,9 @@ export interface BetaConfig {
    */
   mcodeTools: boolean;
   /**
-   * OpenAI Codex OAuth settings entry. Enabled by default in internal builds and development
-   * environments, regardless of the connected backend environment. Public prod / external staging /
-   * Inside / test builds expose the OAuth connection button in desktop model settings via
-   * `beta.codexOAuth: true`. Provider configuration stays in `config.yaml` and OAuth credentials
-   * stay in `<dataDir>/codex-auth.json`.
+   * OpenAI Codex OAuth model settings entry. Enabled by default in every build environment and
+   * release package; set `beta.codexOAuth: false` to hide it. Provider configuration stays in
+   * `config.yaml` and OAuth credentials stay in `<dataDir>/codex-auth.json`.
    */
   codexOAuth: boolean;
 }
@@ -648,9 +647,7 @@ export const BETA_FEATURE_DEFS = {
     configurableVisibility: "online",
   },
   codexOAuth: {
-    defaultVisibility: "none",
-    defaultBuildEnvironments: ["dev"],
-    defaultBuildVariants: ["internal"],
+    defaultVisibility: "online",
     configurableVisibility: "online",
   },
 } satisfies Record<keyof BetaConfig, BetaFeatureDef>;
@@ -675,7 +672,7 @@ function getBetaFeatureChannel(
 }
 
 // Variant defaults depend only on variant flags: internal builds use buildEnv=staging but remain on the internal release lane
-// and must retain internal defaults such as codexOAuth. Inside builds still use buildEnv=prod.
+// and must retain internal defaults. Inside builds still use buildEnv=prod.
 function isDefaultEnabledForBuildVariant(
   def: BetaFeatureDef,
   context: BetaFeatureResolutionContext,
@@ -1019,6 +1016,8 @@ export interface Config {
   cuBackend: CuBackend;
   /** Built-in local code review behavior. */
   review: ReviewConfig;
+  /** Fetch the selected upstream before creating a new worktree. */
+  worktreeRefreshBeforeCreate: boolean;
   /** Automatic prompt delivery policy. */
   promptConfig: PromptConfig;
   /** Durable Goal policy, budgets, breaker, and verifier defaults. */
@@ -1137,6 +1136,8 @@ export interface ProviderConfig {
   id?: string;
   npm?: string;
   models?: Record<string, ModelConfig>;
+  /** Read-time reference to the official catalog before user Context selections. */
+  catalogModels?: Record<string, ModelConfig>;
   /** Display order for managed models; omitted models retain their catalog order. */
   model_order?: string[];
   blacklist?: string[];
@@ -1159,7 +1160,7 @@ export interface MinimaxApiConfig {
   apiKey?: string;
   /** Optional endpoint override; defaults to the runtime's builtin MiniMax API endpoint. */
   baseURL?: string;
-  /** User-owned context selections applied only to the independent MiniMax API catalog. */
+  /** User-owned Context selections for the API route of the shared MiniMax catalog. */
   modelContextLimits?: Record<string, number>;
 }
 
@@ -1516,80 +1517,6 @@ export function getConfigPath(): string {
 // Default provider presets per environment combo (MAVIS_REGION x MAVIS_BUILD_ENV)
 // ---------------------------------------------------------------------------
 
-const MINIMAX_M3_FILE_API_CAPABILITIES: ModelCapabilitiesConfig = {
-  support_files_api: true,
-  files_api_upload_endpoint: "/v1/files/upload",
-  max_image_bytes_inline: 10_485_760,
-  max_video_bytes_inline: 52_428_800,
-  max_request_body_bytes: 67_108_864,
-  max_attachments_count: 4,
-};
-
-const MINIMAX_MODELS: Record<string, ModelConfig> = {
-  "MiniMax-M3": {
-    name: "MiniMax-M3",
-    attachment: true,
-    reasoning: true,
-    tool_call: true,
-    temperature: true,
-    modalities: { input: ["text", "image", "video"], output: ["text"] },
-    limit: { context: 512000, output: 128000 },
-    contextWindowOptions: [512000, 1000000],
-    contextWindowOptionHints: { "1000000": "higher_usage" },
-    options: { reasoningSummary: "auto" },
-    thinking_config: { mode: "switchable", default_value: "true" },
-    variants: {
-      "none-thinking": { thinking: { type: "disabled" } },
-      thinking: { thinking: { type: "adaptive" } },
-    },
-    capabilities: MINIMAX_M3_FILE_API_CAPABILITIES,
-  },
-  "MiniMax-M3.1-Flash-Preview": {
-    name: "M3.1-Flash-Preview",
-    attachment: true,
-    reasoning: true,
-    tool_call: true,
-    temperature: true,
-    modalities: { input: ["text", "image", "video"], output: ["text"] },
-    limit: { context: 512000, output: 128000 },
-    contextWindowOptions: [512000, 1000000],
-    contextWindowOptionHints: { "1000000": "higher_usage" },
-    options: { reasoningSummary: "auto" },
-    thinking: {
-      effortOptions: ["default", "low", "medium", "high", "xhigh", "max"],
-      defaultEffort: "default",
-    },
-    thinking_config: { mode: "forced_on" },
-    variants: {
-      "none-thinking": { thinking: { type: "disabled" } },
-      thinking: { thinking: { type: "adaptive" } },
-    },
-    capabilities: MINIMAX_M3_FILE_API_CAPABILITIES,
-  },
-  "MiniMax-M2.7-highspeed": {
-    name: "MiniMax-M2.7-highspeed",
-    attachment: false,
-    reasoning: true,
-    tool_call: true,
-    temperature: true,
-    modalities: { input: ["text"], output: ["text"] },
-    limit: { context: 200000, output: 128000 },
-  },
-  "MiniMax-M2.7": {
-    name: "MiniMax-M2.7",
-    attachment: false,
-    reasoning: true,
-    tool_call: true,
-    temperature: true,
-    modalities: { input: ["text"], output: ["text"] },
-    limit: { context: 200000, output: 128000 },
-  },
-};
-
-/** MiniMax models the user's own API key may call and the first-run managed fallback. */
-export const MINIMAX_API_MODEL_CATALOG: Record<string, ModelConfig> =
-  MINIMAX_MODELS;
-
 const PRESET_BASE_URLS: Record<PresetKey, string> = {
   "cn-test": "https://matrix-test.example.invalid/mavis/api/v1/llm/v1",
   "cn-dev": "https://matrix-test.example.invalid/mavis/api/v1/llm/v1",
@@ -1836,6 +1763,7 @@ const DEFAULTS: Omit<
   },
   logRetentionDays: 3,
   cuBackend: DEFAULT_CU_BACKEND,
+  worktreeRefreshBeforeCreate: true,
   review: {
     mode: "subagent",
     modeSource: "default",
@@ -2129,6 +2057,7 @@ export function resolveConfigFromRaw(
     mcpToolSearch: parseMcpToolSearchConfig(raw),
     cuBackend: parseCuBackend(raw.cuBackend),
     review: parseReviewConfig(raw.review, DEFAULTS.review),
+    worktreeRefreshBeforeCreate: raw.worktreeRefreshBeforeCreate !== false,
     promptConfig: resolvePromptConfig(raw.promptConfig),
     goal: goalParsed.config,
     goalWarnings: goalParsed.warnings,

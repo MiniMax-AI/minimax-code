@@ -5,13 +5,8 @@ import { dirname, join } from 'node:path';
 import yaml from 'js-yaml';
 import lockfile from 'proper-lockfile';
 
-import {
-  getConfig,
-  getConfigPath,
-  MINIMAX_API_MODEL_CATALOG,
-  resetConfig,
-  type Config,
-} from './config.js';
+import { getConfig, getConfigPath, resetConfig, type Config } from './config.js';
+import { minimaxApiModels } from './byok-config.js';
 import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from './model-availability.js';
 
 const LOCAL_CONFIG_FILE_MODE = 0o600;
@@ -185,18 +180,18 @@ export async function compareAndSetLocalModelContext(
   ) {
     throw new LocalModelProviderConfigValidationError('Invalid MiniMax model context target');
   }
-  if (input.providerId === MINIMAX_API_PROVIDER_ID) {
-    const options = MINIMAX_API_MODEL_CATALOG[modelId]?.contextWindowOptions;
-    if (!options?.includes(input.contextLimit)) {
+  const outcome = await withLockedConfig(async (raw, currentConfig) => {
+    const model =
+      input.providerId === MANAGED_MINIMAX_PROVIDER_ID
+        ? currentConfig.provider?.[input.providerId]?.models?.[modelId]
+        : minimaxApiModels(currentConfig)[modelId];
+    if (
+      input.providerId === MINIMAX_API_PROVIDER_ID &&
+      !model?.contextWindowOptions?.includes(input.contextLimit)
+    ) {
       throw new LocalModelProviderConfigValidationError('Invalid MiniMax API context limit');
     }
-  }
-  const outcome = await withLockedConfig(async (raw, currentConfig) => {
-    const currentContext =
-      input.providerId === MANAGED_MINIMAX_PROVIDER_ID
-        ? currentConfig.provider?.[input.providerId]?.models?.[modelId]?.limit?.context
-        : currentMinimaxApiContext(currentConfig, modelId);
-    if (currentContext !== input.expectedContextLimit) {
+    if (model?.limit?.context !== input.expectedContextLimit) {
       return { write: false, value: false };
     }
     if (!(await beforeCommit(currentConfig))) return { write: false, value: false };
@@ -208,14 +203,6 @@ export async function compareAndSetLocalModelContext(
     return { write: true, value: true };
   });
   return { config: outcome.config, updated: outcome.value };
-}
-
-function currentMinimaxApiContext(config: Config, modelId: string): number | undefined {
-  const model = MINIMAX_API_MODEL_CATALOG[modelId];
-  const override = config.minimax_api?.modelContextLimits?.[modelId];
-  return override !== undefined && model?.contextWindowOptions?.includes(override)
-    ? override
-    : model?.limit?.context;
 }
 
 async function withLockedConfig<T>(

@@ -26,6 +26,8 @@ export interface TuiAgentStatusLineInput {
   readonly requestId?: string;
   readonly activeAgents?: number;
   readonly totalAgents?: number;
+  /** Root-session background Tasks whose result has not settled into a durable root Turn. */
+  readonly backgroundTasks?: number;
 }
 
 /**
@@ -50,7 +52,7 @@ export function formatTuiAgentStatusLine(input: TuiAgentStatusLineInput): string
   const activeAgents = Math.min(boundedAgentCount(input.activeAgents), totalAgents);
   return `${TUI_STATUS_MARKER} seq=${input.seq} state=${input.status} session=${resolveTuiAgentRef(
     input.sessionId,
-  )} turn=${resolveTuiAgentRef(input.turnId)} request=${resolveTuiAgentRef(input.requestId)} agents=${activeAgents}/${totalAgents}`;
+  )} turn=${resolveTuiAgentRef(input.turnId)} request=${resolveTuiAgentRef(input.requestId)} agents=${activeAgents}/${totalAgents} background=${boundedAgentCount(input.backgroundTasks)}`;
 }
 
 function boundedAgentCount(value: number | undefined): number {

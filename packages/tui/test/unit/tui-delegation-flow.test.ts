@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TuiBackgroundTask } from "../../src/runtime/port.js";
 import { TuiDelegationFlow } from "../../src/tui/controller/delegation-flow.js";
 import { createTranscriptCell } from "../../src/tui/transcript/model.js";
 import { TranscriptStore } from "../../src/tui/transcript/store.js";
@@ -1537,5 +1538,173 @@ describe("TuiDelegationFlow", () => {
       activity: "Waiting for approval",
     });
     flow.stop();
+  });
+
+  describe('root background Task status count', () => {
+    function bashTask(overrides: Partial<TuiBackgroundTask> = {}): TuiBackgroundTask {
+      return {
+        taskId: 'bash-1',
+        kind: 'bash',
+        status: 'running',
+        ownerSessionId: 'root',
+        command: 'sleep 75; echo finished',
+        createdAtMs: 100,
+        updatedAtMs: 100,
+        ...overrides,
+      };
+    }
+
+    function rootLifecycle(
+      type: 'session.start' | 'session.finish',
+      turnId: string,
+      deliveredTaskId?: string,
+    ) {
+      return {
+        type,
+        timestampMs: 100,
+        source: 'runtime',
+        sessionId: 'root',
+        turnId,
+        queueItemIds: [],
+        ...(deliveredTaskId
+          ? { runSource: 'background-task-delivery' as const, taskId: deliveredTaskId }
+          : {}),
+      };
+    }
+
+    it('counts only queued, running and stopping Tasks, as listed by the Runtime', async () => {
+      vi.useFakeTimers();
+      let tasks: TuiBackgroundTask[] = [];
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({ listBackgroundTasks: vi.fn(async () => tasks) }),
+        currentSession: () => ({ sessionId: 'root' }),
+        onChanged: vi.fn(),
+      });
+
+      try {
+        await flow.handleRuntimeEvent(rootLifecycle('session.start', 'turn-1'));
+        tasks = [bashTask(), bashTask({ taskId: 'bash-2', status: 'stopping' })];
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(flow.backgroundTaskCount()).toBe(2);
+
+        await flow.handleRuntimeEvent(rootLifecycle('session.finish', 'turn-1'));
+        expect(flow.backgroundTaskCount()).toBe(2);
+
+        // A terminal Task is no longer active, whether or not its result reached the model.
+        tasks = [
+          bashTask({ status: 'succeeded', endedAtMs: 300, updatedAtMs: 300 }),
+          bashTask({ taskId: 'bash-2', status: 'canceled', endedAtMs: 300, updatedAtMs: 300 }),
+        ];
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(flow.backgroundTaskCount()).toBe(0);
+      } finally {
+        flow.stop();
+      }
+    });
+
+    it('keeps sub-Agent Tasks in agents and ignores finished bash history', async () => {
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          getDelegationSnapshot: vi.fn(async () => ({
+            schemaVersion: 1 as const,
+            rootSessionId: 'root',
+            members: [
+              {
+                sessionId: 'child',
+                parentSessionId: 'root',
+                status: 'completed' as const,
+                backgroundTaskId: 'agent-task',
+              },
+            ],
+          })),
+          listBackgroundTasks: vi.fn(async () => [
+            bashTask({ status: 'succeeded', endedAtMs: 200, deliveredAtMs: 200 }),
+          ]),
+        }),
+        currentSession: () => ({ sessionId: 'root' }),
+        onChanged: vi.fn(),
+      });
+      await flow.refresh();
+
+      expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+      expect(flow.backgroundTaskCount()).toBe(0);
+      flow.stop();
+    });
+
+    it('excludes a foreground-owned bash Task that has not been promoted to the background', async () => {
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          listBackgroundTasks: vi.fn(async () => [
+            bashTask({ foreground: true }),
+            bashTask({ taskId: 'bash-2', status: 'running' }),
+          ]),
+        }),
+        currentSession: () => ({ sessionId: 'root' }),
+        onChanged: vi.fn(),
+      });
+      await flow.refresh();
+      expect(flow.backgroundTaskCount()).toBe(1);
+      flow.stop();
+    });
+
+    it('never reports zero before a Task list requested after the root settle succeeds', async () => {
+      vi.useFakeTimers();
+      let finishStalePoll: ((tasks: readonly TuiBackgroundTask[]) => void) | undefined;
+      const listBackgroundTasks = vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockImplementationOnce(
+          () =>
+            new Promise<readonly TuiBackgroundTask[]>((resolve) => {
+              finishStalePoll = resolve;
+            }),
+        )
+        .mockRejectedValueOnce(new Error('list unavailable'))
+        .mockResolvedValueOnce([]);
+      const onChanged = vi.fn();
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          getActiveRun: vi.fn(async (sessionId: string) => ({
+            schemaVersion: 1 as const,
+            sessionId,
+            state: 'running' as const,
+            actions: { steer: false },
+          })),
+          listBackgroundTasks,
+        }),
+        currentSession: () => ({ sessionId: 'root' }),
+        onChanged,
+      });
+
+      try {
+        await flow.refresh();
+        expect(flow.backgroundTaskCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(finishStalePoll).toBeTypeOf('function');
+
+        await flow.handleRuntimeEvent(rootLifecycle('session.finish', 'turn-1'));
+        expect(flow.backgroundTaskCount()).toBe(1);
+
+        // A list requested before the settle cannot prove that no Task was yielded.
+        finishStalePoll?.([]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(flow.backgroundTaskCount()).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(listBackgroundTasks).toHaveBeenCalledTimes(3);
+        expect(flow.backgroundTaskCount()).toBe(1);
+
+        onChanged.mockClear();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(listBackgroundTasks).toHaveBeenCalledTimes(4);
+        expect(flow.backgroundTaskCount()).toBe(0);
+        expect(onChanged).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(listBackgroundTasks).toHaveBeenCalledTimes(4);
+      } finally {
+        flow.stop();
+      }
+    });
   });
 });

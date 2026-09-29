@@ -86,6 +86,7 @@ export interface LocalProviderConfig {
   api?: string;
   options?: LocalProviderOptions;
   models?: Record<string, LocalModelConfig>;
+  catalogModels?: Record<string, LocalModelConfig>;
   model_order?: string[];
 }
 
@@ -242,7 +243,7 @@ export interface LocalResolvedModelConfig extends LLMModelConfig {
   readonly thinkingRequestPatch?: Readonly<Record<string, unknown>>;
   /** True only for the platform-owned Token Plan / Credits inference path. */
   readonly managedProvider?: boolean;
-  /** Selected Model byte authority for Local Serialized Footprint admission; not wire-exact. */
+  /** Client byte budget for compaction estimates and final transformed JSON payload admission. */
   readonly maxRequestBodyBytes?: number;
   /** Managed-login File API transport identity; absent for every BYOK route. */
   readonly fileApiGatewayAuth?: {

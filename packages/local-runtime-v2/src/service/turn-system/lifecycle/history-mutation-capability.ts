@@ -381,11 +381,30 @@ function findDisplayOnlyRewindSlice(
   const boundary = input.displayOnlyBoundary;
   if (!boundary) boundaryNotFound(input.fromUserMessageIdInclusive);
   const canonical = [...source.snapshots.flatMap((snapshot) => snapshot.records), ...source.active];
-  if (canonical.some((envelope) => envelope.turn_id === boundary.turnId)) {
-    throw new HistoryMutationError(
-      'boundary-invalid',
-      'Display-only rewind target Turn is partially present in Canonical History',
-    );
+  const targetRecords = canonical.filter((envelope) => envelope.turn_id === boundary.turnId);
+  if (targetRecords.length > 0) {
+    // The initial LLM hook can persist a hidden reminder before the user envelope.
+    // If interrupted there, rewind that active suffix; never reinterpret real
+    // conversation records or rewrite an archived generation as a reminder-only turn.
+    if (
+      targetRecords.some((envelope) => !isTypedBackgroundReminder(envelope.message)) ||
+      source.snapshots.some((snapshot) =>
+        snapshot.records.some((envelope) => envelope.turn_id === boundary.turnId),
+      )
+    ) {
+      throw new HistoryMutationError(
+        'boundary-invalid',
+        'Display-only rewind target Turn is partially present in Canonical History',
+      );
+    }
+    const index = source.active.findIndex((envelope) => envelope.turn_id === boundary.turnId);
+    const active = source.active.slice(0, index);
+    assertSettledRewindPrefix(active);
+    return {
+      generation: source.activeGeneration,
+      active,
+      snapshots: source.snapshots.map(copySnapshot),
+    };
   }
   const laterBoundary = boundary.subsequentUserMessageIds.find(
     (messageId) => findForkArtifact(source, messageId) !== undefined,

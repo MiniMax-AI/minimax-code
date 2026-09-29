@@ -746,6 +746,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
         ...(task.lastError?.message
           ? { lastError: task.lastError.message }
           : {}),
+        ...(task.kind === 'bash' && task.metadata?.executionMode === 'managed_foreground'
+          ? { foreground: true as const }
+          : {}),
       }));
   }
 

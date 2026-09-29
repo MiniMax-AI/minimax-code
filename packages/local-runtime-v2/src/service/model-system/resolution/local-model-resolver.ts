@@ -59,6 +59,7 @@ import {
 import { hasOpenPlatformThinkingVariants } from './openplatform-thinking.js';
 import { withByokErrorAttribution } from './byok-error-attribution.js';
 import { withLocalDynamicMaxTokens } from './dynamic-max-tokens.js';
+import { normalizeLocalMultimodalLimitCapabilities } from './file-api-capabilities.js';
 import { resolveLocalFileApiGatewayAuth } from './file-api-gateway-auth.js';
 
 const FALLBACK_MODEL_LIMITS = {
@@ -198,8 +199,8 @@ export class LocalModelResolver implements LocalModelResolverLike {
     const maxTokens = positive(input.modelRef.max_tokens) || input.maxTokens;
     const thinking = resolveThinking(input, this.options.implicitCustomProviderThinking === true);
     const baseUrl = normalizeResolvedBaseUrl(input.api, input.baseUrl);
-    const maxRequestBodyBytes = normalizeResolvedRequestBodyAdmissionLimit(
-      input.modelRef.capabilities?.max_request_body_bytes,
+    const maxRequestBodyBytes = Number(
+      normalizeLocalMultimodalLimitCapabilities(input.modelRef.capabilities).max_request_body_bytes,
     );
     const model = buildResolvedModel({ input, contextWindow, maxTokens, baseUrl, thinking });
     const streamFn = resolveModelStream(input, this.options.streamFn);
@@ -227,7 +228,7 @@ export class LocalModelResolver implements LocalModelResolverLike {
       supportsJsonObjectOutput: supportsJsonObjectOutput(input.modelRef),
       apiKey: input.apiKey,
       maxTokens,
-      ...(maxRequestBodyBytes === undefined ? {} : { maxRequestBodyBytes }),
+      maxRequestBodyBytes,
       headers: buildLocalProviderHeaders({
         headers: withOpenCodeGoHeaders(
           baseUrl,
@@ -824,12 +825,4 @@ function lookupLocalCatalogModel(provider: string, modelId: string): Model<Api> 
 
 function positive(value: unknown): number {
   return typeof value === 'number' && value > 0 ? value : 0;
-}
-
-// Upstream capability projection preserves number|string; this resolved admission seam requires a positive safe integer.
-function normalizeResolvedRequestBodyAdmissionLimit(value: unknown): number | undefined {
-  const parsed = typeof value === 'string' && value.trim() ? Number(value.trim()) : value;
-  return typeof parsed === 'number' && Number.isSafeInteger(parsed) && parsed > 0
-    ? parsed
-    : undefined;
 }

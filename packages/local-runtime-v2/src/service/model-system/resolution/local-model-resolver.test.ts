@@ -405,7 +405,7 @@ describe('LocalModelResolver model routing', () => {
         id: 'MiniMax-M3',
         api: 'anthropic-messages',
         baseUrl: 'https://byok.example/messages-api',
-        contextWindow: 512_000,
+        contextWindow: 400_000,
       },
     });
     expect(resolved.streamFn).toBeTypeOf('function');
@@ -416,7 +416,7 @@ describe('LocalModelResolver model routing', () => {
 });
 
 describe('LocalModelResolver request-body byte authority', () => {
-  it('exposes only positive safe integers', async () => {
+  it('preserves positive safe integers and defaults missing or invalid legacy limits', async () => {
     const resolver = new LocalModelResolver({
       providerConfig: {
         'provider-native': {
@@ -457,15 +457,7 @@ describe('LocalModelResolver request-body byte authority', () => {
     );
 
     expect(resolved.map((model) => model.maxRequestBodyBytes)).toEqual([
-      128,
-      256,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+      128, 256, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864,
     ]);
   });
 });

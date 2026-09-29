@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import type { AppDb } from '../../../../infra/db/client.js';
 import { messageRows, sessionAssets } from '../../../../infra/db/schema/messages.js';
@@ -21,7 +21,10 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 100;
 const CONTENT_HEAD_CODE_POINTS = 200;
 
-type MessageRow = typeof messageRows.$inferSelect;
+type MessageRow = Pick<
+  typeof messageRows.$inferSelect,
+  'id' | 'messageId' | 'role' | 'source' | 'createdAtMs'
+> & { readonly dataJson: string | null };
 
 interface AssetOccurrence extends SessionInputSummaryArtifact {
   readonly messageRowId: number;
@@ -65,9 +68,12 @@ export class SessionInputSummaryService {
       this.options.readiness.ensureAssetsReady(input.sessionId),
       this.options.diffs.listSessionDiffs(input.sessionId),
     ]);
-    const snapshot = readSnapshot(this.options.db, input.sessionId);
-    const summaries = buildSummaries(snapshot.messages, snapshot.assets, diffs);
-    return toPage(input.sessionId, summaries, pagination.limit, beforeRowId);
+    return this.options.db.transaction((tx) => {
+      const snapshot = readSnapshot(tx, input.sessionId);
+      const summaries = buildSummaries(snapshot.messages, snapshot.assets, diffs);
+      const page = toPage(input.sessionId, summaries, pagination.limit, beforeRowId);
+      return withContentHeads(tx, input.sessionId, page);
+    });
   }
 }
 
@@ -75,14 +81,34 @@ function readSnapshot(
   db: AppDb,
   sessionId: string,
 ): { readonly messages: readonly MessageRow[]; readonly assets: readonly AssetOccurrence[] } {
-  return db.transaction((tx) => ({
-    messages: tx
-      .select()
+  return {
+    messages: db
+      .select({
+        id: messageRows.id,
+        messageId: messageRows.messageId,
+        role: messageRows.role,
+        source: messageRows.source,
+        createdAtMs: messageRows.createdAtMs,
+        // Interval boundaries need user text, but never tool payloads or assistant bodies.
+        dataJson: sql<string | null>`CASE WHEN json_valid(${messageRows.dataJson}) THEN
+          CASE WHEN json_type(${messageRows.dataJson}) = 'object' THEN json_object(
+            'role', json_extract(${messageRows.dataJson}, '$.role'),
+            'source', json_extract(${messageRows.dataJson}, '$.source'),
+            'kind', json_extract(${messageRows.dataJson}, '$.kind'),
+            'displayKind', json_extract(${messageRows.dataJson}, '$.displayKind'),
+            'msg_content', CASE WHEN coalesce(nullif(${messageRows.role}, ''),
+              json_extract(${messageRows.dataJson}, '$.role')) = 'user'
+              THEN json_extract(${messageRows.dataJson}, '$.msg_content') END,
+            'msgContent', CASE WHEN coalesce(nullif(${messageRows.role}, ''),
+              json_extract(${messageRows.dataJson}, '$.role')) = 'user'
+              THEN json_extract(${messageRows.dataJson}, '$.msgContent') END
+          ) END END`,
+      })
       .from(messageRows)
       .where(eq(messageRows.sessionId, sessionId))
       .orderBy(asc(messageRows.id))
       .all(),
-    assets: tx
+    assets: db
       .select({
         messageRowId: messageRows.id,
         messageId: sessionAssets.messageId,
@@ -106,7 +132,52 @@ function readSnapshot(
       .where(eq(sessionAssets.sessionId, sessionId))
       .orderBy(asc(messageRows.id), asc(sessionAssets.assetIndex), asc(sessionAssets.id))
       .all(),
-  }));
+  };
+}
+
+function withContentHeads(
+  db: AppDb,
+  sessionId: string,
+  page: SessionInputSummaryPage,
+): SessionInputSummaryPage {
+  const messageIds = page.summaries.flatMap((summary) => [
+    summary.userInput.msgId,
+    ...(summary.assistantResponse ? [summary.assistantResponse.msgId] : []),
+  ]);
+  if (messageIds.length === 0) return page;
+  const rows = db
+    .select({
+      messageId: messageRows.messageId,
+      contentJson: sql<string>`json_extract(${messageRows.dataJson}, '$.msg_content', '$.msgContent')`,
+    })
+    .from(messageRows)
+    .where(and(eq(messageRows.sessionId, sessionId), inArray(messageRows.messageId, messageIds)))
+    .all();
+  const contentHeads = new Map(
+    rows.map((row) => {
+      const [snakeContent, camelContent]: unknown[] = JSON.parse(row.contentJson);
+      const content = snakeContent ?? camelContent;
+      const contentHead = takeUnicodeCodePoints(
+        projectNavigationText({ msg_content: typeof content === 'string' ? content : '' }),
+        CONTENT_HEAD_CODE_POINTS,
+      );
+      return [row.messageId, contentHead] as const;
+    }),
+  );
+  const withHead = (head: SessionInputSummaryMessageHead): SessionInputSummaryMessageHead => {
+    const contentHead = contentHeads.get(head.msgId);
+    return { ...head, ...(contentHead ? { contentHead } : {}) };
+  };
+  return {
+    ...page,
+    summaries: page.summaries.map((summary) => ({
+      ...summary,
+      userInput: withHead(summary.userInput),
+      ...(summary.assistantResponse
+        ? { assistantResponse: withHead(summary.assistantResponse) }
+        : {}),
+    })),
+  };
 }
 
 function buildSummaries(
@@ -137,7 +208,7 @@ function reduceMessageRow(
   const next = isNavigableUserInput(message)
     ? {
         completed: state.current ? [...state.completed, state.current] : state.completed,
-        current: newMutableSummary(messageHead(row, message)),
+        current: newMutableSummary(messageHead(row)),
       }
     : state;
   if (!next.current) return next;
@@ -157,7 +228,7 @@ function updateAssistantBoundary(
   message: NonNullable<ReturnType<typeof parseMessage>>,
 ): void {
   if (message.kind != null || message.displayKind != null) return;
-  summary.assistantResponse = messageHead(row, message);
+  summary.assistantResponse = messageHead(row);
 }
 
 function newMutableSummary(userInput: MessageHead): MutableSummary {
@@ -199,7 +270,7 @@ function groupDiffFiles(
 
 function parseMessage(row: MessageRow): DisplayMessageRecord | undefined {
   try {
-    const parsed: unknown = JSON.parse(row.dataJson);
+    const parsed: unknown = row.dataJson === null ? undefined : JSON.parse(row.dataJson);
     if (!isRecord(parsed)) return undefined;
     const legacySource = typeof parsed.source === 'string' ? parsed.source : undefined;
     const message: Record<string, unknown> = { ...parsed, msg_id: row.messageId };
@@ -214,16 +285,11 @@ function parseMessage(row: MessageRow): DisplayMessageRecord | undefined {
   }
 }
 
-function messageHead(row: MessageRow, message: DisplayMessageRecord): MessageHead {
-  const contentHead = takeUnicodeCodePoints(
-    projectNavigationText(message),
-    CONTENT_HEAD_CODE_POINTS,
-  );
+function messageHead(row: MessageRow): MessageHead {
   return {
     messageRowId: row.id,
     msgId: row.messageId,
     timestamp: row.createdAtMs,
-    ...(contentHead ? { contentHead } : {}),
   };
 }
 

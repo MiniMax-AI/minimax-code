@@ -206,7 +206,7 @@ describe('MiniMax api key', () => {
     expect(h.config.minimax_api?.apiKey).toBe(RAW_KEY);
   });
 
-  it('keeps the BYOK catalog independent when the managed snapshot only has other models', async () => {
+  it('uses remote-only models from the shared official catalog for MiniMax API', async () => {
     const h = makeHarness({
       provider: {
         minimax: {
@@ -220,8 +220,7 @@ describe('MiniMax api key', () => {
 
     const provider = await h.service.upsertMinimaxApiKey({ apiKey: RAW_KEY });
 
-    expect(provider.models.map((model) => model.modelId)).toContain('MiniMax-M3');
-    expect(provider.models.map((model) => model.modelId)).not.toContain('Remote-B');
+    expect(provider.models.map((model) => model.modelId)).toEqual(['Remote-B', 'Remote-C']);
   });
 
   it('rejects empty, whitespace-only, and masked placeholder keys', async () => {
@@ -477,8 +476,10 @@ describe('MiniMax model context', () => {
     h.config.provider.minimax = {
       models: { 'Remote-Only-M4': { limit: { context: 256_000 } } },
     };
-    expect(minimaxApiModels(h.config)['MiniMax-M3']?.limit?.context).toBe(1_000_000);
-    expect(() => h.service.assertModelSelectable('minimax', 'MiniMax-M3')).not.toThrow();
+    expect(minimaxApiModels(h.config)['MiniMax-M3']).toBeUndefined();
+    expect(() => h.service.assertModelSelectable('minimax', 'MiniMax-M3')).toThrowError(
+      expect.objectContaining({ code: 'MODEL_NOT_FOUND' }),
+    );
   });
 
   it('keeps the current Paygo M3 context and cache when its candidate test fails', async () => {
@@ -511,12 +512,12 @@ describe('MiniMax model context', () => {
       minimaxModelSource: 'minimax_api_key',
     });
 
-    expect(minimaxApiModels(h.config)['MiniMax-M3']?.limit?.context).toBe(512_000);
+    expect(minimaxApiModels(h.config)['MiniMax-M3']?.limit?.context).toBe(200_000);
     await expect(
       h.service.updateMinimaxModelContext({
         modelId: 'MiniMax-M3',
         contextLimit: 768_000,
-        expectedContextLimit: 512_000,
+        expectedContextLimit: 200_000,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_CONTEXT_LIMIT', status: 400 });
     expect(h.testCalls).toHaveLength(0);
@@ -2418,7 +2419,10 @@ describe('provider listings', () => {
           options: { authMode: 'managed-login' },
           models: {
             'remote-only': { name: 'Remote Only' },
-            'MiniMax-M3': { limit: { context: 512_000, output: 128_000 } },
+            'MiniMax-M3': {
+              limit: { context: 512_000, output: 128_000 },
+              contextWindowOptions: [512_000, 1_000_000],
+            },
           },
         },
       },
@@ -2431,7 +2435,7 @@ describe('provider listings', () => {
     expect(provider?.models.map((model) => model.modelId)).toEqual(
       listed.map((model) => model.modelId),
     );
-    expect(provider?.models.some((model) => model.modelId === 'remote-only')).toBe(false);
+    expect(provider?.models.some((model) => model.modelId === 'remote-only')).toBe(true);
     expect(provider?.models.find((model) => model.modelId === 'MiniMax-M3')).toMatchObject({
       contextLimit: 1_000_000,
       contextWindowOptions: [512_000, 1_000_000],

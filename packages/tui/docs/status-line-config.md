@@ -257,13 +257,14 @@ tui:
 The `build-mode` line is a stable automation protocol, for example for systems that inspect terminal output to determine turn state:
 
 ```text
-[V] seq=<base36> state=<state> session=<ref|none> turn=<ref|none> request=<ref|none> agents=<active>/<total>
+[V] seq=<base36> state=<state> session=<ref|none> turn=<ref|none> request=<ref|none> agents=<active>/<total> background=<count>
 ```
 
 - **Fixed key order; no ANSI anywhere in the line.** Parse keys rather than guessing by position. Fail closed on unknown states or missing fields.
 - **`seq`**: a base36 sequence incremented within the session when machine-readable semantics change. It detects state transitions; it is not a runtime turn ID.
 - **Three refs**: `session`, `turn`, and `request` are six-character lowercase base36 opaque tokens or `none`. They map stably from internal IDs, cannot be reversed, and do not expose full runtime IDs.
 - **`agents`**: unsettled delegated members and total members of the current root session. `queued`, `running`, and `waiting` count as active. Completed background agents remain active until their parent session's delivery turn is persisted. Counts are bounded to 0–9999. This does not change the root turn's canonical `state`; consumers requiring the final parent report may keep waiting for `active=0` after a terminal turn state.
+- **`background`**: active background tasks of the current root session (bash, workflow, and custom; agents are counted only in `agents`). These are runtime task-list entries in `queued`, `running`, or `stopping`, matching the active count in `/tasks`. Bash still owned by its foreground tool call, and not yet moved to the background, is not counted. Finished tasks are never counted, whether or not their result has been delivered to the model. After a root turn settles, the count reports at least `1` until a task-list query issued after settlement succeeds, so a command that has just moved to the background is not reported as `0`; a brief `background=1` may therefore follow each root turn. Counts are bounded to 0–9999. A change increments `seq` but does not change `state`: `state=done ... background=1` means the root turn ended while background work that will wake the agent is still running. There is a short gap (about 10 ms; deferred up to about 60 s when a session wakes more than three times within one minute) between a background task finishing and its wake turn starting, during which `state=done ... background=0` may appear. Consumers requiring the final report should finish only after two consecutive reads of `state=done ... background=0`.
 - **`state`**: one of `ready`, `run`, `perm`, `ask`, `plan`, `done`, `fail`, `cancel`, `error`. Publish `ready` only when SSE is live and a structured snapshot confirms no active / retiring / queued turn or pending interaction. Startup, loading, reconnecting, retrying, compaction, stopping, and interaction submission project to `run`.
 - **Waiting for input**: `perm`, `ask`, and `plan` are stable actionable states and require both `turn` and `request`. Submission immediately returns to `run` and clears `request`; no transient `_submit` state is published.
 - **Terminal states**: `done`, `fail`, and `cancel` are canonical outcomes of a specific turn and require a non-`none` `turn`. Runtime `blocked` maps to `fail`; `ExecResultV1.status` retains the exact `blocked` result.
@@ -276,15 +277,16 @@ Agent counts use a `sessionId`-keyed Map / Set, not stack push / pop operations.
 Examples, with explanatory comments after each record:
 
 ```text
-[V] seq=c state=run session=3j5p7m turn=0a1b2c request=none agents=2/3       ← Turn running
-[V] seq=d state=perm session=3j5p7m turn=0a1b2c request=4d5e6f agents=2/3   ← Waiting for permission
-[V] seq=e state=run session=3j5p7m turn=0a1b2c request=none agents=2/3      ← Decision submitted; awaiting runtime confirmation
-[V] seq=f state=done session=3j5p7m turn=0a1b2c request=none agents=1/3     ← Root turn succeeded; agents or reports remain unsettled
-[V] seq=g state=fail session=3j5p7m turn=0a1b2c request=none agents=1/3     ← Failed or blocked; read the side channel for the exact result
-[V] seq=h state=error session=3j5p7m turn=none request=none agents=0/3      ← Fatal error not tied to a turn
+[V] seq=c state=run session=3j5p7m turn=0a1b2c request=none agents=2/3 background=0       ← Turn running
+[V] seq=d state=perm session=3j5p7m turn=0a1b2c request=4d5e6f agents=2/3 background=0   ← Waiting for permission
+[V] seq=e state=run session=3j5p7m turn=0a1b2c request=none agents=2/3 background=0      ← Decision submitted; awaiting runtime confirmation
+[V] seq=f state=done session=3j5p7m turn=0a1b2c request=none agents=1/3 background=0     ← Root turn succeeded; agents or reports remain unsettled
+[V] seq=g state=done session=3j5p7m turn=0a1b2c request=none agents=0/3 background=1     ← Root turn succeeded; background work will wake the agent
+[V] seq=h state=fail session=3j5p7m turn=0a1b2c request=none agents=1/3 background=0     ← Failed or blocked; read the side channel for the exact result
+[V] seq=i state=error session=3j5p7m turn=none request=none agents=0/3 background=0      ← Fatal error not tied to a turn
 ```
 
-The full record, with an eight-character `seq`, longest state `cancel`, three refs, and four-digit agent counts, requires **86 columns**. Automation and evaluation tmux panes must provide at least 86 columns. Below this width, generic TUI fitting may truncate the record; reject incomplete records instead of guessing. The default Ludus pane is wider than this requirement.
+The full record, with an eight-character `seq`, longest state `cancel`, three refs, four-digit agent counts, and a four-digit background task count, requires **102 columns**. Automation and evaluation tmux panes must provide at least 102 columns. Below this width, generic TUI fitting may truncate the record; reject incomplete records instead of guessing. The default Ludus pane is wider than this requirement.
 
 ## Applying changes
 
@@ -295,4 +297,4 @@ The full record, with an eight-character `seq`, longest state `cancel`, three re
 
 ## Notes
 
-The panel does not edit command contents or introduce new metric definitions; use `tui.customStatusLine` for command configuration. Ordinary status items shrink or drop in narrow terminals. The `[V]` record requires at least 86 columns and has no parseability guarantee below that width.
+The panel does not edit command contents or introduce new metric definitions; use `tui.customStatusLine` for command configuration. Ordinary status items shrink or drop in narrow terminals. The `[V]` record requires at least 102 columns and has no parseability guarantee below that width.
