@@ -1,6 +1,6 @@
 {
   "name": "@minimax/code",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "private": true,
   "description": "Minimax Code CLI and TUI product entry.",
   "type": "module",
