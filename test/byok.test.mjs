@@ -22,10 +22,18 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
 const cli = process.env.MCODE_TEST_CLI ?? fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+// This case is 30+ serial CLI spawns, each booting the whole runtime, so its
+// wall-clock cost tracks machine speed rather than the transport it asserts.
+// A flat budget sized for an idle laptop turns any busy runner (parallel build,
+// shared CI host) into a `testTimeoutFailure` that reports a product failure
+// while every assertion would have passed. Budget it the way smoke.test.mjs
+// budgets runtime startup: a base allowance plus a Windows multiplier for
+// slower process spawn, rather than a number that only holds on one machine.
+const byokSerialTimeoutMs = process.platform === "win32" ? 360000 : 180000;
 // This fixture validates BYOK transport and real Runtime persistence, not model quality.
 test(
   "BYOK runs without managed login and resumes its saved conversation",
-  { timeout: 90000 },
+  { timeout: byokSerialTimeoutMs },
   async (t) => {
     const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-byok-"));
     const dataDir = path.join(fixtureDir, "data");
