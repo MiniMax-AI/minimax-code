@@ -73,6 +73,126 @@ function delta(
 }
 
 describe("EventBridge generation timing", () => {
+  it.each(["text_delta", "thinking_delta", "toolcall_delta"] as const)(
+    "preserves the observed thinking start across later %s and tool completion",
+    async (kind) => {
+      const { bridge, setTime } = fixture();
+      await bridge.processEvent({
+        type: "message_start",
+        message: assistant(),
+      });
+      bridge.setActiveAssistantMessageId("thinking-message");
+      setTime(50_000);
+      const thinkingStart: AgentEvent = {
+        type: "message_update",
+        message: assistant(),
+        assistantMessageEvent: {
+          type: "thinking_start",
+          contentIndex: 0,
+          partial: assistant([{ type: "thinking", thinking: "" }]),
+        },
+      };
+      await bridge.processEvent(thinkingStart, 0);
+      await bridge.processEvent(thinkingStart, 1_000);
+      await bridge.processEvent(delta(kind, "answer"), 2_980);
+      const tool = {
+        type: "toolCall" as const,
+        id: "t",
+        name: "bash",
+        arguments: {},
+      };
+      const ended = await bridge.processEvent(
+        {
+          type: "message_end",
+          message: assistant([tool]),
+        },
+        3_000,
+      );
+      expect(messageUsage(ended.events)).toBeUndefined();
+      setTime(90_000);
+      const completed = await bridge.processEvent({
+        type: "tool_execution_end",
+        toolCallId: "t",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "done" }] },
+        isError: false,
+      });
+      expect(messageUsage(completed.events)?.decode_duration_ms).toBe(3_000);
+      await bridge.processEvent({
+        type: "message_start",
+        message: assistant(),
+      });
+      bridge.setActiveAssistantMessageId("next-message");
+      await bridge.processEvent(delta("text_delta", "next"), 100_000);
+      const next = await bridge.processEvent(
+        {
+          type: "message_end",
+          message: assistant([{ type: "text", text: "next" }]),
+        },
+        102_000,
+      );
+      expect(messageUsage(next.events)?.decode_duration_ms).toBe(2_000);
+    },
+  );
+
+  it("ignores thinking starts before an assistant message is anchored", async () => {
+    const { bridge, setTime } = fixture();
+    const start: AgentEvent = {
+      type: "message_update",
+      message: assistant(),
+      assistantMessageEvent: {
+        type: "thinking_start",
+        contentIndex: 0,
+        partial: assistant(),
+      },
+    };
+    await bridge.processEvent(start, 0);
+    await bridge.processEvent({ type: "message_start", message: assistant() });
+    await bridge.processEvent(start, 100);
+    bridge.setActiveAssistantMessageId("active");
+    setTime(10_000);
+    await bridge.processEvent(delta("text_delta", "answer"));
+    setTime(12_000);
+    const result = await bridge.processEvent({
+      type: "message_end",
+      message: assistant([{ type: "text", text: "answer" }]),
+    });
+    expect(messageUsage(result.events)?.decode_duration_ms).toBe(2_000);
+  });
+
+  it.each([true, false])(
+    "counts hidden thinking before visible output with detailed usage enabled: %s",
+    async (detailed) => {
+      const { bridge, setTime } = fixture(detailed);
+      await bridge.processEvent({
+        type: "message_start",
+        message: assistant(),
+      });
+      bridge.setActiveAssistantMessageId("hidden-thinking");
+      setTime(1_000);
+      const started = await bridge.processEvent({
+        type: "message_update",
+        message: assistant(),
+        assistantMessageEvent: {
+          type: "thinking_start",
+          contentIndex: 0,
+          partial: assistant([{ type: "thinking", thinking: "" }]),
+        },
+      });
+      expect(started.events).toEqual([]);
+      setTime(60_980);
+      await bridge.processEvent(delta("text_delta", "Done."));
+      setTime(61_000);
+      const completed = await bridge.processEvent({
+        type: "message_end",
+        message: assistant([{ type: "text", text: "Done." }]),
+      });
+      expect(messageUsage(completed.events)?.decode_duration_ms).toBe(
+        detailed ? 60_000 : undefined,
+      );
+    },
+  );
+
   it.each(["text", "thinking", "tool"] as const)(
     "starts at the first nonempty %s token and excludes delayed tool completion",
     async (kind) => {

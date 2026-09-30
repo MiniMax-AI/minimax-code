@@ -384,6 +384,15 @@ export class EventBridge {
     event: Extract<AgentEvent, { type: 'message_update' }>,
     observedAtMs?: number,
   ): BridgedEvents {
+    // Output usage includes thinking tokens even when their text is hidden.
+    // Keep the timing boundary aligned with that usage, before queue delays.
+    if (
+      this.activeAssistantMessageId &&
+      this.firstTokenMs === undefined &&
+      event.assistantMessageEvent.type === 'thinking_start'
+    ) {
+      this.firstTokenMs = observedAtMs ?? this.now();
+    }
     const update = extractDeltaUpdate(event.assistantMessageEvent);
     if (!update) return { events: [] };
     if (!this.activeAssistantMessageId) {
