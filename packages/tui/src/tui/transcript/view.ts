@@ -5,6 +5,7 @@ import { formatTuiDuration } from '../rendering/duration.js';
 import type { Component } from '../rendering/component.js';
 import { stripAnsi, truncateToWidth, visibleWidth } from '../rendering/text.js';
 import { sanitizeTerminalText } from '../rendering/terminal-text.js';
+import { wrapLiteralUserText } from './presentation/literal-text.js';
 import type { TranscriptAttachment, TranscriptCell } from './model.js';
 import { resolveTranscriptCellDisplayMode } from './model.js';
 import {
@@ -826,14 +827,16 @@ function sanitizeDelegationLabel(value: string | undefined, fallback: string): s
   return sanitized || fallback;
 }
 
+/**
+ * Render the user's own prompt as literal text inside the user band.
+ * See `wrapLiteralUserText` for why prompts never go through Markdown.
+ */
 function renderUserIntent(content: string, width: number): string[] {
   const normalizedWidth = Math.max(0, Math.floor(width));
   if (normalizedWidth === 0) return [];
   const verticalPadding = renderUserBandLine('', normalizedWidth);
   const bodyWidth = Math.max(1, normalizedWidth - 4);
-  const body = new Markdown(content, 0, 0, markdownTheme, {
-    color: (text) => chalk.hex(colors.text)(text),
-  }).render(bodyWidth);
+  const body = wrapLiteralUserText(content, bodyWidth);
   if (body.length === 0) {
     return [
       verticalPadding,
@@ -878,12 +881,9 @@ function renderPendingSteerMessage(cell: TranscriptCell, width: number): string[
   const heading = `${railIndent}${marker} ${label}`;
   const headingWidth = visibleWidth(heading);
   const contentWidth = Math.max(1, normalizedWidth - headingWidth - 3);
+  // Steer text is user input, so it stays literal like the main prompt row.
   const body = cell.content.trim()
-    ? new Markdown(cell.content, 0, 0, markdownTheme, {
-        color: (text) => chalk.hex(colors.text)(text),
-      })
-        .render(contentWidth)
-        .map(trimTerminalLineEnd)
+    ? wrapLiteralUserText(cell.content, contentWidth).map(trimTerminalLineEnd)
     : [];
   const attachments = (cell.attachments ?? []).map((attachment) => {
     const kind = transcriptAttachmentKind(attachment);

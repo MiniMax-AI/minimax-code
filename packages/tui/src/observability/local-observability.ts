@@ -32,6 +32,27 @@ export interface TuiEventStreamObservation {
   readonly errorKind?: string;
 }
 
+/**
+ * Run-ownership transitions the TUI cannot reconstruct from Runtime history alone.
+ * Session and Turn ids are opaque identifiers; no message content is recorded.
+ */
+export interface TuiRunLifecycleObservation {
+  readonly kind:
+    | 'runtime-turn-adopted'
+    | 'queue-turn-started'
+    | 'terminal-not-owned'
+    | 'stale-run-reconciled'
+    | 'stale-in-process-run';
+  readonly sessionId: string;
+  readonly turnId?: string;
+  readonly projectedTurnId?: string;
+  readonly inProcessTurnId?: string;
+  readonly reason?: string;
+  readonly runtimeState?: string;
+  readonly queuedCount?: number;
+  readonly stalledForMs?: number;
+}
+
 export interface TuiTerminalObservation {
   readonly terminalId: string;
   readonly platform: NodeJS.Platform;
@@ -138,6 +159,7 @@ export interface TuiObservability {
   recordStartup(observation: TuiStartupObservation): void;
   recordAccess(observation: TuiRuntimeAccessObservation): void;
   recordEventStream(observation: TuiEventStreamObservation): void;
+  recordRunLifecycle?(observation: TuiRunLifecycleObservation): void;
   recordTerminal(observation: TuiTerminalObservation): void;
   recordProcessStop(observation: TuiProcessStopObservation): void;
   recordTheme?(observation: TuiThemeObservation): void;
@@ -266,6 +288,10 @@ class LocalTuiObservability implements TuiObservability {
   recordEventStream(observation: TuiEventStreamObservation): void {
     if (observation.state === 'retry-scheduled') this.reconnects += 1;
     this.record('event.stream', observation);
+  }
+
+  recordRunLifecycle(observation: TuiRunLifecycleObservation): void {
+    this.record('run.lifecycle', observation);
   }
 
   recordTerminal(observation: TuiTerminalObservation): void {
