@@ -7,6 +7,7 @@ import {
 } from '../engine/public.js';
 import type { Component } from '../rendering/component.js';
 import { stripAnsi } from '../rendering/text.js';
+import { tuiChalk as chalk, tuiColors as colors } from '../theme/runtime.js';
 import { resolveTuiLayoutPolicy } from './layout-policy.js';
 
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
@@ -36,12 +37,35 @@ interface ActiveAwareComponent extends Component {
   isActive(): boolean;
 }
 
+/** A transcript whose leading rows can be marked final for native scrollback. */
+interface StableRowsAwareComponent extends Component {
+  getStableRowCount(): number;
+  /** Whether leading final rows were dropped; the welcome above them is then gone too. */
+  isTrimmed?(): boolean;
+  takeDiscardedRows?(): number;
+}
+
+/** A welcome that renders a static banner and a separate live notice above a conversation. */
+interface PreludeAwareComponent extends Component {
+  renderPrelude(width: number): string[];
+  renderPreludeNotice(width: number): string[];
+}
+
 interface MouseAwareComponent extends Component {
   handleMouse(event: TuiMouseEvent): boolean;
 }
 
 export class TuiChatLayout implements Component {
   private viewportLayoutKey: string | undefined;
+  /** Rows above the transcript in the latest regular conversation frame. */
+  private documentPreludeRows = 0;
+  private discardedRows = 0;
+
+  takeDiscardedRows(): number {
+    const rows = this.discardedRows;
+    this.discardedRows = 0;
+    return rows;
+  }
 
   getViewportLayoutKey(): string | undefined {
     return this.viewportLayoutKey;
@@ -275,6 +299,17 @@ export class TuiChatLayout implements Component {
       return this.fitDocumentFrame([welcome, ...tailEntries]);
     }
 
+    if (this.viewport() === 'document') {
+      return this.renderDocumentConversation(frame, viewportLayout, [
+        interaction,
+        goal,
+        followUp,
+        tasks,
+        activity,
+        composer,
+        status,
+      ]);
+    }
     const footerEntries =
       interactionActive && this.viewport() === 'fixed'
         ? [interaction, activity, composer, status]
@@ -295,6 +330,64 @@ export class TuiChatLayout implements Component {
     const prelude = joinWelcomeAndTranscript(welcome, transcript);
     const bodyEntries = [prelude, transcript.length > 0 ? [''] : []];
     return this.fitDocumentFrame([...bodyEntries, ...footerEntries]);
+  }
+
+  /**
+   * Regular mode writes rows that scroll off the screen into native terminal
+   * scrollback, which cannot be edited afterward. Only final rows may get there:
+   * the static welcome banner and transcript rows that later updates cannot
+   * change. Rows that may still change stay within the screen above the footer;
+   * when they do not fit, the screen shows their latest rows and a one-line
+   * notice, and the hidden rows enter history once they are final.
+   */
+  private renderDocumentConversation(
+    frame: ChatFrameLayout,
+    viewportLayout: readonly unknown[],
+    footerSections: readonly (readonly string[])[],
+  ): string[] {
+    const insetPart = (lines: readonly string[]) => insetLines(lines, frame.horizontalPadding);
+    const welcomePart = this.parts.welcome;
+    const welcome = isPreludeAwareComponent(welcomePart)
+      ? insetPart(welcomePart.renderPrelude(frame.contentWidth))
+      : insetPart(welcomePart.render(frame.contentWidth));
+    const accountNotice = isPreludeAwareComponent(welcomePart)
+      ? insetPart(welcomePart.renderPreludeNotice(frame.contentWidth))
+      : [];
+    const transcriptPart = this.parts.transcript;
+    const transcript = insetPart(transcriptPart.render(frame.contentWidth));
+    const stableAware = isStableRowsAwareComponent(transcriptPart);
+    const transcriptFinalRows = stableAware
+      ? Math.max(0, Math.min(transcript.length, transcriptPart.getStableRowCount()))
+      : transcript.length;
+    // Once the transcript drops final rows, the banner above them is long in history.
+    const trimmed = stableAware && transcriptPart.isTrimmed?.() === true;
+    const transcriptDiscarded = stableAware ? (transcriptPart.takeDiscardedRows?.() ?? 0) : 0;
+    if (transcriptDiscarded > 0) {
+      this.discardedRows += transcriptDiscarded + (trimmed ? this.documentPreludeRows : 0);
+    }
+    const shownWelcome = trimmed ? [] : welcome;
+    this.viewportLayoutKey = JSON.stringify([
+      ...viewportLayout,
+      shownWelcome.length,
+      accountNotice.length,
+    ]);
+    const prelude = joinWelcomeAndTranscript(shownWelcome, transcript);
+    this.documentPreludeRows = prelude.length - transcript.length;
+    const body = [...prelude, ...(transcript.length > 0 ? [''] : [])];
+    const finalRows = prelude.length - transcript.length + transcriptFinalRows;
+    const [interaction = [], ...afterInteraction] = footerSections;
+    const footer = [...interaction, ...accountNotice, ...afterInteraction.flat()];
+    const liveBudget = Math.max(0, (this.terminal.rows || 24) - footer.length);
+    let live = body.slice(finalRows);
+    if (live.length > liveBudget) {
+      const shown = Math.max(0, liveBudget - 1);
+      const hidden = live.length - shown;
+      live = [
+        ...(liveBudget > 0 ? insetPart([renderHeldRowsNotice(hidden)]) : []),
+        ...live.slice(live.length - shown),
+      ];
+    }
+    return [...body.slice(0, finalRows), ...live, ...footer];
   }
 
   private renderFullscreenBody(width: number): string[] {
@@ -536,6 +629,26 @@ function joinWelcomeAndTranscript(
     compactWelcome.pop();
   }
   return [...compactWelcome, ...(isVisuallyBlank(transcript[0] ?? '') ? [] : ['']), ...transcript];
+}
+
+function renderHeldRowsNotice(hiddenRows: number): string {
+  const noun = hiddenRows === 1 ? 'line' : 'lines';
+  return chalk.hex(colors.muted)(`↑ ${hiddenRows} more ${noun} above · still updating`);
+}
+
+function isStableRowsAwareComponent(
+  component: Component,
+): component is StableRowsAwareComponent {
+  return 'getStableRowCount' in component && typeof component.getStableRowCount === 'function';
+}
+
+function isPreludeAwareComponent(component: Component): component is PreludeAwareComponent {
+  return (
+    'renderPrelude' in component &&
+    typeof component.renderPrelude === 'function' &&
+    'renderPreludeNotice' in component &&
+    typeof component.renderPreludeNotice === 'function'
+  );
 }
 
 function isVisuallyBlank(line: string): boolean {

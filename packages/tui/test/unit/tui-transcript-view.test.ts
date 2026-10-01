@@ -2171,6 +2171,50 @@ describe('TranscriptView', () => {
     });
   });
 
+  it('only appends to an established projection in append-only mode', () => {
+    const tool = (index: number, status: 'running' | 'succeeded' = 'succeeded') =>
+      createTranscriptCell({
+        id: `tool-${index}`,
+        turnId: 'turn-1',
+        kind: 'tool',
+        status,
+        title: 'bash',
+        content: `step ${index}`,
+        createdAtMs: index + 2,
+      });
+    const cells = [
+      createTranscriptCell({
+        id: 'user-1',
+        turnId: 'turn-1',
+        kind: 'user',
+        status: 'pending',
+        content: 'Run every step',
+        createdAtMs: 1,
+      }),
+      ...Array.from({ length: 50 }, (_, index) => tool(index)),
+    ];
+    let appendOnly = true;
+    const view = new TranscriptView(() => cells, { maxCellsPerTurn: 40, appendOnly: () => appendOnly });
+    const plain = () => view.render(80).map((line) => stripVTControlCharacters(line));
+
+    const first = plain();
+    expect(first.join('\n')).toContain('11 earlier steps folded');
+    // The last finished tool step stays live until the next step fixes its connector.
+    expect(view.getStableRowCount()).toBeLessThan(first.length);
+
+    cells.push(...Array.from({ length: 30 }, (_, index) => tool(50 + index)));
+    cells.push(tool(80, 'running'));
+    const grown = plain();
+    const stable = view.getStableRowCount();
+    expect(grown.join('\n')).toContain('11 earlier steps folded');
+    expect(grown.slice(0, first.length - 1)).toEqual(first.slice(0, first.length - 1));
+    expect(grown.slice(stable).join('\n')).toContain('step 80');
+    expect(grown.slice(0, stable).join('\n')).toContain('step 79');
+
+    appendOnly = false;
+    expect(plain().join('\n')).toContain('42 earlier steps folded');
+  });
+
   it('renders Todo progress as a compact read-only checklist', () => {
     const view = new TranscriptView(() => [
       createTranscriptCell({

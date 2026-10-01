@@ -222,6 +222,20 @@ and image layout changes also retain the existing reconstruction behavior. A
 reconstruction clears earlier shell scrollback and can reset the host's scroll
 position; ordinary updates keep native scrolling and selection behavior.
 
+During a run, regular mode lets a row scroll into native history only when later
+updates cannot change it. These rows include finished steps, earlier blocks of a
+streaming reply, and the welcome banner. The welcome banner omits live account
+and runtime status in a conversation; account notices that need action appear
+above the Composer. A running tool, a block that is still streaming (such as a
+growing table or list), and the last tool step stay on screen until they are
+final. If they do not fit, the screen shows their latest rows under a
+`↑ N more lines above · still updating` line, and the full rows enter history in
+order once final. Long turns extend their visible steps instead of re-folding or
+dropping earlier steps, so ordinary progress never needs reconstruction. To keep
+long sessions responsive, MCode stops retaining final rows that are far above
+the screen; they remain in the terminal's own scrollback. A later reconstruction,
+such as after a resize, redraws only the retained recent rows.
+
 Rewind and Fork history-loading hints disappear as soon as their lists are ready.
 Returning from a cancelled operation must not leave a stale loading message in the
 Composer. Rewind displays its completed result after a successful operation.

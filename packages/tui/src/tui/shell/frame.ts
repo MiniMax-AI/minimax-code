@@ -35,7 +35,7 @@ export function renderSplitFrameBottom(width: number, leftWidth: number): string
 export function renderFrameHeader(left: string, right: string, width: number): string {
   const border = (value: string) => chalk.hex(colors.line)(value);
   const start = `${border('╭─')} ${left} `;
-  const end = ` ${right} ${border('─╮')}`;
+  const end = right ? ` ${right} ${border('─╮')}` : border('─╮');
   if (visibleWidth(start) + visibleWidth(end) <= width) {
     return `${start}${border(
       '─'.repeat(Math.max(0, width - visibleWidth(start) - visibleWidth(end))),

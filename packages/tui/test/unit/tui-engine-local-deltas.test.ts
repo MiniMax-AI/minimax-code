@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -937,5 +938,106 @@ describe('MCode Pi Engine local deltas', () => {
     };
     editor.submit();
     expect(submitted).toBe(pasted);
+  });
+});
+
+describe('regular-mode retained document', () => {
+  it.each([
+    ['too few', 3],
+    ['too many', 7],
+  ])('reconstructs instead of rebasing when %s rows are reported', async (_label, reported) => {
+    const terminal = new RecordingVirtualTerminal(40, 8);
+    const tui = new TuiMainScreen(terminal);
+    let lines = Array.from({ length: 30 }, (_, index) => `row ${index}`);
+    let pending = 0;
+    tui.addChild({
+      render: () => [...lines],
+      invalidate: () => undefined,
+      takeDiscardedRows: () => {
+        const rows = pending;
+        pending = 0;
+        return rows;
+      },
+    });
+    tui.renderNow();
+    await terminal.flush();
+    // Drop five rows but report a different count.
+    lines = [...lines.slice(5), 'row 30'];
+    pending = reported;
+    terminal.takeWrites();
+    tui.renderNow();
+    await terminal.flush();
+    const history = terminal.getScrollBuffer().map((line) => line.trimEnd()).filter(Boolean);
+    expect(history.slice(-lines.length)).toEqual(lines);
+    expect(new Set(history).size).toBe(history.length);
+  });
+
+  it('drops final rows already in native history without rewriting it', async () => {
+    const terminal = new RecordingVirtualTerminal(60, 12);
+    const tui = new TuiMainScreen(terminal);
+    const cells: ReturnType<typeof createTranscriptCell>[] = [];
+    const transcript = new TranscriptView(() => cells, {
+      appendOnly: () => true,
+      retainedRows: { high: 60, low: 30 },
+    });
+    const welcome = new MutableLines();
+    welcome.lines = ['BANNER'];
+    const empty = new MutableLines();
+    const composer = new MutableLines();
+    composer.lines = [`composer${CURSOR_MARKER}`];
+    const status = new MutableLines();
+    status.lines = ['status'];
+    const layout = new TuiChatLayout(terminal, {
+      surface: () => 'conversation',
+      welcome,
+      transcript,
+      interaction: empty,
+      activity: empty,
+      followUp: empty,
+      composer,
+      status,
+    });
+    tui.addChild(layout);
+    const addTurn = (turn: number) => {
+      cells.push(
+        createTranscriptCell({
+          id: `user-${turn}`,
+          turnId: `turn-${turn}`,
+          kind: 'user',
+          status: 'succeeded',
+          content: `question ${turn}`,
+          createdAtMs: turn * 2,
+        }),
+        createTranscriptCell({
+          id: `answer-${turn}`,
+          turnId: `turn-${turn}`,
+          kind: 'assistant',
+          status: 'succeeded',
+          content: `answer ${turn} first\n\nanswer ${turn} second`,
+          createdAtMs: turn * 2 + 1,
+        }),
+      );
+    };
+    for (let turn = 0; turn < 60; turn += 1) {
+      addTurn(turn);
+      tui.renderNow();
+      await terminal.flush();
+    }
+
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(transcript.isTrimmed()).toBe(true);
+    expect(layout.render(60).length).toBeLessThan(80);
+    const plain = (lines: readonly string[]) =>
+      lines.map((line) => line.trim()).filter((line) => line.length > 0);
+    const history = plain(terminal.getScrollBuffer());
+    const fullTranscript = new TranscriptView(() => cells, {
+      maxInitialTurns: 1_000,
+      maxProjectedTurns: 1_000,
+    })
+      .render(58)
+      .map((line) => stripVTControlCharacters(line));
+    expect(history).toEqual(
+      plain(['BANNER', ...fullTranscript, 'composer', 'status']),
+    );
   });
 });

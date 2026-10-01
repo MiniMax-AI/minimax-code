@@ -111,7 +111,14 @@ export class TuiLiveTurnProjection {
     const turnCells = this.transcript.snapshot().filter((cell) => cell.turnId === turnId);
     for (const cell of turnCells) {
       if (cell.status !== 'pending' && cell.status !== 'running') continue;
-      this.transcript.upsert({ id: cell.id, status, updatedAtMs: timestamp });
+      // A submitted prompt was delivered even when its run stops. Its cancelled
+      // marker means "returned to the Composer" and is set only by that restore
+      // path; marking it here would rewrite a prompt already in native history.
+      const cellStatus =
+        status === 'cancelled' && cell.kind === 'user' && cell.userPresentation !== 'pending-steer'
+          ? 'succeeded'
+          : status;
+      this.transcript.upsert({ id: cell.id, status: cellStatus, updatedAtMs: timestamp });
     }
     const hasAssistant = turnCells.some(
       (cell) => cell.kind === 'assistant' || cell.kind === 'assistant-preamble',

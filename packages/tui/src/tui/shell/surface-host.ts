@@ -225,6 +225,10 @@ export class TuiSurfaceHost implements Component {
     return key === undefined ? undefined : JSON.stringify([this.activeFeature()?.screen.id, key]);
   }
 
+  takeDiscardedRows(): number {
+    return this.chatComponent.takeDiscardedRows?.() ?? 0;
+  }
+
   render(width: number): string[] {
     const active = this.activeFeature();
     if (!active || this.currentMode() === 'regular') return this.chatComponent.render(width);

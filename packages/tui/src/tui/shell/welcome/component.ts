@@ -40,22 +40,50 @@ export class TuiWelcome implements Component {
   }
 
   renderViewport(width: number, height: number): string[] {
+    return this.renderFrame(width, height, false);
+  }
+
+  /**
+   * Static banner above a conversation. In regular mode it becomes native
+   * scrollback, so it omits live account and runtime status; the conversation
+   * footer shows those through renderPreludeNotice().
+   */
+  renderPrelude(width: number): string[] {
+    return this.renderFrame(width, Number.POSITIVE_INFINITY, true);
+  }
+
+  /** Live account notice for the conversation footer; empty when nothing needs action. */
+  renderPreludeNotice(width: number): string[] {
+    const safeWidth = normalizeWidth(width);
+    const message = resolveWelcomeAccountNotice(this.state);
+    if (!message || safeWidth === 0) return [];
+    return [fitLine(`  ${renderWelcomeAccountNotice(message)}`, safeWidth)];
+  }
+
+  private renderFrame(width: number, height: number, staticBanner: boolean): string[] {
     const safeWidth = normalizeWidth(width);
     if (safeWidth === 0) return [];
     if (safeWidth < 4) return [fitLine('M', safeWidth)];
 
     const policy = resolveTuiLayoutPolicy(safeWidth);
+    const options = { keybindings: this.keybindings, content: this.content, staticBanner };
     let frame =
       policy.welcome === 'compact'
-        ? renderCompactWelcome(this.state, safeWidth, this.keybindings, this.content)
+        ? renderCompactWelcome(this.state, safeWidth, options)
         : policy.welcome === 'stacked'
-          ? renderStackedWelcome(this.state, safeWidth, this.keybindings, this.content)
-          : renderWideWelcome(this.state, safeWidth, this.keybindings, this.content);
+          ? renderStackedWelcome(this.state, safeWidth, options)
+          : renderWideWelcome(this.state, safeWidth, options);
     if (frame.length + 2 > height && policy.welcome !== 'compact') {
-      frame = renderCompactWelcome(this.state, safeWidth, this.keybindings, this.content);
+      frame = renderCompactWelcome(this.state, safeWidth, options);
     }
     return fitWelcomeHeight(['', ...frame, ''], height);
   }
+}
+
+interface WelcomeRenderOptions {
+  readonly keybindings: TuiKeybindingRegistry | undefined;
+  readonly content?: TuiWelcomeContent;
+  readonly staticBanner: boolean;
 }
 
 function fitWelcomeHeight(lines: string[], height: number): string[] {
@@ -73,8 +101,7 @@ function fitWelcomeHeight(lines: string[], height: number): string[] {
 function renderWideWelcome(
   state: TuiShellState,
   width: number,
-  keybindings: TuiKeybindingRegistry | undefined,
-  content?: TuiWelcomeContent,
+  { keybindings, content, staticBanner }: WelcomeRenderOptions,
 ): string[] {
   const tips = resolveWelcomeItems(content?.tips, MINIMAX_CODE_WELCOME_DESIGN.wide.tips, 3);
   const news = resolveWelcomeItems(
@@ -85,8 +112,8 @@ function renderWideWelcome(
   return [
     ...renderTuiWelcomeHero(width),
     '',
-    renderWelcomeHeader(state, width),
-    ...renderWelcomeAccountNoticeRows(state, width),
+    renderWelcomeHeader(state, width, staticBanner),
+    ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameRow(renderSectionTitle(MINIMAX_CODE_WELCOME_DESIGN.sectionTitles.tips), width),
     ...tips.map((text) =>
       renderFrameRow(renderWelcomeBullet(resolveWelcomeCopy(text, keybindings)), width),
@@ -103,8 +130,7 @@ function renderWideWelcome(
 function renderStackedWelcome(
   state: TuiShellState,
   width: number,
-  keybindings: TuiKeybindingRegistry | undefined,
-  content?: TuiWelcomeContent,
+  { keybindings, content, staticBanner }: WelcomeRenderOptions,
 ): string[] {
   const tips = resolveWelcomeItems(content?.tips, MINIMAX_CODE_WELCOME_DESIGN.stacked.tips, 2);
   const news = resolveWelcomeItems(
@@ -115,8 +141,8 @@ function renderStackedWelcome(
   return [
     ...renderTuiWelcomeHero(width),
     '',
-    renderWelcomeHeader(state, width),
-    ...renderWelcomeAccountNoticeRows(state, width),
+    renderWelcomeHeader(state, width, staticBanner),
+    ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameDivider(width),
     renderFrameRow(renderSectionTitle(MINIMAX_CODE_WELCOME_DESIGN.sectionTitles.tips), width),
     ...tips.map((text) =>
@@ -135,8 +161,7 @@ function renderStackedWelcome(
 function renderCompactWelcome(
   state: TuiShellState,
   width: number,
-  keybindings: TuiKeybindingRegistry | undefined,
-  content?: TuiWelcomeContent,
+  { keybindings, content, staticBanner }: WelcomeRenderOptions,
 ): string[] {
   const tips = resolveWelcomeItems(content?.tips, MINIMAX_CODE_WELCOME_DESIGN.compact.tips, 2);
   const news = resolveWelcomeItems(
@@ -149,10 +174,10 @@ function renderCompactWelcome(
     '',
     renderFrameHeader(
       `${chalk.bold.hex(colors.brand)('MCode')} ${chalk.hex(colors.muted)(`v${state.version}`)}`,
-      renderActivity(state),
+      staticBanner ? '' : renderActivity(state),
       width,
     ),
-    ...renderWelcomeAccountNoticeRows(state, width),
+    ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameRow(renderSectionTitle('Tips'), width),
     ...tips.map((text) =>
       renderFrameRow(chalk.hex(colors.muted)(resolveWelcomeCopy(text, keybindings)), width),
@@ -163,10 +188,10 @@ function renderCompactWelcome(
   ];
 }
 
-function renderWelcomeHeader(state: TuiShellState, width: number): string {
+function renderWelcomeHeader(state: TuiShellState, width: number, staticBanner: boolean): string {
   return renderFrameHeader(
     chalk.hex(colors.muted)(`v${state.version}`),
-    renderActivity(state),
+    staticBanner ? '' : renderActivity(state),
     width,
   );
 }
@@ -194,18 +219,24 @@ function resolveWelcomeCopy(value: string, keybindings: TuiKeybindingRegistry | 
   );
 }
 
+function resolveWelcomeAccountNotice(state: TuiShellState): string | undefined {
+  return state.accountStatus === 'Sign in with /login'
+    ? state.accountStatus
+    : state.accountStatus === 'Connected with warnings'
+      ? 'Check /provider or /status for details.'
+      : state.accountStatus === 'Account unavailable'
+        ? 'Check /status for details.'
+        : undefined;
+}
+
+function renderWelcomeAccountNotice(message: string): string {
+  return `${chalk.bold.hex(colors.warning)('○')} ${chalk.bold.hex(colors.warning)(message)}`;
+}
+
 function renderWelcomeAccountNoticeRows(state: TuiShellState, width: number): string[] {
-  const message =
-    state.accountStatus === 'Sign in with /login'
-      ? state.accountStatus
-      : state.accountStatus === 'Connected with warnings'
-        ? 'Check /provider or /status for details.'
-        : state.accountStatus === 'Account unavailable'
-          ? 'Check /status for details.'
-          : undefined;
+  const message = resolveWelcomeAccountNotice(state);
   if (!message) return [];
-  const notice = `${chalk.bold.hex(colors.warning)('○')} ${chalk.bold.hex(colors.warning)(message)}`;
-  return [renderFrameRow(notice, width)];
+  return [renderFrameRow(renderWelcomeAccountNotice(message), width)];
 }
 
 function renderActivity(state: TuiShellState): string {

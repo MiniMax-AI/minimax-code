@@ -122,6 +122,7 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Minimal difference: when a shorter document would move the viewport origin backwards, or changed visible text is already in scrollback, clear and replay the complete current projection, except for addressable text-only shrink covered by L038. Compare changed historical rows without terminal sequences so style-only updates preserve scrollback. Other updates retain differential rendering and genuine resize retains the existing delayed history replay.
 - Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement. L038 keeps freed visible rows temporarily blank instead of reconstructing unchanged history.
 - Evidence: local-delta tests assert every visible row and the complete history, while real Tasks and feature lifecycle tests cover short/long content, background growth, paging, resize, nested panels and return to chat. Queue lifecycle tests replay bracketed CJK paste, Alt+Enter, auto-drain, and history refresh through Ghostty; equal-height and growing historical edits are also covered by xterm. Virtual terminals do not establish native Windows Terminal or iTerm2 touchpad acceptance.
+- Product boundary: the regular chat layout keeps rows that may still change out of native history (see L045), so this reconstruction remains for resize and for content that changes after being reported final.
 - Removal condition: the selected Pi baseline provides equivalent complete viewport and unique-history behavior.
 
 ## L036: Unframed multiline paste chunks
@@ -193,3 +194,18 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Evidence: terminal-output regressions cover held/partial writes, input dispatch, control ordering, transient and permanent failures, frame coalescing, final transcript preservation, keyboard input draining and editor handoff/shutdown races; application tests cover shutdown/suspend drains. A local macOS PTY with 10,000 synthetic history rows and a paused consumer no longer blocks the input loop while reconstructing history.
 - Boundary: history reconstruction still transmits the complete ordered document. A stalled connection can delay visible output; it no longer synchronously stalls the JavaScript event loop. Windows and non-TTY output retain their existing writer. Native remote SSH and native Windows acceptance remain separate.
 - Removal condition: the upstream terminal writer provides ordered asynchronous POSIX TTY writes and its render scheduler observes output backpressure.
+
+## L045: Report committed Markdown lines
+
+- Product contract: in Regular mode a streaming reply enters native scrollback only through rows that appended text cannot change, so a table, list or other block that is still growing never rewrites history.
+- Minimal difference: `components/markdown.ts` exposes `getStableLineCount()`, the number of leading lines from the latest render that come from the blocks already committed by the L026 streaming cache. Rendering output is unchanged.
+- Evidence: `tui-app.test.ts` regular-mode native history cases cover widening tables, lists that become loose, long prose that streams into history during a turn, and exact history after the run.
+- Removal condition: the selected Pi baseline exposes an equivalent committed-prefix contract for streaming Markdown.
+
+## L046: Discard final rows already in native history
+
+- Product contract: a long Regular-mode session keeps frame cost bounded without rewriting native scrollback.
+- Minimal difference: `Component.takeDiscardedRows()` lets the root report leading rows it dropped since the last frame. When those rows are all above the previous viewport, `tui-main-screen.ts` drops them from its retained lines and rebases its viewport and cursor rows before diffing. Other cases keep the existing differential and reconstruction paths.
+- Product boundary: the MCode Transcript only drops whole units of final rows far above the screen, so the remaining output is an exact suffix of the previous output. A later reconstruction, such as a resize, replays only the retained rows.
+- Evidence: `tui-engine-local-deltas.test.ts` retained-document cases assert no scrollback erase and exact native history after trimming (failing without the rebase), and exact history without stale rows when a root reports too few or too many discarded rows.
+- Removal condition: the selected Pi baseline supports discarding a committed document prefix.

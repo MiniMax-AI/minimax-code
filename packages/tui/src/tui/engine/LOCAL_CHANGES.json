@@ -42,8 +42,8 @@
     },
     {
       "path": "components/markdown.ts",
-      "currentSha256": "59eaf8bc4ef1c3a900892248fc3ab9a1483d18d84e63a888711c289f2bdf6e8d",
-      "changeIds": ["L005", "L007", "L013", "L029", "L026"],
+      "currentSha256": "1d32aa3553e99178db5a96130f9a18c1add235d5d70100a8cd2d47c4189ddd1b",
+      "changeIds": ["L005", "L007", "L013", "L029", "L026", "L045"],
       "reason": "Keep strict TypeScript fixes and product Markdown hooks, plus Pi's post-baseline wrapped-table style restoration. 链接标签使用独立样式上下文，防止外层正文或标题颜色覆盖链接颜色。 稳定 Markdown 块缓存",
       "behaviorImpact": "MCode keeps its compact code presentation without reimplementing Pi Markdown or leaking wrapped link styles into table borders and adjacent cells. 链接保留嵌套强调与行内代码，并在结束后恢复外层样式。 保留两个尾部块并对引用回退全文。"
     },
@@ -163,7 +163,7 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "f57eab79552763ae29bc39e2ced4c7905eb44fa163f538ba3ff6000136e0f493",
+      "currentSha256": "f38671720867d2baa633a0e8ca826bd36474edefc281efe6b6e6a2f81e7d3ddb",
       "changeIds": [
         "L005",
         "L017",
@@ -174,7 +174,8 @@
         "L038",
         "L039",
         "L041",
-        "L044"
+        "L044",
+        "L046"
       ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
       "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
@@ -182,7 +183,7 @@
     },
     {
       "path": "tui.ts",
-      "currentSha256": "6bfb2095855d00532bfc96a4be57e0c974e0d8d06137bbba1e865986483e7005",
+      "currentSha256": "a661a3e326e1f10c9567b99c23fec5269849856a54417439597801f75ec077f8",
       "changeIds": [
         "L005",
         "L015",
@@ -192,7 +193,8 @@
         "L031",
         "L040",
         "L041",
-        "L044"
+        "L044",
+        "L046"
       ],
       "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
       "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."

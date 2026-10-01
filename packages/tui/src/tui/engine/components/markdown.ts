@@ -273,6 +273,15 @@ export class Markdown implements Component {
 		this.cachedLines = undefined;
 	}
 
+	/**
+	 * Number of leading lines from the latest render() that appending text cannot
+	 * change. They come from blocks the streaming cache has already committed.
+	 */
+	getStableLineCount(): number {
+		if (!this.cachedLines || this.cachedLines.length === 0) return 0;
+		return Math.min(this.cachedLines.length, this.paddingY + this.stableLines.length);
+	}
+
 	invalidate(): void {
 		this.stableSource = "";
 		this.stableLines = [];

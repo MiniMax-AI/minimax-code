@@ -35,6 +35,15 @@ export interface Component {
 	getViewportLayoutKey?(): string | undefined;
 
 	/**
+	 * Regular mode only: report and reset how many leading rows the component dropped
+	 * since the renderer last asked. Each dropped row must equal the leading row of the
+	 * previous output and already be in native scrollback. The renderer rebases its state
+	 * instead of rewriting history, which bounds the retained document. If the remaining
+	 * history does not line up, its ordinary history comparison reconstructs the session.
+	 */
+	takeDiscardedRows?(): number;
+
+	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;

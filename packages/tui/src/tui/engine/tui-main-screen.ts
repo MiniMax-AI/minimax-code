@@ -307,6 +307,26 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Render all components to get new lines. Strip OSC 133 zone sentinels before the
 		// differential compare so they never enter previousLines or any terminal write.
 		let newLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+		// A root may drop leading rows that already sit in native scrollback. Rebase the
+		// retained state so later diffs address the shorter document without a replay.
+		const discardedRows = this.children.length === 1
+			? Math.max(0, Math.floor(this.children[0]?.takeDiscardedRows?.() ?? 0))
+			: 0;
+		// A miscount needs no separate check: the history comparison below sees the
+		// misaligned rows and reconstructs the session instead of splicing them.
+		if (
+			discardedRows > 0 && discardedRows <= prevViewportTop &&
+			!widthChanged && !heightChanged && !this.historyReplayPending
+		) {
+			this.previousLines = this.previousLines.slice(discardedRows);
+			this.previousViewportTop -= discardedRows;
+			prevViewportTop -= discardedRows;
+			viewportTop -= discardedRows;
+			this.cursorRow = Math.max(0, this.cursorRow - discardedRows);
+			this.hardwareCursorRow -= discardedRows;
+			hardwareCursorRow -= discardedRows;
+			this.maxLinesRendered = Math.max(0, this.maxLinesRendered - discardedRows);
+		}
 		const viewportLayouts = this.children.map((component) => ({
 			component,
 			key: component.getViewportLayoutKey?.(),

@@ -33,6 +33,12 @@ export class TranscriptProjectionWindow {
   private anchorCellId: string | undefined;
   private hiddenTurns = 0;
   private windowRolls = 0;
+  /**
+   * Append-only projections fix each turn's fold when the turn is first seen.
+   * Native terminal history cannot be rewritten, so a growing turn must only
+   * extend its visible tail instead of moving the fold boundary.
+   */
+  private readonly appendOnlyFolds = new Map<string, number>();
 
   constructor(
     private readonly maxInitialTurns = 30,
@@ -41,7 +47,17 @@ export class TranscriptProjectionWindow {
     private readonly maxProjectedCells = 1_000,
   ) {}
 
-  project(input: readonly TranscriptCell[] | TranscriptProjectionSource): TranscriptProjection {
+  /**
+   * Project the source into the cells to render. With `appendOnly`, an established
+   * window never rolls, drops earlier turns, or re-folds a turn; later cells only
+   * extend the projection. Regular terminal mode needs this because rows already
+   * written to native scrollback cannot be changed in place.
+   */
+  project(
+    input: readonly TranscriptCell[] | TranscriptProjectionSource,
+    options: { readonly appendOnly?: boolean } = {},
+  ): TranscriptProjection {
+    const appendOnly = options.appendOnly === true;
     const source = Array.isArray(input)
       ? new ArrayTranscriptProjectionSource(input)
       : (input as TranscriptProjectionSource);
@@ -57,6 +73,10 @@ export class TranscriptProjectionWindow {
     }
     if (this.anchorCellId) {
       const anchor = source.locateCell(this.anchorCellId);
+      if (anchor && appendOnly) {
+        this.hiddenTurns = anchor.turnIndex;
+        return this.projectTurns(source, anchor.turnIndex, true);
+      }
       if (anchor) {
         const projectedTurns = source.turnCount - anchor.turnIndex;
         const projectedTurnLimit = Math.max(
@@ -68,39 +88,53 @@ export class TranscriptProjectionWindow {
           return this.projectTurns(source, anchor.turnIndex);
         }
         this.windowRolls += 1;
-        return this.anchorTrailingWindow(source);
+        return this.anchorTrailingWindow(source, appendOnly);
       }
       this.anchorCellId = undefined;
       this.hiddenTurns = 0;
     }
 
-    return this.anchorTrailingWindow(source);
+    return this.anchorTrailingWindow(source, appendOnly);
   }
 
   reset(): void {
     this.anchorCellId = undefined;
     this.hiddenTurns = 0;
     this.windowRolls = 0;
+    this.appendOnlyFolds.clear();
   }
 
-  private anchorTrailingWindow(source: TranscriptProjectionSource): TranscriptProjection {
+  private anchorTrailingWindow(
+    source: TranscriptProjectionSource,
+    appendOnly: boolean,
+  ): TranscriptProjection {
+    // A new window starts a new fold baseline.
+    this.appendOnlyFolds.clear();
     const retainedTurns = normalizeLimit(this.maxInitialTurns);
     const firstTurn = Math.max(0, source.turnCount - retainedTurns);
     const range = source.turnRange(firstTurn);
     this.anchorCellId = range ? source.cellAt(range.start)?.id : undefined;
     this.hiddenTurns = firstTurn;
-    return this.projectTurns(source, firstTurn);
+    return this.projectTurns(source, firstTurn, appendOnly, true);
   }
 
   private projectTurns(
     source: TranscriptProjectionSource,
     firstTurn: number,
+    appendOnly = false,
+    establishing = false,
   ): TranscriptProjection {
     const limit = Math.max(2, normalizeLimit(this.maxCellsPerTurn));
     const cellBudget = Math.max(limit + 1, normalizeLimit(this.maxProjectedCells));
-    let effectiveFirstTurn = source.turnCount;
+    // An established append-only window keeps every turn it already shows.
+    const applyBudget = !appendOnly || establishing;
+    let effectiveFirstTurn = applyBudget ? source.turnCount : firstTurn;
     let projectedCellCount = 0;
-    for (let turnIndex = source.turnCount - 1; turnIndex >= firstTurn; turnIndex -= 1) {
+    for (
+      let turnIndex = source.turnCount - 1;
+      applyBudget && turnIndex >= firstTurn;
+      turnIndex -= 1
+    ) {
       const range = source.turnRange(turnIndex);
       if (!range) continue;
       const turnLength = Math.max(0, range.end - range.start);
@@ -125,7 +159,14 @@ export class TranscriptProjectionWindow {
       const first = source.cellAt(range.start);
       visitedCells += 1;
       if (!first) continue;
-      if (turnLength <= limit) {
+      const turn = first.turnId?.trim() || `cell:${first.id}`;
+      let hidden = turnLength <= limit ? 0 : turnLength - limit;
+      if (appendOnly) {
+        const fixed = this.appendOnlyFolds.get(turn);
+        if (fixed === undefined) this.appendOnlyFolds.set(turn, hidden);
+        else hidden = Math.min(fixed, Math.max(0, turnLength - 1));
+      }
+      if (hidden === 0) {
         projected.push(first);
         for (let index = range.start + 1; index < range.end; index += 1) {
           const cell = source.cellAt(index);
@@ -135,15 +176,12 @@ export class TranscriptProjectionWindow {
         continue;
       }
 
-      const tailCount = limit - 1;
-      const hidden = turnLength - limit;
       const tail: TranscriptCell[] = [];
-      for (let index = range.end - tailCount; index < range.end; index += 1) {
+      for (let index = range.start + 1 + hidden; index < range.end; index += 1) {
         const cell = source.cellAt(index);
         visitedCells += 1;
         if (cell) tail.push(cell);
       }
-      const turn = first.turnId?.trim() || `cell:${first.id}`;
       projected.push(
         first,
         {

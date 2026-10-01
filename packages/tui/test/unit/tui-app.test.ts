@@ -7,6 +7,7 @@ import {
   type TerminalCapabilities,
 } from "../../src/tui/platform/terminal-capabilities.js";
 import {
+  stripTerminalSequences,
   TuiAltScreen,
   VStack,
   type Terminal,
@@ -15231,5 +15232,302 @@ describe("interactive model argument contract", () => {
         true,
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("regular-mode native history during a live run", () => {
+  class HistoryTerminal extends VirtualTerminal {
+    output = "";
+    override write(data: string): void {
+      this.output += data;
+      super.write(data);
+    }
+  }
+
+  const SCROLLBACK_ERASE = "\x1b[3J";
+  const toolCall = (
+    id: string,
+    status: string,
+    output?: string,
+  ): NonNullable<Extract<TuiStreamEvent, { type: "delta" }>["toolCalls"]>[number] => ({
+    id,
+    name: "bash",
+    status,
+    input: { command: `run ${id}` },
+    ...(output === undefined ? {} : { output }),
+  });
+  const delta = (
+    messageId: string,
+    fields: Omit<Extract<TuiStreamEvent, { type: "delta" }>, "type">,
+  ): TuiStreamEvent => ({ type: "delta", messageId, role: "assistant", ...fields });
+  const paragraphs = (prefix: string, count: number) =>
+    Array.from({ length: count }, (_, index) => `${prefix} ${index}`).join("\n\n");
+  const nonBlank = (lines: readonly string[]) =>
+    lines.map((line) => stripTerminalSequences(line).trimEnd()).filter((line) => line.trim().length > 0);
+
+  async function startScriptedRun(columns: number, rows: number) {
+    const terminal = new HistoryTerminal(columns, rows);
+    const runtime = createRuntime();
+    const queue: TuiStreamEvent[] = [];
+    let wake: (() => void) | undefined;
+    let finished = false;
+    vi.mocked(runtime.sendMessage).mockImplementation(async function* () {
+      for (;;) {
+        while (queue.length > 0) yield queue.shift()!;
+        if (finished) return;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+    });
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+      tuiMode: "regular",
+    });
+    app.start();
+    await app.ready;
+    app.tui.renderNow();
+    await terminal.flush();
+    const settle = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      app.tui.renderNow();
+      await terminal.flush();
+    };
+    return {
+      app,
+      terminal,
+      runtime,
+      settle,
+      async submit(prompt: string) {
+        const calls = vi.mocked(runtime.sendMessage).mock.calls.length;
+        finished = false;
+        app.editor.setText(prompt);
+        terminal.sendInput("\r");
+        await vi.waitFor(() =>
+          expect(runtime.sendMessage).toHaveBeenCalledTimes(calls + 1),
+        );
+        await settle();
+      },
+      async push(...events: TuiStreamEvent[]) {
+        queue.push(...events);
+        wake?.();
+        await settle();
+      },
+      async finish(...events: TuiStreamEvent[]) {
+        queue.push(...events, { type: "done" });
+        finished = true;
+        wake?.();
+        await settle();
+        await settle();
+      },
+      /** Native history plus screen must equal the logical document exactly once. */
+      expectHistoryMatchesDocument() {
+        expect(nonBlank(terminal.getScrollBuffer())).toEqual(
+          nonBlank(app.tui.render(terminal.columns)),
+        );
+      },
+    };
+  }
+
+  it("keeps history when a parallel tool finishes after later tools pushed it out", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("check everything");
+      run.terminal.output = "";
+      const ids = Array.from({ length: 20 }, (_, index) => `call-${index}`);
+      await run.push(
+        delta("m1", {
+          content: "Running checks in parallel.",
+          toolCalls: ids.map((id) => toolCall(id, "running")),
+        }),
+      );
+      await run.push(
+        delta("m1", {
+          toolCalls: ids.map((id, index) =>
+            index === 0 ? toolCall(id, "running") : toolCall(id, "completed", `ok ${id}\nline 2\nline 3`),
+          ),
+        }),
+      );
+      // The running first tool keeps later rows out of history; the screen shows the latest rows.
+      const viewport = nonBlank(run.terminal.getViewport());
+      expect(viewport.some((line) => /↑ \d+ more lines above · still updating/u.test(line))).toBe(true);
+      expect(nonBlank(run.terminal.getScrollBuffer()).filter((line) => line.includes("still updating"))).toHaveLength(1);
+      await run.push(
+        delta("m1", {
+          toolCalls: ids.map((id) => toolCall(id, "completed", `ok ${id}\nline 2\nline 3`)),
+        }),
+      );
+      await run.finish(delta("m2", { content: "All checks passed." }));
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
+  });
+
+  it("keeps history when a streamed table widens after rows scrolled out", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("make a table");
+      run.terminal.output = "";
+      const rows = Array.from({ length: 30 }, (_, index) => `| r${index} | x |`).join("\n");
+      await run.push(delta("m1", { content: `Table:\n\n| a | b |\n|---|---|\n${rows}` }));
+      await run.push(delta("m1", { content: `\n| wide | ${"W".repeat(50)} |` }));
+      await run.finish(delta("m1", { content: "\n\nDone." }));
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
+  });
+
+  it("keeps history when a list becomes loose after items scrolled out", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("list things");
+      run.terminal.output = "";
+      const items = Array.from({ length: 30 }, (_, index) => `- item ${index}`).join("\n");
+      await run.push(delta("m1", { content: `Items:\n\n${items}` }));
+      await run.push(delta("m1", { content: "\n\n- spaced item" }));
+      await run.finish(delta("m1", { content: "\n\nDone." }));
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
+  });
+
+  it("keeps history when a turn grows past the per-turn projection fold", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("long task");
+      run.terminal.output = "";
+      for (let batch = 0; batch < 14; batch += 1) {
+        const ids = Array.from({ length: 10 }, (_, index) => `call-${batch}-${index}`);
+        await run.push(
+          delta(`m${batch}`, { toolCalls: ids.map((id) => toolCall(id, "completed", "ok")) }),
+        );
+      }
+      await run.finish(delta("final", { content: "Finished." }));
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
+  });
+
+  it("keeps history when a failed turn and a recovered turn change the status", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("first");
+      await run.finish(delta("m1", { content: paragraphs("ANSWER", 40) }));
+      run.terminal.output = "";
+      await run.submit("second");
+      await run.finish({ type: "error", message: "provider unavailable" });
+      await run.submit("third");
+      await run.finish(delta("m3", { content: "Recovered." }));
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
+  });
+
+  it("commits finished steps of a long turn to history while the turn runs", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("work through steps");
+      run.terminal.output = "";
+      await run.push(delta("m0", { content: "I will work through the steps." }));
+      for (let step = 0; step < 12; step += 1) {
+        await run.push(
+          delta(`m${step + 1}`, {
+            content: `Step ${step} notes.`,
+            toolCalls: [toolCall(`call-${step}`, "running")],
+          }),
+        );
+        await run.push(
+          delta(`m${step + 1}`, {
+            toolCalls: [toolCall(`call-${step}`, "completed", `done ${step}`)],
+          }),
+        );
+      }
+      const history = nonBlank(run.terminal.getScrollBuffer());
+      const visible = new Set(nonBlank(run.terminal.getViewport()));
+      const early = history.filter(
+        (line) => line.includes("Step 0 notes.") && !visible.has(line),
+      );
+      expect(early).toHaveLength(1);
+      expect(history.some((line) => line.includes("still updating"))).toBe(false);
+      await run.finish(delta("final", { content: "All steps done." }));
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
+  });
+
+  it("keeps history when a long run is stopped", async () => {
+    const terminal = new HistoryTerminal(80, 16);
+    const runtime = createRuntime();
+    vi.mocked(runtime.abortSession).mockResolvedValue(true);
+    vi.mocked(runtime.sendMessage).mockImplementation(async function* (
+      _request: SendMessageReq,
+      signal?: AbortSignal,
+    ) {
+      yield delta("m1", { content: paragraphs("PARTIAL", 30) });
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      yield { type: "done" };
+    });
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+      tuiMode: "regular",
+    });
+    app.start();
+    try {
+      await app.ready;
+      app.editor.setText("long task");
+      terminal.sendInput("\r");
+      await vi.waitFor(async () => {
+        app.tui.renderNow();
+        await terminal.flush();
+        expect(terminal.getScrollBuffer().join("\n")).toContain("PARTIAL 29");
+      });
+      terminal.output = "";
+      terminal.sendInput("\x1b");
+      await vi.waitFor(() => expect(app.controller.snapshot().status).not.toBe("running"));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      app.tui.renderNow();
+      await terminal.flush();
+      expect(terminal.output).not.toContain(SCROLLBACK_ERASE);
+      expect(nonBlank(terminal.getScrollBuffer())).toEqual(nonBlank(app.tui.render(80)));
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it("streams long prose into history without holding it back", async () => {
+    const run = await startScriptedRun(80, 16);
+    try {
+      await run.submit("write a lot");
+      run.terminal.output = "";
+      await run.push(delta("m1", { content: paragraphs("PROSE", 20) }));
+      const midRun = nonBlank(run.terminal.getScrollBuffer());
+      expect(midRun.some((line) => line.includes("PROSE 0"))).toBe(true);
+      await run.push(delta("m1", { content: `\n\n${paragraphs("MORE", 20)}` }));
+      await run.finish();
+      expect(run.terminal.output).not.toContain(SCROLLBACK_ERASE);
+      run.expectHistoryMatchesDocument();
+    } finally {
+      await run.app.stop();
+    }
   });
 });
