@@ -117,6 +117,7 @@
       "packages/local-runtime-v2/test/unit/compat/v1/runtime.test.ts",
       "packages/tui/test/unit/runtime-product-access.test.ts",
       "packages/tui/test/unit/tui-app.test.ts",
+      "packages/tui/test/unit/tui/commands/catalog.test.ts",
       "packages/tui/test/unit/tui-goal-banner.test.ts",
       "packages/tui/test/unit/tui-model-picker.test.ts",
       "packages/tui/test/unit/tui/controller/interaction/input-flow.test.ts",

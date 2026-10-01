@@ -257,6 +257,8 @@ remain hidden from `/sessions` and `/resume`.
 When a side-conversation model request fails and can be retried, run `/retry`
 in the side view to resend the side conversation's last message without
 returning to the main view.
+`/doctor` and `/feedback` also work in the side view, so a failed side response
+can be diagnosed or reported without leaving it. `/quit` stays unavailable there.
 
 Creation and activation failures record a bounded, redacted cause chain in the
 local `session.side.failed` diagnostic event. Feedback uploads still apply the

@@ -37,6 +37,8 @@ export interface TuiCommandContext {
  * conversation" command; it mirrors the Ctrl+/ toggle, not a close.
  * `/retry` stays available because it only resends the side Session's own
  * failed message, and a failed side response tells the user to run it.
+ * `/doctor` and `/feedback` stay available so a failed side response can be
+ * diagnosed and reported where it happened; neither mutates either Session.
  */
 export const SIDE_MODE_COMMANDS = new Set([
   'help',
@@ -49,6 +51,8 @@ export const SIDE_MODE_COMMANDS = new Set([
   'copy',
   'parent',
   'retry',
+  'doctor',
+  'feedback',
 ]);
 
 export interface TuiCommand {

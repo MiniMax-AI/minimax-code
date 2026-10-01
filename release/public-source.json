@@ -3363,6 +3363,7 @@
     "packages/tui/test/unit/tui-transcript-presentation.test.ts",
     "packages/tui/test/unit/tui-transcript-view.test.ts",
     "packages/tui/test/unit/tui-workspace-status-line.test.ts",
+    "packages/tui/test/unit/tui/commands/catalog.test.ts",
     "packages/tui/test/unit/tui/controller/interaction/input-flow.test.ts",
     "packages/tui/test/unit/tui/controller/product/chrome-flow.test.ts",
     "packages/tui/test/unit/tui/controller/product/command-flow.test.ts",
