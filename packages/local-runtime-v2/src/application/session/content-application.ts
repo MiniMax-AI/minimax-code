@@ -481,6 +481,7 @@ export function toSessionMessageView(
   );
   return {
     msgId: maybeString(firstDefined([message.msgId, message.msg_id])) ?? "",
+    ...(typeof message.editContent === "string" ? { editContent: message.editContent } : {}),
     parentMsgId: maybeString(
       firstDefined([message.parentMsgId, message.parent_msg_id]),
     ),
@@ -553,7 +554,9 @@ function toSessionMessageRawJson(
   return isRecord(
     firstDefined([message.contextUsage, message.context_usage]),
   ) ||
-    (isRecord(message.usage) && message.usage.request_duration_ms !== undefined)
+    (isRecord(message.usage) &&
+      (message.usage.request_duration_ms !== undefined ||
+        message.usage.decode_duration_ms !== undefined))
     ? jsonStringOrString(message)
     : jsonStringOrString(firstDefined([message.rawJson, message.raw_json]));
 }

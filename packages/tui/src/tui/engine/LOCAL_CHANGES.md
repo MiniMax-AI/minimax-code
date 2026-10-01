@@ -17,7 +17,7 @@ MCode-owned difference from that baseline.
 | L011 | Fullscreen interaction | `layout.ts`, `tui-alt-screen.ts` and `public.ts` mouse dispatch         | Route SGR press, drag and release events through the rendered Pi layout before Alt text selection, using layout-local coordinates and deepest-target precedence.                                | Fullscreen product interactions such as Plan Review remain mouse-operable without restoring the deleted product-owned selection or renderer path. | Alt renderer integration; Chat layout; Inline panel; Plan Review mouse tests               |
 | L013 | Pi maintenance         | `components/text.ts` and `components/markdown.ts`                       | Adopt Pi post-0.84.2 fixes for adaptive narrow-width padding and wrapped table style restoration.                                                                                               | Narrow panes stay within terminal width, and wrapped links do not leak styles into table borders or adjacent cells.                               | Engine local-delta narrow-width regression; Pi Markdown corpus                             |
 | L014 | Native packaging       | `native-module-path.ts`, `native-modifiers.ts` and `terminal.ts`        | Resolve native helpers from the installed `@minimax/code` package root before standalone archive fallbacks.                                                                                     | Packaged Apple Terminal and Windows modifier/VT helpers load from the actual release layout.                                                      | Native candidate unit contract; package layout inspection                                  |
-| L015 | Render scheduling      | `tui.ts`                                                                | Expose Pi's existing immediate scheduler separately from the destructive `force` reset path.                                                                                                    | Product interactions remain immediate without resetting differential state or clearing native scrollback.                                         | Engine local-delta immediate-render regression; Surface Host focused tests                 |
+| L015 | Render scheduling      | `tui.ts`                                                                | Expose Pi's existing immediate scheduler separately from the destructive `force` reset path.                                                                                                    | Product interactions schedule immediate rendering without resetting differential state or clearing native scrollback; L044 governs delivery under backpressure.                                         | Engine local-delta immediate-render regression; Surface Host focused tests                 |
 | L016 | Process resilience     | `autocomplete.ts` fd child output streams                               | Handle stdout/stderr stream errors at the file-autocomplete owner, terminate the failed child and resolve the scan with no suggestions.                                                         | A broken background fd pipe cannot escalate through `uncaughtException` and stop the active TUI Session.                                          | `tui-autocomplete-process-streams.test.ts`; process-guard focused tests                    |
 | L017 | Pi maintenance         | `tui-main-screen.ts`                                                    | Stream full and differential renders through Pi's bounded terminal writer instead of constructing one unbounded output string (Pi `6c4f360264397c59801f6da2bdac13e3b1fcbe91`).                  | Large regular-mode renders preserve output order without exceeding V8's maximum string length.                                                    | Pi 0.84.4 render regression; bounded-write focused test                                    |
 | L018 | Pi maintenance         | `autocomplete.ts`                                                       | Search direct children separately, merge them with recursive matches, and sort equal-score results by depth, length, then path (Pi `b37ebb7f22ec1a8fbf882366dc20ae6d6010a6e2`).                 | Direct workspace paths remain visible and stable before deeply nested matches when recursive results are abundant.                                | Pi 0.84.4 autocomplete regression; autocomplete focused test                               |
@@ -115,3 +115,81 @@ Remove `L024` when the selected Pi baseline natively matches legacy-terminal `Ct
 - Adaptation: the original contribution widened hits over two live content columns. The reserved gutter prevents those presses from swallowing content clicks or text selection. `chat-layout.ts` opts into the three-column gutter.
 - Evidence: `test/unit/tui-scrollbar-interaction.test.ts` drives SGR press, motion, release and wheel events through VirtualTerminal, covering track jumps, thumb grabs, narrow terminals, content routing, selection, overlays and the actual fullscreen ChatLayout.
 - Removal condition: the selected Pi baseline provides equivalent reserved-gutter track and drag interaction and MCode migrates to it.
+
+## L034: Regular viewport reconstruction after document changes
+
+- Product contract: after running content or a feature panel closes, show the complete current chat viewport with its Composer and status line. Every current-session row must occur once in native history.
+- Minimal difference: when a shorter document would move the viewport origin backwards, or changed visible text is already in scrollback, clear and replay the complete current projection, except for addressable text-only shrink covered by L038. Compare changed historical rows without terminal sequences so style-only updates preserve scrollback. Other updates retain differential rendering and genuine resize retains the existing delayed history replay.
+- Tradeoff: structural reconstruction clears native scrollback, including shell history from before TUI startup. Initial short chat documents retain natural document placement. L038 keeps freed visible rows temporarily blank instead of reconstructing unchanged history.
+- Evidence: local-delta tests assert every visible row and the complete history, while real Tasks and feature lifecycle tests cover short/long content, background growth, paging, resize, nested panels and return to chat. Queue lifecycle tests replay bracketed CJK paste, Alt+Enter, auto-drain, and history refresh through Ghostty; equal-height and growing historical edits are also covered by xterm. Virtual terminals do not establish native Windows Terminal or iTerm2 touchpad acceptance.
+- Removal condition: the selected Pi baseline provides equivalent complete viewport and unique-history behavior.
+
+## L036: Unframed multiline paste chunks
+
+- Product contract: a plain-text stdin chunk containing an internal CR/LF is inserted as a single paste, so its CR bytes cannot submit each line separately.
+- Minimal difference: `stdin-buffer.ts` emits the existing paste event before key splitting when there is no pending escape or bracketed paste and the chunk contains only text, tabs and line endings. The existing editor paste path normalizes CR/LF and tabs and folds large payloads.
+- Boundary: this is a conservative fallback, not a replacement for bracketed paste. A standalone Enter and text followed only by a final Enter retain key semantics. Unframed pastes split into line-sized or character-sized chunks cannot be distinguished from typing and are not inferred using timing. Conversely, multiple typed lines delivered in a single chunk are indistinguishable from an unframed paste and use this fallback. Control sequences retain their existing parser.
+- Evidence: `test/unit/tui-terminal-text-paste.test.ts` replays ProcessTerminal input into the product Editor, including CR, LF, CRLF, Unicode, large pastes, every bracketed chunk split, Enter/shortcuts, and stop/start mode lifecycle. The CR and CRLF cases submitted three separate messages before the fix. These are synthetic input replays, not real WSL terminal acceptance.
+- Removal condition: the selected Pi baseline provides equivalent unframed multiline input handling.
+
+## L037: Commit the IME cursor with the regular-screen frame
+
+- Product contract: a presented frame exposes the focused input's cursor position and visibility, including full redraws, differential updates, and deletion-only frames.
+- Minimal difference: append cursor restoration to the bounded frame writer before ending synchronized output. Cursor-only updates retain the existing path. The product renderer separately defaults to a visible hardware cursor on Windows, where older ConPTY renderers can omit hidden cursor positions; explicit options and `PI_HARDWARE_CURSOR` remain authoritative.
+- Evidence: `test/unit/tui-ime-cursor.test.ts` replays terminal sequences at each synchronized-output boundary and exercises the product renderer, Composer, Editor, focus, mode switches, CJK wrapping, resize and shrink. Native Windows IME and ConPTY transport require separate acceptance.
+- Removal condition: the selected Pi baseline commits cursor restoration within the same synchronized frame.
+
+## L038: Preserve native scrolling during visible content shrink
+
+- Product contract: settling visible activity rows must not clear native scrollback or pin a scrolled host viewport to the top. The Composer and status remain at the bottom, and historical content remains unique.
+- Minimal difference: when terminal geometry, the text already in scrollback and the declared transient layout keys are unchanged, absorb visible text-only shrink with blank rows at the current screen boundary before cursor extraction and differential rendering. L041 makes this an explicit background-content policy; unclassified layouts restore exposed rows. Subsequent output consumes the space before advancing native history. Ignore redundant same-size resize notifications without cancelling a genuine pending resize replay.
+- Boundary: padding is confined to the active screen. Historical text replacement/removal, real resize, overlays and image reflow retain the structural reconstruction path. Blank rows can temporarily separate native history from the visible tail; this is preferable to clearing and replaying the terminal's scrollback during ordinary completion. No mouse capture is enabled in regular mode.
+- Evidence: local-delta tests use xterm's host scroll API independently of the hardware cursor, reproduce the pre-fix jump to line zero, and verify stable scrolling, Composer position, unique history, reclaimed space, corrected-history reconstruction and resize behavior. The product queue/feature tests continue to cover canonical history replacement. Native Windows Terminal and UU Remote acceptance remain separate.
+- Removal condition: the selected Pi baseline preserves host scrolling and unique history through visible shrink.
+
+## L039: Erase regular viewport redraws in place
+
+- Product contract: repainting the visible regular-mode screen must not append the previous transcript, Composer or status line to native history.
+- Minimal difference: viewport-only full redraws home the cursor, erase each screen row with EL 2 using cursor-down movement, and return home before painting. This avoids ED 2, which saves the old screen to scrollback in Apple Terminal. Full structural reconstruction still clears and rebuilds history.
+- Evidence: local-delta tests exercise xterm and a clear-to-scrollback host model, covering historical style changes, simultaneous growth, short-document shrink, subsequent differential output, host scrolling and resize preview/replay. Native Apple Terminal replay of synthetic renderer output reproduces duplicate rows before the fix and preserves the exact document afterward.
+- Boundary: native replay covers synthetic output, not every live-model interaction or other terminal emulator.
+- Removal condition: the selected Pi baseline supplies equivalent in-place viewport erasure without retaining stale rows in native history.
+
+## L040: Coalesce synchronous submission renders
+
+- Product contract: sending the next message removes the previous interrupted duration from the next presented frame, without rendering the same frame twice. When output is ready, submission generates that frame before the input callback returns; L044 permits asynchronous delivery and coalesces frames under backpressure.
+- Minimal difference: queue the normal immediate input render before dispatching a focused component's key. A synchronous `renderNow()` during submission clears that queued request; ordinary keys still render on the next tick.
+- User impact: the previous interrupted footer disappears with the submitted message, and the extra no-op render after Enter is avoided.
+- Evidence: `tui-app.test.ts` checks every presented frame across interrupt and resend; `tui-engine-local-deltas.test.ts` checks that a synchronous input render has no second pass.
+- Removal condition: the selected Pi baseline coalesces synchronous input renders while preserving immediate key rendering.
+
+## L041: Restore chat rows after transient layout shrink
+
+- Product contract: shrinking a transient UI region restores the conversation instead of leaving released rows blank above it. Background activity shrink with unchanged transient layout retains L038's native scrolling behavior.
+- Minimal difference: components may expose the layout key of their last rendered frame. MainScreen permits L038 padding only when every root explicitly supplies the same key and no overlay was present. ChatLayout includes every transient section's height and interaction state, while SurfaceHost includes the active feature. Unknown or changed layouts use L034 reconstruction only when scrolled rows must return. Keys are captured with native render state and cleared on reset. This replaces the earlier completion-specific resize callback and full-viewport close exception.
+- Evidence: application tests replay `/theme`, `/settings`, prompt-history search, image-preview dismissal, multi-line draft clearing and completion filtering. Engine tests repeatedly expand/shrink each transient section under xterm and an ED 2 clear-to-scrollback model, compare the complete viewport, verify unique history, and retain positive background-activity scroll preservation. Short documents avoid unnecessary clearing.
+- Boundary: full history reconstruction retains L034's shell-scrollback tradeoff. Emulator tests do not establish native terminal or live-service acceptance.
+- Removal condition: the selected Pi baseline distinguishes transient UI layout shrink from ordinary background content shrink.
+
+## L042: Preserve product mention bindings in prompt history
+
+- Product contract: plugin labels retain their exact identities while browsing history, including restoration of the working draft.
+- Minimal difference: expose a generic history-text decoder and capture/restore the existing undo extension state alongside the history draft. Plugin parsing and identity ownership stay in the product Editor.
+- Evidence: `tui-plugin-mentions.test.ts` covers repeated history navigation, identical display labels with different IDs, working-draft restoration, atomic deletion and undo.
+- Removal condition: the selected Pi baseline supports durable history decoding and draft extension state.
+
+## L043: Preserve detached scrolling across layout changes
+
+- Product contract: a detached fullscreen transcript remains detached when the viewport grows or content shrinks.
+- Minimal difference: `ScrollView.updateLayout` clamps the scroll position without changing follow state. Explicit scrolling and follow requests retain their existing behavior.
+- Evidence: `tui-scrollbar-interaction.test.ts` covers wheel detachment, viewport growth, footer/content shrink, temporarily fitting all content, subsequent output and re-arming with End.
+- Removal condition: the selected Pi baseline preserves follow state through layout clamping.
+
+## L044: Keep terminal backpressure off the input loop
+
+- Product contract: slow or paused POSIX terminal output must not block input or cancellation during long Regular-mode history reconstruction.
+- Minimal difference: `terminal.ts` serializes POSIX TTY output through asynchronous, bounded `fs.write` operations, preserves partial UTF-8 writes, and reports output failures through the existing stdout error path. Controls share the same queue. `tui.ts` defers subsequent frames until output drains and then renders the latest model once. Ordinary stop queues any deferred final frame before terminal cleanup; mode switches preserve their previously captured render state. Mandatory final resize replay remains ordered before cleanup.
+- Host integration: the observed terminal forwards the output state; shutdown, suspension and external-editor handoff drain queued output before another process owns the terminal. Input draining starts its idle window after keyboard-disable output is sent, and editor handoff rechecks shutdown after the drain.
+- Evidence: terminal-output regressions cover held/partial writes, input dispatch, control ordering, transient and permanent failures, frame coalescing, final transcript preservation, keyboard input draining and editor handoff/shutdown races; application tests cover shutdown/suspend drains. A local macOS PTY with 10,000 synthetic history rows and a paused consumer no longer blocks the input loop while reconstructing history.
+- Boundary: history reconstruction still transmits the complete ordered document. A stalled connection can delay visible output; it no longer synchronously stalls the JavaScript event loop. Windows and non-TTY output retain their existing writer. Native remote SSH and native Windows acceptance remain separate.
+- Removal condition: the upstream terminal writer provides ordered asynchronous POSIX TTY writes and its render scheduler observes output backpressure.

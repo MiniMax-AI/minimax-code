@@ -27,9 +27,10 @@ export interface DurableCanonicalHistoryProvider {
   read(sessionId: string): Promise<CanonicalHistorySnapshot>;
   /** Active post-mutation history; the final tool round may still await results. */
   readActive(sessionId: string): Promise<CanonicalHistorySnapshot>;
-  append(change: CanonicalHistoryChange): Promise<unknown>;
-  replace(change: CanonicalHistoryChange): Promise<unknown>;
-  compact?(change: CanonicalHistoryCompactionChange): Promise<unknown>;
+  /** Return the verified post-write snapshot from the same lane, or request a reread with void. */
+  append(change: CanonicalHistoryChange): Promise<CanonicalHistorySnapshot | void>;
+  replace(change: CanonicalHistoryChange): Promise<CanonicalHistorySnapshot | void>;
+  compact?(change: CanonicalHistoryCompactionChange): Promise<CanonicalHistorySnapshot | void>;
   settleTurnTail?(mutation: SettleTurnTailMutation): Promise<TurnHistoryMutationCommit>;
   retractTurn?(mutation: RetractTurnMutation): Promise<TurnHistoryMutationCommit>;
 }
@@ -41,6 +42,7 @@ export interface DurableCanonicalHistoryProvider {
  */
 export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
   private readonly lane = new KeyedOperationLane<string>();
+  private previousSnapshot?: CanonicalHistorySnapshot;
 
   constructor(private readonly provider: DurableCanonicalHistoryProvider) {
     assertAgentHostCapabilityAvailable(
@@ -102,13 +104,17 @@ export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
   private commit(
     kind: 'append' | 'replace',
     change: CanonicalHistoryChange,
-    mutate: (snapshot: CanonicalHistoryChange) => Promise<unknown>,
+    mutate: (snapshot: CanonicalHistoryChange) => Promise<CanonicalHistorySnapshot | void>,
   ): Promise<CanonicalHistoryCommit> {
     const snapshot = captureSemanticSnapshot(change).value;
     validateCanonicalHistoryChange(snapshot, kind);
     return this.lane.run(snapshot.sessionId, async () => {
-      await mutate(snapshot);
-      return this.readActiveCommitted(snapshot.sessionId);
+      const committed = await mutate(snapshot);
+      // Session-owned providers already reread and validate inside their lane.
+      // Legacy adapters returning void retain the strict post-write read.
+      return committed === undefined
+        ? this.readActiveCommitted(snapshot.sessionId)
+        : this.readProviderSnapshot(committed);
     });
   }
 
@@ -138,14 +144,17 @@ export class DurableCanonicalHistoryStore implements CanonicalHistoryStore {
   }
 
   private readProviderSnapshot(snapshot: CanonicalHistorySnapshot): CanonicalHistorySnapshot {
-    const detached = captureSemanticSnapshot(snapshot).value;
+    const detached = captureSemanticSnapshot(snapshot, this.previousSnapshot).value;
     validateCanonicalHistorySnapshot(detached);
     assertCanonicalIdentityVector(detached);
-    return Object.freeze({
+    const result = captureSemanticSnapshot({
       revision: detached.revision.trim(),
-      messages: Object.freeze([...detached.messages]),
-      identityVector: Object.freeze([...detached.identityVector]),
-    });
+      // Keep the separately owned arrays reusable at the next snapshot boundary.
+      messages: captureSemanticSnapshot([...detached.messages]).value,
+      identityVector: captureSemanticSnapshot([...detached.identityVector]).value,
+    }).value;
+    this.previousSnapshot = result;
+    return result;
   }
 }
 

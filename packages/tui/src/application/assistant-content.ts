@@ -25,9 +25,9 @@ export function simplifyAssistantContentForTerminal(content: string): string {
   return [presentation.text, formatAssetGroup(presentation.assets)].filter(Boolean).join('\n\n');
 }
 
-export function projectAssistantContentForTerminal(content: string): TerminalAssistantContent {
+export function projectAssistantContentForTerminal(rawContent: string): TerminalAssistantContent {
   // Model content is data. Only the renderer may introduce terminal controls.
-  content = sanitizeTerminalText(content);
+  const content = sanitizeTerminalText(rawContent);
   if (!content || !RICH_CONTENT_RE.test(content)) return { text: content, assets: [] };
 
   const segments = splitMarkdownProtectedSegments(content);

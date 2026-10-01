@@ -226,7 +226,7 @@ export class SkillRegistry {
       };
       for (const root of this.roots) {
         collectPath(root.rootPath, root);
-        for (const skillDir of listWatchableSkillDirs(root.rootPath)) {
+        for (const skillDir of listWatchableSkillDirs(root)) {
           collectPath(skillDir, root);
         }
       }
@@ -472,7 +472,10 @@ function existingWatchTarget(targetPath: string): SkillWatchTarget | undefined {
 }
 
 function allowsDirectorySymlinkOutsideRoot(root: SkillSourceRoot): boolean {
-  return ['agent', 'global', 'user', 'builtin'].includes(root.kind);
+  return (
+    root.allowDirectorySymlinksOutsideRoot === true ||
+    ['agent', 'global', 'user', 'builtin'].includes(root.kind)
+  );
 }
 
 async function listSkillFiles(
@@ -811,10 +814,20 @@ function sameSkillFileStat(expected: SkillFileStat, actual: SkillFileStat): bool
   );
 }
 
-function listWatchableSkillDirs(rootPath: string): string[] {
+function listWatchableSkillDirs(root: SkillSourceRoot): string[] {
+  const { rootPath } = root;
   try {
     return readdirSync(rootPath, { withFileTypes: true })
-      .filter((child) => child.isDirectory())
+      .filter((child) => {
+        if (child.isDirectory()) return true;
+        if (!child.isSymbolicLink() || !allowsDirectorySymlinkOutsideRoot(root)) return false;
+        try {
+          // Watch linked directories even before they contain a SKILL.md.
+          return statSync(path.join(rootPath, child.name)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
       .map((child) => path.join(rootPath, child.name))
       .sort();
   } catch {

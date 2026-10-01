@@ -180,6 +180,9 @@ export interface TuiModel {
   defaultEffort?: string;
   /** Runtime projects the saved global or Session selection onto the selected row. */
   thinking?: { effort?: string };
+  /** Present on starred models; `favoriteOrder` ascends in the order they were added. */
+  favorite?: boolean;
+  favoriteOrder?: number;
   providerName?: string;
   providerSource?: string;
   providerKind?: string;

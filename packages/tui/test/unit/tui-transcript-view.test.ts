@@ -21,6 +21,21 @@ const previewDisplayModes = {
 };
 
 describe('TranscriptView', () => {
+  it('renders Hook warning titles and multiline text without terminal controls', () => {
+    const view = new TranscriptView(() => [createTranscriptCell({
+      id: 'hook', kind: 'warning', status: 'succeeded', createdAtMs: 1,
+      title: 'Hook · Stop\x1b]2;FORGED\x07', content: '报告已生成\nSafe\x1b]52;c;PRIVATE\x07',
+    }), createTranscriptCell({ id: 'old-warning', kind: 'warning', content: 'Existing warning', createdAtMs: 2 })]);
+    const rendered = view.render(30).join('\n');
+    expect(stripVTControlCharacters(rendered)).toContain('Hook · Stop');
+    expect(stripVTControlCharacters(rendered)).toContain('报告已生成');
+    expect(stripVTControlCharacters(rendered)).toContain('Safe');
+    expect(stripVTControlCharacters(rendered).replace(/\s+/gu, ' ')).toContain('Warning Existing warning');
+    expect(rendered).not.toContain('FORGED');
+    expect(rendered).not.toContain('PRIVATE');
+    expect(rendered).not.toContain('\x07');
+  });
+
   it.each(['assistant', 'assistant-preamble', 'thinking'] as const)(
     'removes control strings from %s content without changing stored model output',
     (kind) => {
@@ -136,6 +151,136 @@ describe('TranscriptView', () => {
 
     expect(lines.filter((line) => line.startsWith('\x1b]133;A\x07'))).toHaveLength(2);
     expect(lines.filter((line) => line.includes('\x1b]133;B\x07\x1b]133;C\x07'))).toHaveLength(2);
+  });
+
+  it('keeps user prompts literal instead of rendering them as Markdown', () => {
+    // Regression: the prompt echo used to run through the Markdown renderer, so
+    // `__pycache__` lost its underscores, `*` became emphasis, and a leading `>`
+    // turned the row into a quote. User input is quoted source and must survive
+    // verbatim, the way Codex renders its user history cells.
+    const originalTheme = getTuiThemeSnapshot();
+    const palette =
+      originalTheme.appearance === 'light' ? MINIMAX_CODE_LIGHT_THEME : MINIMAX_CODE_DARK_THEME;
+    // Force real styling so "no bold/italic on the prompt" is a meaningful
+    // assertion instead of a vacuous one in a colorless test terminal.
+    applyTuiRenderTheme(palette, 3);
+    try {
+      const view = new TranscriptView(() => [
+        createTranscriptCell({
+          id: 'user-literal-prompt',
+          kind: 'user',
+          status: 'succeeded',
+          content: [
+            'delete __pycache__ then check > logs and 2 * 3',
+            'keep **stars** and _underscores_',
+          ].join('\n'),
+          createdAtMs: 1,
+        }),
+        createTranscriptCell({
+          id: 'assistant-still-markdown',
+          kind: 'assistant',
+          status: 'succeeded',
+          content: 'Removed `__pycache__`.',
+          createdAtMs: 2,
+        }),
+      ]);
+
+      const rendered = view.render(80).join('\n');
+      const plain = stripVTControlCharacters(rendered).replace(/\s+$/gmu, '');
+      const promptLines = plain
+        .split('\n')
+        .filter((line) => line.includes('delete') || line.includes('keep'));
+
+      // Source markers survive verbatim.
+      expect(promptLines[0]).toContain('delete __pycache__ then check > logs and 2 * 3');
+      expect(promptLines[1]).toContain('keep **stars** and _underscores_');
+
+      // The prompt text is one contiguous run. Markdown emphasis would have
+      // injected style codes inside it and dropped the markers; only the `›`
+      // marker itself is bold, and it closes before the text starts.
+      const userRows = rendered
+        .split('\n')
+        .filter((line) => stripVTControlCharacters(line).includes('delete'));
+      expect(userRows).toHaveLength(1);
+      expect(userRows[0]).toContain('delete __pycache__ then check > logs and 2 * 3');
+      expect(rendered).toContain('keep **stars** and _underscores_');
+      expect(userRows[0]).not.toContain('\x1b[3m');
+
+      // Assistant content is still Markdown: its codespan is themed and loses
+      // its backticks, the opposite of the prompt row.
+      expect(plain).toContain('Removed __pycache__.');
+      expect(plain).not.toContain('Removed `__pycache__`.');
+    } finally {
+      applyTuiRenderTheme(palette, originalTheme.colorLevel);
+    }
+  });
+
+  it('preserves user prompt line breaks and pads every band row to the full width', () => {
+    const view = new TranscriptView(() => [
+      createTranscriptCell({
+        id: 'user-multiline',
+        kind: 'user',
+        status: 'succeeded',
+        content: 'line one\nline two',
+        createdAtMs: 1,
+      }),
+    ]);
+
+    const lines = view.render(40);
+    const contentLines = lines
+      .map((line) => stripVTControlCharacters(line))
+      .filter((line) => line.includes('line one') || line.includes('line two'));
+
+    expect(contentLines).toHaveLength(2);
+    expect(contentLines[0]).toContain('line one');
+    expect(contentLines[1]).toContain('line two');
+    for (const line of lines) {
+      expect(visibleWidth(stripVTControlCharacters(line))).toBe(40);
+    }
+  });
+
+  it('does not render trailing blank band rows for a prompt ending in newlines', () => {
+    // Codex trims trailing CR/LF before wrapping its user history cell
+    // (`message.trim_end_matches(['\r', '\n'])`). A pasted prompt often ends
+    // with a newline, which would otherwise pad the user band with empty rows.
+    const view = new TranscriptView(() => [
+      createTranscriptCell({
+        id: 'user-trailing-newlines',
+        kind: 'user',
+        status: 'succeeded',
+        content: 'line one\nline two\n\n\n',
+        createdAtMs: 1,
+      }),
+    ]);
+
+    const plain = view.render(40).map((line) => stripVTControlCharacters(line));
+    const contentLines = plain.filter(
+      (line) => line.includes('line one') || line.includes('line two'),
+    );
+
+    expect(contentLines).toHaveLength(2);
+    // 1 top padding row + 2 content rows (the `›` marker rides on the first
+    // content row) + 1 bottom padding row. The three trailing newlines must not
+    // add empty band rows.
+    expect(plain).toHaveLength(4);
+  });
+
+  it('keeps a pending steer literal like the main prompt row', () => {
+    const view = new TranscriptView(() => [
+      createTranscriptCell({
+        id: 'steer-literal',
+        kind: 'user',
+        status: 'pending',
+        content: 'also clear __pycache__ and keep 2 * 3',
+        userPresentation: 'pending-steer',
+        createdAtMs: 1,
+      }),
+    ]);
+
+    const rendered = stripVTControlCharacters(view.render(80).join('\n'));
+
+    expect(rendered).toContain('Next');
+    expect(rendered).toContain('also clear __pycache__ and keep 2 * 3');
   });
 
   it('attaches a pending steer to the active flow as the next instruction', () => {
@@ -1044,7 +1189,10 @@ describe('TranscriptView', () => {
     const lines = view.render(50);
     const rendered = lines.join('\n');
 
-    expect(rendered).toContain('› Please inspect this.');
+    // The prompt is quoted source: its `**` markers stay literal. Assistant
+    // content below still renders as Markdown, which is why `one` loses its
+    // backticks there but not here.
+    expect(rendered).toContain('› Please **inspect** this.');
     expect(rendered).not.toContain('YOU');
     expect(rendered).toContain('├ • Thinking…');
     expect(rendered).toContain('│   Reading the repository');
@@ -1326,6 +1474,44 @@ describe('TranscriptView', () => {
       applyTuiRenderTheme(originalPalette, original.colorLevel);
     }
   });
+
+  it.each(['Run highlight reproduction script', '中文 English', '克隆仓库并查看渲染逻辑'])(
+    'renders the Bash recap %s as prose while highlighting the command below',
+    (description) => {
+      const original = getTuiThemeSnapshot();
+      const palette =
+        original.appearance === 'light' ? MINIMAX_CODE_LIGHT_THEME : MINIMAX_CODE_DARK_THEME;
+      applyTuiRenderTheme(MINIMAX_CODE_DARK_THEME, 3);
+      try {
+        const view = new TranscriptView(
+          () => [
+            createTranscriptCell({
+              id: 'bash-recap',
+              kind: 'tool',
+              status: 'succeeded',
+              title: 'bash',
+              content: JSON.stringify({ command: 'node repro.mjs', description }),
+              detail: 'one\ntwo',
+              createdAtMs: 1,
+            }),
+          ],
+          { displayModes: previewDisplayModes },
+        );
+        const rendered = view.render(120);
+        const ansi = createTuiChalk({ colorLevel: 3 });
+        expect(stripVTControlCharacters(rendered[0]!)).toBe(
+          `└ • Ran  ${description} · 2 output lines`,
+        );
+        expect(rendered[0]).toContain(ansi.hex(tuiColors.text)(description));
+        expect(rendered[0]).not.toContain(
+          ansi.bold.hex(tuiColors.accent)(description.split(' ')[0]!),
+        );
+        expect(rendered.slice(1).join('\n')).toContain(ansi.bold.hex(tuiColors.accent)('node'));
+      } finally {
+        applyTuiRenderTheme(palette, original.colorLevel);
+      }
+    },
+  );
 
   it('trims the shell command but keeps the output count when the row is narrow', () => {
     const view = new TranscriptView(() => [

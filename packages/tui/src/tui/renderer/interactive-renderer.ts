@@ -15,6 +15,7 @@ import { captureTuiIncidentBestEffort, type TuiIncidentSink } from '../../observ
 export interface McodeInteractiveRendererOptions {
   readonly terminal: Terminal;
   readonly initialMode?: TuiMode;
+  readonly clearScrollbackOnStart?: boolean;
   readonly showHardwareCursor?: boolean;
   readonly logDirectory?: string;
   readonly altScreen?: TuiAltScreenOptions;
@@ -87,6 +88,10 @@ export class McodeInteractiveRenderer {
     this.bindInputListeners();
     if (this.renderer.mode === 'regular' && !this.initialRegularViewportCleared) {
       this.options.terminal.clearScreen();
+      // A resumed process replays its own banner and transcript. Discard the old
+      // process's native history first, including viewport rows saved by ED 2 on
+      // hosts such as Apple Terminal. Ordinary launches retain shell scrollback.
+      if (this.options.clearScrollbackOnStart) this.options.terminal.write('\x1b[3J');
     }
     this.renderer.start();
     if (this.renderer.mode === 'regular') this.initialRegularViewportCleared = true;
@@ -275,7 +280,13 @@ export class McodeInteractiveRenderer {
 
   private createRenderer(
     mode: TuiMode,
-    showHardwareCursor = this.options.showHardwareCursor,
+    // Older ConPTY renderers omit hidden cursor positions from their output,
+    // leaving browser-terminal IME composition at the last painted cell.
+    // Keep explicit options and PI_HARDWARE_CURSOR authoritative.
+    showHardwareCursor = this.options.showHardwareCursor ??
+      (process.platform === 'win32' && process.env.PI_HARDWARE_CURSOR === undefined
+        ? true
+        : undefined),
   ): TuiMainScreen | TuiAltScreen {
     if (mode === 'fullscreen') {
       return new TuiAltScreen(

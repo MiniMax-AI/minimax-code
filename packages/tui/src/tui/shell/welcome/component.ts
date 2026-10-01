@@ -195,14 +195,34 @@ function resolveWelcomeCopy(value: string, keybindings: TuiKeybindingRegistry | 
 }
 
 function renderWelcomeAccountNoticeRows(state: TuiShellState, width: number): string[] {
-  if (state.accountStatus !== 'Sign in with /login') return [];
-  const notice = `${chalk.bold.hex(colors.warning)('○')} ${chalk.bold.hex(colors.warning)(state.accountStatus)}`;
+  const message =
+    state.accountStatus === 'Sign in with /login'
+      ? state.accountStatus
+      : state.accountStatus === 'Connected with warnings'
+        ? 'Check /provider or /status for details.'
+        : state.accountStatus === 'Account unavailable'
+          ? 'Check /status for details.'
+          : undefined;
+  if (!message) return [];
+  const notice = `${chalk.bold.hex(colors.warning)('○')} ${chalk.bold.hex(colors.warning)(message)}`;
   return [renderFrameRow(notice, width)];
 }
 
 function renderActivity(state: TuiShellState): string {
   if (state.accountStatus === 'Sign in with /login') {
     return chalk.bold.hex(colors.warning)('○ Login required');
+  }
+  if (state.runtimeStatus === 'error') {
+    return chalk.bold.hex(colors.error)('× Error');
+  }
+  if (state.accountStatus === 'Checking account') {
+    return chalk.bold.hex(colors.signal)('◌ Checking account');
+  }
+  if (state.accountStatus === 'Connected with warnings') {
+    return chalk.bold.hex(colors.warning)('○ Setup warning');
+  }
+  if (state.accountStatus === 'Account unavailable') {
+    return chalk.bold.hex(colors.warning)('○ Account unavailable');
   }
   if (state.runtimeStatus === 'ready') {
     return chalk.bold.hex(colors.orbit)('● Ready');
@@ -211,7 +231,7 @@ function renderActivity(state: TuiShellState): string {
     return chalk.bold.hex(colors.signal)('◌ Starting');
   }
   if (state.runtimeStatus === 'offline') {
-    return chalk.bold.hex(colors.warning)('○ Login required');
+    return chalk.bold.hex(colors.warning)('○ Offline');
   }
   return chalk.bold.hex(colors.error)('× Error');
 }

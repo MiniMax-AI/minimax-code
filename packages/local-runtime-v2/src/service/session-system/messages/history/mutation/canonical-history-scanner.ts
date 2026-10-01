@@ -72,24 +72,90 @@ export type HistoryScannerErrorCode =
   | 'sequence-corruption'
   | 'unsafe-artifact';
 
+/** Session provider reuse is bounded to the last active file, never a freshness check. */
+export function createCanonicalHistoryScanner() {
+  let cached:
+    | {
+        path: string;
+        bytes: Buffer;
+        locations: readonly LineLocation[];
+        nextLine: number;
+        nextOffset: number;
+      }
+    | undefined;
+  const locate: LocateLines = (path, bytes) => {
+    const previous = cached?.path === path ? cached : undefined;
+    if (previous && bytes.equals(previous.bytes)) return previous.locations;
+    const reuse =
+      previous &&
+      previous.bytes.at(-1) === 10 &&
+      bytes.length >= previous.bytes.length &&
+      bytes.subarray(0, previous.bytes.length).equals(previous.bytes);
+    const locations: LineLocation[] = reuse ? [...previous.locations] : [];
+    const prefix = reuse ? previous.bytes.length : 0;
+    // Match the original decoded UTF-8 offset convention, including replacement characters.
+    let byteOffset = reuse ? previous.nextOffset : 0;
+    let lineNumber = reuse ? previous.nextLine : 0;
+    const lines = bytes.toString('utf8', prefix).split('\n');
+    if (lines.at(-1) === '') lines.pop();
+    for (const line of lines) {
+      lineNumber++;
+      const nextByteOffset = byteOffset + Buffer.byteLength(line, 'utf8') + 1;
+      if (line.length > 0) locations.push({ lineNumber, byteOffset });
+      byteOffset = nextByteOffset;
+    }
+    // Keep only one bounded active file. Large files retain no additional byte buffer.
+    cached =
+      bytes.length <= 4 * 1024 * 1024
+        ? {
+            path,
+            bytes,
+            locations,
+            nextLine: lineNumber,
+            nextOffset: byteOffset,
+          }
+        : undefined;
+    return locations;
+  };
+  return (
+    paths: CanonicalHistoryScannerPaths,
+    files: ReturnType<typeof createCanonicalHistoryFileAdapter>,
+  ) => scanCanonicalHistoryArtifacts(paths, files, locate);
+}
+
+interface LineLocation {
+  readonly lineNumber: number;
+  readonly byteOffset: number;
+}
+type LocateLines = (path: string, bytes: Buffer) => readonly LineLocation[];
+
 export async function scanCanonicalHistoryArtifacts(
   paths: CanonicalHistoryScannerPaths,
+  files = createCanonicalHistoryFileAdapter(),
+  locate?: LocateLines,
 ): Promise<CanonicalHistoryScannerResult> {
-  const files = createCanonicalHistoryFileAdapter();
-  const activeBase = await readArtifact(
-    files.readActiveStrict(paths.activePath),
-    paths.activePath,
-    'active',
-  );
+  let activeBytes: Buffer | undefined;
+  const activeRead =
+    locate && files.readActiveWithBytes
+      ? files.readActiveWithBytes(paths.activePath).then(({ records, bytes }) => {
+          activeBytes = bytes;
+          return records;
+        })
+      : files.readActiveStrict(paths.activePath);
+  const activeBase = await readArtifact(activeRead, paths.activePath, 'active');
   const activeGeneration = inferActiveGeneration(activeBase.records);
   const active = { ...activeBase, generation: activeGeneration };
   const activeMarker = readV2Marker(active.records, activeGeneration);
   const names = await listSnapshotNames(paths.snapshotsPath);
   const chain = await scanReachableSnapshots(files, active.generation, activeMarker, names);
   const reachable = [...chain.artifacts];
-  const activeScanned = { ...active, generation: active.generation, fileName: 'messages.jsonl' };
+  const activeScanned = {
+    ...active,
+    generation: active.generation,
+    fileName: 'messages.jsonl',
+  };
   reachable.push(activeScanned);
-  const locators = await collectUserMessageLocators(reachable);
+  const locators = await collectUserMessageLocators(reachable, locate, activeBytes);
   return {
     catalog: {
       schemaVersion: 1,
@@ -112,7 +178,10 @@ async function scanReachableSnapshots(
   activeGeneration: number,
   activeMarker: Marker | undefined,
   names: readonly SnapshotName[],
-): Promise<{ readonly artifacts: readonly ScannedArtifact[]; readonly reachedNames: Set<string> }> {
+): Promise<{
+  readonly artifacts: readonly ScannedArtifact[];
+  readonly reachedNames: Set<string>;
+}> {
   const byGeneration = groupSnapshotsByGeneration(names);
   const artifacts: ScannedArtifact[] = [];
   const reachedNames = new Set<string>();
@@ -151,7 +220,10 @@ async function readReachableParent(input: {
   readonly marker: Marker | undefined;
   readonly byGeneration: ReadonlyMap<number, readonly SnapshotName[]>;
   readonly reachedNames: Set<string>;
-}): Promise<{ readonly artifact: ScannedArtifact; readonly marker: Marker | undefined }> {
+}): Promise<{
+  readonly artifact: ScannedArtifact;
+  readonly marker: Marker | undefined;
+}> {
   const { files, generation, marker, byGeneration, reachedNames } = input;
   if (!marker) throw new HistoryScannerError('invalid-generation-marker');
   const parent = marker.parentSnapshot;
@@ -170,13 +242,19 @@ async function readReachableParent(input: {
     throw new HistoryScannerError('artifact-revision-mismatch');
   }
   return {
-    artifact: { ...scanned, generation: snapshot.generation, fileName: snapshot.fileName },
+    artifact: {
+      ...scanned,
+      generation: snapshot.generation,
+      fileName: snapshot.fileName,
+    },
     marker: readV2Marker(scanned.records, snapshot.generation),
   };
 }
 
 async function collectUserMessageLocators(
   artifacts: readonly ScannedArtifact[],
+  locate?: LocateLines,
+  activeBytes?: Buffer,
 ): Promise<readonly UserMessageLocatorV1[]> {
   const lineage = new Map<
     string,
@@ -184,8 +262,16 @@ async function collectUserMessageLocators(
   >();
   const locators: UserMessageLocatorV1[] = [];
   for (const artifact of artifacts) {
-    const raw = await readFile(artifact.path, 'utf8');
-    collectArtifactLocators(artifact, raw, lineage, locators);
+    if (locate && artifact.kind === 'active') {
+      const bytes = activeBytes ?? (await readFile(artifact.path));
+      const locations = locate(artifact.path, bytes);
+      for (const [index, location] of locations.entries()) {
+        collectRecordLocator(artifact, artifact.records[index], location, lineage, locators);
+      }
+    } else {
+      const raw = await readFile(artifact.path, 'utf8');
+      collectArtifactLocators(artifact, raw, lineage, locators);
+    }
   }
   return locators;
 }
@@ -202,37 +288,52 @@ function collectArtifactLocators(
     if (line.length > 0) {
       const parsed = artifact.records[recordIndex];
       recordIndex += 1;
-      if (parsed && isExternalUserId(parsed.message_id)) {
-        if (parsed.message.role !== 'user') {
-          throw new HistoryScannerError('external-user-lineage-conflict');
-        }
-        const fingerprint = externalUserFingerprint(parsed);
-        const previous = lineage.get(parsed.message_id);
-        if (
-          previous &&
-          (previous.fingerprint !== fingerprint ||
-            previous.lastGeneration + 1 !== artifact.generation)
-        ) {
-          throw new HistoryScannerError('external-user-lineage-conflict');
-        }
-        lineage.set(parsed.message_id, {
-          fingerprint,
-          lastGeneration: artifact.generation,
-        });
-        if (!previous) {
-          locators.push({
-            schemaVersion: 1,
-            messageId: parsed.message_id,
-            generation: artifact.generation,
-            lineNumber: index + 1,
-            byteOffset: offset,
-            artifactRevision: artifact.revision,
-          });
-        }
-      }
+      collectRecordLocator(
+        artifact,
+        parsed,
+        { lineNumber: index + 1, byteOffset: offset },
+        lineage,
+        locators,
+      );
     }
     offset += Buffer.byteLength(line, 'utf8') + 1;
   });
+}
+
+function collectRecordLocator(
+  artifact: ScannedArtifact,
+  parsed: CanonicalHistoryEnvelope | undefined,
+  location: { readonly lineNumber: number; readonly byteOffset: number },
+  lineage: Map<string, { readonly fingerprint: string; readonly lastGeneration: number }>,
+  locators: UserMessageLocatorV1[],
+): void {
+  if (parsed && isExternalUserId(parsed.message_id)) {
+    if (parsed.message.role !== 'user') {
+      throw new HistoryScannerError('external-user-lineage-conflict');
+    }
+    const fingerprint = externalUserFingerprint(parsed);
+    const previous = lineage.get(parsed.message_id);
+    if (
+      previous &&
+      (previous.fingerprint !== fingerprint || previous.lastGeneration + 1 !== artifact.generation)
+    ) {
+      throw new HistoryScannerError('external-user-lineage-conflict');
+    }
+    lineage.set(parsed.message_id, {
+      fingerprint,
+      lastGeneration: artifact.generation,
+    });
+    if (!previous) {
+      locators.push({
+        schemaVersion: 1,
+        messageId: parsed.message_id,
+        generation: artifact.generation,
+        lineNumber: location.lineNumber,
+        byteOffset: location.byteOffset,
+        artifactRevision: artifact.revision,
+      });
+    }
+  }
 }
 
 function externalUserFingerprint(envelope: CanonicalHistoryEnvelope): string {

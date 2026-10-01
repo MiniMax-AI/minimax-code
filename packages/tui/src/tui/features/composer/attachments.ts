@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, resolve } from 'node:path';
 import type { TuiAttachment } from '../../../application/invocation.js';
 import { inferTuiNativeVideoMimeType } from '../../../application/video-mime.js';
+import { resolveWslPath } from '../../../host/wsl-path.js';
 import { sanitizeTerminalText } from '../../rendering/terminal-text.js';
 import type { TranscriptAttachment } from '../../transcript/model.js';
 import { getTuiTerminalImagePasteFallbackPath } from './terminal-image-paste.js';
@@ -54,12 +55,13 @@ export async function resolveTuiAttachment(
   const normalizedReference = stripMatchingQuotes(reference.trim());
   if (!normalizedReference) throw new Error('Attachment path is required.');
   const userHome = options.homeDir ?? homedir();
-  const expanded =
+  const expanded = await resolveWslPath(
     normalizedReference === '~'
       ? userHome
       : normalizedReference.startsWith('~/') || normalizedReference.startsWith('~\\')
         ? resolve(userHome, normalizedReference.slice(2))
-        : normalizedReference;
+        : normalizedReference,
+  );
   let filePath = isAbsolute(expanded) ? resolve(expanded) : resolve(options.workspaceDir, expanded);
   const info = await stat(filePath)
     .catch((error: unknown) => {

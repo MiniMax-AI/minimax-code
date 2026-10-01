@@ -8,6 +8,8 @@ import type {
 import type { CanonicalHistoryFileAdapter } from './canonical-history-contract.js';
 
 export interface CreateCanonicalHistoryFileAdapterOptions {
+  /** Internal provider only: returned records remain private and immutable. */
+  readonly reuseDecodedRecords?: boolean;
   readonly onMalformedLine?: CanonicalHistoryJsonlDataSourceOptions['onMalformedLine'];
 }
 
@@ -18,8 +20,16 @@ export function createCanonicalHistoryFileAdapter(
 }
 
 class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
+  private cachedSource?: {
+    path: string;
+    source: CanonicalHistoryJsonlDataSource;
+  };
+
   constructor(private readonly options: CreateCanonicalHistoryFileAdapterOptions) {}
 
+  async targetExists(path: string) {
+    return exists(path);
+  }
   async readTarget(path: string) {
     if (!(await exists(path))) return undefined;
     return this.source(path).readActive();
@@ -30,6 +40,9 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
   }
   async readActive(path: string) {
     return this.source(path).readActive();
+  }
+  async readActiveWithBytes(path: string) {
+    return this.source(path).readActiveWithBytes();
   }
   async readActiveStrict(path: string) {
     return this.source(path).readActiveStrict();
@@ -43,8 +56,12 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
   async publishInitial(path: string, records: readonly CanonicalHistoryEnvelope[]) {
     return this.source(path).publishInitial(records);
   }
-  async append(path: string, records: readonly CanonicalHistoryEnvelope[]) {
-    await this.source(path).append(records);
+  async append(
+    path: string,
+    records: readonly CanonicalHistoryEnvelope[],
+    verifiedActive?: readonly CanonicalHistoryEnvelope[],
+  ) {
+    await this.source(path).append(records, verifiedActive);
   }
   async replace(path: string, records: readonly CanonicalHistoryEnvelope[]) {
     await this.source(path).replace(records);
@@ -56,10 +73,16 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
     return this.source(snapshotPath).publishSnapshot(snapshotPath, records);
   }
   private source(path: string) {
-    return new CanonicalHistoryJsonlDataSource({
+    if (this.options.reuseDecodedRecords && this.cachedSource?.path === path) {
+      return this.cachedSource.source;
+    }
+    const source = new CanonicalHistoryJsonlDataSource({
       activePath: path,
+      reuseDecodedRecords: this.options.reuseDecodedRecords,
       ...(this.options.onMalformedLine ? { onMalformedLine: this.options.onMalformedLine } : {}),
     });
+    if (this.options.reuseDecodedRecords) this.cachedSource = { path, source };
+    return source;
   }
 }
 async function exists(path: string) {

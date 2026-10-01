@@ -14,7 +14,8 @@
     "@mavis/config": "workspace:^",
     "@types/node": "^20",
     "typescript": "^5",
-    "vitest": "^2"
+    "vitest": "^2",
+    "@mavis/shared": "workspace:^"
   },
   "private": true,
   "license": "MIT"

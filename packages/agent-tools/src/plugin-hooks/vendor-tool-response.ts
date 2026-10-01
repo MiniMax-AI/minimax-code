@@ -195,6 +195,14 @@ export function withCompatibleGrepToolResponse(
   });
 }
 
+interface CompatibleStructuredPatchHunk {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly lines: readonly string[];
+}
+
 export function withCompatibleEditToolResponse(
   result: ToolResult,
   input: {
@@ -206,30 +214,40 @@ export function withCompatibleEditToolResponse(
     readonly userModified: boolean;
   },
 ): ToolResult {
-  const patch = typeof result.details?.patch === 'string' ? result.details.patch : undefined;
-  if (!patch) return result;
+  return withPluginHookCompatibleToolResponse(result, {
+    filePath: input.filePath,
+    oldString: input.oldString,
+    newString: input.newString,
+    originalFile: input.originalFile,
+    structuredPatch: parseStructuredPatch(result.details?.patch),
+    userModified: input.userModified,
+    replaceAll: input.replaceAll,
+  });
+}
+
+/**
+ * `structuredPatch` is a required array in the Compatible file-edit response,
+ * and the upstream tool already sends `[]` when its own diff gives up, so an
+ * unavailable patch degrades to the empty array. Dropping the field instead
+ * makes the runner skip the handler before it starts, and describing the edit
+ * as one whole-file hunk pushes the payload past the runner's input limit.
+ */
+function parseStructuredPatch(patch: unknown): CompatibleStructuredPatchHunk[] {
+  if (typeof patch !== 'string') return [];
   let parsed: ReturnType<typeof parsePatch>[number] | undefined;
   try {
     parsed = parsePatch(patch)[0];
   } catch {
     // Hook compatibility is an enhancement; malformed vendor metadata must
     // never turn a successful edit into a failed tool call.
-    return result;
+    return [];
   }
-  if (!parsed) return result;
-  return withPluginHookCompatibleToolResponse(result, {
-    filePath: input.filePath,
-    oldString: input.oldString,
-    newString: input.newString,
-    originalFile: input.originalFile,
-    structuredPatch: parsed.hunks.map((hunk) => ({
-      oldStart: hunk.oldStart,
-      oldLines: hunk.oldLines,
-      newStart: hunk.newStart,
-      newLines: hunk.newLines,
-      lines: hunk.lines,
-    })),
-    userModified: input.userModified,
-    replaceAll: input.replaceAll,
-  });
+  if (!parsed) return [];
+  return parsed.hunks.map((hunk) => ({
+    oldStart: hunk.oldStart,
+    oldLines: hunk.oldLines,
+    newStart: hunk.newStart,
+    newLines: hunk.newLines,
+    lines: hunk.lines,
+  }));
 }

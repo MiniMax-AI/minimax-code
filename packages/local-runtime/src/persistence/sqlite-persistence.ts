@@ -1089,6 +1089,40 @@ export class SqliteLocalTurnDiffStore implements LocalTurnDiffStore {
     );
   }
 
+  /** Navigation only needs paths; keep patches and undo contents inside SQLite. */
+  async listFilePathsBySession(
+    sessionId: string,
+  ): Promise<Array<{ assistantMessageId?: string; filePaths: string[] }>> {
+    return this.withDb((db) =>
+      (
+        db
+          .prepare(
+            `
+            SELECT assistant_message_id,
+              (
+                SELECT json_group_array(json_extract(item.value, '$.file'))
+                FROM json_each(
+                  CASE WHEN json_valid(file_changes_json) THEN file_changes_json ELSE '[]' END
+                ) AS item
+                WHERE item.type = 'object' AND json_type(item.value, '$.file') = 'text'
+              ) AS file_paths_json
+            FROM local_runtime_turn_diffs
+            WHERE session_id = ? AND session_id != ''
+              AND change_set_id != '' AND turn_id != '' AND workspace_dir != ''
+            ORDER BY captured_at_ms ASC, change_set_id ASC
+          `,
+          )
+          .all(sessionId) as Array<{
+          assistant_message_id: string | null;
+          file_paths_json: string;
+        }>
+      ).map((row) => ({
+        ...(row.assistant_message_id ? { assistantMessageId: row.assistant_message_id } : {}),
+        filePaths: JSON.parse(row.file_paths_json) as string[],
+      })),
+    );
+  }
+
   async updateStatus(
     sessionId: string,
     changeSetId: string,

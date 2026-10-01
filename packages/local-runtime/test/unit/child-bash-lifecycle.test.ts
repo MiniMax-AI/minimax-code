@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalBashTool } from '@mavis/agent-tools/desktop';
-import { createLocalBashOperations, getShellConfig } from '@earendil-works/pi-coding-agent';
+import { createLocalBashOperations } from '@earendil-works/pi-coding-agent/tools';
+import { getShellConfig } from '@earendil-works/pi-coding-agent/shell';
 import { createChildBashLifecycle } from '../../src/background-task/child-bash-lifecycle.js';
 import { LocalBackgroundTaskService } from '../../src/background-task/service.js';
 import {
@@ -79,6 +80,34 @@ async function fixture() {
   return { dataDir, service, host, controller, lifecycle, create };
 }
 const poll = { wait: false, readTaskIds: new Set<string>() };
+
+// Force Windows PowerShell 5.1 even when pwsh 7 is installed on the host.
+// These are real shell checks, not a simulation of PowerShell exit semantics.
+describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 exit codes', () => {
+  const shellPath = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const native = (code: number) => `& ${quote(process.execPath)} -e ${quote(`console.error('native-evidence');process.exit(${code})`)}`;
+
+  describe.each([false, true])('parentDeathGuard=%s', (parentDeathGuard) => {
+    it.each([
+      ['native failure', native(7), 7, 'native-evidence'],
+      ['native failure followed by PowerShell output', `${native(7)}; Write-Output 'tail'`, 7, 'tail'],
+      ['native success', native(0), 0, 'native-evidence'],
+      ['last native command succeeds', `${native(7)}; ${native(0)}`, 0, 'native-evidence'],
+      ['pure PowerShell success', "Write-Output 'success-evidence'", 0, 'success-evidence'],
+      ['terminating PowerShell error', "throw 'ps-error'", 1, 'ps-error'],
+      ['explicit exit', 'exit 9', 9, ''],
+    ] as const)('%s', async (_name, command, exitCode, evidence) => {
+      let output = '';
+      const result = await createLocalBashOperations({ shellPath, parentDeathGuard }).exec(command, tmpdir(), {
+        onData: (chunk) => { output += chunk.toString(); },
+        timeout: 10,
+      });
+      expect(output).toContain(evidence);
+      expect(result.exitCode).toBe(exitCode);
+    }, 15_000);
+  });
+});
 
 describe('child Bash lifecycle', () => {
   it.each(['succeeded', 'failed', 'canceled', 'lost'] as const)(
@@ -191,7 +220,7 @@ describe('child Bash lifecycle', () => {
 });
 
 describe('real child Bash boundaries', () => {
-  it('uses the actual 15 second LocalBashTool soft yield and then recovers output', async () => {
+  it('keeps the 3600 second command deadline across the actual 60 second soft yield', async () => {
     const { dataDir, host, lifecycle, service, controller } = await fixture();
     const session = {
       ...parentSessionRecord(dataDir),
@@ -209,23 +238,39 @@ describe('real child Bash boundaries', () => {
     const startedAt = Date.now();
     try {
       const receipt = await tool.execute(
-        toolContext('child'),
+        { ...toolContext('child'), canConsumeBackgroundBashOutput: true },
         {
-          command: nodeCommand("setTimeout(() => console.log('after-real-soft-yield'), 16500)"),
+          command: nodeCommand("setTimeout(() => console.log('after-real-soft-yield'), 61500)"),
         },
         controller.signal,
       );
       expect(receipt.details).toMatchObject({ status: 'auto_promoted' });
-      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(15000);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(60000);
+      const timing = receipt.details?.timing as {
+        commandTimeoutSeconds: number;
+        commandTimerStartedAt: number;
+        commandDeadlineAt: number;
+      };
+      expect(timing.commandTimeoutSeconds).toBe(3600);
+      expect(timing.commandTimerStartedAt).toBeGreaterThanOrEqual(startedAt);
+      expect(timing.commandDeadlineAt - timing.commandTimerStartedAt).toBe(3_600_000);
+      expect(timing.commandDeadlineAt - Date.now()).toBeLessThan(3_550_000);
       const taskId = String(receipt.details?.task_id);
       expect(await lifecycle.poll({ ...poll, wait: true })).toContain(taskId);
       expect((await service.readOutput(toolContext('child'), taskId)).content).toContain(
         'after-real-soft-yield',
       );
+      expect((await service.get(taskId))?.metadata?.bashDetails).toMatchObject({
+        timing: {
+          commandTimeoutSeconds: 3600,
+          commandTimerStartedAt: timing.commandTimerStartedAt,
+          commandDeadlineAt: timing.commandDeadlineAt,
+        },
+      });
     } finally {
       await lifecycle.close();
     }
-  }, 30000);
+  }, 90000);
   it.each(['failure', 'timeout', 'cancel'] as const)(
     'preserves real shell %s and cleans up the process',
     async (mode) => {

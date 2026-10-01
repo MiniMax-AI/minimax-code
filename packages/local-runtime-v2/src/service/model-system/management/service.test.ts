@@ -11,6 +11,7 @@ import type {
   ModelDiscoveryResult,
   ModelDiscoveryTarget,
 } from '../contracts.js';
+import { planCustomProviderResolution } from '../resolution/model-resolver-byok.js';
 import { LocalModelCache } from '../catalog/model-cache.js';
 import { MINIMAX_API_DEFAULT_BASE_URL, minimaxApiModels } from '../catalog/minimax-api.js';
 import { listLocalRuntimeModels } from '../catalog/catalog.js';
@@ -205,7 +206,7 @@ describe('MiniMax api key', () => {
     expect(h.config.minimax_api?.apiKey).toBe(RAW_KEY);
   });
 
-  it('keeps the BYOK catalog independent when the managed snapshot only has other models', async () => {
+  it('uses remote-only models from the shared official catalog for MiniMax API', async () => {
     const h = makeHarness({
       provider: {
         minimax: {
@@ -219,8 +220,7 @@ describe('MiniMax api key', () => {
 
     const provider = await h.service.upsertMinimaxApiKey({ apiKey: RAW_KEY });
 
-    expect(provider.models.map((model) => model.modelId)).toContain('MiniMax-M3');
-    expect(provider.models.map((model) => model.modelId)).not.toContain('Remote-B');
+    expect(provider.models.map((model) => model.modelId)).toEqual(['Remote-B', 'Remote-C']);
   });
 
   it('rejects empty, whitespace-only, and masked placeholder keys', async () => {
@@ -476,8 +476,10 @@ describe('MiniMax model context', () => {
     h.config.provider.minimax = {
       models: { 'Remote-Only-M4': { limit: { context: 256_000 } } },
     };
-    expect(minimaxApiModels(h.config)['MiniMax-M3']?.limit?.context).toBe(1_000_000);
-    expect(() => h.service.assertModelSelectable('minimax', 'MiniMax-M3')).not.toThrow();
+    expect(minimaxApiModels(h.config)['MiniMax-M3']).toBeUndefined();
+    expect(() => h.service.assertModelSelectable('minimax', 'MiniMax-M3')).toThrowError(
+      expect.objectContaining({ code: 'MODEL_NOT_FOUND' }),
+    );
   });
 
   it('keeps the current Paygo M3 context and cache when its candidate test fails', async () => {
@@ -510,12 +512,12 @@ describe('MiniMax model context', () => {
       minimaxModelSource: 'minimax_api_key',
     });
 
-    expect(minimaxApiModels(h.config)['MiniMax-M3']?.limit?.context).toBe(512_000);
+    expect(minimaxApiModels(h.config)['MiniMax-M3']?.limit?.context).toBe(200_000);
     await expect(
       h.service.updateMinimaxModelContext({
         modelId: 'MiniMax-M3',
         contextLimit: 768_000,
-        expectedContextLimit: 512_000,
+        expectedContextLimit: 200_000,
       }),
     ).rejects.toMatchObject({ code: 'INVALID_CONTEXT_LIMIT', status: 400 });
     expect(h.testCalls).toHaveLength(0);
@@ -777,6 +779,21 @@ describe('custom provider API key reveal', () => {
 });
 
 describe('custom providers', () => {
+  it('discovers a new provider with its draft key before any model or configuration is saved', async () => {
+    const h = makeHarness({});
+    const before = JSON.stringify(h.config);
+    h.setDiscoverResult({ ok: true, models: [{ modelId: 'new-model' }] });
+    await expect(h.service.discoverUserModelsCandidate({
+      name: 'Draft gateway', baseUrl: 'https://draft.example/v1',
+      apiKey: 'synthetic-draft-key', apiFormat: 'openai-completions',
+    })).resolves.toEqual([{ modelId: 'new-model' }]);
+    expect(h.discoverCalls).toEqual([expect.objectContaining({
+      baseUrl: 'https://draft.example/v1', apiKey: 'synthetic-draft-key', api: 'openai-completions',
+    })]);
+    expect(JSON.stringify(h.config)).toBe(before);
+    expect(h.testCalls).toEqual([]);
+  });
+
   it('tests and discovers an edit candidate without mutating config or cache', async () => {
     const h = makeHarness({
       custom_provider: {
@@ -1020,6 +1037,63 @@ describe('custom provider candidate persistence implicit thinking default', () =
 });
 
 describe('custom provider candidate persistence', () => {
+  it.each(['https://api.z.ai', 'https://open.bigmodel.cn'])(
+    'persists and resolves only the explicitly retried Coding Plan endpoint on %s',
+    async (origin) => {
+      const h = makeHarness();
+      const generalUrl = `${origin}/api/paas/v4`;
+      const codingUrl = `${origin}/api/coding/paas/v4`;
+      const candidate = {
+        name: 'GLM plan',
+        apiKey: CUSTOM_KEY,
+        baseUrl: generalUrl,
+        apiFormat: 'openai-completions',
+        models: [{ modelId: 'glm-5.3', toolCall: true }],
+      };
+      h.setTestResult({
+        ok: false,
+        errorCode: 'http_429',
+        errorMessage: 'Insufficient balance',
+      });
+      const failed = await h.service.saveUserModelProviderCandidate({
+        candidate,
+        modelId: 'glm-5.3',
+        saveAndUse: true,
+      });
+      expect(failed.ok).toBe(false);
+      expect(h.config.custom_provider).toBeUndefined();
+      expect(h.config.defaultModel).toBe('minimax/MiniMax-M3');
+      expect(h.testCalls.map(({ target }) => target.baseUrl)).toEqual([generalUrl]);
+
+      h.setTestResult({ ok: true });
+      const saved = await h.service.saveUserModelProviderCandidate({
+        candidate: { ...candidate, baseUrl: codingUrl },
+        modelId: 'glm-5.3',
+        saveAndUse: true,
+      });
+      expect(saved.ok).toBe(true);
+      const provider = saved.provider!.providerId;
+      const providerKey = provider.replace('custom_provider:', '');
+      expect(h.config.custom_provider?.[providerKey]?.options?.baseURL).toBe(codingUrl);
+      expect(h.config.defaultModel).toBe(`${provider}/glm-5.3`);
+      expect(h.testCalls.map(({ target }) => target.baseUrl)).toEqual([generalUrl, codingUrl]);
+      // Custom provider resolution must use the persisted URL, not a similarly
+      // named provider in the bundled inference registry.
+      expect(
+        planCustomProviderResolution({
+          byok: h.config,
+          provider,
+          providerKey,
+          modelId: 'glm-5.3',
+        }),
+      ).toMatchObject({
+        baseUrl: codingUrl,
+        api: 'openai-completions',
+        apiKey: CUSTOM_KEY,
+      });
+    },
+  );
+
   it('saves every preset model without testing or switching the active model', async () => {
     const h = makeHarness();
 
@@ -2345,7 +2419,10 @@ describe('provider listings', () => {
           options: { authMode: 'managed-login' },
           models: {
             'remote-only': { name: 'Remote Only' },
-            'MiniMax-M3': { limit: { context: 512_000, output: 128_000 } },
+            'MiniMax-M3': {
+              limit: { context: 512_000, output: 128_000 },
+              contextWindowOptions: [512_000, 1_000_000],
+            },
           },
         },
       },
@@ -2358,7 +2435,7 @@ describe('provider listings', () => {
     expect(provider?.models.map((model) => model.modelId)).toEqual(
       listed.map((model) => model.modelId),
     );
-    expect(provider?.models.some((model) => model.modelId === 'remote-only')).toBe(false);
+    expect(provider?.models.some((model) => model.modelId === 'remote-only')).toBe(true);
     expect(provider?.models.find((model) => model.modelId === 'MiniMax-M3')).toMatchObject({
       contextLimit: 1_000_000,
       contextWindowOptions: [512_000, 1_000_000],

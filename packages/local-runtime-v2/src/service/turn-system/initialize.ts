@@ -269,6 +269,8 @@ function turnExecutionOverrides(options: InitializeTurnSystemOptions) {
       : {}),
     ...(options.nowMs ? { nowMs: options.nowMs } : {}),
     ...(options.makeTurnId ? { makeTurnId: options.makeTurnId } : {}),
+    ...(options.userStop ? { userStop: options.userStop } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
   };
 }
 

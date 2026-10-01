@@ -515,32 +515,57 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
     expect(active.status).toBe("active");
   });
 
-  it("ignores an ordinary unbound Turn even when the session currently has an active Goal", async () => {
-    const active = goal();
-    const bumpBoundUsage = vi.fn();
-    const settleBoundTurn = vi.fn();
-    const enqueuePostTurnContinuation = vi.fn(async () => undefined);
-    const { integration } = makeIntegration({
-      store: makeStore({
-        getBySession: async () => active,
-        bumpBoundUsage,
-        settleBoundTurn,
-      }),
-      enqueuePostTurnContinuation,
-    });
+  it.each(["active", "complete"] as const)(
+    "rejects an unbound proposal without ending the user Turn or changing the %s Goal",
+    async (status) => {
+      const currentGoal = goal({ status });
+      const bumpBoundUsage = vi.fn();
+      const settleBoundTurn = vi.fn();
+      const enqueuePostTurnContinuation = vi.fn(async () => undefined);
+      const { integration } = makeIntegration({
+        store: makeStore({
+          getBySession: async () => currentGoal,
+          bumpBoundUsage,
+          settleBoundTurn,
+        }),
+        enqueuePostTurnContinuation,
+      });
 
-    await integration.settleInjectedTurn({
-      sessionId: active.sessionId,
-      turnId: "turn_int",
-      status: "completed",
-      tokens: 99,
-      retracted: false,
-    });
+      const proposal = await submitGoalProposal(integration, "complete");
 
-    expect(bumpBoundUsage).not.toHaveBeenCalled();
-    expect(settleBoundTurn).not.toHaveBeenCalled();
-    expect(enqueuePostTurnContinuation).not.toHaveBeenCalled();
-  });
+      expect(proposal.isError).toBe(true);
+      expect(proposal.terminate).toBeUndefined();
+      expect(JSON.parse(proposal.text)).toMatchObject({
+        reason: "not_a_goal_turn",
+        currentGoal: {
+          goalId: currentGoal.goalId,
+          status,
+          objective: currentGoal.objective,
+        },
+      });
+      expect(JSON.parse(proposal.text)).not.toHaveProperty("proposal");
+
+      const decision = await integration.settleInjectedTurn({
+        sessionId: currentGoal.sessionId,
+        turnId: "turn_int",
+        status: "completed",
+        tokens: 99,
+        retracted: false,
+      });
+
+      expect(bumpBoundUsage).not.toHaveBeenCalled();
+      expect(settleBoundTurn).not.toHaveBeenCalled();
+      expect(enqueuePostTurnContinuation).not.toHaveBeenCalled();
+      expect(decision).toEqual({
+        stage: 1,
+        action: "ignored",
+        reason: "not_a_goal_turn",
+      });
+      expect(
+        await integration.store.getBySession(currentGoal.sessionId),
+      ).toEqual(currentGoal);
+    },
+  );
 
   it("never attributes an old binding to a replacement Goal in the same session", async () => {
     let current = goal({ goalId: "tg_old" });
@@ -566,6 +591,10 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
     });
     await admitGoalTurn(integration, current, "turn_int");
     current = replacement;
+
+    const proposal = await submitGoalProposal(integration, "complete");
+    expect(proposal.isError).toBe(true);
+    expect(proposal.terminate).toBe(true);
 
     await integration.settleInjectedTurn({
       sessionId: current.sessionId,

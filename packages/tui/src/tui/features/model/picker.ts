@@ -36,6 +36,9 @@ const MODEL_CONTROL_ROWS = 3;
 type ModelKey = string;
 const CONNECT_CODEX_ITEM_VALUE = '\u0000connect-codex';
 const ADD_PROVIDER_ITEM_VALUE = '\u0000add-provider';
+/** Favorite rows repeat a provider row, so they need a distinct list value. */
+const FAVORITE_ROW_PREFIX = '\u0000favorite\u0000';
+const FAVORITE_UPDATE_FAILED = "Couldn't update favorites. Press ctrl+s to retry.";
 
 interface ModelGroup {
   readonly label: string;
@@ -54,6 +57,9 @@ export class TuiModelPicker implements Component, Focusable {
   private readonly contextDrafts = new Map<ModelKey, number>();
   private readonly effortDrafts = new Map<ModelKey, string>();
   private readonly modelByKey = new Map<ModelKey, TuiModel>();
+  /** Starred models in the order they were added; new favorites go last. */
+  private favoriteKeys: ModelKey[];
+  private favoriteStatus: string | undefined;
   private deletingProviderId: string | undefined;
   private deleteStatus: { readonly tone: 'info' | 'error'; readonly text: string } | undefined;
   private busy = false;
@@ -73,12 +79,18 @@ export class TuiModelPicker implements Component, Focusable {
       };
       onAddProvider?: () => void;
       onDeleteProvider?: (providerId: string) => Promise<void>;
+      /** Persists a favorite toggle; `false` or a rejection rolls the row back. */
+      onToggleFavorite?: (model: TuiModel, favorite: boolean) => Promise<boolean | void> | boolean | void;
       requestRender?: () => void;
     } = {},
     /** Think effort already stored for the current Session, when known. */
     private readonly selectedEffort?: string,
     initialQuery = '',
   ) {
+    this.favoriteKeys = models
+      .filter((model) => model.favorite)
+      .sort((a, b) => (a.favoriteOrder ?? Infinity) - (b.favoriteOrder ?? Infinity))
+      .map(modelKey);
     const selectedModel = models.find((model) => model.selected);
     this.selectedModelKey = selectedModel ? modelKey(selectedModel) : undefined;
     this.focusBeforeSearchKey = this.selectedModelKey;
@@ -110,6 +122,10 @@ export class TuiModelPicker implements Component, Focusable {
     }
 
     const model = this.focusedModel();
+    if (model && this.availability.onToggleFavorite && matchesKey(data, Key.ctrl('s'))) {
+      this.toggleFavorite(model);
+      return;
+    }
     if (
       model &&
       isCustomProviderModel(model) &&
@@ -194,6 +210,9 @@ export class TuiModelPicker implements Component, Focusable {
       ...(layout.bodyHeight >= 3 && this.availability.unavailableHint
         ? [chalk.hex(colors.warning)(sanitizeTerminalText(this.availability.unavailableHint))]
         : []),
+      ...(layout.bodyHeight >= 3 && this.favoriteStatus
+        ? [chalk.hex(colors.warning)(this.favoriteStatus)]
+        : []),
       ...(layout.bodyHeight >= 2 ? [`${searchPrompt}${search}`] : []),
       ...(layout.bodyHeight >= 4 &&
       this.visibleModels().length === 0 &&
@@ -224,7 +243,49 @@ export class TuiModelPicker implements Component, Focusable {
 
   private focusedModel(): TuiModel | undefined {
     const item = this.list.getSelectedItem();
-    return item ? this.modelByKey.get(item.value) : undefined;
+    return item ? this.modelByKey.get(rowModelKey(item.value)) : undefined;
+  }
+
+  private isFavorite(model: TuiModel): boolean {
+    return this.favoriteKeys.includes(modelKey(model));
+  }
+
+  private toggleFavorite(model: TuiModel): void {
+    const onToggle = this.availability.onToggleFavorite;
+    if (!onToggle) return;
+    const key = modelKey(model);
+    const previousIndex = this.favoriteKeys.indexOf(key);
+    const favorite = previousIndex < 0;
+    this.favoriteKeys = favorite
+      ? [...this.favoriteKeys, key]
+      : this.favoriteKeys.filter((candidate) => candidate !== key);
+    this.favoriteStatus = undefined;
+    // Unstarring from the Favorites group keeps focus on the same model.
+    if (!favorite && this.focusedModelKey === favoriteRowValue(key)) this.focusedModelKey = key;
+    this.list = this.createList();
+    this.availability.requestRender?.();
+
+    const rollback = () => {
+      const current = this.favoriteKeys.filter((candidate) => candidate !== key);
+      if (!favorite) current.splice(Math.min(previousIndex, current.length), 0, key);
+      this.favoriteKeys = current;
+      this.favoriteStatus = FAVORITE_UPDATE_FAILED;
+      this.list = this.createList();
+      this.availability.requestRender?.();
+    };
+    let result: ReturnType<typeof onToggle>;
+    try {
+      result = onToggle(model, favorite);
+    } catch {
+      rollback();
+      return;
+    }
+    void Promise.resolve(result).then(
+      (saved) => {
+        if (saved === false) rollback();
+      },
+      rollback,
+    );
   }
 
   private contextChoice(model: TuiModel): number | undefined {
@@ -279,21 +340,43 @@ export class TuiModelPicker implements Component, Focusable {
     this.modelByKey.clear();
     for (const model of this.models) this.modelByKey.set(modelKey(model), model);
 
-    const items = groups.flatMap((group) =>
-      group.models.map((model) => {
-        const key = modelKey(model);
-        const unavailable = Boolean(this.availability.isUnavailable?.(model));
-        return {
-          value: key,
-          label: `${model.selected ? '● ' : ''}${unavailable ? '[login] ' : ''}${sanitizeTerminalText(model.displayName ?? model.modelId)}`,
-          description: formatModelDescription(
-            { ...model, contextLimit: this.contextChoice(model) },
-            unavailable,
+    const row = (model: TuiModel, value: string, groupLabel: string, star: boolean) => {
+      const unavailable = Boolean(this.availability.isUnavailable?.(model));
+      return {
+        value,
+        label: `${model.selected ? '● ' : ''}${star ? '★ ' : ''}${unavailable ? '[login] ' : ''}${sanitizeTerminalText(model.displayName ?? model.modelId)}`,
+        description: formatModelDescription(
+          { ...model, contextLimit: this.contextChoice(model) },
+          unavailable,
+        ),
+        groupLabel,
+      };
+    };
+    const visibleKeys = new Set(visible.map(modelKey));
+    const favorites = this.favoriteKeys.flatMap((key) => {
+      const model = visibleKeys.has(key) ? this.modelByKey.get(key) : undefined;
+      return model ? [model] : [];
+    });
+    const items = [
+      ...favorites.map((model) =>
+        row(
+          model,
+          favoriteRowValue(modelKey(model)),
+          `★ Favorites · ${favorites.length}`,
+          false,
+        ),
+      ),
+      ...groups.flatMap((group) =>
+        group.models.map((model) =>
+          row(
+            model,
+            modelKey(model),
+            `${sanitizeTerminalText(group.label)} · ${group.models.length}`,
+            this.isFavorite(model),
           ),
-          groupLabel: `${sanitizeTerminalText(group.label)} · ${group.models.length}`,
-        };
-      }),
-    );
+        ),
+      ),
+    ];
     items.push({
       value: ADD_PROVIDER_ITEM_VALUE,
       label: '+ Add 3rd-party provider…',
@@ -324,7 +407,7 @@ export class TuiModelPicker implements Component, Focusable {
         this.availability.onAddProvider?.();
         return;
       }
-      const model = this.modelByKey.get(item.value);
+      const model = this.modelByKey.get(rowModelKey(item.value));
       if (!model) return;
       if (this.availability.isUnavailable?.(model)) {
         this.availability.onUnavailable?.(model);
@@ -343,16 +426,23 @@ export class TuiModelPicker implements Component, Focusable {
     };
     list.onCancel = this.onCancel;
 
-    const preferredIndex = this.focusedModelKey
-      ? visible.findIndex((model) => modelKey(model) === this.focusedModelKey)
-      : visible.findIndex((model) => modelKey(model) === this.selectedModelKey);
+    // Explicit focus is tracked by row value. Otherwise use the model's first
+    // row, so the selected favorite opens on its Favorites row at the top.
+    const modelRows = items.filter((item) => this.modelByKey.has(rowModelKey(item.value)));
+    const target = this.focusedModelKey ?? this.selectedModelKey;
+    let preferredIndex = this.focusedModelKey
+      ? modelRows.findIndex((item) => item.value === this.focusedModelKey)
+      : -1;
+    if (preferredIndex < 0 && target) {
+      preferredIndex = modelRows.findIndex(
+        (item) => rowModelKey(item.value) === rowModelKey(target),
+      );
+    }
     if (preferredIndex >= 0) {
       list.setSelectedIndex(preferredIndex);
-      this.focusedModelKey = visible[preferredIndex]
-        ? modelKey(visible[preferredIndex])
-        : undefined;
-    } else if (visible[0]) {
-      this.focusedModelKey = modelKey(visible[0]);
+      this.focusedModelKey = modelRows[preferredIndex]?.value;
+    } else if (modelRows[0]) {
+      this.focusedModelKey = modelRows[0].value;
     }
     return list;
   }
@@ -374,9 +464,14 @@ export class TuiModelPicker implements Component, Focusable {
     const switchable = model?.thinkingConfig?.mode === 'switchable';
     const contextHint = model && contextWindowOptions(model).length > 1 ? ' · tab context' : '';
     const deleteHint =
-      model && isCustomProviderModel(model) && this.availability.onDeleteProvider
+      (model && this.availability.onToggleFavorite
+        ? this.isFavorite(model)
+          ? ' · ctrl+s unfavorite'
+          : ' · ctrl+s favorite'
+        : '') +
+      (model && isCustomProviderModel(model) && this.availability.onDeleteProvider
         ? ' · ctrl+d delete provider'
-        : '';
+        : '');
     if (supportsTuiEffort(model)) {
       return `↑↓ select · type to search · ←/→ effort · enter apply${contextHint}${deleteHint} · esc cancel`;
     }
@@ -533,6 +628,14 @@ function codexOAuthAction(state: Exclude<McodeCodexOAuthState, 'hidden'>): {
 
 function modelKey(model: TuiModel): ModelKey {
   return `${model.providerId}\u0000${model.modelId}`;
+}
+
+function favoriteRowValue(key: ModelKey): string {
+  return `${FAVORITE_ROW_PREFIX}${key}`;
+}
+
+function rowModelKey(value: string): ModelKey {
+  return value.startsWith(FAVORITE_ROW_PREFIX) ? value.slice(FAVORITE_ROW_PREFIX.length) : value;
 }
 
 function isCustomProviderModel(model: TuiModel): boolean {

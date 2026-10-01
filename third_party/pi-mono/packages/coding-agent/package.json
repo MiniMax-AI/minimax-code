@@ -12,6 +12,30 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./tools": {
+      "types": "./dist/core/tools/index.d.ts",
+      "import": "./dist/core/tools/index.js"
+    },
+    "./messages": {
+      "types": "./dist/core/messages.d.ts",
+      "import": "./dist/core/messages.js"
+    },
+    "./auth-storage": {
+      "types": "./dist/core/auth-storage.d.ts",
+      "import": "./dist/core/auth-storage.js"
+    },
+    "./compaction": {
+      "types": "./dist/core/compaction/compaction.d.ts",
+      "import": "./dist/core/compaction/compaction.js"
+    },
+    "./image-resize": {
+      "types": "./dist/utils/image-resize.d.ts",
+      "import": "./dist/utils/image-resize.js"
+    },
+    "./shell": {
+      "types": "./dist/utils/shell.d.ts",
+      "import": "./dist/utils/shell.js"
     }
   },
   "files": [

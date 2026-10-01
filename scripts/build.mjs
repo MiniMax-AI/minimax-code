@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { copyLocalRuntimeAssets } from "./lib/local-runtime-assets.mjs";
@@ -17,6 +18,7 @@ import { shouldCopyTuiRuntimeResource } from "./lib/tui-package-privacy.mjs";
 import { TUI_DISABLED_BUILTIN_SKILL_NAMES } from "./lib/builtin-skills.mjs";
 import { copyMcodeToolsArtifact } from './lib/mcode-tools-artifact.mjs';
 import { readExtraction } from "./lib/release-metadata.mjs";
+import { cliBuildVersion, cliExternalModules } from './lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const metadata = readExtraction(root);
@@ -72,7 +74,7 @@ const sourcePlugin = {
     });
   },
 };
-const version = packages.get("@minimax/code").manifest.version;
+const version = cliBuildVersion(root);
 const result = await build({
   absWorkingDir: root,
   entryPoints: {
@@ -81,18 +83,14 @@ const result = await build({
     'mcode-tools': 'packages/tui/src/cli/mcode-tools-entry.ts',
     'matrix-mcp-stdio': 'packages/agent-tools/src/desktop/matrix-mcp-stdio.ts',
   },
-  external: [
-    "better-sqlite3",
-    "@mariozechner/clipboard",
-    "@vscode/ripgrep",
-    "@larksuiteoapi/node-sdk",
-  ],
+  external: cliExternalModules,
   outdir,
   bundle: true,
   splitting: true,
   format: "esm",
   platform: "node",
   minifyIdentifiers: true,
+  minifyWhitespace: true,
   target: "node22",
   chunkNames: "chunks/[name]-[hash]",
   banner: { js: location.banner },
@@ -143,7 +141,12 @@ console.log(
 writeFileSync(
   path.join(outdir, "package.json"),
   JSON.stringify(
-    { name: "@minimax-ai/code", version, type: "module", private: true },
+    {
+      name: "@minimax-ai/code", version, type: "module", private: true,
+      ...(process.env.MCODE_RELEASE_TAG ? {
+        gitHead: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+      } : {}),
+    },
     null,
     2,
   ) + "\n",

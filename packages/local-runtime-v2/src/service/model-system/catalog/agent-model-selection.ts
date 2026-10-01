@@ -2,7 +2,7 @@ import { getRuntimePresetKey, resolveModelAvailability } from '@mavis/config';
 import { ThinkingLevel } from '@mavis/protocol';
 
 import type { LocalConversationRuntimeConfig, LocalModelConfig } from '../contracts.js';
-import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from '../identity.js';
+import { MANAGED_MINIMAX_PROVIDER_ID } from '../identity.js';
 import { modelConfigForRef } from './list-models.js';
 import { resolveLegacyMinimaxModel } from './model-selection.js';
 import {
@@ -12,7 +12,6 @@ import {
   type ParsedModelKey,
 } from '../resolution/model-key.js';
 import {
-  MINIMAX_M3_MODEL_ID,
   isMiniMaxM3ThinkingMode,
   isThinkingEffortDisabled,
   resolveMiniMaxM3ThinkingMode,
@@ -225,7 +224,7 @@ export function resolveAgentModelSelection(input: {
       : {}),
     defaultMissingEffortOff: defaultsMissingEffortOff(sources, modelIndex, modelSource),
   });
-  const contextWindow = resolveContextWindow({ contributors, modelSource, model, modelConfig });
+  const contextWindow = resolveContextWindow({ contributors, modelSource, modelConfig });
   const maxOutputTokens = resolveLimit({
     field: 'maxOutputTokens',
     requested: firstNumber(contributors, 'maxOutputTokens'),
@@ -357,12 +356,13 @@ function resolveSelectionContext(input: {
 function resolveContextWindow(input: {
   readonly contributors: readonly AgentModelSelectionSource[];
   readonly modelSource: AgentModelSelectionSource;
-  readonly model: { readonly providerId: string; readonly modelId: string };
   readonly modelConfig: LocalModelConfig | undefined;
 }) {
   const contextDefault = positiveLimit(input.modelConfig?.limit?.context);
-  // Official M3 catalog context is the selected 512K/1M tier, not its maximum.
-  const physicalLimit = hasM3ContextTiers(input.model, contextDefault) ? 1_000_000 : contextDefault;
+  const contextOptions = input.modelConfig?.contextWindowOptions?.filter(
+    (value) => positiveLimit(value) !== undefined,
+  );
+  const physicalLimit = contextOptions?.length ? Math.max(...contextOptions) : contextDefault;
   return resolveLimit({
     field: 'contextWindow',
     requested: firstNumber(input.contributors, 'contextWindow'),
@@ -370,18 +370,6 @@ function resolveContextWindow(input: {
     defaultLimit: contextDefault,
     physicalLimit,
   });
-}
-
-function hasM3ContextTiers(
-  model: { readonly providerId: string; readonly modelId: string },
-  contextDefault: number | undefined,
-): boolean {
-  return (
-    model.modelId === MINIMAX_M3_MODEL_ID &&
-    (model.providerId === MANAGED_MINIMAX_PROVIDER_ID ||
-      model.providerId === MINIMAX_API_PROVIDER_ID) &&
-    contextDefault !== undefined
-  );
 }
 
 function assertRequiredCatalogModel(

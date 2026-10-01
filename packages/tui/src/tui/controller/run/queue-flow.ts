@@ -1,3 +1,4 @@
+import { decodePluginMentions, encodePluginMentions, transformPluginMentions } from '../../widgets/editor/plugin-mentions.js';
 import type {
   TuiModelSelection,
   TuiQueuePort,
@@ -301,6 +302,12 @@ export class TuiQueueFlow {
         ? (submission?.transportContent ?? rememberedTransport)
         : (item.content ?? submission?.transportContent ?? rememberedTransport);
     if (!transportContent) return item;
+    const decoded = decodePluginMentions(visibleSessionMutationContent(transportContent));
+    if (decoded.mentions.length) {
+      this.queuedTransportContents.set(item.itemId, transportContent);
+      return { ...item, content: decoded.text };
+    }
+    if (rememberedTransport && decodePluginMentions(visibleSessionMutationContent(rememberedTransport)).text === item.content) return item;
     if (item.reviewRequest) {
       this.queuedTransportContents.set(item.itemId, transportContent);
       return { ...item, content: '/review' };
@@ -575,8 +582,11 @@ export class TuiQueueFlow {
     }
     const sessionId = this.options.controller.snapshot().session?.sessionId;
     if (!sessionId) return false;
-    const transportContent =
-      rebuildSessionMutationTransport(this.queuedTransportContents.get(itemId), content) ?? content;
+    const previousTransport = this.queuedTransportContents.get(itemId);
+    const previous = decodePluginMentions(visibleSessionMutationContent(previousTransport ?? cached?.content));
+    const mentions = transformPluginMentions(previous.text, content, previous.mentions);
+    const boundContent = encodePluginMentions(content, mentions);
+    const transportContent = rebuildSessionMutationTransport(previousTransport, boundContent) ?? boundContent;
     const updated = await this.options.runtime.updateQueuedMessageContent(
       sessionId,
       itemId,
@@ -588,6 +598,8 @@ export class TuiQueueFlow {
       await this.refresh(sessionId);
       return false;
     }
+    if (transportContent !== content) this.queuedTransportContents.set(itemId, transportContent);
+    else this.queuedTransportContents.delete(itemId);
     const captured = this.queuedSubmissions.get(itemId);
     if (captured) {
       this.queuedSubmissions.set(itemId, {
@@ -596,6 +608,7 @@ export class TuiQueueFlow {
           schemaVersion: 1,
           text: content,
           cursor: content.length,
+          pluginMentions: mentions,
           pastes: [],
           pasteCounter: 0,
         },
@@ -792,7 +805,8 @@ function createSubmissionFromQueuedMessage(
   submissionId: string,
   transportContent?: string,
 ): TuiSubmissionSnapshot {
-  const content = item.content ?? '';
+  const decoded = decodePluginMentions(visibleSessionMutationContent(transportContent ?? item.content));
+  const content = decoded.text;
   const transportAttachments = (item.attachments ?? []).flatMap<TuiTransportAttachment>(
     (attachment) => {
       const filePath = attachment.local?.filePath;
@@ -816,12 +830,13 @@ function createSubmissionFromQueuedMessage(
     editor: {
       schemaVersion: 1,
       text: content,
+      pluginMentions: decoded.mentions,
       cursor: content.length,
       pastes: [],
       pasteCounter: 0,
     },
     content,
-    ...(transportContent ? { transportContent } : {}),
+    ...(transportContent || decoded.mentions.length ? { transportContent: transportContent ?? item.content } : {}),
     attachments: (item.attachments ?? []).flatMap((attachment) => {
       const filePath = attachment.local?.filePath;
       if (!filePath) return [];

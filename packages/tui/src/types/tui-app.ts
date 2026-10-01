@@ -1,6 +1,7 @@
 import type { TuiIncidentSink, TuiObservability } from '../observability/index.js';
 import type { McodeAuthPort } from '../auth/application.js';
 import type { TuiRuntime, TuiWorkspaceRoot } from '../runtime/port.js';
+import type { TuiCommandFlow } from '../tui/controller/product/command-flow.js';
 import type {
   TuiAttachment,
   ResolveTuiAttachmentOptions,
@@ -22,6 +23,7 @@ import type { TuiExternalTargetOpener } from '../host/open-external.js';
 import type { TuiTranscriptExporter } from '../host/transcript-export.js';
 import type { McodeBusinessTelemetry } from '../analytics/business-telemetry.js';
 import type { TuiNotificationSettings } from '../tui/platform/terminal-notifications.js';
+import type { TerminalCapabilities } from '../tui/platform/terminal-capabilities.js';
 import type { MavisRegion } from '@mavis/config';
 import type { TuiKeybindingOverride, TuiKeybindingRegistry } from '../tui/shell/keybindings.js';
 import type { FindRecentCodexSession } from '../host/recent-codex-session.js';
@@ -33,8 +35,14 @@ export interface CreateTuiAppOptions extends TuiUpdateOptions {
   workspaceRoots?: readonly TuiWorkspaceRoot[];
   homeDir?: string;
   terminal?: Terminal;
+  terminalCapabilities?: TerminalCapabilities;
   tuiMode?: TuiMode;
+  /** Rebuild terminal history when restoring a Session at process startup. */
+  clearScrollbackOnStart?: boolean;
   persistTuiMode?: (mode: TuiMode) => void;
+  /** Saved theme selection, e.g. `aurora` or `aurora/dark`. */
+  theme?: string;
+  persistTheme?: (theme: string) => void;
   runtimeLogDirectory?: string;
   resolveAttachment?: (
     reference: string,
@@ -56,6 +64,8 @@ export interface CreateTuiAppOptions extends TuiUpdateOptions {
   customStatusLine?: TuiCustomStatusLineConfig;
   /** Whether the idle conversation composer may show contextual Tips. Defaults to true. */
   showTips?: boolean;
+  /** Ordered terminal title items from tui.terminalTitle; null or [] disables updates. */
+  terminalTitle?: readonly string[] | null;
   notifications?: TuiNotificationSettings;
   /** Internal result-channel path; ignored unless statusLineItems enables build-mode. */
   automationResultPath?: string;
@@ -103,6 +113,8 @@ export interface TuiApp {
   /** Internal startup chrome shown while the embedded Runtime is initializing. */
   setStartupStatus(status?: string): void;
   submit(input: string): Promise<void>;
+  /** Exposed for integration tests that submit with an explicit seed. */
+  commandFlow: TuiCommandFlow;
   abortTurn(): Promise<boolean>;
   leaveUi(): Promise<void>;
   stop(options?: TuiStopOptions): Promise<void>;

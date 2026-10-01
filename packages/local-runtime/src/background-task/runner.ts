@@ -57,6 +57,9 @@ async function startAdmittedBackgroundLocalTask(
   const taskModelSelection = taskModelSelectionFor(taskInput);
 
   const taskId = createBackgroundTaskId();
+  // Claim the row for this process before it exists durably, so a Session stop
+  // cascade can tell "our task" from a row owned by another client process.
+  admission.identify(taskId);
   const turnId = taskTurnId(taskId);
   await createLocalSubagentTaskRow({
     host: input.host,

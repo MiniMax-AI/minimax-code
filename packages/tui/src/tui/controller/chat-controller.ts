@@ -96,7 +96,7 @@ export class TuiChatController {
     this.runCoordinator = options.runCoordinator ?? new TuiRunCoordinator(options.runtime);
     this.retirementWarningTimeoutMs = options.retirementWarningTimeoutMs ?? 5_000;
     this.now = options.now ?? Date.now;
-    this.outputRate = new TuiTurnOutputRate({ now: this.now });
+    this.outputRate = new TuiTurnOutputRate();
     this.onChange = options.onChange;
     this.onTurnAccepted = options.onTurnAccepted;
     this.onUserSubmissionProjected = options.onUserSubmissionProjected;
@@ -254,6 +254,7 @@ export class TuiChatController {
         getMessages(current.sessionId),
       ]);
       if (projectionSequence !== this.sessionProjectionSequence) return;
+      this.turnProjection.clearTodos();
       this.transcript.replaceDurableProjection(() => this.turnProjection.hydrateHistory(messages));
       this.durableMessageAnchor = latestHistoryMessageId(messages);
       if (projectionSequence !== this.sessionProjectionSequence) return;
@@ -380,6 +381,8 @@ export class TuiChatController {
         updatedAtMs: timestamp,
       });
     }
+    // The user turn is already visible while the asynchronous login preflight runs.
+    this.turnProjection.removePreviousTerminalDuration(turnId);
     this.updateState({
       activeTurnId: turnId,
       lastSettledTurn: undefined,
@@ -389,6 +392,9 @@ export class TuiChatController {
       errorRetryable: undefined,
     });
     if (!optimisticCell && !isRetryContinuation) this.onUserSubmissionProjected?.();
+    // Before the first await: the turn id is final, so the caller can retain
+    // the original submission snapshot for this turn.
+    if (!isRetryContinuation) options.onTurnStarted?.(turnId);
 
     try {
       await this.requireLoginForAgentAction();
@@ -430,6 +436,7 @@ export class TuiChatController {
           turnId,
           session,
           content,
+          ...(options.displayContent !== undefined ? { displayContent } : {}),
           workspace: this.workspaceDir,
           version: this.version,
           ...(attachments.length > 0 ? { attachments } : {}),
@@ -641,6 +648,15 @@ export class TuiChatController {
     return Boolean(this.activeTurn || this.runCoordinator.activeTurnId());
   }
 
+  getTerminalDurationId(): string | undefined {
+    return this.transcript.snapshot().find((cell) => cell.kind === 'turn-duration')?.id;
+  }
+
+  dismissTerminalDuration(id: string | undefined): void {
+    if (!id || this.transcript.get(id)?.kind !== 'turn-duration') return;
+    if (this.transcript.remove(id)) this.notify();
+  }
+
   beginRuntimeTurn(turnId: string, timestamp: number): void {
     this.outputRate.beginTurn(turnId);
     this.turnProjection.beginTurn(turnId, timestamp);
@@ -664,6 +680,9 @@ export class TuiChatController {
     attachments: readonly TranscriptAttachment[] = [],
     userPresentation?: TranscriptUserPresentation,
   ): void {
+    if (userPresentation !== 'pending-steer') {
+      this.turnProjection.removePreviousTerminalDuration();
+    }
     this.turnProjection.projectOptimisticUserMessage(
       requestId,
       content,

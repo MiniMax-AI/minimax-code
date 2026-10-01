@@ -2,12 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createRequire } from "node:module";
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   rmSync,
   existsSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,11 +21,19 @@ import Database from "better-sqlite3";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
-const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const cli = process.env.MCODE_TEST_CLI ?? fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+// This case is 30+ serial CLI spawns, each booting the whole runtime, so its
+// wall-clock cost tracks machine speed rather than the transport it asserts.
+// A flat budget sized for an idle laptop turns any busy runner (parallel build,
+// shared CI host) into a `testTimeoutFailure` that reports a product failure
+// while every assertion would have passed. Budget it the way smoke.test.mjs
+// budgets runtime startup: a base allowance plus a Windows multiplier for
+// slower process spawn, rather than a number that only holds on one machine.
+const byokSerialTimeoutMs = process.platform === "win32" ? 360000 : 180000;
 // This fixture validates BYOK transport and real Runtime persistence, not model quality.
 test(
   "BYOK runs without managed login and resumes its saved conversation",
-  { timeout: 90000 },
+  { timeout: byokSerialTimeoutMs },
   async (t) => {
     const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-byok-"));
     const dataDir = path.join(fixtureDir, "data");
@@ -151,6 +163,18 @@ test(
             : "Unexpected external request",
         );
       } finally {
+        // Hook snapshots deliberately use read-only directories. Restore only
+        // this isolated fixture's directory permissions before removing it.
+        const hookCache = path.join(dataDir, "v2", "plugin-hook-cache");
+        if (existsSync(hookCache)) {
+          const writable = (directory) => {
+            chmodSync(directory, 0o700);
+            for (const entry of readdirSync(directory, { withFileTypes: true })) {
+              if (entry.isDirectory()) writable(path.join(directory, entry.name));
+            }
+          };
+          writable(hookCache);
+        }
         rmSync(fixtureDir, { recursive: true, force: true });
       }
     });
@@ -264,27 +288,30 @@ test(
         proxyNames.map((name) => [name, proxyValue(name)]),
       )],
     ]) {
-      await t.test(`offline BYOK ignores ambient proxies: ${label}`, async () => {
-        const environment = Object.freeze({ ...cleanEnvironment, ...proxies });
-        // NO_PROXY alone does not enable proxy mode, so check its isolation explicitly.
-        const isolated = withoutProxyEnvironment(environment);
-        for (const name of proxyNames) assert.equal(isolated[name], "");
-        assert.equal(isolated.PATH, environment.PATH);
-        const beforeRequests = requests.length;
-        const managedAudit = `${networkAudit}.managed`;
-        const beforeManaged = readFileSync(managedAudit, "utf8").length;
-        await run([
-          "provider", "test", selected.providerId, "--model", "fixture-model",
-        ], environment);
-        assert.ok(requests.length > beforeRequests, "The local provider must receive the request");
-        assert.equal(requests[beforeRequests].body.model, "fixture-model");
-        assert.match(
-          readFileSync(managedAudit, "utf8").slice(beforeManaged),
-          /https:\/\/models\.dev\/api\.json|\/mavis\/api\/v1\/models-dev\/catalog/,
-        );
-        assert.equal(existsSync(networkAudit), false, "No outbound network attempt is allowed");
-        for (const [name, value] of Object.entries(proxies)) assert.equal(environment[name], value);
-      });
+      // Node 24.0–24.2 returns undefined from t.test(), so awaiting it does
+      // not wait for the proxy checks. Keep this shared-fixture phase directly
+      // sequential before changing rejectConnection or checking request counts.
+      // https://github.com/nodejs/node/issues/58227
+      t.diagnostic(`offline BYOK ignores ambient proxies: ${label}`);
+      const environment = Object.freeze({ ...cleanEnvironment, ...proxies });
+      // NO_PROXY alone does not enable proxy mode, so check its isolation explicitly.
+      const isolated = withoutProxyEnvironment(environment);
+      for (const name of proxyNames) assert.equal(isolated[name], "");
+      assert.equal(isolated.PATH, environment.PATH);
+      const beforeRequests = requests.length;
+      const managedAudit = `${networkAudit}.managed`;
+      const beforeManaged = readFileSync(managedAudit, "utf8").length;
+      await run([
+        "provider", "test", selected.providerId, "--model", "fixture-model",
+      ], environment);
+      assert.ok(requests.length > beforeRequests, "The local provider must receive the request");
+      assert.equal(requests[beforeRequests].body.model, "fixture-model");
+      assert.match(
+        readFileSync(managedAudit, "utf8").slice(beforeManaged),
+        /https:\/\/models\.dev\/api\.json|\/mavis\/api\/v1\/models-dev\/catalog/,
+      );
+      assert.equal(existsSync(networkAudit), false, "No outbound network attempt is allowed");
+      for (const [name, value] of Object.entries(proxies)) assert.equal(environment[name], value);
     }
     const configPath = path.join(dataDir, "config.yaml");
     const savedConfig = () => parseYaml(readFileSync(configPath, "utf8"));
@@ -293,6 +320,25 @@ test(
     assert.equal(selected.active, false);
     assert.equal(selected.models[0].contextLimit, undefined);
     assert.equal(selected.models[0].maxOutputTokens, undefined);
+
+    // The selected plan path must survive YAML persistence and actual inference.
+    const codingUrl = `${new URL(baseUrl).origin}/api/coding/paas/v4`;
+    const beforeCoding = requests.length;
+    await run([
+      "provider", "add", "--name", "Coding", "--base-url", codingUrl,
+      "--api-format", "openai-completions", "--model", "glm-5.3", "--use",
+    ]);
+    assert.equal(savedConfig().custom_provider.coding.options.baseURL, codingUrl);
+    assert.equal(savedConfig().defaultModel, "custom_provider:coding/glm-5.3");
+    assert.match(await run([
+      "exec", "CODING_ENDPOINT_TEST", "--timeout", "20s", "--max-steps", "1",
+    ]), /LOCAL_BYOK_OK/);
+    const codingRequests = requests.slice(beforeCoding);
+    assert.ok(codingRequests.some(({ body }) => body.stream === true && body.model === "glm-5.3"));
+    // Loopback hosts may also receive a separate Responses token-count probe.
+    const chatRequests = codingRequests.filter(({ body }) => Array.isArray(body.messages));
+    assert.ok(chatRequests.length >= 2, "Both the connection test and inference must use Chat");
+    assert.ok(chatRequests.every(({ url }) => url === "/api/coding/paas/v4/chat/completions"));
 
     const addArgs = [
       "provider", "add", "--name", "Limited", "--base-url", baseUrl,
@@ -406,6 +452,30 @@ test(
       "--effort", "medium", "--timeout", "20s", "--max-steps", "1"]),
     /Available levels: low, high, max/);
     assert.equal(requests.length, beforeInvalidEffort, "Invalid effort must fail before transport");
+    // Real Plugin packages exercise command execution and all three output adapters.
+    const hookMarkers = ["minimax", "claude", "codex"].map((format) => {
+      const name = `hook-notice-${format}`;
+      const root = path.join(dataDir, "plugins", name);
+      const manifestDir = format === "minimax" ? ".minimax-plugin" : `.${format}-plugin`;
+      mkdirSync(path.join(root, manifestDir), { recursive: true });
+      mkdirSync(path.join(root, "hooks"));
+      const marker = `HOOK_DISPLAY_ONLY_${format.toUpperCase()}`;
+      const manifest = format === "minimax" ? {
+        schemaVersion: 1, name, version: "1.0.0", description: "Synthetic Hook display fixture",
+        author: "Test", icon: "icon.png", category: "Code", exampleQueries: ["Reply OK"],
+        apps: [], mcpServers: [], skills: [], hooks: ["hooks/hooks.json"],
+      } : { name, version: "1.0.0" };
+      writeFileSync(path.join(root, manifestDir, "plugin.json"), JSON.stringify(manifest));
+      writeFileSync(path.join(root, "icon.png"), Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5N8AAAAASUVORK5CYII=", "base64"));
+      writeFileSync(path.join(root, "hooks", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{
+        type: "command", command: 'node "${PLUGIN_ROOT}/notice.cjs"', timeout: 5,
+      }] }] } }));
+      writeFileSync(path.join(root, "notice.cjs"),
+        `process.stdout.write(JSON.stringify({systemMessage: ${JSON.stringify(marker)}}));`);
+      return marker;
+    });
+    const beforeFirst = requests.length;
     const modelArgs = ["--model", `${selected.providerId}/fixture-model`];
     // The first run must work through the saved default, without --model or managed login.
     const first = await run([
@@ -417,6 +487,9 @@ test(
       "1",
     ]);
     assert.match(first, /LOCAL_BYOK_OK/);
+    assert.equal(requests.slice(beforeFirst).filter((r) => r.body.stream).length, 1,
+      "Display-only Hooks must not start another model request");
+    for (const marker of hookMarkers) assert.ok(!first.includes(marker));
     await assert.rejects(run([
       'exec', 'Managed model still requires its own login',
       '--model', 'minimax/MiniMax-M3', '--timeout', '20s', '--max-steps', '1',
@@ -445,6 +518,34 @@ test(
         requests.map((r) => ({ url: r.url, keys: Object.keys(r.body) })),
       ),
     );
+    assert.equal(requests.slice(beforeResume).filter((r) => r.body.stream).length, 1);
+    for (const marker of hookMarkers) {
+      assert.ok(!second.includes(marker), "Hook notices must not become the final answer");
+      assert.ok(!JSON.stringify(requests.slice(beforeResume)).includes(marker),
+        "The resumed provider request must not contain Hook display messages");
+    }
+    const displayDb = new Database(dbPath, { readonly: true });
+    try {
+      const notices = displayDb.prepare("SELECT data_json FROM local_runtime_message_rows").all()
+        .map((row) => JSON.parse(row.data_json))
+        .filter((message) => typeof message.msg_content === "string" &&
+          hookMarkers.some((marker) => message.msg_content.includes(marker)));
+      assert.equal(notices.length, 2, "Both turns must persist a Hook notice before CLI shutdown");
+      assert.notEqual(notices[0].msg_id, notices[1].msg_id);
+      for (const message of notices) {
+        const notice = JSON.parse(message.msg_content);
+        assert.equal(notice.eventType, "runtime.warning");
+        assert.equal(notice.category, "system-message");
+        for (const marker of hookMarkers) assert.ok(notice.message.includes(marker));
+      }
+    } finally { displayDb.close(); }
+    const historyRoot = path.join(dataDir, "v2", "sessions");
+    const canonicalFiles = readdirSync(historyRoot, { recursive: true }).filter((file) => file.endsWith("messages.jsonl"));
+    assert.ok(canonicalFiles.length > 0);
+    const canonical = canonicalFiles.map((file) => readFileSync(path.join(historyRoot, file), "utf8")).join("\n");
+    assert.ok(canonical.includes("SOURCE_REPOSITORY_TEST"));
+    for (const marker of hookMarkers) assert.ok(!canonical.includes(marker),
+      "Canonical history used by subsequent turns and compaction must not contain Hook notices");
     const toolStart = requests.length;
     await run([
       "exec",
@@ -502,3 +603,304 @@ test(
     }
   },
 );
+
+test(
+  "cancelling a contended message write persists an aborted turn rather than a failure",
+  // Node terminates children on Windows SIGINT instead of invoking their handler.
+  { timeout: 45000, skip: process.platform === "win32" },
+  cancellationTest("lock"),
+);
+
+test(
+  "cancelling a running tool preserves its completed display message",
+  { timeout: 45000, skip: process.platform === "win32" },
+  cancellationTest("tool"),
+);
+
+function cancellationTest(cancellation) {
+  return async (t) => {
+    const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-cancel-write-"));
+    const dataDir = path.join(fixtureDir, "data");
+    const workspaceDir = path.join(fixtureDir, "workspace");
+    const homeDir = path.join(fixtureDir, "home");
+    for (const dir of [dataDir, workspaceDir, homeDir]) mkdirSync(dir);
+    const dbPath = path.join(dataDir, "v2", "sqlite", "runtime-state.sqlite");
+    const networkAudit = path.join(fixtureDir, "network-audit.log");
+    let child, holder, holderClosed, cancelTimer, deadline;
+    let serverError;
+    let cancelledWhileLocked = false;
+    let cancelledDuringTool = false;
+    const marker = path.join(workspaceDir, "cancel-tool.marker");
+    let holderReleased = false;
+    const server = createServer(async (req, res) => {
+      try {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        const body = JSON.parse(raw);
+        if (req.url?.endsWith("/responses/input_tokens")) {
+          res
+            .writeHead(200, { "content-type": "application/json" })
+            .end(JSON.stringify({ input_tokens: 1 }));
+          return;
+        }
+        const content = "SYNTHETIC_CANCELLED_ANSWER";
+        if (!body.stream) {
+          res.writeHead(200, { "content-type": "application/json" }).end(
+            JSON.stringify({
+              id: "fixture",
+              object: "chat.completion",
+              model: "fixture",
+              choices: [
+                { index: 0, message: { role: "assistant", content }, finish_reason: "stop" },
+              ],
+            }),
+          );
+          return;
+        }
+        if (cancellation === "lock") {
+          // A separate process releases the lock even when the CLI blocks its event loop.
+          holder = spawn(
+            process.execPath,
+            [
+              "-e",
+              `
+        const Database = require(process.argv[1]);
+        const db = new Database(process.argv[2]);
+        db.exec('BEGIN IMMEDIATE');
+        process.send('locked');
+        setTimeout(() => {
+          db.exec('COMMIT'); db.close(); process.disconnect();
+        }, 1500);
+      `,
+              createRequire(import.meta.url).resolve("better-sqlite3"),
+              dbPath,
+            ],
+            {
+              stdio: ["ignore", "ignore", "inherit", "ipc"],
+            },
+          );
+          holderClosed = once(holder, "close").then(() => {
+            holderReleased = true;
+          });
+          await Promise.race([
+            once(holder, "message"),
+            holderClosed.then(() => {
+              throw new Error("Writer exited before acquiring the lock");
+            }),
+          ]);
+        }
+        const delta =
+          cancellation === "tool"
+            ? {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "cancel-tool-call",
+                    type: "function",
+                    function: {
+                      name: "bash",
+                      arguments: JSON.stringify({
+                        command: "printf started > cancel-tool.marker; sleep 30",
+                      }),
+                    },
+                  },
+                ],
+              }
+            : { role: "assistant", content };
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        for (const chunk of [
+          {
+            choices: [{ index: 0, delta, finish_reason: null }],
+          },
+          {
+            choices: [
+              {
+                index: 0,
+                delta: {},
+                finish_reason: cancellation === "tool" ? "tool_calls" : "stop",
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          },
+        ])
+          res.write(
+            `data: ${JSON.stringify({
+              id: "fixture",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: "fixture",
+              ...chunk,
+            })}\n\n`,
+          );
+        res.end("data: [DONE]\n\n");
+        if (cancellation === "tool") {
+          cancelTimer = setInterval(() => {
+            if (!existsSync(marker)) return;
+            clearInterval(cancelTimer);
+            cancelledDuringTool = true;
+            child.kill("SIGINT");
+          }, 20);
+        } else {
+          cancelTimer = setTimeout(() => {
+            cancelledWhileLocked = !holderReleased;
+            child.kill("SIGINT");
+          }, 200);
+        }
+      } catch (error) {
+        serverError = error;
+        res.writeHead(500).end();
+      }
+    });
+    t.after(async () => {
+      clearTimeout(cancelTimer);
+      clearTimeout(deadline);
+      for (const childProcess of [child, holder]) {
+        if (
+          childProcess &&
+          childProcess.exitCode === null &&
+          childProcess.signalCode === null
+        ) {
+          const closed = once(childProcess, "close");
+          childProcess.kill("SIGKILL");
+          await closed;
+        }
+      }
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(fixtureDir, { recursive: true, force: true });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    writeFileSync(
+      path.join(dataDir, "config.yaml"),
+      stringifyYaml({
+        custom_provider: {
+          fixture: {
+            name: "fixture",
+            kind: "custom",
+            enabled: true,
+            api: "openai-completions",
+            options: {
+              apiKey: "synthetic-key",
+              baseURL: `${origin}/v1`,
+              authMode: "api-key",
+            },
+            models: { fixture: { limit: { context: 32768, output: 4096 } } },
+          },
+        },
+      }),
+    );
+    child = spawn(
+      process.execPath,
+      [
+        cli,
+        "exec",
+        "Reply with the synthetic fixture response.",
+        "--model",
+        "custom_provider:fixture/fixture",
+        "--permission",
+        "off",
+        "--cwd",
+        workspaceDir,
+        "--timeout",
+        "30s",
+        "--max-steps",
+        "1",
+      ],
+      {
+        cwd: workspaceDir,
+        env: {
+          ...withoutProxyEnvironment(process.env),
+          HOME: homeDir,
+          XDG_CONFIG_HOME: path.join(homeDir, "config"),
+          XDG_DATA_HOME: path.join(homeDir, "data"),
+          MINIMAX_DATA_DIR: dataDir,
+          MAVIS_DATA_DIR: dataDir,
+          MCODE_TEST_ALLOWED_ORIGIN: origin,
+          MCODE_TEST_NETWORK_AUDIT: networkAudit,
+          MCODE_TEST_MANAGED_OFFLINE: "1",
+          NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "",
+      stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    deadline = setTimeout(() => child.kill("SIGKILL"), 35000);
+    const [code] = await once(child, "close");
+    clearTimeout(deadline);
+    if (holderClosed) await holderClosed;
+    assert.equal(serverError, undefined);
+    if (cancellation === "tool") {
+      assert.equal(cancelledDuringTool, true, "SIGINT must follow actual Bash execution");
+      assert.equal(holder, undefined, "Tool cancellation must not involve a foreign writer");
+    } else {
+      assert.equal(
+        cancelledWhileLocked,
+        true,
+        "SIGINT must arrive while the foreign writer holds its lock",
+      );
+    }
+    assert.equal(code, 130, `${stdout}\n${stderr}`);
+    assert.equal(existsSync(networkAudit), false, "No external requests are allowed");
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      assert.deepEqual(db.prepare("SELECT status FROM local_runtime_turn_ingress").all(), [
+        { status: "aborted" },
+      ]);
+      assert.deepEqual(
+        db.prepare("SELECT status, error_message FROM local_runtime_sessions").all(),
+        [{ status: "aborted", error_message: null }],
+      );
+      assert.deepEqual(
+        db.prepare("SELECT terminal_outcome FROM local_runtime_session_agent_state").all(),
+        [{ terminal_outcome: "aborted" }],
+      );
+      if (cancellation === "tool") {
+        const display = db
+          .prepare(
+            "SELECT data_json FROM local_runtime_message_rows WHERE role = 'assistant'",
+          )
+          .all()
+          .map((row) => JSON.parse(row.data_json));
+        assert.equal(
+          display.length,
+          1,
+          "Tool completion must survive reopening display history",
+        );
+        const calls = display[0].tool_calls ?? [];
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].tool_call_id, "cancel-tool-call");
+        assert.equal(calls[0].tool_name, "bash");
+        assert.ok(
+          calls[0].tool_call_result_data,
+          "Persist the completed tool result as well as its call",
+        );
+      }
+    } finally {
+      db.close();
+    }
+    const sessionsDir = path.join(dataDir, "v2", "sessions");
+    const histories = readdirSync(sessionsDir, { recursive: true }).filter((file) =>
+      file.endsWith("messages.jsonl"),
+    );
+    assert.equal(histories.length, 1);
+    const roles = readFileSync(path.join(sessionsDir, histories[0]), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line).message?.role);
+    assert.deepEqual(
+      roles,
+      cancellation === "tool" ? ["user", "assistant", "toolResult"] : ["user"],
+      "Abort reconciliation must preserve executed tools without retaining cancelled text output",
+    );
+  };
+}

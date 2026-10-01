@@ -5,6 +5,8 @@ import type {
 import {
   buildCompressedModelImageFromBuffer,
   closeAgentDb,
+  createUserStopCascade,
+  type UserStopCascade,
   createLocalWorkspaceGitFacade,
   emitSubagentTelemetry,
   listFileTree,
@@ -337,6 +339,7 @@ export interface V1ServiceCompatibility extends V1ProcessLocalSupport {
     }): void;
     recover(recoveredTurnIds: readonly string[]): Promise<boolean | void>;
     pollRecovery(): Promise<boolean>;
+    readonly userStop: UserStopCascade;
   };
   readonly conversation: {
     bind(conversation: RuntimeConversation): Promise<void>;
@@ -534,6 +537,10 @@ export function createV1RuntimeCompatibility(
             return api.backgroundTaskService.hasPendingStartupRecovery();
           },
           pollRecovery: () => api.backgroundTaskService.pollStartupLostTasks(),
+          userStop: createUserStopCascade({
+            host: api,
+            pauseActiveGoal: (sessionId) => api.threadGoal.pauseActiveGoalForAbort(sessionId),
+          }),
         },
         conversation: {
           bind: async (service) => {

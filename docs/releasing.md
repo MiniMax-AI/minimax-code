@@ -1,4 +1,74 @@
-# Releasing a source preview
+# Releasing MiniMax Code
+
+## Tag-triggered CLI installation packages
+
+Run the release command from a clean checkout of the latest reviewed `origin/main`.
+Git and an authenticated `gh-axi` or `gh` are required:
+
+```bash
+pnpm release:cli --version 0.4.13 --dry-run
+pnpm release:cli --version 0.4.13
+```
+
+The dry run checks the starting revision, versions and remote refs without changing
+files, creating commits or pushing. The release command then:
+
+1. Creates `release/v0.4.13` from the reviewed starting commit.
+2. Bumps `package.json` and `packages/tui/package.json` together and commits them.
+3. Creates the annotated `v0.4.13` tag on that version commit.
+4. Atomically pushes the release branch and tag, without pushing `main`.
+5. Opens a version PR back to `main`; merge it through the normal review process.
+
+CI requires the tag, both committed source versions and `mcode --version` to agree.
+It does not override the source version during a build. An existing tag or release
+branch, a non-increasing version, uncommitted files, or a starting commit other
+than the latest `origin/main` stops the command before version changes.
+
+The tag starts the release workflow independently of the version PR. If a network
+or PR-creation failure occurs, inspect the local and remote branch/tag before
+retrying: the version commit and tag are retained for recovery. If both refs were
+pushed but opening the PR failed, open that version PR manually. Never delete and
+recreate an already distributed tag. Merge the version PR before starting the
+next release so `main` carries the released version.
+
+The workflow runs the full verification profile and secret scans, builds one
+`minimax-code-X.Y.Z.tar.gz` npm installation package, and authenticates and installs
+that same archive on Linux and macOS with Node 22.19.0, 24.2.0, 25 and 26. Each
+installation checks the generated `mcode` launcher, native SQLite, ripgrep, and
+the offline smoke/BYOK suites. Windows validation remains paused.
+
+Only after every installation succeeds does CI create a GitHub Release with the
+archive and its `.sha256` checksum. Tags such as `v0.4.13-rc.1` create prereleases.
+Release creation starts as a draft; assets are uploaded before it becomes public.
+Existing releases are never overwritten. If publication fails after draft
+creation, inspect the draft and workflow artifacts before deciding whether to
+finish publication manually or delete only the incomplete draft and rerun.
+Never move an already distributed tag to different code.
+
+To exercise this workflow without publication, dispatch `CLI release` on a
+selected branch. An optional tag input must match the committed source version. A manual dispatch only builds and
+validates Actions artifacts, even when the requested tag already exists.
+PRs that change release tooling also run the build/install matrix using the
+committed source version, without creating a tag or publishing a release.
+
+To reproduce the packaging and installation checks locally, use a clean reviewed
+commit and keep output outside the repository:
+
+```bash
+export MCODE_RELEASE_TAG="v$(node -p 'require("./package.json").version')"
+pnpm verify
+node scripts/package-cli-release.mjs "$MCODE_RELEASE_TAG" /tmp/mcode-release
+MCODE_RELEASE_ARCHIVE="/tmp/mcode-release/minimax-code-${MCODE_RELEASE_TAG#v}.tar.gz" pnpm verify --profile package
+```
+
+The `package` profile validates installation of an existing archive; it does not
+replace full source verification. The archive includes the compiled CLI, runtime
+assets, licenses and a `release.json` source receipt. npm installs external runtime
+dependencies, including native dependencies, for the user's platform. It does not
+include Node.js and is not an offline bundle. See [installation](installation.md#install-a-github-release-archive).
+This workflow does not publish to the npm registry or change the official installer.
+
+## Source previews
 
 The current source target is MiniMax Code 0.4.12. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication. A source release, npm package, and installer are separate artifacts with separate verification.
 
@@ -17,7 +87,7 @@ Before npm or installer distribution, separately validate the published package 
 
 The `Source candidate` workflow exports the selected commit without Git history, verifies its receipt, and scans both repository history and the extracted source. Linux and macOS runners authenticate the same archive, install from public npm into fresh stores, and run the archive verification profile.
 
-Windows validation is temporarily paused across source verification, Node compatibility, and source candidates. Candidate reports cover only Linux and macOS; a successful candidate does not establish Windows acceptance. Restore the Windows workflow matrices and the required report set in `scripts/source-candidate.mjs` together when Windows checks are reliable again.
+Windows full validation is temporarily paused for Node compatibility and source candidates. Ordinary pull requests run a focused Windows source-verification contract, but candidate reports still cover only Linux and macOS; a successful candidate does not establish Windows acceptance. Restore the Windows compatibility/source-candidate matrices and the required report set in `scripts/source-candidate.mjs` together when those checks are reliable again.
 
 After both platform jobs pass, the workflow creates a `source-candidate-<full-SHA>` artifact containing:
 

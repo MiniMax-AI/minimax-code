@@ -1,9 +1,11 @@
+import { formatTokensPerSecond } from '../rendering/output-rate.js';
 import { Markdown, Text } from '../engine/public.js';
 import { projectAssistantContentForTerminal } from '../../application/assistant-content.js';
 import { formatTuiDuration } from '../rendering/duration.js';
 import type { Component } from '../rendering/component.js';
 import { stripAnsi, truncateToWidth, visibleWidth } from '../rendering/text.js';
 import { sanitizeTerminalText } from '../rendering/terminal-text.js';
+import { wrapLiteralUserText } from './presentation/literal-text.js';
 import type { TranscriptAttachment, TranscriptCell } from './model.js';
 import { resolveTranscriptCellDisplayMode } from './model.js';
 import {
@@ -578,7 +580,7 @@ function renderCell(
   if (cell.kind === 'turn-duration') {
     const label = cell.status === 'cancelled' ? 'Interrupted after' : 'Completed in';
     const outputRate = isPositiveFinite(cell.outputTokensPerSecond)
-      ? ` · ⚡ ${cell.outputTokensPerSecondEstimated === true ? '~' : ''}${cell.outputTokensPerSecond.toFixed(1)} tok/s`
+      ? ` · ⚡ ${cell.outputTokensPerSecondEstimated === true ? '~' : ''}${formatTokensPerSecond(cell.outputTokensPerSecond)} tok/s`
       : '';
     const summary = chalk.hex(colors.muted)(
       `  └ ${label} ${formatTuiDuration((cell.durationMs ?? 0) / 1_000)}${outputRate}`,
@@ -655,7 +657,7 @@ function renderCell(
             toolSummary,
             width,
             visibleWidth(`${marker} ${title}`),
-            !backgroundBash,
+            backgroundBash ? 'background' : (evidence.summaryKind ?? 'command'),
           )}`
         : chalk.hex(colors.muted)(
             definition?.summaryStyle === 'dot' ? ` · ${toolSummary}` : ` (${toolSummary})`,
@@ -725,9 +727,9 @@ function renderCell(
   }
 
   if (cell.kind === 'warning') {
-    return [
-      ...new Text(chalk.hex(colors.warning)(`! Warning  ${cell.content}`), 2, 0).render(width),
-    ];
+    const title = sanitizeTerminalText(cell.title ?? 'Warning');
+    const content = sanitizeTerminalText(cell.content);
+    return [...new Text(chalk.hex(colors.warning)(`! ${title}  ${content}`), 2, 0).render(width)];
   }
 
   return [...new Text(cell.content, 2, 0).render(width)];
@@ -791,14 +793,16 @@ function sanitizeDelegationLabel(value: string | undefined, fallback: string): s
   return sanitized || fallback;
 }
 
+/**
+ * Render the user's own prompt as literal text inside the user band.
+ * See `wrapLiteralUserText` for why prompts never go through Markdown.
+ */
 function renderUserIntent(content: string, width: number): string[] {
   const normalizedWidth = Math.max(0, Math.floor(width));
   if (normalizedWidth === 0) return [];
   const verticalPadding = renderUserBandLine('', normalizedWidth);
   const bodyWidth = Math.max(1, normalizedWidth - 4);
-  const body = new Markdown(content, 0, 0, markdownTheme, {
-    color: (text) => chalk.hex(colors.text)(text),
-  }).render(bodyWidth);
+  const body = wrapLiteralUserText(content, bodyWidth);
   if (body.length === 0) {
     return [
       verticalPadding,
@@ -821,9 +825,16 @@ function renderUserIntent(content: string, width: number): string[] {
 function renderUserMessage(cell: TranscriptCell, width: number): string[] {
   const attachments = renderUserAttachments(cell, width);
   const body = cell.content.trim() ? renderUserIntent(cell.content, width) : [];
-  return attachments.length > 0 && body.length > 0
-    ? [...attachments, ' ', ...body]
-    : [...attachments, ...body];
+  const rows =
+    attachments.length > 0 && body.length > 0
+      ? [...attachments, ' ', ...body]
+      : [...attachments, ...body];
+  // A cancelled user row (prompt restored to the composer on abort) stays in
+  // the history with a muted marker, matching the cancelled-todo precedent.
+  if (cell.status === 'cancelled') {
+    return [chalk.hex(colors.muted)('× Cancelled'), ...rows];
+  }
+  return rows;
 }
 
 function renderPendingSteerMessage(cell: TranscriptCell, width: number): string[] {
@@ -836,12 +847,9 @@ function renderPendingSteerMessage(cell: TranscriptCell, width: number): string[
   const heading = `${railIndent}${marker} ${label}`;
   const headingWidth = visibleWidth(heading);
   const contentWidth = Math.max(1, normalizedWidth - headingWidth - 3);
+  // Steer text is user input, so it stays literal like the main prompt row.
   const body = cell.content.trim()
-    ? new Markdown(cell.content, 0, 0, markdownTheme, {
-        color: (text) => chalk.hex(colors.text)(text),
-      })
-        .render(contentWidth)
-        .map(trimTerminalLineEnd)
+    ? wrapLiteralUserText(cell.content, contentWidth).map(trimTerminalLineEnd)
     : [];
   const attachments = (cell.attachments ?? []).map((attachment) => {
     const kind = transcriptAttachmentKind(attachment);
@@ -959,16 +967,15 @@ function styleShellSummary(
   summary: string,
   width: number,
   usedWidth: number,
-  highlightCommand: boolean,
+  kind: 'description' | 'command' | 'background',
 ): string {
   const fitted = fitShellSummary(summary, width, usedWidth);
-  if (!highlightCommand) return chalk.hex(colors.muted)(fitted);
+  if (kind === 'background') return chalk.hex(colors.muted)(fitted);
+  const styleSubject = kind === 'command' ? highlightTuiShellCommand : chalk.hex(colors.text);
 
   const index = shellOutputSummaryIndex(fitted);
-  if (index <= 0) return highlightTuiShellCommand(fitted);
-  return `${highlightTuiShellCommand(fitted.slice(0, index))}${chalk.hex(colors.muted)(
-    fitted.slice(index),
-  )}`;
+  if (index <= 0) return styleSubject(fitted);
+  return `${styleSubject(fitted.slice(0, index))}${chalk.hex(colors.muted)(fitted.slice(index))}`;
 }
 
 function shellOutputSummaryIndex(summary: string): number {

@@ -1,3 +1,4 @@
+import { parsePluginMentions } from '@mavis/shared/plugin-mention';
 import { randomUUID } from 'node:crypto';
 
 import {
@@ -126,6 +127,7 @@ export class UserMessageTurnDeliveryService implements UserMessageTurnDelivery {
       ...(input.message.userMessageId ? { userMessageId: input.message.userMessageId } : {}),
       unstartedFromTurnIds: input.message.unstartedFromTurnIds,
       content: projectedMessageContent(delivery, input.message.message.text),
+      inputContent: input.message.message.text,
       ...(attachments ? { attachments } : {}),
       ...(input.message.sourceMessageId ? { sourceMessageId: input.message.sourceMessageId } : {}),
       provenance: input.message.provenance,
@@ -295,6 +297,7 @@ async function commitTurnMessages(
       messageKey: member.messageKey,
       userMessageId: member.userMessageId,
       content: projectedMessageContent(member.message, member.message.content),
+      inputContent: member.message.content,
       timestamp: member.createdAt,
       ...(member.unconsumedFromTurnIds
         ? { unconsumedFromTurnIds: member.unconsumedFromTurnIds }
@@ -323,6 +326,7 @@ async function commitTurnMessage(
     messageKey: input.messageKey ?? `turn:${turnId}`,
     ...(input.userMessageId ? { userMessageId: input.userMessageId } : {}),
     content: projectedMessageContent(input, input.input.text),
+    inputContent: input.input.text,
     ...(queryKey ? { queryKey } : {}),
     ...(attachments ? { attachments } : {}),
     ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
@@ -340,6 +344,7 @@ function commitMessage(
     readonly messageKey: string;
     readonly userMessageId?: UserMessageId;
     readonly content: string;
+    readonly inputContent: string;
     readonly timestamp?: number;
     readonly unconsumedFromTurnIds?: readonly string[];
     readonly unstartedFromTurnIds?: readonly string[];
@@ -360,6 +365,9 @@ function commitMessage(
       messageKey: input.messageKey,
       ...(input.userMessageId ? { userMessageId: input.userMessageId } : {}),
       content: input.content,
+      ...(input.inputContent !== input.content && parsePluginMentions(input.inputContent).length > 0
+        ? { editContent: input.inputContent }
+        : {}),
       ...(input.timestamp !== undefined ? { timestamp: input.timestamp } : {}),
       ...(input.unconsumedFromTurnIds
         ? { unconsumedFromTurnIds: input.unconsumedFromTurnIds }

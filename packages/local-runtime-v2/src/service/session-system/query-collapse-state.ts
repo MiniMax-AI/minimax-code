@@ -217,19 +217,30 @@ function readByCurrentTurn(db: AppDb, sessionId: string, currentTurnId: string) 
     .get();
 }
 
+const processingQueries = new WeakMap<AppDb, ReturnType<typeof prepareProcessingQuery>>();
+
 function readProcessingByCurrentTurn(db: AppDb, sessionId: string, currentTurnId: string) {
+  let query = processingQueries.get(db);
+  if (!query) {
+    query = prepareProcessingQuery(db);
+    processingQueries.set(db, query);
+  }
+  return query.get({ sessionId, currentTurnId });
+}
+
+function prepareProcessingQuery(db: AppDb) {
   return db
     .select()
     .from(queryCollapseViewStates)
     .where(
       and(
-        eq(queryCollapseViewStates.sessionId, sessionId),
-        eq(queryCollapseViewStates.currentTurnId, currentTurnId),
+        eq(queryCollapseViewStates.sessionId, sql.placeholder('sessionId')),
+        eq(queryCollapseViewStates.currentTurnId, sql.placeholder('currentTurnId')),
         isNull(queryCollapseViewStates.processingFinishedAtMs),
       ),
     )
     .orderBy(desc(queryCollapseViewStates.updatedAtMs), desc(queryCollapseViewStates.queryKey))
-    .get();
+    .prepare();
 }
 
 function readByKey(db: AppDb, sessionId: string, queryKey: string) {

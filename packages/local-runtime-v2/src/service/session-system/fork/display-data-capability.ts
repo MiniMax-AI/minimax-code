@@ -1,6 +1,7 @@
 import type { SessionHistoryMutationCapability } from '../messages/history/mutation/session-history-mutation-adapter.js';
 import type { MessageRepository } from '../messages/repo/contract.js';
 import { resolveForkDisplayBoundary } from './display-boundary.js';
+import { resolveSideHistoryBoundary } from './side-history-boundary.js';
 
 /** Session-owned Display boundary and projection operations used by Application Fork. */
 export function createSessionForkDisplayCapability(
@@ -13,13 +14,27 @@ export function createSessionForkDisplayCapability(
       resolve: async ({
         sessionId,
         assistantDisplayMessageId,
+        sideHistory,
       }: {
         readonly sessionId: string;
         readonly assistantDisplayMessageId?: string;
+        readonly sideHistory?: { readonly throughMessageId?: string };
       }) => {
         const display = (await messages.list(sessionId)).messages;
         const boundary = resolveForkDisplayBoundary(display, assistantDisplayMessageId);
         if (!boundary.assistant || boundary.assistantIndex < 0) return undefined;
+        if (sideHistory) {
+          const history = await historyMutation.read(sessionId);
+          const messageId = resolveSideHistoryBoundary(history, sideHistory.throughMessageId);
+          return {
+            messages: display,
+            assistant: boundary.assistant,
+            assistantIndex: boundary.assistantIndex,
+            isLatestConversationMessage: boundary.isLatestConversationMessage,
+            canonicalBoundaryReachable: messageId !== undefined,
+            ...(messageId ? { sideHistoryMessageId: messageId } : {}),
+          };
+        }
         const candidates = [
           boundary.assistantCanonicalMessageId,
           boundary.beforeUserMessageId,

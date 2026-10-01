@@ -6,6 +6,7 @@ import type {
   LocalCustomProviderConfig,
   LocalCustomProvidersConfig,
   LocalModelConfig,
+  LocalRuntimeConfig,
 } from '../contracts.js';
 import {
   cacheStatusView,
@@ -115,7 +116,7 @@ export function asLocalModelProviderError(error: unknown): LocalModelProviderErr
 }
 
 export function minimaxContextBaselineFingerprint(
-  config: Parameters<typeof minimaxApiModels>[0],
+  config: LocalRuntimeConfig,
   modelId: string,
 ): string {
   const source = config.minimaxModelSource ?? 'token_plan';

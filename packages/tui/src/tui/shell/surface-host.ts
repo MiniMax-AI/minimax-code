@@ -220,6 +220,11 @@ export class TuiSurfaceHost implements Component {
     else this.chatComponent.invalidate();
   }
 
+  getViewportLayoutKey(): string | undefined {
+    const key = this.chatComponent.getViewportLayoutKey?.();
+    return key === undefined ? undefined : JSON.stringify([this.activeFeature()?.screen.id, key]);
+  }
+
   render(width: number): string[] {
     const active = this.activeFeature();
     if (!active || this.currentMode() === 'regular') return this.chatComponent.render(width);

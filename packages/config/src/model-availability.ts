@@ -1,8 +1,7 @@
 // Route-aware model availability.
 //
-// A model id alone says nothing about whether it can be called: the same
-// `minimax/MiniMax-M2.7` is a retired token-plan model on one backend and a
-// perfectly callable BYOK model on a user's own API key. This module owns the
+// Managed and MiniMax API-key routes share the official model catalog.
+// Custom providers retain their own configured models. This module owns the
 // one answer to "may this route call this model", so the local model list, the
 // save entry (`selectModel`) and the Turn execution gate cannot disagree and
 // let a locally-known model reach a backend that retired it.
@@ -12,7 +11,8 @@
 // Do not use a resolver's generic limit fallback as a validity signal — an
 // unknown model resolving to default limits is exactly the bug this replaces.
 
-import { MINIMAX_API_MODEL_CATALOG, type PresetKey } from './config.js';
+import { MINIMAX_MODELS } from './minimax-model-catalog.js';
+import type { PresetKey } from './config.js';
 import { resolveProviderAuthMode } from './provider-auth-mode.js';
 
 /** Reserved provider ids, mirrored by the local-runtime model-key parsers. */
@@ -84,8 +84,7 @@ export function isFirstPartyMinimaxMessagesRoute(api: string, providerId: string
 /**
  * The route a provider id resolves to. `provider.minimax` is not a fixed
  * route: with `minimaxModelSource = 'minimax_api_key'` the very same builtin
- * entry is called with the user's own key, so it must be judged against the
- * API catalog rather than the managed active set.
+ * entry is called with the user's own key, using the same official catalog.
  */
 export function resolveModelCallRoute(
   config: ModelAvailabilityConfigView,
@@ -104,10 +103,9 @@ export function resolveModelCallRoute(
 }
 
 /**
- * Model ids the given provider id may actually call right now. The managed
- * token-plan route is capped by the preset active set; every other route keeps
- * what the user configured (a token-plan retirement must not shrink a BYOK
- * route).
+ * Model ids the given provider id may actually call right now. Both MiniMax
+ * routes follow the official catalog and ordering; custom providers keep
+ * their user-owned model lists.
  */
 export function listRouteModelIds(
   config: ModelAvailabilityConfigView,
@@ -120,7 +118,8 @@ export function listRouteModelIds(
       return configuredModelIds(config.provider?.[providerId], true);
     }
     case 'minimax_api_key': {
-      return Object.keys(MINIMAX_API_MODEL_CATALOG);
+      const provider = config.provider?.[MANAGED_MINIMAX_PROVIDER_ID];
+      return configuredModelIds({ ...provider, models: provider?.models ?? MINIMAX_MODELS }, true);
     }
     case 'custom_provider': {
       const provider = config.custom_provider?.[providerId.slice(CUSTOM_PROVIDER_ID_PREFIX.length)];

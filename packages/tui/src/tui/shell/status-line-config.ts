@@ -4,6 +4,7 @@ import type { TuiNotificationSettings } from '../platform/terminal-notifications
 import type { TuiCustomStatusLineConfig } from '../../host/custom-status-command.js';
 
 export interface TuiPresentationConfig {
+  readonly terminalTitle?: readonly string[] | null;
   readonly showTips?: boolean;
   readonly statusLineItems?: readonly string[];
   readonly notifications?: TuiNotificationSettings;
@@ -27,6 +28,7 @@ export async function readTuiPresentationConfig(dataDir: string): Promise<TuiPre
     const config = loadConfigFromFile(path.join(dataDir, 'config.yaml'), { dataDir });
     const tui = config.tui;
     return {
+      ...(tui?.terminalTitle !== undefined ? { terminalTitle: tui.terminalTitle } : {}),
       ...(typeof tui?.showTips === 'boolean' ? { showTips: tui.showTips } : {}),
       ...(Array.isArray(tui?.statusLine) ? { statusLineItems: tui.statusLine } : {}),
       ...(tui?.notifications ? { notifications: tui.notifications } : {}),

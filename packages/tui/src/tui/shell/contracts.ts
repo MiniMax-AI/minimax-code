@@ -27,6 +27,8 @@ export interface TuiShellState {
   agentActiveCount?: number;
   /** All delegated Sessions currently projected for the current root Session. */
   agentTotalCount?: number;
+  /** Root-session background Tasks (bash/workflow/custom) not yet settled into a durable root Turn. */
+  agentBackgroundCount?: number;
   homeDir?: string;
   sessionTitle?: string;
   sessionRole?: 'root' | 'subagent';

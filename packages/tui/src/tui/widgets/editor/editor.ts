@@ -1,3 +1,11 @@
+import {
+  decodePluginMentions,
+  encodePluginMentions,
+  transformPluginMentions,
+  transformExternalPluginMentions,
+  validPluginMentions,
+  type EditorPluginMention,
+} from './plugin-mentions.js';
 import type { AutocompleteProvider, AutocompleteSuggestions } from '../autocomplete.js';
 import {
   decodePrintableKey,
@@ -20,6 +28,7 @@ export type { EditorTheme };
 
 export interface EditorDraftSnapshot extends EditorStateSnapshot {
   readonly attachmentPlaceholders?: readonly EditorAttachmentElement[];
+  readonly pluginMentions?: readonly EditorPluginMention[];
 }
 
 export interface EditorAttachmentPlaceholder {
@@ -46,6 +55,11 @@ export class Editor implements Component, Focusable {
   ) => void;
 
   private readonly engine: PiEditor;
+  private pluginMentions: EditorPluginMention[] = [];
+  private pendingPluginMention: EditorPluginMention | undefined;
+  private pendingPluginState: EditorPluginMention[] | undefined;
+  private skipNextPluginTransform = false;
+  private lastPluginSubmission: { content: string; transport: string } | undefined;
   private attachmentPlaceholders = new Map<string, EditorAttachmentElement>();
   private bindLegacyAttachmentPlaceholders = false;
   private lastText = '';
@@ -70,10 +84,39 @@ export class Editor implements Component, Focusable {
     this.engine.onSubmit = (_text, snapshot) => this.handleEngineSubmit(snapshot);
     this.engine.onPaste = (text) => this.onPaste?.(text) ?? false;
     this.engine.onAutocompleteView = (suggestions) => this.onAutocompleteView?.(suggestions);
-    this.engine.onAutocompleteSelect = (suggestions, item) =>
+    this.engine.onAutocompleteSelect = (suggestions, item) => {
+      if ('pluginId' in item && typeof item.pluginId === 'string') {
+        const start = this.engine.captureState().cursor - suggestions.prefix.length;
+        this.pendingPluginMention = {
+          pluginId: item.pluginId,
+          label: item.value,
+          start,
+          end: start + item.value.length,
+        };
+      }
       this.onAutocompleteSelect?.(suggestions, item);
-    this.engine.captureUndoExtensionState = () => [...this.attachmentPlaceholders.values()];
-    this.engine.restoreUndoExtensionState = (state) => this.restoreAttachmentUndoState(state);
+    };
+    this.engine.captureUndoExtensionState = () => ({
+      attachments: [...this.attachmentPlaceholders.values()],
+      plugins: this.pluginMentions.map((mention) => ({ ...mention })),
+    });
+    this.engine.restoreUndoExtensionState = (state) => {
+      if (!state || typeof state !== 'object' || !('attachments' in state) || !('plugins' in state))
+        return;
+      this.restoreAttachmentUndoState(state.attachments);
+      if (validPluginMentions(this.getText(), state.plugins)) {
+        this.pluginMentions = (state.plugins ?? []).map((mention) => ({
+          ...mention,
+        }));
+        this.skipNextPluginTransform = true;
+      }
+    };
+    this.engine.transformHistoryText = (text) => {
+      const decoded = decodePluginMentions(text);
+      this.pluginMentions = decoded.mentions;
+      this.skipNextPluginTransform = true;
+      return decoded.text;
+    };
   }
 
   get focused(): boolean {
@@ -113,7 +156,15 @@ export class Editor implements Component, Focusable {
   }
 
   addToHistory(text: string): void {
-    this.engine.addToHistory(text);
+    const current = this.captureDraft();
+    const transport =
+      this.lastPluginSubmission?.content === text.trim()
+        ? this.lastPluginSubmission.transport
+        : submittedEditorContent(current) === text.trim()
+          ? submittedEditorTransport(current)
+          : undefined;
+    this.engine.addToHistory(transport ?? text);
+    this.lastPluginSubmission = undefined;
   }
 
   getHistoryEntries(): readonly string[] {
@@ -139,6 +190,7 @@ export class Editor implements Component, Focusable {
   captureDraft(): EditorDraftSnapshot {
     return {
       ...this.engine.captureState(),
+      pluginMentions: this.pluginMentions.map((mention) => ({ ...mention })),
       attachmentPlaceholders: [...this.attachmentPlaceholders.values()].map((element) => ({
         ...element,
       })),
@@ -148,6 +200,11 @@ export class Editor implements Component, Focusable {
   restoreDraft(snapshot: EditorDraftSnapshot): boolean {
     if (!isValidEditorDraftSnapshot(snapshot)) return false;
     const previous = this.attachmentPlaceholders;
+    const previousPlugins = this.pluginMentions;
+    this.pluginMentions = (snapshot.pluginMentions ?? []).map((mention) => ({
+      ...mention,
+    }));
+    this.skipNextPluginTransform = true;
     this.attachmentPlaceholders = new Map(
       (snapshot.attachmentPlaceholders ?? []).map((element) => [element.id, { ...element }]),
     );
@@ -157,6 +214,8 @@ export class Editor implements Component, Focusable {
     const restored = this.engine.restoreState(snapshot);
     if (!restored) {
       this.attachmentPlaceholders = previous;
+      this.pluginMentions = previousPlugins;
+      this.skipNextPluginTransform = false;
       this.skipNextAttachmentTransform = false;
     }
     return restored;
@@ -180,8 +239,18 @@ export class Editor implements Component, Focusable {
       cursor: currentOffset + remappedCurrent.cursor,
       pastes: [...snapshot.pastes.map((paste) => ({ ...paste })), ...remappedCurrent.pastes],
       pasteCounter: remappedCurrent.pasteCounter,
+      pluginMentions: [
+        ...(snapshot.pluginMentions ?? []).map((mention) => ({ ...mention })),
+        ...(remappedCurrent.pluginMentions ?? []).map((mention) => ({
+          ...mention,
+          start: mention.start + currentOffset,
+          end: mention.end + currentOffset,
+        })),
+      ],
       attachmentPlaceholders: [
-        ...(snapshot.attachmentPlaceholders ?? []).map((element) => ({ ...element })),
+        ...(snapshot.attachmentPlaceholders ?? []).map((element) => ({
+          ...element,
+        })),
         ...(remappedCurrent.attachmentPlaceholders ?? [])
           .filter(({ id }) => !submittedAttachmentIds.has(id))
           .map((element) => ({
@@ -239,7 +308,10 @@ export class Editor implements Component, Focusable {
   dismissAttachmentPreview(): void {
     const preview = this.getAttachmentPreview();
     if (!preview) return;
-    this.dismissedAttachmentPreview = { id: preview.id, cursor: this.engine.captureState().cursor };
+    this.dismissedAttachmentPreview = {
+      id: preview.id,
+      cursor: this.engine.captureState().cursor,
+    };
     this.freshAttachmentPreview = undefined;
     this.tui.requestRender();
   }
@@ -251,6 +323,7 @@ export class Editor implements Component, Focusable {
     let cursor = this.engine.captureState().cursor;
     let changed = false;
     const elements = cloneAttachmentElements(this.attachmentPlaceholders);
+    let pluginMentions = this.pluginMentions.map((mention) => ({ ...mention }));
     if (this.bindLegacyAttachmentPlaceholders) {
       const claimedRanges: Array<{ start: number; end: number }> = [];
       for (const [id, label] of next) {
@@ -270,7 +343,9 @@ export class Editor implements Component, Focusable {
       replacement: string,
       target?: { id: string; label: string },
     ): void => {
-      text = `${text.slice(0, start)}${replacement}${text.slice(end)}`;
+      const nextText = `${text.slice(0, start)}${replacement}${text.slice(end)}`;
+      pluginMentions = transformPluginMentions(text, nextText, pluginMentions);
+      text = nextText;
       if (cursor > end) cursor += replacement.length - (end - start);
       else if (cursor > start) cursor = start + replacement.length;
       const delta = replacement.length - (end - start);
@@ -342,10 +417,14 @@ export class Editor implements Component, Focusable {
       return;
     }
     this.pendingAttachmentElements = elements;
+    this.pendingPluginState = pluginMentions;
     this.skipNextAttachmentTransform = true;
     this.engine.replaceRange(0, this.getText().length, text, cursor);
     if (added) {
-      this.freshAttachmentPreview = { id: added.id, cursor: this.engine.captureState().cursor };
+      this.freshAttachmentPreview = {
+        id: added.id,
+        cursor: this.engine.captureState().cursor,
+      };
       this.dismissedAttachmentPreview = undefined;
     }
   }
@@ -359,16 +438,32 @@ export class Editor implements Component, Focusable {
   }
 
   setText(text: string): void {
-    const value = text.replace(/\r\n?/gu, '\n');
+    const decoded = decodePluginMentions(text.replace(/\r\n?/gu, '\n'));
+    const value = decoded.text;
     const replaced = appendAttachmentElements(value, this.attachmentPlaceholders);
-    if (replaced.text === this.getText()) return;
+    if (replaced.text === this.getText()) {
+      if (text !== value) {
+        this.pluginMentions = decoded.mentions;
+        this.onChange?.(this.getText());
+      }
+      return;
+    }
+    this.pendingPluginMention = undefined;
+    this.pendingPluginState = decoded.mentions;
     this.pendingAttachmentElements = replaced.elements;
     this.skipNextAttachmentTransform = true;
     this.engine.replaceRange(0, this.getText().length, replaced.text, replaced.cursor);
   }
 
   replaceTextUndoable(text: string): void {
-    this.setText(text);
+    // External editors edit expanded visible text, while setText loads a new draft.
+    const draft = this.captureDraft();
+    const previous = decodePluginMentions(
+      expandDraftPastes(encodePluginMentions(draft.text, this.pluginMentions), draft.pastes),
+    );
+    const normalized = text.replace(/\r\n?/gu, '\n');
+    const mentions = transformExternalPluginMentions(previous.text, normalized, previous.mentions);
+    this.setText(encodePluginMentions(normalized, mentions));
   }
 
   invalidate(): void {
@@ -407,6 +502,7 @@ export class Editor implements Component, Focusable {
   dispose(): void {
     this.engine.dispose();
     this.attachmentPlaceholders.clear();
+    this.pluginMentions = [];
     this.pendingSubmission = undefined;
     this.lastAttachmentSubmission = undefined;
     this.onAttachmentPlaceholderDeleted = undefined;
@@ -414,7 +510,21 @@ export class Editor implements Component, Focusable {
   }
 
   private handleEngineChange(text: string): void {
+    if (this.pendingPluginState) {
+      this.pluginMentions = this.pendingPluginState;
+      this.pendingPluginState = undefined;
+    } else if (this.skipNextPluginTransform) this.skipNextPluginTransform = false;
+    else this.pluginMentions = transformPluginMentions(this.lastText, text, this.pluginMentions);
+    if (this.pendingPluginMention) {
+      if (
+        text.slice(this.pendingPluginMention.start, this.pendingPluginMention.end) ===
+        this.pendingPluginMention.label
+      )
+        this.pluginMentions.push(this.pendingPluginMention);
+      this.pendingPluginMention = undefined;
+    }
     if (this.pendingSubmission && text === '') {
+      this.pluginMentions = [];
       this.attachmentPlaceholders.clear();
       this.lastText = '';
       this.skipNextAttachmentTransform = false;
@@ -445,13 +555,15 @@ export class Editor implements Component, Focusable {
   private handleEngineSubmit(snapshot: EditorStateSnapshot): void {
     const draft: EditorDraftSnapshot = {
       ...snapshot,
+      pluginMentions: this.pendingSubmission?.pluginMentions?.map((mention) => ({ ...mention })),
       attachmentPlaceholders: (this.pendingSubmission?.attachmentPlaceholders ?? []).map(
         (element) => ({ ...element }),
       ),
     };
     this.pendingSubmission = undefined;
-    const visibleText = removeAttachmentElements(draft.text, draft.attachmentPlaceholders ?? []);
-    const content = expandDraftPastes(visibleText, draft.pastes).trim();
+    const content = submittedEditorContent(draft);
+    const transport = submittedEditorTransport(draft);
+    this.lastPluginSubmission = transport ? { content, transport } : undefined;
     if (draft.attachmentPlaceholders?.length) this.lastAttachmentSubmission = { content, draft };
     this.onSubmit?.(content, draft);
   }
@@ -475,14 +587,24 @@ export class Editor implements Component, Focusable {
     }
   }
 
+  private atomicElements(): EditorAttachmentElement[] {
+    return [
+      ...this.attachmentPlaceholders.values(),
+      ...this.pluginMentions.map((mention) => ({
+        ...mention,
+        id: `plugin:${mention.start}`,
+      })),
+    ];
+  }
+
   private handleAtomicAttachmentInput(data: string): boolean {
-    if (this.attachmentPlaceholders.size === 0) return false;
+    if (this.atomicElements().length === 0) return false;
     const command = resolveAttachmentCommand(data);
     if (!command || command === 'jump-forward' || command === 'jump-backward') return false;
     const snapshot = this.engine.captureState();
     const cursor = snapshot.cursor;
     const text = snapshot.text;
-    const elements = [...this.attachmentPlaceholders.values()];
+    const elements = this.atomicElements();
     if (command === 'left' || command === 'word-left') {
       const element = elements.find(
         (candidate) => cursor > candidate.start && cursor <= attachmentElementEnd(text, candidate),
@@ -526,7 +648,7 @@ export class Editor implements Component, Focusable {
       this.jumpOutsideAttachments(printable, direction);
       return true;
     }
-    if (this.attachmentPlaceholders.size === 0) return false;
+    if (this.atomicElements().length === 0) return false;
     const command = resolveAttachmentCommand(data);
     if (command !== 'jump-forward' && command !== 'jump-backward') return false;
     this.attachmentJumpMode = command === 'jump-forward' ? 'forward' : 'backward';
@@ -542,7 +664,7 @@ export class Editor implements Component, Focusable {
           ? snapshot.text.indexOf(character, from)
           : snapshot.text.lastIndexOf(character, from);
       if (target < 0) return;
-      const element = [...this.attachmentPlaceholders.values()].find(
+      const element = this.atomicElements().find(
         (candidate) => target >= candidate.start && target < candidate.end,
       );
       if (!element) {
@@ -556,7 +678,7 @@ export class Editor implements Component, Focusable {
 
   private snapCursorOutsideAttachment(previousCursor: number): void {
     const snapshot = this.engine.captureState();
-    const element = [...this.attachmentPlaceholders.values()].find(
+    const element = this.atomicElements().find(
       (candidate) => snapshot.cursor > candidate.start && snapshot.cursor < candidate.end,
     );
     if (!element) return;
@@ -624,7 +746,10 @@ function editorDeletionRange(
     };
   }
   if (command === 'delete-line-start') {
-    return { start: text.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1, end: cursor };
+    return {
+      start: text.lastIndexOf('\n', Math.max(0, cursor - 1)) + 1,
+      end: cursor,
+    };
   }
   const lineEnd = text.indexOf('\n', cursor);
   return {
@@ -653,6 +778,7 @@ function isValidEditorDraftSnapshot(snapshot: EditorDraftSnapshot): boolean {
     !snapshot ||
     snapshot.schemaVersion !== 1 ||
     typeof snapshot.text !== 'string' ||
+    !validPluginMentions(snapshot.text, snapshot.pluginMentions) ||
     !Number.isInteger(snapshot.cursor) ||
     snapshot.cursor < 0 ||
     snapshot.cursor > snapshot.text.length ||
@@ -699,7 +825,10 @@ function isValidEditorDraftSnapshot(snapshot: EditorDraftSnapshot): boolean {
       return false;
     }
     attachmentIds.add(element.id);
-    ranges.push({ start: attachmentElementStart(snapshot.text, element), end: element.end });
+    ranges.push({
+      start: attachmentElementStart(snapshot.text, element),
+      end: element.end,
+    });
     return true;
   });
 }
@@ -729,7 +858,14 @@ function remapEditorDraftPastes(
       const id = Number(match[1]);
       const paste = draft.pastes.find((candidate) => candidate.id === id);
       if (!paste || match.index === undefined) return [];
-      return [{ start: match.index, end: match.index + match[0].length, paste, marker: match[0] }];
+      return [
+        {
+          start: match.index,
+          end: match.index + match[0].length,
+          paste,
+          marker: match[0],
+        },
+      ];
     })
     .map((replacement, index) => {
       const id = startingCounter + index + 1;
@@ -755,8 +891,16 @@ function remapEditorDraftPastes(
     schemaVersion: 1,
     text,
     cursor: shiftPosition(draft.cursor),
-    pastes: replacements.map(({ id, paste }) => ({ id, content: paste.content })),
+    pastes: replacements.map(({ id, paste }) => ({
+      id,
+      content: paste.content,
+    })),
     pasteCounter: startingCounter + replacements.length,
+    pluginMentions: draft.pluginMentions?.map((mention) => ({
+      ...mention,
+      start: shiftPosition(mention.start),
+      end: shiftPosition(mention.end),
+    })),
     attachmentPlaceholders: (draft.attachmentPlaceholders ?? []).map((element) => ({
       ...element,
       start: shiftPosition(element.start),
@@ -788,7 +932,11 @@ function attachmentElementEnd(text: string, element: EditorAttachmentElement): n
 function appendAttachmentElements(
   text: string,
   elements: ReadonlyMap<string, EditorAttachmentElement>,
-): { text: string; cursor: number; elements: Map<string, EditorAttachmentElement> } {
+): {
+  text: string;
+  cursor: number;
+  elements: Map<string, EditorAttachmentElement>;
+} {
   let output = text;
   let cursor = output.length;
   const appended = new Map<string, EditorAttachmentElement>();
@@ -806,6 +954,34 @@ function appendAttachmentElements(
     cursor = output.length;
   }
   return { text: output, cursor, elements: appended };
+}
+
+export function submittedEditorContent(draft: EditorDraftSnapshot): string {
+  const visibleText = removeAttachmentElements(draft.text, draft.attachmentPlaceholders ?? []);
+  return expandDraftPastes(visibleText, draft.pastes).trim();
+}
+
+/** Serialize identity bindings into the existing durable user-text transport. */
+export function submittedEditorTransport(draft: EditorDraftSnapshot): string | undefined {
+  if (!draft.pluginMentions?.length) return undefined;
+  let text = draft.text;
+  const replacements = [
+    ...draft.pluginMentions.map((mention) => ({
+      start: mention.start,
+      end: mention.end,
+      text: encodePluginMentions(mention.label, [
+        { ...mention, start: 0, end: mention.label.length },
+      ]),
+    })),
+    ...(draft.attachmentPlaceholders ?? []).map((element) => ({
+      start: attachmentElementStart(text, element),
+      end: attachmentElementEnd(text, element),
+      text: '',
+    })),
+  ].sort((a, b) => b.start - a.start);
+  for (const replacement of replacements)
+    text = text.slice(0, replacement.start) + replacement.text + text.slice(replacement.end);
+  return expandDraftPastes(text, draft.pastes).trim();
 }
 
 function removeAttachmentElements(

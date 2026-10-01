@@ -16,6 +16,7 @@ import {
   toPiUserMessage,
 } from '@mavis/agent-core/pi-turn-runner';
 import { type RuntimeTool, type ToolExecutionContext } from '@mavis/agent-core/tools';
+import { prepareBashTurnTools } from '../assembly/local-turn-tool-catalog.js';
 import { buildCompletedTerminalStatusEvent } from '@mavis/agent-core/event-bridge';
 import {
   beginLocalPluginHookTurn,
@@ -130,7 +131,9 @@ export class LocalRuntimeTurnExecutor<
   async execute(input: LocalTurnExecutionInput<TAgent>): Promise<AgentHostTurnOutcome> {
     let unboundPluginHookTranscriptCleanup: (() => Promise<void>) | undefined;
     try {
-      const eventWriter = createLocalTurnEventWriter(input, this.options.projectRuntimeEvent);
+      const eventWriter = createLocalTurnEventWriter(input, this.options.projectRuntimeEvent, {
+        retainEvents: this.options.runtime.acceptsEventSummary !== true,
+      });
       const pluginHookEventReporter = createLocalPluginHookEventReporter({
         writer: eventWriter,
         sessionId: input.lease.sessionId,
@@ -473,14 +476,15 @@ export class LocalRuntimeTurnExecutor<
     });
     const readTaskOutputTaskIds = new Set<string>();
     const toolResolution = preparedExecution.toolResolution;
-    const tools = applyProcessLocalToolResultPolicy(
+    const admittedTools = applyProcessLocalToolResultPolicy(
       validateRoutedTurnTools(input.assembly.tools),
       this.options.cliProductPolicy === true,
     );
-    const canConsumeBackgroundBashOutput = tools.some(
+    const canConsumeBackgroundBashOutput = admittedTools.some(
       (tool) =>
         tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
     );
+    const tools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
     const toolContext = {
       ...toolResolution.context,
       ...(input.pluginHooks?.length

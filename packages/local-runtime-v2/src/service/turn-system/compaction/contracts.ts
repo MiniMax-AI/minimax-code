@@ -3,6 +3,7 @@ import type { CompactionSubagentState } from './compat.js';
 export type ContextCompactionErrorCode =
   | 'INVALID_HISTORY'
   | 'INVALID_CHECKPOINT'
+  | 'CHECKPOINT_PROVIDER_FAILED'
   | 'COMPACTION_INPUT_TOO_LARGE'
   | 'POST_ADMISSION_FAILED';
 
@@ -38,17 +39,23 @@ export interface CheckpointGenerationMetadata {
 }
 
 /**
- * Content-free sizing facts captured when checkpoint generation cannot admit
- * any candidate. Counts, token estimates, and limits only; never message text.
+ * Content-free sizing facts captured when compaction cannot admit a candidate
+ * or a generated checkpoint. Counts, token estimates, and limits only; never
+ * message text.
  */
 export interface ContextCompactionSizeDiagnostics {
   readonly historyMessageCount: number;
-  readonly protectedMessageCount: number;
+  readonly protectedMessageCount?: number;
   readonly protectedInputTokens?: number;
   readonly protectedSerializedBytes?: number;
   readonly providerInputLimit: number;
   readonly maxSerializedInputBytes?: number;
-  readonly hminAvailable: boolean;
+  readonly hminAvailable?: boolean;
+  /** Post-admission sizing: the measured next request before/after replacement. */
+  readonly beforeInputTokens?: number;
+  readonly beforeSerializedBytes?: number;
+  readonly afterInputTokens?: number;
+  readonly afterSerializedBytes?: number;
 }
 
 export class ContextCompactionError extends Error {
@@ -66,11 +73,31 @@ export class ContextCompactionError extends Error {
   }
 }
 
-/** Provider-specific overflow is normalized at the request boundary. */
-export class CheckpointInputTooLargeError extends Error {
-  override readonly name = 'CheckpointInputTooLargeError';
+/**
+ * Why the Provider could not turn a candidate into a checkpoint within one request:
+ * the input overflowed the context window, or the shared output budget ran out
+ * (for example on reasoning) before any checkpoint text. Diagnostics only; the
+ * candidate ladder treats both reasons identically.
+ */
+export type CheckpointCandidateTooLargeReason = 'input_overflow' | 'output_exhausted';
 
-  constructor(cause: unknown) {
-    super('Provider rejected checkpoint input because it exceeded the context limit.', { cause });
+/**
+ * The candidate is too large to checkpoint in one Provider request, normalized
+ * at the request boundary. The candidate ladder advances to the next, smaller
+ * candidate regardless of `reason`.
+ */
+export class CheckpointCandidateTooLargeError extends Error {
+  override readonly name = 'CheckpointCandidateTooLargeError';
+
+  constructor(
+    cause: unknown,
+    readonly reason: CheckpointCandidateTooLargeReason = 'input_overflow',
+  ) {
+    super(
+      reason === 'output_exhausted'
+        ? 'Checkpoint output budget was exhausted before any checkpoint text.'
+        : 'Provider rejected checkpoint input because it exceeded the context limit.',
+      { cause },
+    );
   }
 }

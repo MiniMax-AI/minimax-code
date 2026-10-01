@@ -260,7 +260,7 @@ function composerLabels(
     return [`${attachment} · ${submit} send`, attachment, 'Message'];
   }
   if (state.surface === 'welcome') {
-    return ['Start · @ file · / autocomplete', 'Start below'];
+    return ['Start · @ file or Plugin · / autocomplete', 'Start below'];
   }
   const newline = composerNewlineKeybinding(supportsShiftEnter, keybindings);
   return [`Message · ${submit} send · ${newline} newline`, `Message · ${submit} send`, 'Message'];

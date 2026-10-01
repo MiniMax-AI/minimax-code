@@ -1,5 +1,3 @@
-import { normalizeAbortSource } from '@mavis/agent-core/pi-turn-runner';
-
 import type {
   AgentHost,
   AgentHostTurnOutcome,
@@ -14,6 +12,7 @@ import type {
   RegisterAcceptedTurnInput,
   TurnController,
 } from './contracts.js';
+import { pausesQueueOnAbort } from './queue-pause-on-abort.js';
 import type { TurnReleasedSignal } from '../lifecycle/turn-released-signal.js';
 import type { TurnRepository, TurnTerminalOutcome } from '../persistence/contracts.js';
 
@@ -304,7 +303,7 @@ function terminalQueuePauseCause(input: {
   if (
     input.outcome === 'aborted' &&
     input.controllerTurn?.busyReason === 'turn' &&
-    normalizeAbortSource(input.controllerTurn.signal.reason) === 'user_stop'
+    pausesQueueOnAbort(input.controllerTurn.signal.reason)
   ) {
     return 'user-stop';
   }

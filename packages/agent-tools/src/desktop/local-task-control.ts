@@ -14,6 +14,7 @@ import type {
   LocalTaskControlAdapter,
   LocalTaskOutputReadResult,
 } from './types.js';
+import { formatBashExecutionOutcome, readBashExecutionOutcome } from './local-bash-result.js';
 
 const MAX_TASK_OUTPUT_WAIT_MS = 30_000;
 
@@ -82,6 +83,13 @@ export class LocalTaskOutputTool implements ToolImpl<
       ...(signal ? { signal } : {}),
     });
     const status = read.status ?? task.status;
+    const snapshot = read.task ?? task;
+    const execution = readBashExecutionOutcome(snapshot.metadata?.bashDetails);
+    const output = (snapshot.metadata?.bashDetails as Record<string, unknown> | undefined)?.output;
+    const persistenceHint =
+      (output as { persistence?: string } | undefined)?.persistence === 'incomplete'
+        ? '<task_output_hint>Output persistence is incomplete; this log may be missing command output.</task_output_hint>\n'
+        : '';
     const body = read.content || '(no output yet)';
     const cursor = [
       ...(read.nextOffset === undefined ? [] : [`next_offset="${read.nextOffset}"`]),
@@ -94,10 +102,18 @@ export class LocalTaskOutputTool implements ToolImpl<
         ? ''
         : '<task_output_hint>Your requested wait_ms exceeded 30000 ms and was capped at 30000 ms (30 seconds). This output read reached its wait limit; the background task was not stopped. Use wait_ms=30000 or less for future reads.</task_output_hint>\n';
     const hint = signal?.aborted ? '' : this.pollingHint(ctx, input.task_id, { ...read, status });
-    const text = `<task_output status="${status}">\n${receipt}${waitLimitHint}${hint}${body}\n</task_output>`;
-    return ok(LocalTaskOutputToolDef.name, text, {
+    const outcome = execution
+      ? `<bash_status>${formatBashExecutionOutcome(execution)}</bash_status>\n`
+      : '';
+    const text = `<task_output status="${status}">\n${receipt}${waitLimitHint}${persistenceHint}${hint}${outcome}${body}\n</task_output>`;
+    const result = ok(LocalTaskOutputToolDef.name, text, {
       task_id: input.task_id,
       status,
+      ...(execution ? { execution } : {}),
+      ...(output ? { output } : {}),
+      timing:
+        (snapshot.metadata?.bashDetails as Record<string, unknown> | undefined)?.timing ??
+        snapshot.metadata?.timing,
       effective_wait_ms: effectiveWaitMs,
       wait_ms_clamped: waitMsClamped,
       ...(read.timedOut === undefined ? {} : { timed_out: read.timedOut }),
@@ -105,6 +121,7 @@ export class LocalTaskOutputTool implements ToolImpl<
       ...(read.truncated === undefined ? {} : { truncated: read.truncated }),
       ...(read.summary ? { summary: read.summary } : {}),
     });
+    return result;
   }
 
   private pollingHint(
@@ -152,8 +169,21 @@ export class LocalTaskStopTool implements ToolImpl<
   async execute(ctx: LocalRuntimeToolContext, input: LocalTaskStopToolInput): Promise<ToolResult> {
     const task = await this.adapter.stop(ctx, input.task_id, input.reason);
     if (!task) return notFound(LocalTaskStopToolDef.name, input.task_id);
-    const text = `<task_stop status="${task.status}">\nStop requested for ${input.task_id}.\n</task_stop>`;
-    return ok(LocalTaskStopToolDef.name, text, { task_id: input.task_id, status: task.status });
+    const stopError =
+      task.metadata?.stopError ??
+      (task.lastError?.code === 'TASK_STOP_FAILED' ? task.lastError : undefined);
+    const message = stopError
+      ? `Stop failed for ${input.task_id}: ${(stopError as { message: string }).message}. Process cleanup could not be confirmed.`
+      : `Task ${input.task_id} is ${task.status}.`;
+    const text = `<task_stop status="${task.status}">\n${message}\n</task_stop>`;
+    return {
+      ...ok(LocalTaskStopToolDef.name, text, {
+        task_id: input.task_id,
+        status: task.status,
+        ...(stopError ? { stopError } : {}),
+      }),
+      ...(stopError ? { isError: true } : {}),
+    };
   }
 }
 
@@ -167,16 +197,28 @@ function renderTask(task: BackgroundTask): string {
     ...(mode ? [`execution_mode=${mode}`] : []),
   ];
   const lineageText = lineage.length === 0 ? '' : ` (${lineage.join(' ')})`;
-  return `- ${task.taskId} [${task.kind}/${task.status}]${description}${lineageText}`;
+  const execution = readBashExecutionOutcome(task.metadata?.bashDetails);
+  const outcome = execution ? ` — ${formatBashExecutionOutcome(execution)}` : '';
+  const output = (task.metadata?.bashDetails as { output?: { persistence?: string } } | undefined)
+    ?.output;
+  const persistence = output?.persistence === 'incomplete' ? ' — output log incomplete' : '';
+  return `- ${task.taskId} [${task.kind}/${task.status}]${description}${lineageText}${outcome}${persistence}`;
 }
 
 function summarizeTask(task: BackgroundTask): Record<string, unknown> {
   const sessionId = childSessionId(task);
   const mode = executionMode(task);
+  const execution = readBashExecutionOutcome(task.metadata?.bashDetails);
   return {
     task_id: task.taskId,
     kind: task.kind,
     status: task.status,
+    ...(execution ? { execution } : {}),
+    output: (task.metadata?.bashDetails as Record<string, unknown> | undefined)?.output,
+    timing:
+      (task.metadata?.bashDetails as Record<string, unknown> | undefined)?.timing ??
+      task.metadata?.timing,
+    ...(task.metadata?.stopError ? { stopError: task.metadata.stopError } : {}),
     // Handle recovery after the first receipt scrolled out of context. Only a
     // subagent task that really owns a child Session gets a session handle.
     ...(sessionId ? { session_id: sessionId } : {}),

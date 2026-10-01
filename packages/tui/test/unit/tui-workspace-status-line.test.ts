@@ -227,8 +227,8 @@ describe('TuiWorkspaceStatusLine', () => {
         agentRunId: 'turn_550e8400-e29b-41d4-a716-446655440000',
       });
 
-      expect(status.render(80).join('\n').trim()).toMatch(
-        /^\[V\] seq=0 state=run session=none turn=[a-z0-9]{6} request=none agents=0\/0$/u,
+      expect(status.render(100).join('\n').trim()).toMatch(
+        /^\[V\] seq=0 state=run session=none turn=[a-z0-9]{6} request=none agents=0\/0 background=0$/u,
       );
     } finally {
       status.dispose();

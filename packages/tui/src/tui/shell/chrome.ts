@@ -315,6 +315,7 @@ function renderBuildMode(state: TuiShellState): string {
     requestId: state.agentRequestId,
     activeAgents: state.agentActiveCount,
     totalAgents: state.agentTotalCount,
+    backgroundTasks: state.agentBackgroundCount,
   });
 }
 

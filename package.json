@@ -1,6 +1,6 @@
 {
   "name": "minimax-code",
-  "version": "0.4.12",
+  "version": "0.5.10",
   "private": true,
   "type": "module",
   "description": "Standalone MiniMax Code TUI with managed accounts, BYOK models, cloud tools, plugins and ACP.",
@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "release:cli": "node scripts/release-cli.mjs",
     "start": "node dist/cli.js",
     "mcode": "node dist/cli.js",
     "verify": "node scripts/verify.mjs",
@@ -24,8 +25,11 @@
     "test:status-contract": "node scripts/run-vitest-suite.mjs status-contract",
     "check:source": "node scripts/source-inventory.mjs",
     "test:capabilities": "node scripts/run-vitest-suite.mjs capability",
+    "test:windows": "node scripts/run-vitest-suite.mjs windows",
     "test:artifact": "node --test test/public-artifact.test.mjs",
-    "test:release-tools": "node --test test/source-sync.test.mjs"
+    "test:release-tools": "node --test test/source-sync.test.mjs",
+    "lint": "pnpm run lint:tui",
+    "lint:tui": "eslint packages/tui/src packages/tui/test --ext .ts,.mjs --quiet"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",
@@ -38,7 +42,14 @@
     "vitest": "4.1.11",
     "yaml": "2.9.0",
     "tar": "7.5.22",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "eslint": "8.57.1",
+    "@typescript-eslint/eslint-plugin": "7.18.0",
+    "@typescript-eslint/parser": "7.18.0",
+    "eslint-config-airbnb-base": "15.0.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-import": "2.32.0",
+    "eslint-plugin-prettier": "5.5.5"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

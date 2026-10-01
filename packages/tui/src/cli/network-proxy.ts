@@ -66,6 +66,15 @@ export function configureTuiNetworkProxy(
   return configuration;
 }
 
+export function createTuiNetworkDispatcher(
+  environment: NodeJS.ProcessEnv = process.env,
+): Dispatcher {
+  const configuration = resolveTuiProxyConfiguration(environment);
+  return configuration.mode === 'proxy'
+    ? new TuiProxyDispatcher(configuration)
+    : new Agent({ allowH2: false });
+}
+
 function firstProxyValue(
   environment: NodeJS.ProcessEnv,
   ...names: readonly string[]
@@ -106,8 +115,18 @@ function installUndiciFetch(): void {
   (undici as typeof undici & { install?: () => void }).install?.();
 }
 
+function createTuiProxyAgent(uri: string): ProxyAgent {
+  // Preserve HTTP/1.1 on both TLS hops and CONNECT for plain HTTP targets.
+  return new ProxyAgent({
+    uri,
+    allowH2: false,
+    proxyTls: { allowH2: false },
+    proxyTunnel: true,
+  });
+}
+
 class TuiProxyDispatcher extends Dispatcher {
-  readonly #directDispatcher = new Agent();
+  readonly #directDispatcher = new Agent({ allowH2: false });
   readonly #httpDispatcher: Dispatcher;
   readonly #httpsDispatcher: Dispatcher;
   readonly #dispatchers: readonly Dispatcher[];
@@ -116,12 +135,12 @@ class TuiProxyDispatcher extends Dispatcher {
   constructor(options: { httpProxy: string; httpsProxy: string; noProxy: string }) {
     super();
     this.#httpDispatcher = options.httpProxy
-      ? new ProxyAgent({ uri: options.httpProxy })
+      ? createTuiProxyAgent(options.httpProxy)
       : this.#directDispatcher;
     this.#httpsDispatcher = options.httpsProxy
       ? options.httpsProxy === options.httpProxy
         ? this.#httpDispatcher
-        : new ProxyAgent({ uri: options.httpsProxy })
+        : createTuiProxyAgent(options.httpsProxy)
       : this.#directDispatcher;
     this.#dispatchers = [
       ...new Set([this.#directDispatcher, this.#httpDispatcher, this.#httpsDispatcher]),

@@ -117,7 +117,7 @@ describe('modelRefForModel', () => {
   });
 
   it('builds a conservative ref when no catalog config exists', () => {
-    expect(modelRefForModel('provider', 'model', undefined)).toEqual({
+    expect(modelRefForModel('provider', 'model', undefined)).toMatchObject({
       provider: 'provider',
       model_id: 'model',
       thinking_level: ThinkingLevel.OFF,
@@ -649,6 +649,10 @@ describe('model capability helpers', () => {
       support_image: true,
       support_video: true,
       support_files_api: false,
+      max_image_bytes_inline: 10_485_760,
+      max_video_bytes_inline: 52_428_800,
+      max_request_body_bytes: 67_108_864,
+      max_attachments_count: 4,
       thinking_mode: ThinkingMode.FORCED_ON,
     });
   });
@@ -688,6 +692,66 @@ describe('model capability helpers', () => {
       max_tokens: 0,
     });
     expect(modelLimitsFromConfig(undefined)).toEqual({});
+  });
+
+  it('gives legacy custom models client budgets without enabling unsupported media or uploads', () => {
+    expect(capabilitiesFromModelConfig(undefined)).toMatchObject({
+      support_image: false,
+      support_video: false,
+      support_files_api: false,
+      max_image_bytes_inline: 10_485_760,
+      max_video_bytes_inline: 52_428_800,
+      max_request_body_bytes: 67_108_864,
+      max_attachments_count: 4,
+    });
+    expect(
+      modelRefForModel('custom_provider:legacy', 'video-model', {
+        modalities: { input: ['text', 'video'] },
+      }).capabilities,
+    ).toMatchObject({
+      support_video: true,
+      max_video_bytes_inline: 52_428_800,
+      max_request_body_bytes: 67_108_864,
+    });
+  });
+
+  it.each([undefined, '', 'NaN', 0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'uses the same defaults for every missing or invalid media limit: %s',
+    (limit) => {
+      expect(
+        capabilitiesFromModelConfig({
+          capabilities: {
+            max_image_bytes_inline: limit,
+            max_video_bytes_inline: limit,
+            max_request_body_bytes: limit,
+            max_attachments_count: limit,
+          },
+        }),
+      ).toMatchObject({
+        max_image_bytes_inline: 10_485_760,
+        max_video_bytes_inline: 52_428_800,
+        max_request_body_bytes: 67_108_864,
+        max_attachments_count: 4,
+      });
+    },
+  );
+
+  it('honors explicit client budgets above the defaults', () => {
+    expect(
+      capabilitiesFromModelConfig({
+        capabilities: {
+          max_image_bytes_inline: 20_971_520,
+          max_video_bytes_inline: '104857600',
+          max_request_body_bytes: 134_217_728,
+          max_attachments_count: 8,
+        },
+      }),
+    ).toMatchObject({
+      max_image_bytes_inline: 20_971_520,
+      max_video_bytes_inline: '104857600',
+      max_request_body_bytes: 134_217_728,
+      max_attachments_count: 8,
+    });
   });
 
   it('normalizes canonical File API capabilities and inline media limits like v1', () => {
@@ -744,7 +808,7 @@ describe('model capability helpers', () => {
     ).not.toHaveProperty('files_api_upload_endpoint');
   });
 
-  it('drops malformed File API and inline media limits', () => {
+  it('drops malformed File API metadata and defaults invalid inline media limits', () => {
     const capabilities = capabilitiesFromModelConfig({
       capabilities: {
         support_files_api: true,
@@ -762,10 +826,12 @@ describe('model capability helpers', () => {
     expect(capabilities).not.toHaveProperty('files_api_upload_endpoint');
     expect(capabilities).not.toHaveProperty('files_api_ref_scheme');
     expect(capabilities).not.toHaveProperty('files_api_file_id_ttl_sec');
-    expect(capabilities).not.toHaveProperty('max_image_bytes_inline');
-    expect(capabilities).not.toHaveProperty('max_video_bytes_inline');
-    expect(capabilities).not.toHaveProperty('max_request_body_bytes');
-    expect(capabilities).not.toHaveProperty('max_attachments_count');
+    expect(capabilities).toMatchObject({
+      max_image_bytes_inline: 10_485_760,
+      max_video_bytes_inline: 52_428_800,
+      max_request_body_bytes: 67_108_864,
+      max_attachments_count: 4,
+    });
   });
 });
 

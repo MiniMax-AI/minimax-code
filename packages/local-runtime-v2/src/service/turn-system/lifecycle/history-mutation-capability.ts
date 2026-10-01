@@ -84,20 +84,21 @@ async function fork(
   options: HistoryMutationCapabilityOptions,
   input: HistoryForkInput,
 ): Promise<HistoryForkResult> {
-  const boundary = input.throughAssistantMessageId ?? input.beforeUserMessageId;
+  const inclusiveBoundary = input.throughMessageId ?? input.throughAssistantMessageId;
+  const boundary = inclusiveBoundary ?? input.beforeUserMessageId;
   const source = await readBoundarySource(
     options,
     input.sourceSessionId,
     boundary,
     input.beforeUserMessageId,
   );
-  const sourceArtifact = findForkArtifact(source, boundary);
+  const sourceArtifact = findForkArtifact(source, boundary, Boolean(input.throughMessageId));
   if (!sourceArtifact) boundaryNotFound(boundary);
   const index = boundary
     ? sourceArtifact.records.findIndex((envelope) => envelope.message_id === boundary)
     : sourceArtifact.records.length;
   if (index < 0) boundaryNotFound(boundary);
-  const prefixEnd = input.throughAssistantMessageId ? index + 1 : index;
+  const prefixEnd = inclusiveBoundary ? index + 1 : index;
   const prefix = withoutSourceBackgroundReminders(sourceArtifact.records.slice(0, prefixEnd));
   if (boundary && !isSettledPrefix(prefix)) {
     throw new HistoryMutationError('boundary-invalid', 'History fork target prefix is not settled');
@@ -380,11 +381,30 @@ function findDisplayOnlyRewindSlice(
   const boundary = input.displayOnlyBoundary;
   if (!boundary) boundaryNotFound(input.fromUserMessageIdInclusive);
   const canonical = [...source.snapshots.flatMap((snapshot) => snapshot.records), ...source.active];
-  if (canonical.some((envelope) => envelope.turn_id === boundary.turnId)) {
-    throw new HistoryMutationError(
-      'boundary-invalid',
-      'Display-only rewind target Turn is partially present in Canonical History',
-    );
+  const targetRecords = canonical.filter((envelope) => envelope.turn_id === boundary.turnId);
+  if (targetRecords.length > 0) {
+    // The initial LLM hook can persist a hidden reminder before the user envelope.
+    // If interrupted there, rewind that active suffix; never reinterpret real
+    // conversation records or rewrite an archived generation as a reminder-only turn.
+    if (
+      targetRecords.some((envelope) => !isTypedBackgroundReminder(envelope.message)) ||
+      source.snapshots.some((snapshot) =>
+        snapshot.records.some((envelope) => envelope.turn_id === boundary.turnId),
+      )
+    ) {
+      throw new HistoryMutationError(
+        'boundary-invalid',
+        'Display-only rewind target Turn is partially present in Canonical History',
+      );
+    }
+    const index = source.active.findIndex((envelope) => envelope.turn_id === boundary.turnId);
+    const active = source.active.slice(0, index);
+    assertSettledRewindPrefix(active);
+    return {
+      generation: source.activeGeneration,
+      active,
+      snapshots: source.snapshots.map(copySnapshot),
+    };
   }
   const laterBoundary = boundary.subsequentUserMessageIds.find(
     (messageId) => findForkArtifact(source, messageId) !== undefined,
@@ -548,16 +568,21 @@ function sameStringArray(left: readonly string[], right: readonly string[]): boo
 function findForkArtifact(
   source: Awaited<ReturnType<typeof readBoundarySource>>,
   boundary: string | undefined,
+  preferLatest = false,
 ):
   | { readonly generation: number; readonly records: readonly CanonicalHistoryEnvelope[] }
   | undefined {
   if (!boundary) return { generation: source.activeGeneration, records: source.active };
-  return [
+  const artifacts = [
     ...[...source.snapshots]
       .sort((left, right) => left.generation - right.generation)
       .map(({ generation, records }) => ({ generation, records })),
     { generation: source.activeGeneration, records: source.active },
-  ].find((artifact) => artifact.records.some((envelope) => envelope.message_id === boundary));
+  ];
+  if (preferLatest) artifacts.reverse();
+  return artifacts.find((artifact) =>
+    artifact.records.some((envelope) => envelope.message_id === boundary),
+  );
 }
 
 function createContinuationEnvelope(

@@ -39,6 +39,7 @@ export function formatTuiToolSummary(value: string): string {
           typeof candidate === 'string' && Boolean(candidate.trim()),
       );
       if (typeof parsed.command === 'string' && parsed.command.trim()) {
+        if (typeof description === 'string' && description.trim()) return firstLine(description);
         const command = firstLine(parsed.command);
         return scope ? `${command} · in ${firstLine(scope)}` : command;
       }

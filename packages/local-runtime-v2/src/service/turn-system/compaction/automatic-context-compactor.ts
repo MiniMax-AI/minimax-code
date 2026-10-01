@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { DEFAULT_COMPACTION_SETTINGS } from '@earendil-works/pi-coding-agent';
+import { DEFAULT_COMPACTION_SETTINGS } from '@earendil-works/pi-coding-agent/compaction';
 import type { PiBeforeLlmCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
 import { resolveCompactionTokenBudget } from '@mavis/context-manager';
 
@@ -215,6 +215,7 @@ async function openAutomaticCheckpoint(
     maxOutputTokens: checkpointMaxOutputTokens(
       DEFAULT_COMPACTION_SETTINGS.reserveTokens,
       input.maxTokens ?? input.model.maxTokens,
+      input.model.contextWindow,
     ),
     ...(input.maxSerializedInputBytes === undefined
       ? {}

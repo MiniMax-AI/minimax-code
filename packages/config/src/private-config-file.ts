@@ -18,11 +18,13 @@ export function writePrivateConfigFileSync(
   content: string | Buffer,
   exclusive = false,
 ): void {
-  const fd = fs.openSync(
-    filePath,
-    exclusive ? "wx" : "a",
-    PRIVATE_CONFIG_FILE_MODE,
-  );
+  // Append handles cannot be truncated on Windows. Defer truncation until
+  // permissions have been restricted, including for an existing POSIX file.
+  const flags =
+    fs.constants.O_WRONLY |
+    fs.constants.O_CREAT |
+    (exclusive ? fs.constants.O_EXCL : 0);
+  const fd = fs.openSync(filePath, flags, PRIVATE_CONFIG_FILE_MODE);
   try {
     fs.fchmodSync(fd, PRIVATE_CONFIG_FILE_MODE);
     fs.ftruncateSync(fd, 0);

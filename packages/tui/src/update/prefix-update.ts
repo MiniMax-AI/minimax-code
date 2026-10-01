@@ -704,7 +704,7 @@ function platformPathFor(platform: NodeJS.Platform): McodePlatformPath {
   return platform === 'win32' ? path.win32 : path.posix;
 }
 
-function readMcodeBinEntry(value: unknown, name: 'mcode' | 'mcode-tools'): string | undefined {
+export function readMcodeBinEntry(value: unknown, name: 'mcode' | 'mcode-tools'): string | undefined {
   const entry =
     typeof value === 'string' && name === 'mcode'
       ? value

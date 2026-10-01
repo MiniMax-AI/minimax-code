@@ -32,10 +32,14 @@ export interface TuiCustomStatusLineConfig {
 }
 
 export interface TuiConfig {
+  /** Ordered terminal title items. Null or an empty list disables title updates. */
+  terminalTitle?: readonly string[] | null;
   /** Terminal notification policy. Unknown focus falls back to notifying. */
   notifications?: {
     when?: 'unfocused' | 'always' | 'never';
     method?: 'auto' | 'osc9' | 'osc777' | 'bel';
+    /** Omit to enable all supported notification events; an empty list disables them. */
+    events?: readonly string[];
   };
   /** Show contextual Tips in the idle composer header. Defaults to true. */
   showTips?: boolean;
@@ -75,11 +79,16 @@ export function parseTuiConfig(raw: Record<string, unknown>): TuiConfig {
     typeof rawNotifications === 'object' &&
     !Array.isArray(rawNotifications)
   ) {
-    const { when, method } = rawNotifications as Record<string, unknown>;
+    const { when, method, events } = rawNotifications as Record<string, unknown>;
     notifications = {
       ...(when === 'unfocused' || when === 'always' || when === 'never' ? { when } : {}),
       ...(method === 'auto' || method === 'osc9' || method === 'osc777' || method === 'bel'
         ? { method }
+        : {}),
+      ...(Array.isArray(events)
+        ? {
+            events: events.filter((event): event is string => typeof event === 'string'),
+          }
         : {}),
     };
   }
@@ -92,6 +101,16 @@ export function parseTuiConfig(raw: Record<string, unknown>): TuiConfig {
     : undefined;
   const customStatusLine = parseTuiCustomStatusLineConfig(tui.customStatusLine);
   return {
+    ...(tui.terminalTitle === null
+      ? { terminalTitle: null }
+      : Array.isArray(tui.terminalTitle)
+        ? {
+            terminalTitle: tui.terminalTitle
+              .filter((item): item is string => typeof item === 'string')
+              .map((item) => item.trim())
+              .filter(Boolean),
+          }
+        : {}),
     ...(typeof tui.showTips === 'boolean' ? { showTips: tui.showTips } : {}),
     ...(notifications ? { notifications } : {}),
     ...(statusLine ? { statusLine } : {}),

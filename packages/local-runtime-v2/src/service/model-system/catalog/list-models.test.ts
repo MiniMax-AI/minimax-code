@@ -71,7 +71,12 @@ describe('model catalog helpers', () => {
       minimax_api: { modelContextLimits: { 'MiniMax-M3': 1_000_000 } },
       provider: {
         minimax: {
-          models: { 'MiniMax-M3': { limit: { context: 256_000 } } },
+          models: {
+            'MiniMax-M3': {
+              limit: { context: 256_000 },
+              contextWindowOptions: [256_000, 1_000_000],
+            },
+          },
         },
       },
     });
@@ -86,23 +91,27 @@ describe('model catalog helpers', () => {
     );
   });
 
-  it('lists managed models in the configured catalog order', () => {
-    const runtimeConfig = config({
-      provider: {
-        minimax: {
-          options: { authMode: 'managed-login' },
-          model_order: ['MiniMax-M3.1', 'MiniMax-M3'],
-          models: { 'MiniMax-M3': {}, 'MiniMax-M3.1': {} },
+  it.each(['token_plan', 'minimax_api_key'] as const)(
+    'lists %s models in the configured catalog order',
+    (minimaxModelSource) => {
+      const runtimeConfig = config({
+        minimaxModelSource,
+        provider: {
+          minimax: {
+            options: { authMode: 'managed-login' },
+            model_order: ['MiniMax-M3.1', 'MiniMax-M3'],
+            models: { 'MiniMax-M3': {}, 'MiniMax-M3.1': {} },
+          },
         },
-      },
-    });
+      });
 
-    expect(
-      routeModelEntries(runtimeConfig, 'minimax', runtimeConfig.provider.minimax ?? {}).map(
-        ([modelId]) => modelId,
-      ),
-    ).toEqual(['MiniMax-M3.1', 'MiniMax-M3']);
-  });
+      expect(
+        routeModelEntries(runtimeConfig, 'minimax', runtimeConfig.provider.minimax ?? {}).map(
+          ([modelId]) => modelId,
+        ),
+      ).toEqual(['MiniMax-M3.1', 'MiniMax-M3']);
+    },
+  );
 
   it('normalizes cached status, thinking modes, and variants', () => {
     expect(cacheStatusView(undefined)).toBeUndefined();

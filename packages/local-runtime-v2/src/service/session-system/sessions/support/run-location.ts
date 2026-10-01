@@ -57,6 +57,7 @@ export async function applyLocalRunLocation(
   input: LocalRunLocationInput,
   workspaceDir: string,
   nowMs: () => number,
+  refreshBeforeCreate = true,
 ): Promise<ResolvedLocalRunLocation> {
   const createdAt = nowMs();
   if (input.mode === 'current') {
@@ -69,7 +70,7 @@ export async function applyLocalRunLocation(
     };
   }
   if (input.mode === 'new-worktree') {
-    return createNewWorktree(input, workspaceDir, createdAt);
+    return createNewWorktree(input, workspaceDir, createdAt, refreshBeforeCreate);
   }
   return resolveExistingWorktree(input, workspaceDir, createdAt);
 }
@@ -78,16 +79,20 @@ async function createNewWorktree(
   input: LocalRunLocationInput,
   workspaceDir: string,
   createdAt: number,
+  refreshBeforeCreate: boolean,
 ): Promise<ResolvedLocalRunLocation> {
   const branch =
     input.newWorktreeBranch ?? input.branch ?? generateDefaultWorktreeBranch(createdAt);
   await assertSafeBranchName(branch, workspaceDir);
-  if (input.newWorktreeBase) assertSafeBaseRef(input.newWorktreeBase);
+  const baseSha = await resolveWorktreeBase(
+    input.newWorktreeBase ?? 'HEAD',
+    workspaceDir,
+    refreshBeforeCreate,
+  );
   const worktreeParentDir = await resolveSafeWorktreeParent(workspaceDir);
   const targetDir = join(worktreeParentDir, branch.replaceAll('/', '-'));
-  const args = ['worktree', 'add', '-b', branch, targetDir];
-  if (input.newWorktreeBase) args.push(input.newWorktreeBase);
-  const result = await git(args, workspaceDir);
+  await createPinnedBranch(branch, input.newWorktreeBase ?? 'HEAD', baseSha, workspaceDir);
+  const result = await git(['worktree', 'add', targetDir, branch], workspaceDir);
   if (result.code !== 0) {
     throw new LocalRunLocationError(
       `git worktree add failed: ${result.stderr || result.stdout}`,
@@ -101,6 +106,35 @@ async function createNewWorktree(
     parentRepoDir: workspaceDir,
     createdAt,
   };
+}
+
+async function createPinnedBranch(
+  branch: string,
+  baseRef: string,
+  baseSha: string,
+  cwd: string,
+): Promise<void> {
+  // Let Git apply autoSetupMerge/autoSetupRebase to the selected reference before
+  // pinning the new branch. Starting directly from a SHA loses that information.
+  const createBranch = await git(['branch', branch, baseRef], cwd);
+  if (createBranch.code !== 0) {
+    throw new LocalRunLocationError(
+      `git branch failed: ${createBranch.stderr || createBranch.stdout}`,
+      'RUN_LOCATION_WORKTREE_ADD_FAILED',
+    );
+  }
+  const branchRef = `refs/heads/${branch}`;
+  const initial = await git(['rev-parse', '--verify', branchRef], cwd);
+  const pin =
+    initial.code === 0
+      ? await git(['update-ref', branchRef, baseSha, initial.stdout.trim()], cwd)
+      : initial;
+  if (pin.code !== 0) {
+    throw new LocalRunLocationError(
+      `Could not pin worktree branch: ${pin.stderr || pin.stdout}`,
+      'RUN_LOCATION_WORKTREE_ADD_FAILED',
+    );
+  }
 }
 
 async function resolveExistingWorktree(
@@ -172,6 +206,121 @@ function assertSafeBaseRef(baseRef: string): void {
   }
 }
 
+/** Resolve the selected ref once; the worktree setting owns network refresh policy. */
+async function resolveWorktreeBase(
+  baseRef: string,
+  cwd: string,
+  refresh: boolean,
+): Promise<string> {
+  assertSafeBaseRef(baseRef);
+  const ref = refresh ? await resolvePreferredRef(baseRef, cwd) : baseRef;
+  const result = await git(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], cwd);
+  const sha = result.stdout.trim();
+  if (result.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
+    throw new LocalRunLocationError(
+      `Could not resolve worktree base "${baseRef}": ${result.stderr || result.stdout}`,
+      'RUN_LOCATION_INVALID_BASE',
+    );
+  }
+  return sha;
+}
+
+async function resolvePreferredRef(baseRef: string, cwd: string): Promise<string> {
+  const result = await git(['remote'], cwd);
+  if (result.code !== 0) {
+    throw new LocalRunLocationError(result.stderr, 'RUN_LOCATION_INVALID_BASE');
+  }
+  const remotes = result.stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  const localName = baseRef.replace(/^refs\/heads\//, '');
+  const local = await git(['show-ref', '--verify', '--quiet', `refs/heads/${localName}`], cwd);
+  if (local.code === 0 || baseRef === 'HEAD') {
+    const branchResult =
+      baseRef === 'HEAD'
+        ? await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], cwd)
+        : { stdout: localName };
+    const branch = branchResult.stdout.trim();
+    return branch ? resolveBranchUpstream(branch, cwd) : baseRef;
+  }
+  const shortRef = baseRef.replace(/^refs\/remotes\//, '');
+  const remote = remotes.find((name) => shortRef.startsWith(`${name}/`));
+  if (remote) return fetchBaseRef(remote, shortRef.slice(remote.length + 1), cwd);
+  if (baseRef.startsWith('refs/remotes/')) {
+    throw new LocalRunLocationError(
+      `Remote no longer exists for ${baseRef}`,
+      'RUN_LOCATION_FETCH_FAILED',
+    );
+  }
+  return baseRef;
+}
+
+async function resolveBranchUpstream(branch: string, cwd: string): Promise<string> {
+  const [remoteConfig, mergeConfig] = await Promise.all([
+    git(['config', '--get', `branch.${branch}.remote`], cwd),
+    git(['config', '--get', `branch.${branch}.merge`], cwd),
+  ]);
+  const remote = remoteConfig.stdout.trim();
+  const mergeRef = mergeConfig.stdout.trim();
+  if (remote === '.' && mergeRef) return mergeRef;
+  if (remote && mergeRef.startsWith('refs/heads/')) {
+    return fetchBaseRef(remote, mergeRef.slice('refs/heads/'.length), cwd);
+  }
+  return `refs/heads/${branch}`;
+}
+
+async function resolveRemoteBranch(remote: string, branch: string, cwd: string): Promise<string> {
+  if (branch !== 'HEAD') return branch;
+  const prefix = `refs/remotes/${remote}/`;
+  const result = await git(['symbolic-ref', '--quiet', `${prefix}HEAD`], cwd);
+  const target = result.stdout.trim();
+  if (result.code !== 0 || !target.startsWith(prefix)) {
+    throw new LocalRunLocationError(
+      `Could not resolve ${remote}/HEAD`,
+      'RUN_LOCATION_INVALID_BASE',
+    );
+  }
+  return target.slice(prefix.length);
+}
+
+async function fetchBaseRef(
+  remote: string,
+  branch: string,
+  cwd: string,
+  timeoutMs = 60_000,
+): Promise<string> {
+  const resolvedBranch = await resolveRemoteBranch(remote, branch, cwd);
+  const ref = `refs/remotes/${remote}/${resolvedBranch}`;
+  const validRef = await git(['check-ref-format', ref], cwd);
+  if (!remote || remote.startsWith('-') || !resolvedBranch || validRef.code !== 0) {
+    throw new LocalRunLocationError(
+      `Invalid remote base "${remote}/${resolvedBranch}"`,
+      'RUN_LOCATION_INVALID_BASE',
+    );
+  }
+  const result = await git(
+    [
+      'fetch',
+      '--no-tags',
+      '--no-recurse-submodules',
+      '--',
+      remote,
+      `+refs/heads/${resolvedBranch}:${ref}`,
+    ],
+    cwd,
+    timeoutMs,
+  );
+  if (result.code !== 0) {
+    throw new LocalRunLocationError(
+      `Failed to fetch latest ${remote}/${resolvedBranch}. Retry or turn off upstream refresh in Worktree settings: ${result.stderr || result.stdout}`,
+      'RUN_LOCATION_FETCH_FAILED',
+    );
+  }
+  return ref;
+}
+
 async function assertSafeBranchName(branch: string, cwd: string): Promise<void> {
   if (branch.startsWith('-') || branch.startsWith('@') || branch.includes('\0')) {
     throw new LocalRunLocationError(
@@ -191,9 +340,15 @@ async function assertSafeBranchName(branch: string, cwd: string): Promise<void> 
 async function git(
   args: readonly string[],
   cwd: string,
+  timeoutMs?: number,
 ): Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }> {
   try {
-    const result = await execFile('git', args, { cwd, encoding: 'utf-8', env: gitEnv() });
+    const result = await execFile('git', args, {
+      cwd,
+      encoding: 'utf-8',
+      env: { ...gitEnv(), GIT_TERMINAL_PROMPT: '0' },
+      ...(timeoutMs ? { timeout: timeoutMs } : {}),
+    });
     return { code: 0, stdout: String(result.stdout ?? ''), stderr: String(result.stderr ?? '') };
   } catch (error) {
     const failure = error as ExecFileException & {

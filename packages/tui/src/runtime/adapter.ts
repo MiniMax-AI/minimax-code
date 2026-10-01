@@ -446,6 +446,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   ): Promise<boolean> {
     return this.productAccess.selectSessionModel(model, sessionId);
   }
+  setModelFavorite(model: TuiModelSelection, favorite: boolean): Promise<boolean> {
+    return this.productAccess.setModelFavorite(model, favorite);
+  }
   listUserModelProviders() {
     return this.productAccess.listUserModelProviders();
   }
@@ -742,6 +745,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
           : {}),
         ...(task.lastError?.message
           ? { lastError: task.lastError.message }
+          : {}),
+        ...(task.kind === 'bash' && task.metadata?.executionMode === 'managed_foreground'
+          ? { foreground: true as const }
           : {}),
       }));
   }

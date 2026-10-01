@@ -9,12 +9,26 @@ const BYOK_UPSTREAM_ERROR_SOURCE = 'byok_upstream';
 export function deriveLocalTurnRuntimeOutcome(
   events: readonly IRuntimeEvent[],
 ): LocalRuntimeTurnRuntimeOutcome {
-  const state: MutableOutcome = {
-    status: 'unknown',
-    waitingForUser: false,
-  };
-  events.forEach((event) => updateOutcome(state, event));
+  const tracker = createLocalTurnOutcomeTracker();
+  events.forEach((event) => tracker.observe(event));
+  return tracker.read();
+}
 
+/** Fold approved events without retaining their streaming payloads. */
+export function createLocalTurnOutcomeTracker() {
+  const state: MutableOutcome = { status: 'unknown', waitingForUser: false };
+  let eventCount = 0;
+  return {
+    get eventCount() { return eventCount; },
+    observe(event: IRuntimeEvent): void {
+      updateOutcome(state, event);
+      eventCount += 1;
+    },
+    read: (): LocalRuntimeTurnRuntimeOutcome => snapshotOutcome(state),
+  };
+}
+
+function snapshotOutcome(state: MutableOutcome): LocalRuntimeTurnRuntimeOutcome {
   return {
     status: state.status,
     ...(state.errorMessage ? { errorMessage: state.errorMessage } : {}),

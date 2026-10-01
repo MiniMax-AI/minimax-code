@@ -20,7 +20,12 @@ export interface CheckpointGenerationMetadata {
 }
 
 export type CheckpointCandidate = 'h0' | 'htrim' | 'hall' | 'hvideo' | 'hmid' | 'hmin';
-type CheckpointAttemptOutcome = 'generated' | 'input_too_large' | 'aborted' | 'failed';
+type CheckpointAttemptOutcome =
+  | 'generated'
+  | 'input_too_large'
+  | 'output_exhausted'
+  | 'aborted'
+  | 'failed';
 
 export interface CompactionTokenUsage {
   readonly inputTokens: number;

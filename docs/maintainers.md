@@ -34,6 +34,20 @@ Route security reports through [Security](../SECURITY.md). Do not ask for secret
 
 This small label set draws on the type and information-request handling in [VS Code's triage guide](https://github.com/microsoft/vscode/wiki/Issues-Triaging) and the `needs-triage`/`needs-info` states used by [Ruff](https://github.com/astral-sh/ruff/labels). Contribution eligibility follows this repository's policy.
 
+## Pull request labels
+
+Use the existing labels to describe a PR on three independent axes:
+
+| Axis | Labels and meaning |
+| --- | --- |
+| Change type | `bug`: fixes a malfunction; `enhancement`: adds or improves behavior, including performance; `documentation`: primarily changes documentation; `dependencies`: updates dependencies |
+| Product | `cli`: changes the standalone CLI, its runtime or its build; `tui`: changes interactive-terminal behavior and is used together with `cli`; `desktop`: changes the Desktop app |
+| Verification | `perf:full`: selects the full performance suite for changes covered by the [performance rules](../CONTRIBUTING.md#performance-checks) |
+
+Add one primary change-type label when a PR fits one of these types. Leave it unset for repository maintenance that fits none of them. Add each affected product label; leave product labels unset for repository-wide policy or tooling changes with no specific product impact. Classify the behavior and scope of the PR, not just its title or changed paths. The author proposes the labels and the reviewer checks them when the scope changes.
+
+Keep `perf:full` until merge when the performance rules require it, including for dependency updates that affect the covered runtime paths. It is a verification trigger, not a change type or a statement that the PR is ready to merge. Use GitHub's draft state, reviewers, approvals and checks for review progress. `needs-triage` and `needs-info` remain issue-triage labels.
+
 ## Review and merge
 
 1. Repository collaborators open an issue for substantial scope or submit a focused feature-branch PR. Other users may open issues to discuss ideas and proposals. Security details follow the private reporting process.

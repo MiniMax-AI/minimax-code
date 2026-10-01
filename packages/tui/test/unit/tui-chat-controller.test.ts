@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SendMessageReq } from '@mavis/local-runtime-v2/cli-service';
+import type { CliSendMessageReq, SendMessageReq } from '@mavis/local-runtime-v2/cli-service';
 import { TuiFailure } from '../../src/failure.js';
 import {
   TuiChatController as ProductionTuiChatController,
@@ -20,6 +20,50 @@ class TuiChatController extends ProductionTuiChatController {
 }
 
 describe('TuiChatController', () => {
+  it.each(['display', 'legacy transport'])(
+    'reconciles plugin mentions using %s without duplicate user cells',
+    async (echo) => {
+      const content = '[@Codex 插件](plugin://codex%40official) 这个插件可以干什么';
+      const displayContent = '@Codex 插件 这个插件可以干什么';
+      let turn = 0;
+      const runtime = {
+        createSession: vi.fn(async () => ({ sessionId: 'plugin-session' })),
+        sendMessage: vi.fn(async function* (
+          request: SendMessageReq,
+        ): AsyncGenerator<TuiStreamEvent> {
+          expect(request).toMatchObject({ content, displayContent });
+          const message = {
+            id: `message-${request.turnId}`,
+            turnId: request.turnId,
+            role: 'user' as const,
+            content: echo === 'display' ? request.displayContent : request.content,
+          };
+          yield { type: 'message', message };
+          yield { type: 'message', message };
+          yield { type: 'done', turnId: request.turnId };
+        }),
+        abortSession: vi.fn(async () => true),
+      };
+      const transcript = new TranscriptStore();
+      const controller = new ProductionTuiChatController({
+        runtime: runtime as never,
+        transcript,
+        workspaceDir: '/workspace',
+        createTurnId: () => `plugin-turn-${++turn}`,
+      });
+      await controller.submit(content, { displayContent });
+      expect(transcript.snapshot().filter((cell) => cell.kind === 'user')).toMatchObject([
+        { content: displayContent, sourceMessageId: 'message-plugin-turn-1' },
+      ]);
+      // An intentional repeat in another turn must remain a separate message.
+      await controller.submit(content, { displayContent });
+      expect(transcript.snapshot().filter((cell) => cell.kind === 'user')).toHaveLength(2);
+      const rendered = new TranscriptView(transcript).render(100).join('\n');
+      expect(rendered).not.toContain('plugin://');
+      expect(rendered).not.toContain('\x1b[4m');
+    },
+  );
+
   it('hides plain and namespaced AskUser protocol tools from the transcript', () => {
     expect(isQuestionnaireTool('ask_user')).toBe(true);
     expect(isQuestionnaireTool('functions.AskUser')).toBe(true);
@@ -27,7 +71,7 @@ describe('TuiChatController', () => {
     expect(isQuestionnaireTool('read_file')).toBe(false);
   });
 
-  it('shows estimated output throughput while a text response is still streaming', async () => {
+  it('waits for provider usage before showing output throughput', async () => {
     let nowMs = 0;
     let releaseResponse: (() => void) | undefined;
     const responseGate = new Promise<void>((resolve) => {
@@ -66,7 +110,7 @@ describe('TuiChatController', () => {
             turnId: 'turn-live-output-rate',
             role: 'assistant',
             content: 'hello world',
-            usage: { outputTokens: 126, requestDurationMs: 2_000 },
+            usage: { outputTokens: 126, requestDurationMs: 7_000, decodeDurationMs: 2_000 },
           },
         };
         yield { type: 'done', turnId: 'turn-live-output-rate' };
@@ -86,8 +130,8 @@ describe('TuiChatController', () => {
     await vi.waitFor(() =>
       expect(controller.snapshot()).toMatchObject({
         activeTurnId: 'turn-live-output-rate',
-        outputTokensPerSecond: 2,
-        outputTokensPerSecondEstimated: true,
+        outputTokensPerSecond: undefined,
+        outputTokensPerSecondEstimated: undefined,
       }),
     );
     const snapshot = controller.snapshot();
@@ -107,7 +151,7 @@ describe('TuiChatController', () => {
       workspace: '/workspace',
     });
     const line = new TuiActivityLine(presentation.activity, { animate: false });
-    expect(line.render(120).join('\n')).toContain('⚡ ~2.0 tok/s');
+    expect(line.render(120).join('\n')).not.toContain('tok/s');
 
     releaseResponse?.();
     await submission;
@@ -138,7 +182,7 @@ describe('TuiChatController', () => {
             turnId: 'turn-output-rate',
             role: 'assistant',
             content: 'hello',
-            usage: { outputTokens: 126, requestDurationMs: 2_000 },
+            usage: { outputTokens: 126, requestDurationMs: 7_000, decodeDurationMs: 2_000 },
           },
         };
         yield { type: 'done', turnId: 'turn-output-rate' };
@@ -156,7 +200,7 @@ describe('TuiChatController', () => {
     await controller.submit('Say hello');
 
     const view = new TranscriptView(() => transcript.snapshot());
-    expect(view.render(80).join('\n')).toContain('⚡ 63.0 tok/s');
+    expect(view.render(80).join('\n')).toContain('⚡ 63 tok/s');
   });
 
   it('accumulates provider output throughput for one turn and resets it for the next', () => {
@@ -187,7 +231,7 @@ describe('TuiChatController', () => {
         id: 'message-1',
         turnId: 'turn-1',
         role: 'assistant',
-        usage: { outputTokens: 126, requestDurationMs: 2_000 },
+        usage: { outputTokens: 126, requestDurationMs: 7_000, decodeDurationMs: 2_000 },
       },
     });
 
@@ -226,7 +270,7 @@ describe('TuiChatController', () => {
       timestamp: 2_000,
     });
 
-    expect(controller.snapshot().outputTokensPerSecond).toBeGreaterThan(0);
+    expect(controller.snapshot().outputTokensPerSecond).toBeUndefined();
     expect(onChange).toHaveBeenCalledOnce();
   });
 
@@ -266,7 +310,22 @@ describe('TuiChatController', () => {
       onUserSubmissionProjected,
     });
 
+    transcript.upsert({
+      id: 'turn-duration:previous-turn',
+      kind: 'turn-duration',
+      status: 'cancelled',
+      content: '',
+      durationMs: 12_000,
+      turnId: 'previous-turn',
+      ephemeral: true,
+      createdAtMs: 80,
+      updatedAtMs: 80,
+    });
+    const view = new TranscriptView(transcript);
+    expect(view.render(80).join('\n')).toContain('Interrupted after 12s');
     controller.projectOptimisticUserMessage('submission-1', 'Show this immediately', 90);
+    expect(view.render(80).join('\n')).not.toContain('Interrupted after 12s');
+    expect(transcript.get('turn-duration:previous-turn')).toBeUndefined();
     const sending = controller.submit('Show this immediately', {
       optimisticRequestId: 'submission-1',
     });
@@ -279,12 +338,69 @@ describe('TuiChatController', () => {
     });
     expect(transcript.get('optimistic:user:submission-1')).toBeUndefined();
     expect(transcript.snapshot().filter((cell) => cell.kind === 'user')).toHaveLength(1);
+    expect(view.render(80).join('\n')).not.toContain('Interrupted after 12s');
+    expect(transcript.get('turn-duration:previous-turn')).toBeUndefined();
     expect(onUserSubmissionProjected).toHaveBeenCalledOnce();
     expect(runtime.createSession).not.toHaveBeenCalled();
     expect(runtime.sendMessage).not.toHaveBeenCalled();
 
     resolveAccount?.({ status: 'ready', managedTokenPresent: true, warnings: [] });
     await expect(sending).resolves.toBe('succeeded');
+  });
+
+  it('dismisses only older turn-scoped ephemeral errors when a Runtime turn starts', () => {
+    const transcript = new TranscriptStore();
+    for (const cell of [
+      { id: 'old-terminal-error', turnId: 'old-turn', ephemeral: true },
+      { id: 'current-terminal-error', turnId: 'current-turn', ephemeral: true },
+      { id: 'local-action-error', ephemeral: true },
+      { id: 'historical-error', turnId: 'old-turn' },
+    ]) {
+      transcript.upsert({
+        ...cell,
+        kind: 'error',
+        status: 'failed',
+        content: cell.id,
+        createdAtMs: 1,
+      });
+    }
+    const controller = new ProductionTuiChatController({
+      runtime: {} as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+
+    controller.beginRuntimeTurn('current-turn', 2);
+
+    expect(transcript.snapshot().map((cell) => cell.id)).toEqual([
+      'current-terminal-error',
+      'local-action-error',
+      'historical-error',
+    ]);
+  });
+
+  it('keeps the previous duration while projecting a steer for the current turn', () => {
+    const transcript = new TranscriptStore();
+    transcript.upsert({
+      id: 'turn-duration:previous-turn',
+      kind: 'turn-duration',
+      status: 'cancelled',
+      content: '',
+      durationMs: 12_000,
+      turnId: 'previous-turn',
+      ephemeral: true,
+      createdAtMs: 80,
+      updatedAtMs: 80,
+    });
+    const controller = new ProductionTuiChatController({
+      runtime: {} as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+
+    controller.projectOptimisticUserMessage('steer-1', 'Continue this turn', 90, [], 'pending-steer');
+
+    expect(transcript.get('turn-duration:previous-turn')).toBeDefined();
   });
 
   it('detaches the foreground observer when switching Sessions without aborting the Runtime turn', async () => {
@@ -2703,6 +2819,49 @@ describe('TuiChatController', () => {
       'session-2',
     );
   });
+
+  it.each([false, true])(
+    'rebuilds todos from rewound history with earlier todos=%s',
+    async (keepEarlier) => {
+      const onTodoChange = vi.fn();
+      const earlierTodo = { content: 'Earlier task', status: 'pending' };
+      const getMessages = vi.fn(async () =>
+        keepEarlier
+          ? [
+              {
+                id: 'earlier-todo',
+                turnId: 'earlier-turn',
+                role: 'system' as const,
+                content: JSON.stringify({ eventType: 'todo_updated', todos: [earlierTodo] }),
+              },
+            ]
+          : [],
+      );
+      const controller = new ProductionTuiChatController({
+        runtime: {
+          getSession: vi.fn(async () => ({ sessionId: 'rewound-session' })),
+          getMessages,
+        } as never,
+        transcript: new TranscriptStore(),
+        workspaceDir: '/workspace',
+        onTodoChange,
+      });
+      await controller.loadSessionProjection('rewound-session');
+      controller.applyRuntimeTurnEvent('discarded-turn', {
+        type: 'generic',
+        eventType: 'todo_updated',
+        turnId: 'discarded-turn',
+        data: { todos: [{ content: 'Discarded task', status: 'in_progress' }] },
+      });
+      expect(onTodoChange).toHaveBeenLastCalledWith([
+        { content: 'Discarded task', status: 'in_progress' },
+      ]);
+
+      await controller.reconcileOwnerHistory(true);
+
+      expect(onTodoChange).toHaveBeenLastCalledWith(keepEarlier ? [earlierTodo] : []);
+    },
+  );
 
   it('clears input-adjacent tasks when starting a new session', () => {
     const onTodoChange = vi.fn();

@@ -1,3 +1,4 @@
+import { submittedEditorTransport } from '../../widgets/editor/editor.js';
 import type { TuiChatController } from '../chat-controller.js';
 import type { Component, Focusable } from '../../rendering/component.js';
 import { matchesKey } from '../../engine/public.js';
@@ -415,8 +416,12 @@ export class TuiSessionMutationFlow {
       this.options.onChanged();
       return 'retained';
     }
+    const boundContent = draft ? submittedEditorTransport(draft) ?? content : content;
     const transportContent =
-      rebuildSessionMutationTransport(invocation.targetMessage?.content, content) ?? content;
+      rebuildSessionMutationTransport(
+        invocation.targetMessage?.editContent ?? invocation.targetMessage?.content,
+        boundContent,
+      ) ?? boundContent;
     if (invocation.phase === 'resubmit') {
       this.invocations.set(invocation.sequence, { ...invocation, phase: 'resubmitting' });
       this.options.setHint(sessionMutationText('sessionMutation.hint.editSubmitting'));
@@ -427,6 +432,7 @@ export class TuiSessionMutationFlow {
         ...(mergedAttachments ? { attachments: mergedAttachments } : {}),
       };
     }
+    const previousDurationId = this.options.controller.getTerminalDurationId();
     this.invocations.set(invocation.sequence, { ...invocation, phase: 'submitting' });
     this.options.setHint(sessionMutationText('sessionMutation.hint.editSubmitting'));
     this.options.onChanged();
@@ -446,6 +452,13 @@ export class TuiSessionMutationFlow {
         return 'retained';
       }
       const code = rewindErrorCode(error);
+      if (
+        code === 'EDIT_RESTART_NEEDS_RESUBMIT' ||
+        code === 'EDIT_SUBMIT_FAILED_AFTER_REWIND' ||
+        code === 'REWIND_DISPLAY_COMMIT_FAILED'
+      ) {
+        this.options.controller.dismissTerminalDuration(previousDurationId);
+      }
       if (code === 'EDIT_RESTART_NEEDS_NEW_OPERATION') {
         this.invocations.set(invocation.sequence, {
           ...current,
@@ -480,6 +493,11 @@ export class TuiSessionMutationFlow {
         'warning',
       );
       return 'retained';
+    }
+    // Edit bypasses normal submit. Discard only the captured footer on success,
+    // before history refresh can expose it; a new run may already have finished.
+    if (this.isCurrentMutation(invocation)) {
+      this.options.controller.dismissTerminalDuration(previousDurationId);
     }
     try {
       await this.options.refreshProjection?.(invocation.sourceSessionId);
@@ -645,7 +663,9 @@ export class TuiSessionMutationFlow {
     this.closeHistoryScreen();
     this.options.setEditTranscriptBoundary?.(targetMessage.id);
     this.invocations.set(sequence, { ...invocation, targetMessage, phase: 'editing' });
-    const content = visibleSessionMutationContent(targetMessage.content);
+    const content = visibleSessionMutationContent(
+      targetMessage.editContent ?? targetMessage.content,
+    );
     const placeholders = this.editAttachmentEntries();
     if (placeholders.length > 0) this.options.editor.restoreMessageDraft(content, placeholders);
     else this.options.editor.setText(content);
@@ -708,6 +728,7 @@ export class TuiSessionMutationFlow {
       ...(this.options.nowMs ? { nowMs: this.options.nowMs() } : {}),
     });
     this.options.setHint(undefined);
+    this.options.onChanged();
     const handle = this.options.surfaceHost.pushFeature({ screen: picker, focus: picker });
     this.mutationScreen = handle;
     this.invocations.set(sequence, {
@@ -1201,6 +1222,7 @@ export class TuiSessionMutationFlow {
       ...(this.options.nowMs ? { nowMs: this.options.nowMs() } : {}),
     });
     this.options.setHint(undefined);
+    this.options.onChanged();
     const handle = this.options.surfaceHost.pushFeature({
       screen: picker,
       focus: picker,
@@ -1446,6 +1468,7 @@ export class TuiSessionMutationFlow {
     if (sequence === this.mutationSequence) {
       this.closeMutationScreen();
       this.options.setHint(undefined);
+      this.options.onChanged();
     }
     this.invocations.delete(sequence);
   }

@@ -17,6 +17,7 @@ export interface TuiAutomationStatusFacts {
   readonly compacting: boolean;
   readonly retrying: boolean;
   readonly agentCounts?: { readonly active: number; readonly total: number };
+  readonly backgroundTasks?: number;
 }
 
 export interface TuiAutomationStatusSnapshot {
@@ -27,6 +28,7 @@ export interface TuiAutomationStatusSnapshot {
   readonly requestId?: string;
   readonly activeAgents: number;
   readonly totalAgents: number;
+  readonly backgroundTasks: number;
 }
 
 type AutomationStatusTuple = Omit<TuiAutomationStatusSnapshot, 'seq'>;
@@ -99,6 +101,7 @@ export class TuiAutomationStatusStore {
       activeTurnId,
       activeAgents,
       totalAgents,
+      backgroundTasks: boundedCount(facts.backgroundTasks),
     });
     const semanticKey = tupleKey(tuple);
     if (this.semanticKey === undefined) {
@@ -117,9 +120,14 @@ export class TuiAutomationStatusStore {
       readonly activeTurnId?: string;
       readonly activeAgents: number;
       readonly totalAgents: number;
+      readonly backgroundTasks: number;
     },
   ): AutomationStatusTuple {
-    const counts = { activeAgents: facts.activeAgents, totalAgents: facts.totalAgents };
+    const counts = {
+      activeAgents: facts.activeAgents,
+      totalAgents: facts.totalAgents,
+      backgroundTasks: facts.backgroundTasks,
+    };
     const session = facts.sessionId ? { sessionId: facts.sessionId } : {};
 
     // A disconnected or reconciling SSE projection cannot prove ready or terminal.
@@ -237,6 +245,7 @@ function tupleKey(tuple: AutomationStatusTuple): string {
     tuple.requestId ?? '',
     tuple.activeAgents,
     tuple.totalAgents,
+    tuple.backgroundTasks,
   ].join('\u0000');
 }
 

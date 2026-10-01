@@ -165,6 +165,21 @@ describe('model selection input', () => {
   });
 });
 
+it('creates an API-only session before a shared MiniMax catalog exists', () => {
+  const config: LocalRuntimeConfig = {
+    dataDir: '/tmp/api-only-session-create',
+    defaultModel: 'minimax_api/MiniMax-M3',
+    provider: {},
+    minimax_api: { apiKey: 'api-only-placeholder' },
+  };
+  expect(
+    resolveRequestedSessionModel(config, {
+      providerId: 'minimax_api',
+      modelId: 'MiniMax-M3',
+    }),
+  ).toMatchObject({ providerId: 'minimax_api', modelId: 'MiniMax-M3' });
+});
+
 describe('ordinary session inherits the selected global effort', () => {
   const model = {
     limit: { context: 512_000, output: 16_000 },

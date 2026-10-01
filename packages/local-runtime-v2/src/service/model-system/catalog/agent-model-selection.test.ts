@@ -154,7 +154,7 @@ describe('resolveAgentModelSelection', () => {
     ).toMatchObject({ providerId: 'target', modelId: 'replacement' });
   });
 
-  registerM3TierSelectionTests();
+  registerContextTierSelectionTests();
   registerCatalogSelectionValidationTests();
   registerCustomProviderPrefixFallbackTests();
   registerAgentModelInputValidationTests();
@@ -164,7 +164,7 @@ describe('resolveAgentModelSelection', () => {
   registerResolverBoundaryCoverageTest();
 });
 
-function registerM3TierSelectionTests(): void {
+function registerContextTierSelectionTests(): void {
   it.each(['minimax', 'minimax_api'])(
     'separates official M3 tier from its maximum for %s',
     (providerId) => {
@@ -204,6 +204,50 @@ function registerM3TierSelectionTests(): void {
         diagnostics: [
           expect.objectContaining({ code: 'context_window_clamped', physicalLimit: 1_000_000 }),
           expect.objectContaining({ code: 'max_output_tokens_clamped', physicalLimit: 128_000 }),
+        ],
+      });
+    },
+  );
+
+  it.each([
+    ['minimax', 'MiniMax-M3.1-Flash-Preview', [2_000_000, 128_000], 2_000_000],
+    ['minimax_api', 'future-model', [2_000_000, 128_000], 2_000_000],
+    ['minimax_api', 'MiniMax-M3', [128_000, 256_000], 256_000],
+    ['minimax_api', 'MiniMax-M3', undefined, 128_000],
+    ['minimax_api', 'MiniMax-M3', [], 128_000],
+    ['minimax_api', 'future-model', [0, -1, NaN, Infinity, 1.5], 128_000],
+  ] as const)(
+    'uses catalog Context options for %s/%s (%j)',
+    (providerId, modelId, options, ceiling) => {
+      const select = (contextWindow?: number) =>
+        resolveAgentModelSelection({
+          config: {
+            ...config,
+            minimaxModelSource: 'minimax_api_key',
+            provider: {
+              minimax: {
+                models: {
+                  [modelId]: {
+                    limit: { context: 128_000 },
+                    ...(options ? { contextWindowOptions: [...options] } : {}),
+                  },
+                },
+              },
+            },
+          },
+          sources: [
+            {
+              source: 'agent-config',
+              selection: { model: `${providerId}/${modelId}`, contextWindow },
+            },
+          ],
+        });
+      expect(select()).toMatchObject({ contextWindow: 128_000, diagnostics: [] });
+      expect(select(ceiling)).toMatchObject({ contextWindow: ceiling, diagnostics: [] });
+      expect(select(ceiling + 1)).toMatchObject({
+        contextWindow: ceiling,
+        diagnostics: [
+          expect.objectContaining({ code: 'context_window_clamped', physicalLimit: ceiling }),
         ],
       });
     },

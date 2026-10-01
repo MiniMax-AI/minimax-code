@@ -6,7 +6,7 @@ import type {
   CompactionTokenUsage,
 } from '../../agent-host/contracts.js';
 import {
-  CheckpointInputTooLargeError,
+  CheckpointCandidateTooLargeError,
   ContextCompactionError,
   type ContextCompactionSizeDiagnostics,
 } from '../contracts.js';
@@ -45,6 +45,14 @@ export interface CompactContextInput {
   readonly toolResultCompactionCandidate?: ToolResultCompactionCandidate;
   /** Direct-module compatibility only; production disables the legacy 30% trim policy. */
   readonly allowLegacyToolTrim?: boolean;
+  /**
+   * Final-request admission for the generated checkpoint. Automatic callers
+   * enforce it; the manual caller bypasses it because an explicit user request
+   * always commits a validly generated checkpoint. A replacement can outgrow a
+   * short history (bounded by the checkpoint output cap plus the host
+   * appendix); the caller observes that case instead of intercepting it.
+   */
+  readonly finalAdmission?: 'enforce' | 'bypass';
   readonly checkpoint: {
     readonly tokensBefore: number;
     readonly timestamp: number;
@@ -146,11 +154,12 @@ export async function compactContext(input: CompactContextInput): Promise<Compac
     input.signal?.throwIfAborted();
     assertValidMeasurement(measurement);
   }
-  if (!fitsFinalRequest(measurement, input.limits)) {
+  if (!admitsFinalRequest(input, measurement)) {
     throw new ContextCompactionError(
       'POST_ADMISSION_FAILED',
       'post_admission',
       'Generated checkpoint does not fit the next Provider request.',
+      { diagnostics: postAdmissionDiagnostics(input, measurement) },
     );
   }
   return {
@@ -245,6 +254,58 @@ async function planDirectTrim(input: CompactContextInput): Promise<{
   };
 }
 
+/**
+ * Provider-level checkpoint failures (`stopReason === "error"`) get exactly one
+ * bounded in-place retry of the same candidate, keeping the invocation's
+ * incremental attempt numbering and never re-sending earlier candidates that
+ * already overflowed. A second failure surfaces as CHECKPOINT_PROVIDER_FAILED
+ * so callers can attribute the failure to the Provider instead of the
+ * checkpoint content. A typed overflow thrown by the retry propagates to the
+ * caller's normal candidate progression.
+ */
+async function generateCandidateWithProviderRetry({
+  input,
+  session,
+  candidate,
+  counter,
+  messages,
+  instructions,
+}: {
+  readonly input: CompactContextInput;
+  readonly session: CheckpointSession;
+  readonly candidate: CheckpointCandidate;
+  readonly counter: { value: number };
+  readonly messages: readonly AgentMessage[];
+  readonly instructions: string | undefined;
+}): Promise<{ readonly generation: CheckpointGeneration; readonly attemptNumber: number }> {
+  counter.value += 1;
+  const first = await generateCheckpointAttempt({
+    input,
+    session,
+    candidate,
+    attemptNumber: counter.value,
+    messages,
+    instructions,
+  });
+  if (first.stopReason !== 'error') return { generation: first, attemptNumber: counter.value };
+  input.signal?.throwIfAborted();
+  counter.value += 1;
+  const second = await generateCheckpointAttempt({
+    input,
+    session,
+    candidate,
+    attemptNumber: counter.value,
+    messages,
+    instructions,
+  });
+  if (second.stopReason !== 'error') return { generation: second, attemptNumber: counter.value };
+  throw new ContextCompactionError(
+    'CHECKPOINT_PROVIDER_FAILED',
+    'llm_checkpoint',
+    'Checkpoint Provider request failed after one retry.',
+  );
+}
+
 async function generateCheckpoint(
   input: CompactContextInput,
   candidate: ToolResultCompactionCandidate | ToolTrimCandidate | undefined,
@@ -269,32 +330,31 @@ async function generateCheckpoint(
   if (hall.trimmedResultCount > 0) {
     checkpointCandidates.push({ candidate: 'hall', messages: hall.messages });
   }
-  let attempts = 0;
-  let overflow: CheckpointInputTooLargeError | undefined;
+  const counter = { value: 0 };
+  let overflow: CheckpointCandidateTooLargeError | undefined;
 
   for (const checkpointCandidate of checkpointCandidates) {
     input.signal?.throwIfAborted();
     if (!session.fits(checkpointRequest(input, checkpointCandidate.messages, instructions))) {
       continue;
     }
-    attempts += 1;
-    const attemptNumber = attempts;
     try {
+      const settled = await generateCandidateWithProviderRetry({
+        input,
+        session,
+        candidate: checkpointCandidate.candidate,
+        counter,
+        messages: checkpointCandidate.messages,
+        instructions,
+      });
       return {
-        generation: await generateCheckpointAttempt({
-          input,
-          session,
-          candidate: checkpointCandidate.candidate,
-          attemptNumber,
-          messages: checkpointCandidate.messages,
-          instructions,
-        }),
-        attempts: attemptNumber,
+        generation: settled.generation,
+        attempts: settled.attemptNumber,
         maxOutputTokens: session.maxOutputTokens,
         ...tokenUsageMetadata(input.checkpoint.getTokenUsage?.()),
       };
     } catch (cause) {
-      if (!(cause instanceof CheckpointInputTooLargeError)) throw cause;
+      if (!(cause instanceof CheckpointCandidateTooLargeError)) throw cause;
       overflow = cause;
     }
   }
@@ -304,7 +364,7 @@ async function generateCheckpoint(
     session,
     hallMessages: hall.messages,
     instructions,
-    priorAttempts: attempts,
+    counter,
     priorOverflow: overflow,
   });
 }
@@ -322,15 +382,15 @@ async function recoverAfterHall({
   session,
   hallMessages,
   instructions,
-  priorAttempts,
+  counter,
   priorOverflow,
 }: {
   readonly input: CompactContextInput;
   readonly session: CheckpointSession;
   readonly hallMessages: readonly AgentMessage[];
   readonly instructions: string | undefined;
-  readonly priorAttempts: number;
-  readonly priorOverflow: CheckpointInputTooLargeError | undefined;
+  readonly counter: { value: number };
+  readonly priorOverflow: CheckpointCandidateTooLargeError | undefined;
 }): Promise<{
   readonly generation: CheckpointGeneration;
   readonly attempts: number;
@@ -340,31 +400,29 @@ async function recoverAfterHall({
 }> {
   input.signal?.throwIfAborted();
   const hvideo = buildAttachmentFreeCandidate(hallMessages);
-  let attempts = priorAttempts;
   let overflow = priorOverflow;
   if (
     hvideo.replacedBlockCount > 0 &&
     session.fits(checkpointRequest(input, hvideo.messages, instructions))
   ) {
     input.signal?.throwIfAborted();
-    attempts += 1;
-    const attemptNumber = attempts;
     try {
+      const settled = await generateCandidateWithProviderRetry({
+        input,
+        session,
+        candidate: 'hvideo',
+        counter,
+        messages: hvideo.messages,
+        instructions,
+      });
       return {
-        generation: await generateCheckpointAttempt({
-          input,
-          session,
-          candidate: 'hvideo',
-          attemptNumber,
-          messages: hvideo.messages,
-          instructions,
-        }),
-        attempts: attemptNumber,
+        generation: settled.generation,
+        attempts: settled.attemptNumber,
         maxOutputTokens: session.maxOutputTokens,
         ...tokenUsageMetadata(input.checkpoint.getTokenUsage?.()),
       };
     } catch (cause) {
-      if (!(cause instanceof CheckpointInputTooLargeError)) throw cause;
+      if (!(cause instanceof CheckpointCandidateTooLargeError)) throw cause;
       overflow = cause;
     }
   }
@@ -380,29 +438,29 @@ async function recoverAfterHall({
       session,
       attachmentFreeMessages: hvideo.messages,
       instructions,
-      attemptNumber: attempts + 1,
+      counter,
       overflow,
     });
   }
 
   input.signal?.throwIfAborted();
-  attempts += 1;
   try {
+    const settled = await generateCandidateWithProviderRetry({
+      input,
+      session,
+      candidate: 'hmid',
+      counter,
+      messages: hmid,
+      instructions,
+    });
     return {
-      generation: await generateCheckpointAttempt({
-        input,
-        session,
-        candidate: 'hmid',
-        attemptNumber: attempts,
-        messages: hmid,
-        instructions,
-      }),
-      attempts,
+      generation: settled.generation,
+      attempts: settled.attemptNumber,
       maxOutputTokens: session.maxOutputTokens,
       ...tokenUsageMetadata(input.checkpoint.getTokenUsage?.()),
     };
   } catch (cause) {
-    if (!(cause instanceof CheckpointInputTooLargeError)) throw cause;
+    if (!(cause instanceof CheckpointCandidateTooLargeError)) throw cause;
     overflow = cause;
   }
 
@@ -411,7 +469,7 @@ async function recoverAfterHall({
     session,
     attachmentFreeMessages: hvideo.messages,
     instructions,
-    attemptNumber: attempts + 1,
+    counter,
     overflow,
   });
 }
@@ -421,15 +479,15 @@ async function generateHminCheckpoint({
   session,
   attachmentFreeMessages,
   instructions,
-  attemptNumber,
+  counter,
   overflow,
 }: {
   readonly input: CompactContextInput;
   readonly session: CheckpointSession;
   readonly attachmentFreeMessages: readonly AgentMessage[];
   readonly instructions: string | undefined;
-  readonly attemptNumber: number;
-  readonly overflow: CheckpointInputTooLargeError | undefined;
+  readonly counter: { value: number };
+  readonly overflow: CheckpointCandidateTooLargeError | undefined;
 }): Promise<{
   readonly generation: CheckpointGeneration;
   readonly attempts: number;
@@ -453,22 +511,23 @@ async function generateHminCheckpoint({
   }
   input.signal?.throwIfAborted();
   try {
+    const settled = await generateCandidateWithProviderRetry({
+      input,
+      session,
+      candidate: 'hmin',
+      counter,
+      messages: hmin,
+      instructions,
+    });
     return {
-      generation: await generateCheckpointAttempt({
-        input,
-        session,
-        candidate: 'hmin',
-        attemptNumber,
-        messages: hmin,
-        instructions,
-      }),
-      attempts: attemptNumber,
+      generation: settled.generation,
+      attempts: settled.attemptNumber,
       maxOutputTokens: session.maxOutputTokens,
       ...(overflow ? { hmidOverflowRecovered: true as const } : {}),
       ...tokenUsageMetadata(input.checkpoint.getTokenUsage?.()),
     };
   } catch (cause) {
-    if (cause instanceof CheckpointInputTooLargeError) {
+    if (cause instanceof CheckpointCandidateTooLargeError) {
       throw inputTooLarge(
         cause,
         captureSizeDiagnosticsBestEffort({
@@ -524,8 +583,9 @@ async function generateCheckpointAttempt({
     return generation;
   } catch (cause) {
     let outcome: CheckpointAttemptMetadata['outcome'] = 'failed';
-    if (cause instanceof CheckpointInputTooLargeError) outcome = 'input_too_large';
-    else if (input.signal?.aborted) outcome = 'aborted';
+    if (cause instanceof CheckpointCandidateTooLargeError) {
+      outcome = cause.reason === 'output_exhausted' ? 'output_exhausted' : 'input_too_large';
+    } else if (input.signal?.aborted) outcome = 'aborted';
     reportCheckpointAttempt(input, {
       candidate,
       attemptNumber,
@@ -618,6 +678,32 @@ function fitsFinalRequest(measurement: PairedContextFootprint, limits: ToolTrimL
     measurement.after.serializedBytes <=
       (limits.maxSerializedInputBytes ?? measurement.before.serializedBytes)
   );
+}
+
+/** The manual caller bypasses the final gate; automatic callers enforce it. */
+function admitsFinalRequest(
+  input: CompactContextInput,
+  measurement: PairedContextFootprint,
+): boolean {
+  return input.finalAdmission === 'bypass' || fitsFinalRequest(measurement, input.limits);
+}
+
+/** Content-free sizing facts for the POST_ADMISSION_FAILED failure log. */
+function postAdmissionDiagnostics(
+  input: CompactContextInput,
+  measurement: PairedContextFootprint,
+): ContextCompactionSizeDiagnostics {
+  return {
+    historyMessageCount: input.history.length,
+    providerInputLimit: input.limits.providerInputLimit,
+    ...(input.limits.maxSerializedInputBytes === undefined
+      ? {}
+      : { maxSerializedInputBytes: input.limits.maxSerializedInputBytes }),
+    beforeInputTokens: measurement.before.inputTokens,
+    beforeSerializedBytes: measurement.before.serializedBytes,
+    afterInputTokens: measurement.after.inputTokens,
+    afterSerializedBytes: measurement.after.serializedBytes,
+  };
 }
 
 function invalidHistory(cause: unknown): ContextCompactionError {

@@ -20,9 +20,10 @@ export function applyEdit(
   if (!replaceAll && matches > 1) {
     throw new LocalMemoryError('OLD_STRING_AMBIGUOUS', 'old_string is ambiguous');
   }
-  const content = replaceAll
-    ? current.split(oldString).join(newString)
-    : current.replace(oldString, newString);
+  // split/join inserts newString literally; String.prototype.replace would expand
+  // $&, $$, $`, $' and silently rewrite the replacement text. The replaceAll=false
+  // path is already guarded to a single match above.
+  const content = current.split(oldString).join(newString);
   return { content, replacements: replaceAll ? matches : 1 };
 }
 

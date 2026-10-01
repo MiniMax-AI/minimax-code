@@ -143,6 +143,7 @@ import {
 } from "./service/miniapp/index.js";
 import {
   createLocalModelSystemConfigPort,
+  ModelFavoritesPreference,
   resolveLocalRuntimeModelKey,
   type ModelSystemOwner,
 } from "./service/model-system/index.js";
@@ -530,6 +531,7 @@ export async function createRuntimeServices(
       providers: modelSystem.providers,
       listProviderPresets: modelSystem.listProviderPresets,
       oauth: modelSystem.oauth,
+      favorites: new ModelFavoritesPreference(options.db),
     },
   });
   if (owners.cron)
@@ -915,6 +917,7 @@ async function initializeRuntimeTurnSystem(
   });
   return initializeTurnSystem({
     db: input.options.db,
+    userStop: input.options.compatibility.backgroundTasks.userStop,
     ...(input.options.logger ? { logger: input.options.logger } : {}),
     sessions: input.sessionSystem,
     processStartedAtMs: input.processStartedAtMs,

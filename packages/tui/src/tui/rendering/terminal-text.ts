@@ -1,5 +1,17 @@
 import { stripVTControlCharacters } from 'node:util';
 
+/** A bounded, single-line label suitable for an OSC payload. */
+export function sanitizeTerminalLabel(value: string, maxLength = 240): string {
+  return Array.from(
+    sanitizeTerminalText(value)
+      .replace(/[\u00ad\u061c\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, '')
+      .replace(/\s+/gu, ' ')
+      .trim(),
+  )
+    .slice(0, maxLength)
+    .join('');
+}
+
 export function sanitizeTerminalText(value: string): string {
   // Consume terminal strings, including incomplete streaming prefixes and C1
   // forms, before stripping ordinary ANSI styles. Their payload is not prose.

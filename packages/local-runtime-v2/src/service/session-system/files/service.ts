@@ -66,9 +66,8 @@ export class SessionFilesService {
 
   private async buildIndex(sessionId: string): Promise<void> {
     if (!(await this.isQueryable(sessionId))) return;
-    await this.options.messages.list(sessionId);
-    if (!(await this.isQueryable(sessionId))) return;
     const latestRowId = await this.options.messages.latestDisplayRowId(sessionId);
+    if (!(await this.isQueryable(sessionId))) return;
     const state = await this.options.assets.getIndexState(sessionId);
     if (isSessionAssetIndexCurrent(state, latestRowId)) return;
     await this.options.assets.rebuild(sessionId, this.nowMs());

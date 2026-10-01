@@ -20,6 +20,7 @@ import type { Component, Focusable } from '../../rendering/component.js';
 import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
 import { renderTuiStructuredPreview } from '../../transcript/presentation/structured-preview.js';
 import { renderDeliveredAssets } from '../../transcript/delivered-assets.js';
+import { wrapLiteralUserText } from '../../transcript/presentation/literal-text.js';
 import {
   renderTuiActionHint,
   tuiChalk as chalk,
@@ -506,11 +507,15 @@ export class TuiTranscriptPanel implements TuiFeatureScreen, Component, Focusabl
     if (this.rawIds.has(cell.id)) {
       return this.renderTextSection('raw', presentation.rawText || 'No raw content', contentWidth);
     }
-    if (cell.kind === 'assistant' || cell.kind === 'assistant-preamble' || cell.kind === 'user') {
-      const content =
-        cell.kind === 'user'
-          ? { text: cell.content, assets: [] }
-          : projectAssistantContentForTerminal(cell.content);
+    if (cell.kind === 'user') {
+      // User prompts render literally here too, matching the main rail; see
+      // `wrapLiteralUserText`.
+      return wrapLiteralUserText(cell.content, contentWidth).map((line) =>
+        this.detailLine(line, width),
+      );
+    }
+    if (cell.kind === 'assistant' || cell.kind === 'assistant-preamble') {
+      const content = projectAssistantContentForTerminal(cell.content);
       const body = new Markdown(content.text, 0, 0, markdownTheme, {
         color: (value) => chalk.hex(colors.text)(value),
       }).render(contentWidth);

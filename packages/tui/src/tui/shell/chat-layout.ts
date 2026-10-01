@@ -41,6 +41,11 @@ interface MouseAwareComponent extends Component {
 }
 
 export class TuiChatLayout implements Component {
+  private viewportLayoutKey: string | undefined;
+
+  getViewportLayoutKey(): string | undefined {
+    return this.viewportLayoutKey;
+  }
   readonly fullscreenLayoutRoot: Component;
   private readonly fullscreenBodyViewport: ScrollView;
   private pendingFullscreenFrame:
@@ -140,6 +145,12 @@ export class TuiChatLayout implements Component {
   }
 
   followBottom(): void {
+    if (this.fullscreenBodyViewport.isFollowingEnd) {
+      this.fullscreenBodyViewport.scrollToEnd();
+    }
+  }
+
+  forceFollowBottom(): void {
     this.fullscreenBodyViewport.scrollToEnd();
   }
 
@@ -227,8 +238,15 @@ export class TuiChatLayout implements Component {
           goal.length + followUp.length + activity.length + composer.length + status.length,
           surface === 'conversation' ? 2 : Math.max(1, notice.length + 1),
         );
+    // Activity/transcript updates may preserve host scrolling. Every transient
+    // section participates here so new controls cannot silently leave blank rows.
+    const viewportLayout = [
+      surface, interactionActive, interaction.length, composer.length, followUp.length,
+      goal.length, notice.length, tasks.length, status.length,
+    ];
     if (surface === 'welcome') {
       if (interactionActive) {
+        this.viewportLayoutKey = JSON.stringify([...viewportLayout, 0]);
         return this.fitDocumentFrame(
           this.viewport() === 'fixed'
             ? [interaction, activity, composer, status]
@@ -253,6 +271,7 @@ export class TuiChatLayout implements Component {
               frame.horizontalPadding,
             )
           : renderPart(this.parts.welcome);
+      this.viewportLayoutKey = JSON.stringify([...viewportLayout, welcome.length]);
       return this.fitDocumentFrame([welcome, ...tailEntries]);
     }
 
@@ -272,6 +291,7 @@ export class TuiChatLayout implements Component {
           ];
     const transcript = renderPart(this.parts.transcript);
     const welcome = renderPart(this.parts.welcome);
+    this.viewportLayoutKey = JSON.stringify([...viewportLayout, welcome.length]);
     const prelude = joinWelcomeAndTranscript(welcome, transcript);
     const bodyEntries = [prelude, transcript.length > 0 ? [''] : []];
     return this.fitDocumentFrame([...bodyEntries, ...footerEntries]);

@@ -1,3 +1,6 @@
+import { createLocalTurnEventWriter } from '../events/runtime-event-writer.js';
+import { createLocalTurnOutcomeTracker } from '../runner/turn-outcome.js';
+import { RespDataType, ToolCallStatus } from '@mavis/agent-core/protocol/agent-message';
 import {
   RUNTIME_EVENT_SCHEMA,
   RuntimeEventStatus,
@@ -820,6 +823,54 @@ describe("LocalRuntimeTurnExecutor Plugin prompt admission", () => {
 });
 
 describe("LocalRuntimeTurnExecutor Bash output capability", () => {
+  it.each([true, false])(
+    "bounds Bash receipt purpose text (run_in_background=%s)",
+    async (runInBackground) => {
+      const startBackground = vi.fn(async (_ctx: unknown, _input: unknown) => ({
+        status: "started" as const,
+        taskId: "receipt-task",
+      }));
+      const runManagedForeground = vi.fn(async (_ctx: unknown, _input: unknown) => ({
+        status: "auto_promoted" as const,
+        taskId: "receipt-task",
+      }));
+      const tool = new LocalBashTool(
+        "/tmp/workspace",
+        { startBackground, runManagedForeground },
+        { mode: "off" },
+      );
+      const command = "echo " + "x".repeat(100_000);
+      for (const description of [undefined, "说明🙂".repeat(20_000), "Inspect workspace"]) {
+        const result = await tool.execute(
+          {
+            sessionId: "session-1",
+            turnId: "turn-1",
+            canConsumeBackgroundBashOutput: true,
+          },
+          { command, description, timeout: 600, run_in_background: runInBackground },
+        );
+        expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(24 * 1024);
+        expect(result.text).not.toContain("\uFFFD");
+        for (const retained of [
+          'task_id="receipt-task"', "Command limit: 600s", "task_output", "task_stop",
+        ]) {
+          expect(result.text).toContain(retained);
+        }
+        expect(result.text).toContain(
+          description === "Inspect workspace"
+            ? "Purpose: Inspect workspace\n"
+            : "[purpose truncated]",
+        );
+        expect(result.content).toEqual([{ type: "text", text: result.text }]);
+        expect(result.details?.description).toBe(description ?? command);
+        const adapter = runInBackground ? startBackground : runManagedForeground;
+        expect(adapter.mock.lastCall?.[1]).toMatchObject({
+          command, description: description ?? command,
+        });
+      }
+    },
+  );
+
   it.each([
     {
       name: "custom bash-only selector",
@@ -946,6 +997,13 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
             "Expected the native Bash tool and its Turn context to remain admitted",
           );
         }
+        const properties = admittedBash.def.schema.properties as Record<string, unknown>;
+        expect('run_in_background' in properties).toBe(allowed);
+        expect(admittedBash.def.description).toContain(
+          allowed ? 'task_output' : 'foreground execution only',
+        );
+        expect(bash.def.schema.properties).toHaveProperty('run_in_background');
+        expect(admittedBash.def.schema).not.toBe(bash.def.schema);
         const result = await admittedBash.impl.execute(
           toolContext,
           { command: "controlled command" },
@@ -1034,6 +1092,7 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
               "Expected the native Bash tool and its Turn context to remain admitted",
             );
           }
+          expect('run_in_background' in admittedBash.def.schema.properties).toBe(allowed);
           const result = await admittedBash.impl.execute(
             toolContext,
             {
@@ -5755,5 +5814,76 @@ describe("child Bash waiting steering", () => {
     } finally {
       controller.complete(lease);
     }
+  });
+});
+
+
+describe("incremental runtime event outcomes", () => {
+  function stream(payload: unknown, id = "stream"): RuntimeEvent {
+    return { ...terminalEvent(RuntimeEventStatus.COMPLETED), event_id: id,
+      type: RuntimeEventType.STREAM_RESP, payload: { stream_resp: JSON.stringify(payload) } };
+  }
+
+  it("preserves final message identity, waiting-for-user and terminal replacement semantics", () => {
+    const tracker = createLocalTurnOutcomeTracker();
+    tracker.observe(stream({ type: RespDataType.AgentMessageChunk,
+      agent_message_chunk: { msg_id: "partial", text: "chunk" } }));
+    tracker.observe({ ...terminalEvent(RuntimeEventStatus.FAILED),
+      payload: { status: RuntimeEventStatus.FAILED, error: { message: "failure", code: 501 } } });
+    expect(tracker.read()).toEqual({ status: "failed", errorMessage: "failure", errorCode: 501, messageId: "partial" });
+    tracker.observe(stream({ type: RespDataType.AgentMessageChunk, agent_message_chunk: {
+      msg_id: "approved", tool_calls: [{ tool_name: "ask_user", tool_call_status: ToolCallStatus.Finished,
+        tool_call_result_data: JSON.stringify({ details: { waiting_for_user: false } }) }] } }));
+    expect(tracker.read().waitingForUser).toBeUndefined();
+    tracker.observe(stream({ type: RespDataType.AgentMessage, agent_message: {
+      msg_id: "approved", tool_calls: [{ tool_name: "ask_user", tool_call_status: ToolCallStatus.Finished }] } }));
+    tracker.observe(terminalEvent(RuntimeEventStatus.COMPLETED));
+    expect(tracker.read()).toEqual({ status: "completed", messageId: "approved", waitingForUser: true });
+    expect(tracker.eventCount).toBe(5);
+    expect(tracker.read()).not.toBe(tracker.read());
+  });
+
+  it("delivers every projected event without retaining the stream and still observes failed delivery", async () => {
+    const delivered: RuntimeEvent[] = [];
+    const input = { ...executionInput(), onRuntimeEvent: async (event: RuntimeEvent) => {
+      delivered.push(event);
+      if (event.event_id === "failed-delivery") throw new Error("delivery failed");
+    } };
+    const writer = createLocalTurnEventWriter(input, ({ event }) =>
+      event.event_id === "filtered" ? undefined : event, { retainEvents: false });
+    for (let i = 0; i < 2000; i++) await writer.pushRuntime(stream({ type: RespDataType.AgentMessageChunk,
+      agent_message_chunk: { msg_id: `message-${i}`, text: "x".repeat(256) } }, `event-${i}`));
+    await writer.pushRuntime(stream({}, "filtered"));
+    const failure = { ...terminalEvent(RuntimeEventStatus.ABORTED), event_id: "failed-delivery" };
+    await expect(writer.pushRuntime(failure)).rejects.toThrow("delivery failed");
+    expect(delivered).toHaveLength(2001);
+    expect(delivered.at(-1)).toBe(failure);
+    expect(writer.events).toEqual([]);
+    expect(writer.outcome?.eventCount).toBe(2001);
+    expect(writer.outcome?.read()).toEqual({ status: "aborted",
+      errorMessage: `terminal:${RuntimeEventStatus.ABORTED}`, messageId: "message-1999" });
+  });
+
+  it("retains the original array and event identities by default", async () => {
+    const writer = createLocalTurnEventWriter({ ...executionInput(), onRuntimeEvent: async () => {} });
+    const events = writer.events;
+    const event = terminalEvent(RuntimeEventStatus.COMPLETED);
+    await writer.pushRuntime(event);
+    expect(writer.events).toBe(events);
+    expect(events).toEqual([event]);
+    expect(events[0]).toBe(event);
+    expect(writer.outcome).toBeUndefined();
+  });
+
+  it.each([false, true])("uses summary mode only when the runtime accepts it (%s)", async (acceptsEventSummary) => {
+    const runnerOptions = options(async (input) => {
+      await input.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+      expect(Boolean(input.eventWriter.outcome)).toBe(acceptsEventSummary);
+      expect(input.eventWriter.events).toHaveLength(acceptsEventSummary ? 0 : 1);
+      return { outcome: { status: "completed" } };
+    });
+    const executor = new LocalRuntimeTurnExecutor({ ...runnerOptions,
+      runtime: { ...runnerOptions.runtime, acceptsEventSummary } });
+    await expect(executor.execute(executionInput())).resolves.toEqual({ status: "completed" });
   });
 });

@@ -2,6 +2,8 @@ import type { AppDb } from '../../../../infra/db/client.js';
 
 export interface DisplayMessageRecord extends Record<string, unknown> {
   readonly msg_id?: string;
+  /** Canonical user input preserved when display text hides plugin identities. */
+  readonly editContent?: string;
   /** Stable canonical identity of this completed assistant message, when known. */
   readonly canonical_message_id?: string;
   readonly role?: string;
@@ -36,6 +38,10 @@ export interface MessageUpsertInput {
   readonly turnId?: string;
   readonly source?: string;
   readonly sourceContext?: Record<string, unknown>;
+}
+export interface MessageWriteOptions {
+  /** Cancels lock contention waits; immediately available cleanup writes still commit. */
+  readonly signal?: AbortSignal;
 }
 export interface UserMessageCommitInput extends MessageUpsertInput {
   readonly unconsumedFromTurnIds?: readonly string[];
@@ -97,8 +103,11 @@ export interface MessageRepository {
     },
   ): Promise<DisplayMessageRecord[]>;
   commitUserMessage(input: UserMessageCommitInput): Promise<UserMessageCommitResult>;
-  upsert(input: MessageUpsertInput): Promise<NormalizedDisplayMessage>;
-  upsertMany(inputs: readonly MessageUpsertInput[]): Promise<readonly NormalizedDisplayMessage[]>;
+  upsert(input: MessageUpsertInput, options?: MessageWriteOptions): Promise<NormalizedDisplayMessage>;
+  upsertMany(
+    inputs: readonly MessageUpsertInput[],
+    options?: MessageWriteOptions,
+  ): Promise<readonly NormalizedDisplayMessage[]>;
   replace(input: MessageReplaceInput): Promise<void>;
   replaceStream(input: MessageReplaceStreamInput): Promise<void>;
   rewindInclusive(input: MessageRewindInclusiveInput): Promise<MessageRewindInclusiveResult>;

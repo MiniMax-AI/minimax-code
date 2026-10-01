@@ -342,12 +342,14 @@ describe('event-bridge/converters: toolCallFromRuntime', () => {
 });
 
 describe('event-bridge/converters: stream-event builders', () => {
-  it('buildRuntimeWarningEvent uses a SystemEvent envelope rather than model history content', () => {
+  it.each([undefined, 'system-message'])(
+    'buildRuntimeWarningEvent preserves the optional category %s in a SystemEvent', (category) => {
     const event = buildRuntimeWarningEvent({
       sessionId: fixture.sessionId,
       turnId: fixture.turnId,
       eventId: 'warning-1',
       runtimeSeq: 1,
+      category,
       message: 'A Plugin Hook failed open.',
       source: 'plugin-hook',
       hookEvent: 'PreToolUse',
@@ -362,6 +364,7 @@ describe('event-bridge/converters: stream-event builders', () => {
     expect(envelope.agent_message.msg_type).toBe(MsgType.SystemEvent);
     expect(JSON.parse(envelope.agent_message.msg_content)).toEqual({
       eventType: 'runtime.warning',
+      ...(category ? { category } : {}),
       message: 'A Plugin Hook failed open.',
       source: 'plugin-hook',
       hookEvent: 'PreToolUse',

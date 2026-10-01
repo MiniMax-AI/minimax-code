@@ -21,9 +21,9 @@
     },
     {
       "path": "components/editor.ts",
-      "currentSha256": "0775a490df136d1083738cce649e026d6153ecb5480715b2c1104d51051968c5",
-      "changeIds": ["L005", "L009", "L022", "L030", "L032"],
-      "reason": "Keep strict TypeScript fixes and add the smallest generic snapshot, paste, telemetry, programmatic submission, undo-extension and empty-placeholder hooks needed by the MCode product wrapper. 提供方通过上下文回调控制自动触发，并通过 applyOnEnter 控制 Enter 是否填入候选。 强制补全上下文失效时立即取消请求并清空菜单。 支持单帧 placeholder 覆盖，由 Editor 统一保留 padding、可见光标和 IME 定位标记。 命令参数候选标记阶段，接受命令后续查参数，并隔离参数回调失败。",
+      "currentSha256": "55d313e4f7f5760212e0ff397cb7a599c52d42a90df8c0014f25cf4652897d20",
+      "changeIds": ["L005", "L009", "L022", "L030", "L032", "L042"],
+      "reason": "Preserve product history metadata through a generic text transform and draft extension state. Keep strict TypeScript fixes and add the smallest generic snapshot, paste, telemetry, programmatic submission, undo-extension and empty-placeholder hooks needed by the MCode product wrapper. 提供方通过上下文回调控制自动触发，并通过 applyOnEnter 控制 Enter 是否填入候选。 强制补全上下文失效时立即取消请求并清空菜单。 支持单帧 placeholder 覆盖，由 Editor 统一保留 padding、可见光标和 IME 定位标记。 命令参数候选标记阶段，接受命令后续查参数，并隔离参数回调失败。",
       "behaviorImpact": "MCode Draft, attachment, product-level submission-intent and empty-input guidance semantics use the canonical Pi Editor cursor, width, padding, history, undo, paste-marker and autocomplete behavior. Shell 补全只由 Tab 打开，菜单内输入继续过滤；Enter 执行当前输入，Tab 填入选中项。其他提供方沿用默认行为。 删除 Shell 标记或命令名前缀后立即关闭候选；已取消请求的延迟结果无法恢复旧菜单。 带参数候选的命令支持连续补全，参数 Enter 仅填入，Esc 保留草稿；无参数命令保持原行为。"
     },
     {
@@ -49,10 +49,10 @@
     },
     {
       "path": "components/scroll-view.ts",
-      "currentSha256": "6f82fb1f426fdf81ca7058e6a1ea4a94c9ddd8f0e15d69c9020f9c66ca5411dd",
-      "changeIds": ["L035"],
-      "reason": "Allow hosts to reserve a wider always-visible scrollbar gutter while retaining at least one content column.",
-      "behaviorImpact": "The fullscreen transcript reserves three columns; other scroll views retain the default one-column gutter."
+      "currentSha256": "a2d9d5a19b40afd9d5a83f611890b592afc9764d916b24ec6090bbd5b95e21ea",
+      "changeIds": ["L035", "L043"],
+      "reason": "Allow hosts to reserve a wider always-visible scrollbar gutter while retaining at least one content column. Preserve follow state when layout changes clamp the scroll position.",
+      "behaviorImpact": "The fullscreen transcript reserves three columns; other scroll views retain the default one-column gutter. A detached viewport stays detached across layout changes until scrolling or an explicit follow request restores following."
     },
     {
       "path": "components/settings-list.ts",
@@ -126,10 +126,10 @@
     },
     {
       "path": "stdin-buffer.ts",
-      "currentSha256": "95e18c6c702fee39289c2221ddb54dfe7269812fa2f80223025d6a6df05d7e10",
-      "changeIds": ["L005"],
-      "reason": "Make the length-guarded final byte access explicit under the shared MCode strict TypeScript contract.",
-      "behaviorImpact": "none_intended"
+      "currentSha256": "1aca0d7fb7dacaf16a28ede79f52fcf7bea651d8a263777ee327fdaeb2dcaa28",
+      "changeIds": ["L005", "L036"],
+      "reason": "Keep strict TypeScript guards and preserve unframed multiline text chunks before key splitting.",
+      "behaviorImpact": "Plain-text chunks with internal line endings use the existing paste path; standalone Enter and control sequences retain key semantics."
     },
     {
       "path": "terminal-colors.ts",
@@ -148,10 +148,10 @@
     },
     {
       "path": "terminal.ts",
-      "currentSha256": "3f53e011ddd18872691c9fe21d9f2309995a74eeb0a1f7f6023a9cc9e7b13553",
-      "changeIds": ["L014", "L028"],
-      "reason": "Use the package-aware native module resolver for Windows virtual-terminal input initialization. 终端焦点报告生命周期",
-      "behaviorImpact": "Packaged Windows builds retain modified-key escape sequences such as Shift+Tab instead of silently falling back to plain keys. 焦点报告转发给 Host，cmux 抑制策略仍归 Host。"
+      "currentSha256": "11fca3d510dc827a2a91d05425aeb9ddf3a1829ce1f57415a3c000a8d9a9fd17",
+      "changeIds": ["L014", "L028", "L044"],
+      "reason": "Use the package-aware native module resolver for Windows virtual-terminal input initialization. 终端焦点报告生命周期 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
+      "behaviorImpact": "Packaged Windows builds retain modified-key escape sequences such as Shift+Tab instead of silently falling back to plain keys. 焦点报告转发给 Host，cmux 抑制策略仍归 Host。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."
     },
     {
       "path": "tui-alt-screen.ts",
@@ -163,18 +163,39 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "146fd4222ae5a48d1f439de2f280b111789151a30c1bdd2735e32fff07329b9d",
-      "changeIds": ["L005", "L017", "L027", "L033", "L034"],
+      "currentSha256": "f57eab79552763ae29bc39e2ced4c7905eb44fa163f538ba3ff6000136e0f493",
+      "changeIds": [
+        "L005",
+        "L017",
+        "L027",
+        "L033",
+        "L034",
+        "L037",
+        "L038",
+        "L039",
+        "L041",
+        "L044"
+      ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
-      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。",
-      "behaviorImpact": "Large regular-mode renders preserve output order without constructing a single V8-limited terminal string. 150ms 后及退出前重放完整投影历史。 内部导航标记不再写入终端，避免 iTerm2 左侧箭头和命令条噪声。 Session 结束后的状态更新不再发送 ESC 3J 清除原生滚动历史，当前视口仍显示最新内容。"
+      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
+      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored. Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."
     },
     {
       "path": "tui.ts",
-      "currentSha256": "0dee17d791b8f02fc26b28fe32506b036eb82761572dbcd378f2cac782a01798",
-      "changeIds": ["L005", "L015", "L023", "L027", "L028", "L031"],
-      "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, and dispatch the input left over after terminal color sequences are removed. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。",
-      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。"
+      "currentSha256": "6bfb2095855d00532bfc96a4be57e0c974e0d8d06137bbba1e865986483e7005",
+      "changeIds": [
+        "L005",
+        "L015",
+        "L023",
+        "L027",
+        "L028",
+        "L031",
+        "L040",
+        "L041",
+        "L044"
+      ],
+      "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure.",
+      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output."
     },
     {
       "path": "utils.ts",

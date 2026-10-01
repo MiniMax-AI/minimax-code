@@ -8,9 +8,10 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { parse as parseYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
+import { cliBuildVersion } from '../scripts/lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const cli = path.join(root, "dist/cli.js");
+const cli = process.env.MCODE_TEST_CLI ?? path.join(root, "dist/cli.js");
 // Full runtime startup can exceed 15s on Windows CI (ACP took 22s).
 // Match the ACP startup budget; lightweight help/validation stays at 15s.
 const runtimeTimeoutMs = process.platform === "win32" ? 30000 : 15000;
@@ -19,9 +20,7 @@ function assertSuccessfulChild(result) {
     `CLI spawn failed: ${result.error?.message}; signal=${result.signal}; stderr=${result.stderr}`);
   assert.equal(result.status, 0, result.stderr);
 }
-const version = JSON.parse(
-  readFileSync(path.join(root, "packages/tui/package.json"), "utf8"),
-).version;
+const version = cliBuildVersion(root);
 function fixture(t, environment = process.env) {
   const dataDir = mkdtempSync(path.join(tmpdir(), "minimax-code-smoke-"));
   const audit = path.join(dataDir, "network-attempts.log");

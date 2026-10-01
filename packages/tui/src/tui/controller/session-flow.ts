@@ -5,6 +5,7 @@ import type {
   TuiSessionForkPort,
   TuiSessionPort,
 } from '../../runtime/port.js';
+import type { TuiObservability } from '../../observability/index.js';
 import type { TuiRotationEvent, TuiSessionCatalogEvent } from '../../types/runtime-events.js';
 import type { TuiComposerDraft } from '../features/composer/draft.js';
 import type { TuiRunProjection } from '../state/run-projection.js';
@@ -23,11 +24,13 @@ import {
 import {
   BTW_SIDE_SESSION_PURPOSE,
   BTW_SIDE_SESSION_TITLE,
+  BTW_REJECT_NO_BOUNDARY,
   isSideSession,
   resolveBtwStartDecision,
 } from '../commands/side-session.js';
 
 export interface TuiSessionFlowOptions {
+  readonly observability?: Pick<TuiObservability, 'recordSideSessionFailure'>;
   readonly runtime: Pick<
     TuiSessionPort,
     'getSession' | 'listSessionPage' | 'createSession' | 'deleteSession'
@@ -183,7 +186,11 @@ export class TuiSessionFlow {
     ) {
       return;
     }
-    if (previousSessionId && previousSessionId !== targetSessionId && !options.preserveSideConversation) {
+    if (
+      previousSessionId &&
+      previousSessionId !== targetSessionId &&
+      !options.preserveSideConversation
+    ) {
       await this.options.preparePluginHookSessionSwitch?.(previousSessionId, 'resume_other');
     }
     if (
@@ -204,8 +211,7 @@ export class TuiSessionFlow {
     if (options.preserveSideConversation && this.sideConversation) {
       this.sideConversation = {
         ...this.sideConversation,
-        activeView:
-          targetSessionId === this.sideConversation.sideSessionId ? 'side' : 'parent',
+        activeView: targetSessionId === this.sideConversation.sideSessionId ? 'side' : 'parent',
       };
       this.options.onSideConversationChanged?.(this.sideConversation);
     }
@@ -361,8 +367,21 @@ export class TuiSessionFlow {
         purpose: BTW_SIDE_SESSION_PURPOSE,
         title: BTW_SIDE_SESSION_TITLE,
       });
-    } catch {
-      this.options.append("Couldn't open a side conversation. Try again.", 'error');
+    } catch (error) {
+      this.options.observability?.recordSideSessionFailure?.({
+        stage: 'create',
+        parentSessionId: decision.parentSessionId,
+        error,
+      });
+      const code = error instanceof Error ? Reflect.get(error, 'code') : undefined;
+      const noBoundary =
+        code === 'assistant-not-found' ||
+        code === 'assistant-not-settled' ||
+        code === 'invalid-boundary';
+      this.options.append(
+        noBoundary ? BTW_REJECT_NO_BOUNDARY : "Couldn't open a side conversation. Try again.",
+        noBoundary ? 'warning' : 'error',
+      );
       this.options.onChanged();
       return undefined;
     }
@@ -377,7 +396,13 @@ export class TuiSessionFlow {
         allowDuringLiveRun: true,
         preserveSideConversation: true,
       });
-    } catch {
+    } catch (error) {
+      this.options.observability?.recordSideSessionFailure?.({
+        stage: 'activate',
+        parentSessionId: decision.parentSessionId,
+        sideSessionId: side.sessionId,
+        error,
+      });
       this.sideConversation = undefined;
       this.options.onSideConversationChanged?.(undefined);
       await this.options.runtime.deleteSession(side.sessionId).catch(() => undefined);

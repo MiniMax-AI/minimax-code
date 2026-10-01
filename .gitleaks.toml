@@ -45,7 +45,21 @@ description = "Bundled TUI shortcut and permission translation key"
 condition = "AND"
 paths = ['''(^|/)dist/chunks/(chunk|launcher)-[A-Z0-9]+\.js$''']
 regexTarget = "match"
-regexes = ['''^defaultKeys: "ctrl\+shift\+down"$''', '''^labelKey: "permission\.scope\.byArgvPrefix2"$''']
+regexes = ['''^defaultKeys: ?"ctrl\+shift\+down"$''', '''^labelKey: ?"permission\.scope\.byArgvPrefix2"$''']
+
+[[rules.allowlists]]
+description = "Bundled node-forge public PKCS12 algorithm names"
+condition = "AND"
+paths = ['''(^|/)dist/chunks/chunk-[A-Z0-9]+\.js$''']
+regexTarget = "match"
+regexes = ['''^pbeWithSHAAnd3-KeyTripleDES-CBC","pbewithSHAAnd40BitRC2-CBC"$''']
+
+[[rules.allowlists]]
+description = "Bundled IM binding migration guard, no credential value"
+condition = "AND"
+paths = ['''(^|/)dist/chunks/chunk-[A-Z0-9]+\.js$''']
+regexTarget = "match"
+regexes = ['''^[A-Za-z_$][A-Za-z0-9_$]*\.resolvedProjectKey\|\|[A-Za-z_$][A-Za-z0-9_$]*\.mutationReceipts===void $''']
 
 [[rules.allowlists]]
 description = "node-forge PKCS12 function alias, no key material"

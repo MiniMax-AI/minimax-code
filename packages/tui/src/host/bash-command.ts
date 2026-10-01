@@ -14,7 +14,7 @@ export type ExecuteTuiBash = (input: {
 }) => Promise<TuiBashResult>;
 
 export const executeTuiBash: ExecuteTuiBash = async (input) => {
-  const { createLocalBashOperations } = await import('@earendil-works/pi-coding-agent');
+  const { createLocalBashOperations } = await import('@earendil-works/pi-coding-agent/tools');
   const operations = createLocalBashOperations({ parentDeathGuard: true });
   const env = { ...process.env };
   stripRuntimeBoundaryKeysFrom(env, 'agent-runtime');

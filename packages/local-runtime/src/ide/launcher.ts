@@ -593,6 +593,10 @@ export class IdeLauncher {
       throw new IdeLauncherError(`${entry.name} is not available`, 'IDE_APP_UNAVAILABLE', 422);
     }
 
+    if (entry.family === 'ghostty') {
+      await this.launchWorkspaceInResolvedIde(path.dirname(filePath), entry, app);
+      return;
+    }
     if (entry.id === 'finder') {
       await runCommand('open', ['-R', filePath]);
       return;
@@ -632,6 +636,8 @@ export class IdeLauncher {
       });
       return;
     }
-    await runCommand(app.launchTarget, [workspaceRoot]);
+    const args =
+      entry.family === 'ghostty' ? [`--working-directory=${workspaceRoot}`] : [workspaceRoot];
+    await runCommand(app.launchTarget, args);
   }
 }

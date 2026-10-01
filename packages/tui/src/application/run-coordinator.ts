@@ -28,6 +28,7 @@ export interface TuiRunRequest {
   turnId: string;
   session: Promise<TuiSession>;
   content: string;
+  displayContent?: string;
   workspace: string;
   version: string;
   attachments?: readonly TuiTransportAttachment[];
@@ -87,7 +88,7 @@ export interface TuiRunCoordinatorOptions {
   nowMs?: () => number;
 }
 
-const DEFAULT_CANCELLATION_SETTLEMENT_TIMEOUT_MS = 1_000;
+export const DEFAULT_CANCELLATION_SETTLEMENT_TIMEOUT_MS = 1_000;
 
 export class TuiRunCoordinator {
   private activeRun?: ActiveRun;
@@ -406,6 +407,7 @@ function toSendMessageRequest(
     id: session.sessionId,
     turnId: request.turnId,
     content: request.content,
+    ...(request.displayContent !== undefined ? { displayContent: request.displayContent } : {}),
     ...(executionDeadlineAtMs !== undefined ? { executionDeadlineAtMs } : {}),
     ...(request.executionDiagnostics ? { executionDiagnostics: true } : {}),
     ...(request.clientIntent ? { clientIntent: request.clientIntent } : {}),

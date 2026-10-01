@@ -24,9 +24,17 @@ const DISABLED_PROVIDER_IDS = new Set([
   'minimax-cn-coding-plan',
 ]);
 const REGION_PINNED_PROVIDER_IDS = {
-  cn: ['zhipuai', 'deepseek', 'moonshotai-cn', 'openai', 'anthropic'],
-  en: ['zai', 'deepseek', 'moonshotai', 'openai', 'anthropic'],
+  cn: ['zhipuai-coding-plan', 'zhipuai', 'deepseek', 'moonshotai-cn', 'openai', 'anthropic'],
+  en: ['zai-coding-plan', 'zai', 'deepseek', 'moonshotai', 'openai', 'anthropic'],
 } as const;
+// These IDs belong to models.dev, not the bundled inference registry. Keep their
+// URLs and IDs intact, and make the billing plan explicit at selection time.
+const PROVIDER_PLAN_NAMES = new Map([
+  ['zai', 'Z.AI API'],
+  ['zai-coding-plan', 'Z.AI Coding Plan'],
+  ['zhipuai', 'Zhipu AI API'],
+  ['zhipuai-coding-plan', 'Zhipu AI Coding Plan'],
+]);
 const refreshInFlight = new Map<string, Promise<void>>();
 
 export interface ProviderPresetCatalogOptions extends ProviderPresetRepositoryOptions {
@@ -127,7 +135,7 @@ function parseProvider(
   if (models.length === 0) return undefined;
   return {
     providerId,
-    name: stringValue(value.name) ?? providerId,
+    name: PROVIDER_PLAN_NAMES.get(providerId) ?? stringValue(value.name) ?? providerId,
     ...transport,
     models,
     ...(iconBaseUrl ? { iconUrl: resolveProviderIconUrl(iconBaseUrl, providerId) } : {}),

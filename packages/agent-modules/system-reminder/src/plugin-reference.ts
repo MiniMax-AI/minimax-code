@@ -1,12 +1,15 @@
+import { parsePluginMentions } from '@mavis/shared/plugin-mention';
+
 export interface EffectivePluginToolGroup {
   readonly source: string;
   readonly tools: readonly string[];
-  /** Deferred App tools must be discovered before they can be invoked. */
+  /** Deferred tools must be discovered before they can be invoked. */
   readonly access?: 'direct' | 'tool_search';
 }
 
 export interface EffectivePluginCapabilityInventory {
   readonly name: string;
+  readonly pluginId?: string;
   readonly appTools: readonly EffectivePluginToolGroup[];
   readonly mcpTools: readonly EffectivePluginToolGroup[];
   readonly skills: readonly string[];
@@ -33,7 +36,7 @@ export function detectPluginReferencesForMessages<T extends EffectivePluginCapab
 
   for (const text of texts) {
     for (const match of detectReferencesInText(text, plugins)) {
-      const key = normalizedName(match.name);
+      const key = match.pluginId ?? normalizedName(match.name);
       if (seen.has(key)) continue;
       seen.add(key);
       selected.push(match);
@@ -45,11 +48,12 @@ export function detectPluginReferencesForMessages<T extends EffectivePluginCapab
 /** Render one self-contained reminder for every Plugin selected in this turn. */
 export function buildPluginReferenceReminder(
   plugins: readonly EffectivePluginCapabilityInventory[],
+  unavailablePluginIds: readonly string[] = [],
 ): string | undefined {
-  if (plugins.length === 0) return undefined;
-  const blocks = plugins.map((plugin) => {
+  if (plugins.length === 0 && unavailablePluginIds.length === 0) return undefined;
+  const blocks = plugins.slice(0, 8).map((plugin) => {
     const name = inlineCode(plugin.name);
-    return [
+    const detail = [
       `<selected-plugin name="${escapeXml(plugin.name)}">`,
       `Referenced as \`@${name}\`.`,
       '',
@@ -66,20 +70,46 @@ export function buildPluginReferenceReminder(
       '</plugin-skills>',
       '</selected-plugin>',
     ].join('\n');
+    return detail.length <= 4096
+      ? detail
+      : `<selected-plugin name="${escapeXml(plugin.name).slice(0, 512)}">\nCapability details omitted to fit the context limit. Use this Plugin's tool provenance and Skill namespace in the available catalogs.\n</selected-plugin>`;
   });
+
+  const bounded: string[] = [];
+  let remaining = 12_288;
+  let omitted = plugins.length > 8 || unavailablePluginIds.length > 8;
+  for (const block of [
+    ...blocks,
+    ...unavailablePluginIds
+      .slice(0, 8)
+      .map(
+        (id) =>
+          `Selected Plugin \`${inlineCode(id)}\` is unavailable for this turn. Tell the user it could not be used; do not substitute a same-named Plugin or enable/install it automatically.`,
+      ),
+  ]) {
+    if (block.length + 2 > remaining) {
+      omitted = true;
+      continue;
+    }
+    bounded.push(block);
+    remaining -= block.length + 2;
+  }
 
   return [
     '<system-reminder>',
     'The user explicitly selected the following Plugin capabilities for this request.',
     'Prefer them when relevant; other tools remain available if needed.',
     '',
-    blocks.join('\n\n'),
+    bounded.join('\n\n'),
+    ...(omitted ? ['Additional selected capabilities omitted to fit the context limit.'] : []),
     '',
-    'Only the capabilities listed above are effective for this turn.',
+    'The listed capabilities are drawn from the effective inventory for this turn; lists may be truncated.',
     'Do not invent or claim unavailable Plugin capabilities.',
-    ...(plugins.some((plugin) => plugin.appTools.some((group) => group.access === 'tool_search'))
+    ...(plugins.some((plugin) =>
+      [...plugin.appTools, ...plugin.mcpTools].some((group) => group.access === 'tool_search'),
+    )
       ? [
-          'For App tools marked `via tool_search + mcp_invoke`, discover the exact tool with `tool_search` before calling it through `mcp_invoke`.',
+          'For tools marked `via tool_search + mcp_invoke`, discover the exact tool with `tool_search` before calling it through `mcp_invoke`.',
         ]
       : []),
     'Before following a listed Skill, call the `skill` tool with its exact name.',
@@ -91,6 +121,7 @@ export function buildPluginReferenceReminder(
 function formatAppToolGroups(groups: readonly EffectivePluginToolGroup[]): string {
   if (groups.length === 0) return 'none';
   return [...groups]
+    .slice(0, 16)
     .sort((left, right) => {
       const sourceOrder = normalizedName(left.source).localeCompare(normalizedName(right.source));
       if (sourceOrder !== 0) return sourceOrder;
@@ -108,11 +139,24 @@ function detectReferencesInText<T extends EffectivePluginCapabilityInventory>(
   text: string,
   plugins: readonly T[],
 ): T[] {
-  const normalizedText = text.normalize('NFKC');
+  const linked = parsePluginMentions(text);
+  let plainText = text;
+  for (const mention of [...linked].reverse())
+    plainText = `${plainText.slice(0, mention.start)}${' '.repeat(mention.end - mention.start)}${plainText.slice(mention.end)}`;
+  const normalizedText = plainText.normalize('NFKC');
   const matches: Array<{ index: number; plugin: T }> = [];
   for (const plugin of plugins) {
+    const explicit = linked.find((mention) => mention.pluginId === plugin.pluginId);
+    if (explicit) {
+      matches.push({ index: explicit.start, plugin });
+      continue;
+    }
     const name = normalizedName(plugin.name);
-    if (!name) continue;
+    if (
+      !name ||
+      plugins.filter((candidate) => normalizedName(candidate.name) === name).length !== 1
+    )
+      continue;
     const pattern = new RegExp(`(^|\\s)@${escapeRegExp(name)}(?=\\s|$)`, 'giu');
     const match = pattern.exec(normalizedText);
     if (!match) continue;
@@ -128,16 +172,19 @@ function formatToolGroups(
 ): string {
   if (groups.length === 0) return 'none';
   return [...groups]
+    .slice(0, 16)
     .sort((left, right) => normalizedName(left.source).localeCompare(normalizedName(right.source)))
     .map((group) => {
       const tools = formatToolNames(group.tools);
-      return `- ${label} \`${inlineCode(group.source)}\`: ${tools || 'none'}`;
+      const access = group.access === 'tool_search' ? ' via `tool_search` + `mcp_invoke`' : '';
+      return `- ${label} \`${inlineCode(group.source)}\`${access}: ${tools || 'none'}`;
     })
     .join('\n');
 }
 
 function formatToolNames(tools: readonly string[]): string {
   return [...new Set(tools)]
+    .slice(0, 32)
     .sort((left, right) => normalizedName(left).localeCompare(normalizedName(right)))
     .map((tool) => `\`${inlineCode(tool)}\``)
     .join(', ');
@@ -146,6 +193,7 @@ function formatToolNames(tools: readonly string[]): string {
 function formatSkills(skills: readonly string[]): string {
   if (skills.length === 0) return 'none';
   return [...new Set(skills)]
+    .slice(0, 32)
     .sort((left, right) => normalizedName(left).localeCompare(normalizedName(right)))
     .map((skill) => `- \`${inlineCode(skill)}\``)
     .join('\n');

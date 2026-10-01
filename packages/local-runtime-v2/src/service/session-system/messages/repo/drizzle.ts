@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, gt, gte, inArray, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lt, lte, placeholder, sql } from 'drizzle-orm';
 
 import type { AppDb } from '../../../../infra/db/client.js';
+import { runWithWriteLock } from '../../../../infra/db/write-transaction.js';
 import {
   legacyMessages,
   messageRowMigrations,
@@ -22,6 +23,7 @@ import type {
   MessageRewindInclusiveInput,
   MessageRewindInclusiveResult,
   MessageUpsertInput,
+  MessageWriteOptions,
   DisplayMessageRecord,
   NormalizedDisplayMessage,
   UserMessageCommitInput,
@@ -35,6 +37,36 @@ export function createMessageRepository(options: MessageRepositoryOptions): Mess
   return new DrizzleMessageRepository(options);
 }
 
+function prepareMessageRead(db: AppDb) {
+  return db
+    .select()
+    .from(messageRows)
+    .where(
+      and(
+        eq(messageRows.sessionId, placeholder('sessionId')),
+        eq(messageRows.messageId, placeholder('msgId')),
+      ),
+    )
+    .prepare();
+}
+
+function prepareTurnRead(db: AppDb) {
+  return db
+    .select()
+    .from(messageRows)
+    .where(
+      and(
+        eq(messageRows.sessionId, placeholder('sessionId')),
+        eq(messageRows.turnId, placeholder('turnId')),
+      ),
+    )
+    .orderBy(asc(messageRows.id))
+    .prepare();
+}
+
+const messageReads = new WeakMap<AppDb, ReturnType<typeof prepareMessageRead>>();
+const turnReads = new WeakMap<AppDb, ReturnType<typeof prepareTurnRead>>();
+
 class DrizzleMessageRepository implements MessageRepository {
   private readonly nowMs: () => number;
   constructor(private readonly options: MessageRepositoryOptions) {
@@ -43,11 +75,13 @@ class DrizzleMessageRepository implements MessageRepository {
 
   async get(sessionId: string, msgId: string): Promise<DisplayMessageRecord | undefined> {
     this.ensureReady(sessionId);
-    const row = this.options.db
-      .select()
-      .from(messageRows)
-      .where(and(eq(messageRows.sessionId, sessionId), eq(messageRows.messageId, msgId)))
-      .get();
+    const db = this.options.db;
+    let query = messageReads.get(db);
+    if (!query) {
+      query = prepareMessageRead(db);
+      messageReads.set(db, query);
+    }
+    const row = query.get({ sessionId, msgId });
     return row ? decodeDisplayMessage(row) : undefined;
   }
 
@@ -95,13 +129,13 @@ class DrizzleMessageRepository implements MessageRepository {
 
   async listTurn(sessionId: string, turnId: string): Promise<DisplayMessageRecord[]> {
     this.ensureReady(sessionId);
-    return this.options.db
-      .select()
-      .from(messageRows)
-      .where(and(eq(messageRows.sessionId, sessionId), eq(messageRows.turnId, turnId)))
-      .orderBy(asc(messageRows.id))
-      .all()
-      .map(decodeDisplayMessage);
+    const db = this.options.db;
+    let query = turnReads.get(db);
+    if (!query) {
+      query = prepareTurnRead(db);
+      turnReads.set(db, query);
+    }
+    return query.all({ sessionId, turnId }).map(decodeDisplayMessage);
   }
 
   async listRecent(
@@ -205,14 +239,18 @@ class DrizzleMessageRepository implements MessageRepository {
     );
   }
 
-  async upsert(input: MessageUpsertInput): Promise<NormalizedDisplayMessage> {
-    const [result] = await this.upsertMany([input]);
+  async upsert(
+    input: MessageUpsertInput,
+    options?: MessageWriteOptions,
+  ): Promise<NormalizedDisplayMessage> {
+    const [result] = await this.upsertMany([input], options);
     if (!result) throw new Error('Message upsert returned no row');
     return result;
   }
 
   async upsertMany(
     inputs: readonly MessageUpsertInput[],
+    options?: MessageWriteOptions,
   ): Promise<readonly NormalizedDisplayMessage[]> {
     const sessionId = inputs[0]?.sessionId;
     if (!sessionId) return [];
@@ -229,11 +267,16 @@ class DrizzleMessageRepository implements MessageRepository {
       }),
       replaceProvenance: hasMessageProvenance(input),
     }));
-    this.mutationTransaction(sessionId, (tx) => {
-      normalized.forEach(({ message, replaceProvenance }) =>
-        this.write(tx, sessionId, message, replaceProvenance),
-      );
-    });
+    await runWithWriteLock(
+      this.options.db,
+      (tx) => {
+        this.ensureReadyInTransaction(tx, sessionId);
+        normalized.forEach(({ message, replaceProvenance }) =>
+          this.write(tx, sessionId, message, replaceProvenance),
+        );
+      },
+      options,
+    );
     return normalized.map(({ message }) => message);
   }
 

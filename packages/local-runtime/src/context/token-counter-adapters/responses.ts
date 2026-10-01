@@ -91,7 +91,7 @@ export function buildResponsesInputTokensUrl(
     if (options.stripMessagesCompatibilityPrefix) {
       rootPath = stripMessagesCompatibilityPrefix(rootPath);
     }
-    if (!rootPath.endsWith('/v1')) {
+    if (!endsWithVersionSegment(rootPath)) {
       rootPath = `${rootPath}/v1`;
     }
     url.pathname = `${rootPath}/responses/input_tokens`.replace(/\/{2,}/gu, '/');
@@ -109,9 +109,19 @@ export function buildResponsesInputTokensUrl(
     if (options.stripMessagesCompatibilityPrefix) {
       root = stripMessagesCompatibilityPrefix(root);
     }
-    if (!root.endsWith('/v1')) root = `${root}/v1`;
+    if (!endsWithVersionSegment(root)) root = `${root}/v1`;
     return `${root}/responses/input_tokens`;
   }
+}
+
+/**
+ * Base URLs of OpenAI-compatible gateways are often already versioned
+ * (`/v1`, but also `/api/paas/v4`, `/api/coding/paas/v4`, ...). Appending
+ * `/v1` after an existing version segment can only produce a path that no
+ * gateway serves, so treat any trailing `/v<digits>` as the API root.
+ */
+function endsWithVersionSegment(root: string): boolean {
+  return /\/v\d+$/u.test(root);
 }
 
 function stripMessagesCompatibilityPrefix(root: string): string {

@@ -23,6 +23,7 @@ export class BackgroundBashOutputWriter {
   private recoveryOffset = 0;
   private recoveryContent = '';
   private droppedRecoveryBytes = 0;
+  private omittedBytes = 0;
   private retryTimer: NodeJS.Timeout | undefined;
   private retryDelayMs = INITIAL_RECOVERY_RETRY_MS;
   private settling = false;
@@ -55,10 +56,11 @@ export class BackgroundBashOutputWriter {
     this.beginSettlement();
     await this.flush();
     if (!this.streamedOutput && !this.rawOutputAccounting) {
-      this.outputBytes = Buffer.byteLength(result.text, 'utf8');
+      const facts = result.details?.output as { rawBytes?: number } | undefined;
+      this.outputBytes = facts?.rawBytes ?? Buffer.byteLength(result.text, 'utf8');
     }
     if (!this.persistenceIncomplete) {
-      return this.lastOutputRef ?? (await this.tryAppend(result.text, 'final_result'));
+      return this.lastOutputRef ?? (await this.appendTerminalOutput(result.text));
     }
     try {
       return await this.repairPendingOutput();
@@ -81,6 +83,21 @@ export class BackgroundBashOutputWriter {
       }
     }
     return this.appendTerminalOutput(content);
+  }
+
+  describePersistence(outputRef?: TaskOutputRef): {
+    rawBytes: number;
+    persistence: 'complete' | 'incomplete';
+    omittedBytes: number;
+  } {
+    return {
+      rawBytes: this.outputBytes,
+      persistence:
+        !this.persistenceIncomplete && this.omittedBytes === 0 && outputRef
+          ? 'complete'
+          : 'incomplete',
+      omittedBytes: this.omittedBytes,
+    };
   }
 
   private startDrain(): void {
@@ -155,10 +172,12 @@ export class BackgroundBashOutputWriter {
       retained = retained.slice(0, -1);
     }
     this.recoveryContent += retained;
-    this.droppedRecoveryBytes += Math.max(
+    const droppedBytes = Math.max(
       0,
       Buffer.byteLength(content, 'utf8') - Buffer.byteLength(retained, 'utf8'),
     );
+    this.droppedRecoveryBytes += droppedBytes;
+    this.omittedBytes += droppedBytes;
   }
 
   warn(operation: string, error: unknown): void {

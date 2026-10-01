@@ -29,9 +29,9 @@ export {
   isManagedRuntime,
   getRuntimePresetKey,
   DEFAULT_MODEL_PRESETS,
-  MINIMAX_API_MODEL_CATALOG,
   isProposalEligibleAgent,
 } from './config.js';
+export { minimaxApiModels } from './byok-config.js';
 export {
   GOAL_CONFIG_DEFAULTS,
   GOAL_CONFIG_LIMITS,

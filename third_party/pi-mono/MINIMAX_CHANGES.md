@@ -13,6 +13,30 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-09-23 — preserve Bash execution facts and bounded output
+
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), Bash execution, child-process observation, and output accumulation.
+- Change: require exit code zero for success; preserve signals, cancellation reasons, timeout deadlines, and partial output in structured success and failure results. Add an optional original head-and-tail preview and host-owned persistence so managed commands use one complete log. Report persistence failures separately from the process outcome.
+- The existing exit-code-only helper and default tail preview remain compatible. Process cleanup and command timers retain their existing lifecycle.
+- Provenance: shared MiniMax Bash implementation, adapted to the standalone source distribution. Existing upstream notices and licenses apply; no new dependency is introduced. Upstream PR: not opened.
+- Regression coverage: the existing child Bash lifecycle, turn executor, and built-in catalog tests cover command deadlines, native output capability gating, and rendered prompt guidance. Vendored upstream suites remain outside this distribution's verification; real-model and Windows acceptance are separate.
+
+### 2026-09-21 — report why the edit unified patch was omitted
+
+- Reason: the unified patch is a second, independently timed Myers run over the same input as the display diff. When only that run ran out of time, `details` held a diff, no patch, and no `diffOmitted` — consumers could not tell an omitted patch apart from a tool that never produces one.
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), edit tool details assembly.
+- Change type: generic, upstreamable correctness fix. Add `details.patchOmitted`, set to `diffOmitted` when the display diff was abandoned and to `timeout` when only the patch was, so `details.patch` is absent exactly when `patchOmitted` is set. jsdiff routes `createTwoFilesPatch` through the same bounded `diffLines`, so `maxEditLength` is deterministic across both runs and can never trip for the patch alone; only its separately measured wall clock can. `diffOmitted` keeps its meaning and is unchanged.
+- Upstream PR: not opened.
+- Validation: `packages/agent-tools/src/desktop/edit-diff-bounds.test.ts` pins the invariant on both reachable paths (an ordinary edit and a bounded-out whole-file rewrite). The patch-only timeout is not unit-testable: it needs the two runs to land on opposite sides of a 5 s wall clock, which no deterministic input can force.
+
+### 2026-09-21 — bound the post-edit diff of the edit tool
+
+- Reason: `edit` computed its display diff and its unified patch with unbounded Myers, which costs O((N+M)·D) in the length D of the edit script. A whole-file rewrite therefore scaled quadratically in the number of changed lines: rewriting every line of a 20 000-line file blocked the tool for over two minutes and produced a multi-megabyte patch that no renderer displays. The sibling `write` path already caps the same work (`packages/agent-tools/src/shared/write-capture.ts`); `edit` had no cap.
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), edit tool diff generation.
+- Change type: generic, upstreamable performance fix. Pass jsdiff's `maxEditLength` (2000 edits) and `timeout` (5 s) to `diffLines` and `createTwoFilesPatch`. `maxEditLength` is the primary bound because it is deterministic and therefore testable; `timeout` only backstops slow machines. Replacing a line costs 2 edits, so the bound admits a full rewrite of any file up to 1000 lines and only gives up past that. When a bound trips, `details.diff` carries a one-line notice so every renderer still has something to show, `details.patch` is omitted, and the new `details.diffOmitted` names the reason. The unified patch is skipped once the display diff was abandoned rather than repeating a second Myers run that aborts on the same bound. The file is written before any diff runs, so a dropped diff never changes what lands on disk.
+- Upstream PR: not opened.
+- Validation: `packages/agent-tools/src/desktop/edit-diff-bounds.test.ts` (registered in the `capability` suite) covers an ordinary edit, a large block replacement that stays under the bound, a full rewrite at the bound that keeps its diff, and a whole-file rewrite that keeps the write while dropping the diff; `pnpm verify --profile platform` on macOS. Measured end to end through `createEditTool`, three runs each on the same machine: a 20 000-line whole-file rewrite took 167 620 / 173 523 / 167 547 ms unbounded and 200 / 192 / 193 ms bounded, with peak heap dropping from 47–60 MB to 14–15 MB; a 501-line rewrite takes 53 / 49 / 47 ms and a 1000-line rewrite 177 / 173 / 177 ms, both keeping their diff.
+
 ### 2026-09-19 — omit empty tools for OpenAI-compatible checkpoint requests
 
 - Reason: checkpoint requests retain tool-call history but omit tool definitions. The OpenAI Completions provider unconditionally added `tools: []` for that history, which can cause a backend to reject compaction with HTTP 400 (public issue MiniMax-AI/minimax-code#194).
@@ -338,3 +362,12 @@ For future changes, add one entry per MiniMax patch with:
 - Reason: immediately submitted local user batches must be consumed in one provider hop while retaining each message identity.
 - Affected package: `Agent.steerBatch` added to `@earendil-works/pi-agent-core`; individual `steer` / `followUp` and default modes remain compatible.
 - Validation: `pnpm --filter @earendil-works/pi-agent-core build`; `node scripts/test/focused-vitest.mjs --package @earendil-works/pi-agent-core --skip-workspace-build third_party/pi-mono/packages/agent/test/agent.test.ts` (19 tests); agent-core focused `pi-turn-runner.test.ts` covers local batches and machine-only individual consumption.
+
+## 2026-09-21: Propagate native exit codes through Windows PowerShell 5.1 wrappers
+
+- Reason: `wrapWindowsPowerShellStdinCommand` ends with `& ([ScriptBlock]::Create($source))` and `wrapConstrainedWindowsPowerShellCommand` ends with `Invoke-Expression $source`. On Windows PowerShell 5.1, a `-Command` session whose final statement is a scriptblock invocation exits 0 regardless of `$LASTEXITCODE` set by native commands inside it, so every failing native command was reported as success (foreground tool result and background task status) on hosts without pwsh 7. Reproduced before the fix: a `node -e "…;process.exit(7)"` command produced its stderr yet the shell process exited 0.
+- Affected package: `@earendil-works/pi-coding-agent` local bash operations, PowerShell 5.1 transport only (`src/core/tools/bash.ts`). pwsh 7 (native `-Command` path) and POSIX shells are untouched. PowerShell-internal terminating errors still exit non-zero via `throw` before the appended statement.
+- Type: generic, upstreamable Windows fix using the same `exit $LASTEXITCODE` idiom already used by the first-party `packages/tui/src/update/versioned-prefix.ts` launchers.
+- Change: append `exit $LASTEXITCODE` after the scriptblock invocation (stdin transport) and after `Invoke-Expression` (ConstrainedLanguage transport).
+- Upstream PR: not opened.
+- Validation (Windows 11 x64 build 26200, PowerShell 5.1 default, Node 24.18.0): `packages/local-runtime/test/unit/child-bash-lifecycle.test.ts` 'failure' mode fails before the fix (`expected 'succeeded' to be 'failed'`) and passes after; 'timeout' and 'cancel' modes unaffected. Focused re-run of the affected suites and full `pnpm test:capabilities` show no new failures. Not run: pwsh 7 host validation, ConstrainedLanguage host validation (launcher covered by structure assertions only), macOS/Linux regression runs.

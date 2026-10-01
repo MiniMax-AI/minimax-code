@@ -273,6 +273,8 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;
+  /** Stars or unstars a model; resolves false when favorites are unavailable. */
+  setModelFavorite?(model: TuiModelSelection, favorite: boolean): Promise<boolean>;
 }
 
 export interface TuiAccountStatusOptions {
@@ -582,6 +584,8 @@ export interface TuiBackgroundTask {
   readonly endedAtMs?: number;
   readonly deliveredAtMs?: number;
   readonly lastError?: string;
+  /** Bash still owned by its foreground tool call (not auto-promoted to the background). */
+  readonly foreground?: true;
 }
 
 export interface TuiBackgroundTaskCapability {

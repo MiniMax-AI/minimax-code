@@ -22,6 +22,31 @@ function shellCell() {
 }
 
 describe('Shell transcript block', () => {
+  it.each(['succeeded', 'cancelled'] as const)(
+    'dismisses the previous %s turn duration when the next turn starts',
+    (status) => {
+      const transcript = new TranscriptStore();
+      const view = new TranscriptView(transcript);
+      const onChange = vi.fn();
+      const projection = new TuiTurnProjection({ transcript, now: () => 10, onChange });
+      projection.recordTerminalDuration('previous-turn', status, 12_000);
+      const label = status === 'cancelled' ? 'Interrupted after 12s' : 'Completed in 12s';
+      expect(stripAnsi(view.render(80).join('\n'))).toContain(label);
+
+      transcript.replaceDurableProjection(() => projection.hydrateHistory([]));
+      expect(stripAnsi(view.render(80).join('\n'))).toContain(label);
+
+      onChange.mockClear();
+      projection.beginTurn('next-turn', 20);
+      expect(transcript.get('turn-duration:previous-turn')).toBeUndefined();
+      expect(stripAnsi(view.render(80).join('\n'))).not.toContain(label);
+      expect(onChange).toHaveBeenCalledOnce();
+
+      projection.recordTerminalDuration('next-turn', 'succeeded', 3_000);
+      expect(stripAnsi(view.render(80).join('\n'))).toContain('Completed in 3s');
+    },
+  );
+
   it.each([
     { exitCode: 0, cancelled: false, status: 'succeeded' },
     { exitCode: 7, cancelled: false, status: 'failed' },

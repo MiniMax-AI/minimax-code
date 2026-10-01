@@ -206,7 +206,7 @@ export interface SessionRecordServiceDeps {
   readonly runLocation: {
     resolve(input: unknown, workspaceDir: string): Promise<SessionRecord['runLocation']>;
   };
-  readonly titlePolicy: { blocks(title: string): Promise<boolean> };
+  readonly titlePolicy: { blocks(title: string, session: SessionRecord): Promise<boolean> };
   readonly artifacts?: {
     initialize(sessionId: string): Promise<void>;
     delete(sessionId: string): Promise<void>;
@@ -813,7 +813,7 @@ export class SessionRecordService
     if (
       fields.title !== undefined &&
       fields.title !== null &&
-      (await this.deps.titlePolicy.blocks(fields.title))
+      (await this.deps.titlePolicy.blocks(fields.title, current))
     ) {
       throw new SessionServiceError('content-policy-rejected', 'Content validation failed');
     }

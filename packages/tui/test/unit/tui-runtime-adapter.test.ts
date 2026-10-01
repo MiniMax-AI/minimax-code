@@ -40,6 +40,7 @@ describe("TuiRuntimeAdapter process-local facades", () => {
                 status: "running" as const,
                 ownerSessionId: "session-1",
                 description: "pnpm test",
+                metadata: { command: "pnpm test", executionMode: "managed_foreground" },
                 createdAt: 100,
                 updatedAt: 200,
                 startedAt: 110,
@@ -80,9 +81,11 @@ describe("TuiRuntimeAdapter process-local facades", () => {
         status: "running",
         ownerSessionId: "session-1",
         description: "pnpm test",
+        command: "pnpm test",
         createdAtMs: 100,
         updatedAtMs: 200,
         startedAtMs: 110,
+        foreground: true,
       },
     ]);
     expect(listBackgroundTasks).toHaveBeenNthCalledWith(1, {

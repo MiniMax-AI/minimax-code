@@ -40,7 +40,13 @@ function buildEditBlocks(
 ): TuiStructuredPreviewBlock[] {
   const path = readString(input, ['path', 'filePath', 'file_path']);
   const resultDiff = readToolResultDiff(output);
-  if (resultDiff) return [createDiffBlock(path, resultDiff)];
+  if (resultDiff) {
+    return [
+      resultDiff.omitted === undefined
+        ? createDiffBlock(path, resultDiff.diff)
+        : createOmittedDiffBlock(path, resultDiff.diff, resultDiff.omitted),
+    ];
+  }
 
   return readEditPairs(input).map(({ oldText, newText }) => {
     const diff = [
@@ -108,7 +114,28 @@ function createDiffBlock(path: string | undefined, rawDiff: string): TuiStructur
   };
 }
 
-function readToolResultDiff(output: unknown): string | undefined {
+// The edit tool replaces the diff body with a one-line notice once it hits its own
+// bounds, so the body carries no `+`/`-` lines. Rendering that as a diff block reports
+// `+0 -0`, which reads as "nothing changed" on exactly the largest edits.
+function createOmittedDiffBlock(
+  path: string | undefined,
+  message: string,
+  omittedReason: string,
+): TuiStructuredPreviewBlock {
+  return {
+    kind: 'summary',
+    ...(path ? { path } : {}),
+    message,
+    reason: omittedReason === 'timeout' ? 'unavailable' : 'too-large',
+  };
+}
+
+interface ToolResultDiff {
+  readonly diff: string;
+  readonly omitted?: string;
+}
+
+function readToolResultDiff(output: unknown): ToolResultDiff | undefined {
   const root = parseRecord(output);
   if (!root) return undefined;
   const candidates = [root, parseRecord(root.result), parseRecord(root.output)].filter(
@@ -117,7 +144,10 @@ function readToolResultDiff(output: unknown): string | undefined {
   for (const candidate of candidates) {
     const details = parseRecord(candidate.details);
     const diff = details ? readString(details, ['diff', 'previewDiff', 'preview_diff']) : undefined;
-    if (diff) return diff;
+    if (diff) {
+      const omitted = details ? readString(details, ['diffOmitted', 'diff_omitted']) : undefined;
+      return omitted === undefined ? { diff } : { diff, omitted };
+    }
   }
   return undefined;
 }

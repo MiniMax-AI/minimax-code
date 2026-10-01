@@ -339,6 +339,8 @@ export interface MemoryReferenceView {
 
 export interface SessionMessageView {
   msgId: string;
+  /** Canonical user text for editing when display text omits plugin identities. */
+  editContent?: string;
   parentMsgId?: string;
   timestamp?: number;
   msgContent?: string;

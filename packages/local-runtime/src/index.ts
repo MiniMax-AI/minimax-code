@@ -1,3 +1,4 @@
+export { createUserStopCascade, type UserStopCascade } from "./background-task/index.js";
 export { resolveAgentBashEnvPolicy } from "./infra/ensure-rm-shim.js";
 export {
   ManagedWorktreeService,

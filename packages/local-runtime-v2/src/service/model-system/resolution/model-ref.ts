@@ -374,7 +374,12 @@ export function resolveMiniMaxM3ThinkingProtocol(
   if (api === 'openai-responses') {
     return { reasoning: { effort: mode === 'on' ? 'minimal' : 'none' } };
   }
-  return { thinking: { type: mode === 'on' ? 'adaptive' : 'disabled' } };
+  return {
+    // Remove the internal on/off value serialized by Pi as a generic effort.
+    ...(api === 'openai-completions' ? { reasoning_effort: undefined } : {}),
+    ...(api === 'anthropic-messages' ? { output_config: { effort: undefined } } : {}),
+    thinking: { type: mode === 'on' ? 'adaptive' : 'disabled' },
+  };
 }
 
 export function resolveModelThinkingMiddleEffort(

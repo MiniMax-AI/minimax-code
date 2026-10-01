@@ -7,6 +7,8 @@ export interface SkillSourceRoot {
   rootPath: string;
   priority?: number;
   external?: boolean;
+  /** Follow directory links outside the root for configured compatibility sources. */
+  allowDirectorySymlinksOutsideRoot?: boolean;
 }
 
 export type SkillDiagnosticLevel = 'warning' | 'error';

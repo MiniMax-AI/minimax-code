@@ -28,6 +28,13 @@ export interface Component {
 	render(width: number): string[];
 
 	/**
+	 * Opt into preserving native scrolling when only background content shrinks.
+	 * Return a key for the last rendered transient layout (menus, editor, banners).
+	 * A changed or missing key restores exposed document rows instead of padding.
+	 */
+	getViewportLayoutKey?(): string | undefined;
+
+	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
@@ -340,6 +347,8 @@ export abstract class TuiBase extends Container implements TUI {
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
 	private renderRequested = false;
+	private hasRenderedFrame = false;
+	private outputDrainPending = false;
 	private immediateRenderScheduled = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
@@ -771,7 +780,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.renderRequested = false;
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
-		this.doRender();
+		this.renderFrame();
 	}
 
 	requestRender(force = false): void {
@@ -798,8 +807,33 @@ export abstract class TuiBase extends Container implements TUI {
 			this.cancelRenderTimer();
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
-			this.doRender();
+			this.renderFrame();
 		});
+	}
+
+	protected hasPendingRender(): boolean {
+		return this.renderRequested || this.outputDrainPending;
+	}
+
+	private renderFrame(): void {
+		// The initial frame may follow startup controls. Later frames wait for the
+		// previous output and render only the latest model, rather than queueing
+		// obsolete history replays while an SSH peer is slow or paused.
+		if (this.hasRenderedFrame && this.terminal.outputPending && this.terminal.drainOutput) {
+			if (!this.outputDrainPending) {
+				this.outputDrainPending = true;
+				void this.terminal.drainOutput().then(() => {
+					this.outputDrainPending = false;
+					if (!this.stopped) this.requestRender();
+				}, () => {
+					// ProcessTerminal reports the failure through stdout's error event.
+					this.outputDrainPending = false;
+				});
+			}
+			return;
+		}
+		this.doRender();
+		this.hasRenderedFrame = true;
 	}
 
 	private cancelRenderTimer(): void {
@@ -821,7 +855,7 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 			this.renderRequested = false;
 			this.lastRenderAt = performance.now();
-			this.doRender();
+			this.renderFrame();
 			if (this.renderRequested) {
 				this.scheduleRender();
 			}
@@ -904,10 +938,13 @@ export abstract class TuiBase extends Container implements TUI {
 			if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) {
 				return;
 			}
-			this.focusedComponent.handleInput(data);
 			// Keyboard input is latency-sensitive. Avoid the throttled timer path,
 			// where even setTimeout(0) can take a full 16 ms tick on Windows.
 			this.requestImmediateRender();
+			// A submission may render synchronously to dismiss a previous turn's
+			// footer. In that case renderNow clears this pending request, avoiding
+			// a second full render on the next tick.
+			this.focusedComponent.handleInput(data);
 		}
 	}
 

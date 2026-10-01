@@ -2,6 +2,65 @@
 
 The current capability target is **TUI 0.4.12**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
+## Output speed
+
+The activity line and completed-turn summary show provider output tokens divided by
+model generation time. Timing starts at the first nonempty text, reasoning, or tool
+token and ends when the model finishes, excluding first-token wait and tool execution.
+Multiple responses in a turn use total tokens divided by total generation time.
+
+Speed appears after the first response with both provider usage and generation timing;
+streaming text is not estimated. Confirmed speed stays visible during later requests
+and tools, duplicate messages do not count twice, and a new turn resets the samples.
+Messages without generation timing are excluded. Values below 10 tok/s use one decimal
+place; higher values are rounded to integers. Batched provider events measure the
+observed generation window, not server hardware throughput.
+
+## Terminal titles and notifications
+
+Terminal titles show the current state, session name and MCode, for example
+`Needs approval | Fix login | MCode`. Renaming or switching a session updates the
+title. Unnamed sessions use the project name and a short session ID. Titles are
+cleared when MCode exits or suspends and reapplied when it resumes.
+
+Configure these presentation settings in the MCode data directory's `config.yaml`:
+
+```yaml
+tui:
+  terminalTitle: [status, session-name, app-name]
+  notifications:
+    when: unfocused
+    method: auto
+    events: [turn-complete, turn-failed, permission-required, question-required]
+```
+
+Title items can be ordered or omitted; `project-name` is also available. Set
+`terminalTitle` to `null` or `[]` to disable title updates. Unknown items are ignored.
+Notification `when` accepts `unfocused`, `always` or `never`; `method` accepts
+`auto`, `osc9`, `osc777` or `bel`. Omitting `events` enables all four events; `[]`
+disables them. Apply configuration changes by restarting MCode.
+
+Notifications identify the session and suppress duplicates. Completion waits for
+the session's queue to finish; failed turns and requests for input can notify
+independently. Known foreground focus suppresses notifications by default. When
+focus is unknown, delivery is best-effort; cmux manages its own surface focus.
+Automatic delivery uses the detected terminal's notification protocol or falls
+back to a bell. The existing Windows toast bridge is restricted to local Windows
+or WSL interop. Terminal settings and OS notification permissions still apply.
+
+VS Code normally displays a process name in its terminal tabs. To display MCode's
+session titles, use this VS Code setting:
+
+```json
+"terminal.integrated.tabs.title": "${sequence}"
+```
+
+A manually assigned tab title overrides automatic titles. VS Code's bell is a
+terminal-tab indicator, not a guarantee of a desktop notification. See the
+[VS Code terminal appearance documentation](https://code.visualstudio.com/docs/terminal/appearance#_tab-text).
+Inside tmux, OSC notifications require passthrough and support from the outer
+terminal; use `method: bel` for a bell fallback.
+
 The evidence column summarizes the historical TUI 0.3.11 restoration record from 2026-09-11. It does not claim fresh TUI 0.4.12 live-service acceptance. Use [current verification status](verification.md#current-source-verification-status) for checks run against the updated source and explicit NOT RUN boundaries.
 
 | Capability | Implementation | Evidence |
@@ -20,6 +79,61 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | Model catalog | Online catalog and bundled snapshot fallback restored | Actual build boundary checks and offline startup; online catalog contents not accepted |
 | Files, shell, subagents, sessions, headless, ACP | Actual runtime retained | BYOK, file reads, session resume, ACP, sandbox, and status protocol tests |
 | Built-in skills, MCP, plugin tools | Original TUI assets and activation conditions retained | Asset build, plugin, and MCP tests; no claim that every skill has passed a real task |
+
+## Local Bash execution
+
+When the current turn includes native `task_output`, foreground Bash waits up to
+60 seconds before returning the same command's background task ID. Its total
+command timeout defaults to 600 seconds and is capped at 600 seconds; a shorter
+requested timeout applies. Backgrounding and output reads preserve the original
+deadline. Without native `task_output`, Bash stays in the foreground with a
+120-second default and a 300-second cap, and its schema omits `run_in_background`.
+Explicit background commands use the requested timeout; when omitted, the
+existing 30-minute runtime watchdog applies.
+
+Only exit code zero is success. Results retain available exit, signal, timeout,
+cancellation, and partial-output facts. Large output keeps its original beginning
+and end within a 24 KiB first-response text budget, with a full-log reference when
+persistence succeeds. `task_output` reads use byte offsets; a successful read can
+report a failed command. Stop failures and incomplete logs are reported separately.
+An optional `description` supplies the TUI summary while execution and permission
+checks continue to use the original command.
+
+## Stopping a conversation and its background work
+
+An explicit user stop (Esc in the TUI) also cancels background Bash commands and
+subagents owned by that conversation in the current process, including activated
+`task_append` continuations and work spawned by their child turns. Completion
+notices for those tasks no longer automatically wake the conversation. Their
+terminal results remain unread so the next turn can inspect them through the
+background-task reminder and `task_output`.
+
+Leaving a conversation with `/clear` or a session switch still stops its current
+turn and pauses its Goal and queued instructions, but leaves background work
+running. This pause also applies when unconsumed steering must fall back to the
+queue after a history-write failure. A stop rejected because it names an older
+turn does not cancel the current turn's background work.
+
+Only locally owned running tasks are canceled; tasks held by another runtime
+process are left alone. Child cleanup follows the task's owning child turn, so a
+later continuation in the same child session is preserved. Delivery suppression
+is held in process memory. If a turn does not release within the abort timeout,
+work created later during its shutdown is outside the stop boundary. A delivery
+already being admitted can also race with a stop.
+
+Offline regression tests cover cascade ownership, delivery suppression, late
+task creation, repeated stops, append completion/shutdown, and queue fallback.
+The host integration tests use a scripted runner and real background processes;
+they do not establish live-model or cross-platform acceptance.
+
+## Skill directory links
+
+Workspace `.agents/skills`, `.claude/skills`, and `.minimax/skills` support
+directory symlinks, both for the entire skill root and for individual skill
+directories. Targets may live outside the workspace. Existing external-source
+enable settings and duplicate-name priority still apply. Linked directories are
+watched for `SKILL.md` creation and edits; broken links are skipped. `SKILL.md`
+itself must remain a regular file.
 
 ## ACP Skill commands
 
@@ -80,3 +194,78 @@ the configured default. Omitting `--model` preserves existing startup behavior.
 The untargeted `--session` picker cannot be combined with `--model`; provide an ID
 or use `--continue` instead. If opening or continuing a Session fails, the override
 and initial prompt are not applied.
+
+## Feature panels and chat restoration
+
+In regular mode, independent feature panels occupy the complete visible terminal
+area, including short Rewind previews and scope pickers. Closing a panel restores
+the current conversation. Closing, replacing or shrinking a transient region
+restores the exposed chat rows. This includes inline selectors such as `/theme`,
+completion menus, multi-line drafts, image previews, queued messages, task and
+Goal summaries, welcome notices and status rows. Short documents refresh in place;
+history is reconstructed only when the smaller layout needs to bring scrolled
+rows back into view. This rule follows the rendered layout, including asynchronous
+updates, rather than requiring each close handler to request a special redraw.
+When background running content shrinks entirely within the current screen and
+the transient layout stays unchanged, the renderer keeps native scrollback and
+the Composer position stable.
+Freed rows temporarily remain blank at the top of the active screen and subsequent
+output reuses them. This avoids resetting the host's scroll position when a turn
+finishes. Redundant resize notifications with unchanged dimensions do not rebuild
+history. Viewport-only redraws erase rows in place so terminals that save a cleared
+screen to scrollback, including Apple Terminal, do not retain the old Composer,
+status line or duplicate transcript rows.
+
+When a change removes or replaces text already in scrollback, the renderer still
+reconstructs the current session to avoid stale or duplicate history. Real resizes
+and image layout changes also retain the existing reconstruction behavior. A
+reconstruction clears earlier shell scrollback and can reset the host's scroll
+position; ordinary updates keep native scrolling and selection behavior.
+
+Rewind and Fork history-loading hints disappear as soon as their lists are ready.
+Returning from a cancelled operation must not leave a stale loading message in the
+Composer. Rewind displays its completed result after a successful operation.
+
+## Temporary side conversations
+
+Use `/btw [question]` (or `/side [question]`) to open a temporary side conversation
+while the main task continues. The side conversation inherits the latest complete
+prefix of persisted history. Completed tool calls retain all their results; an
+unfinished group of tool calls is excluded together. The selected boundary is
+fixed before creation, so later main-task output does not change that fork.
+Inherited tool calls are context and are not executed again.
+
+Press `Ctrl+/` to switch between the main and side views, or `/parent` to return
+to the main view. Press `Ctrl+C` on an empty Composer to discard the side
+conversation. Side conversations retain the main session's permission mode and
+remain hidden from `/sessions` and `/resume`.
+
+Creation and activation failures record a bounded, redacted cause chain in the
+local `session.side.failed` diagnostic event. Feedback uploads still apply the
+existing diagnostic-counts projection; raw error text, stacks and session IDs
+are not added to the uploaded ZIP. Offline tests cover persisted tool histories,
+archives, concurrent parent output, side-session cleanup and local diagnostics;
+this does not establish native-terminal or live-model acceptance.
+
+## Select a plugin for a message
+
+Type `@` in the Composer to search files and installed, enabled plugins. Plugin
+candidates show their source so packages with the same display name can be
+selected independently. Choose a plugin with Tab or Enter, then describe the task.
+The Composer shows `@Name` and retains the plugin identity through editing, undo,
+prompt history, queued-message recovery, saved drafts, and `/edit` after a
+message is sent. Ctrl+C clearing/restoration and external-editor edits retain
+unchanged plugin bindings. If external edits make duplicate labels ambiguous,
+reselect those plugins in the Composer. Displayed messages remain readable; Runtime retains
+the original input separately when needed to recover the plugin identity for editing.
+
+Selection applies to that message. Runtime checks the plugin's effective Skills,
+MCP tools, and App tools again for the turn and asks the Agent to prefer relevant
+capabilities. Selecting a plugin does not install or enable it. An unavailable
+selection is reported to the Agent rather than redirected to a same-named package.
+
+Exec and ACP text prompts can use the durable linked form, for example
+`[@Notes](plugin://notes%40local) summarize these files`. The ID is the package
+name plus its `local` or `official` source; display labels do not determine the
+selection. Legacy whitespace-delimited `@package-name` text remains supported
+when it identifies exactly one effective plugin.

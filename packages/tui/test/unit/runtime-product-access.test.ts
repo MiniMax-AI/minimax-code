@@ -703,6 +703,9 @@ it("forwards saved-credential discovery and revision-checked model-only updates"
     [{ modelId: "latest" }],
   );
   expect(discoverUserModelsCandidate).toHaveBeenCalledWith(candidate);
+  const draft = { name: "Draft", baseUrl: "https://draft.example/v1", apiKey: "synthetic-key", apiFormat: "openai-completions" as const };
+  await expect(adapter.discoverUserModelsCandidate(draft)).resolves.toEqual([{ modelId: "latest" }]);
+  expect(discoverUserModelsCandidate).toHaveBeenLastCalledWith(draft);
   await adapter.saveUserModelProviderCandidate({
     ...candidate,
     models: [{ modelId: "latest" }],

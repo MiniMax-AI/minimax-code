@@ -391,7 +391,7 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 /**
  * Replicated from `third_party/pi-mono/packages/coding-agent/src/utils/mime.ts`
  * `detectSupportedImageMimeType` — the function is NOT exported from
- * `@earendil-works/pi-coding-agent` (package exposes only the root entry),
+ * `@earendil-works/pi-coding-agent`,
  * so we keep a byte-exact copy here. KEEP IN SYNC on pi upstream syncs:
  * the whole point of this replica is that the exemption face equals pi's
  * image-branch acceptance face (JPEG minus JPEG-LS, PNG minus APNG, GIF,

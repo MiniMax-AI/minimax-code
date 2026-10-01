@@ -153,6 +153,8 @@ export interface LocalRuntimeTurnRuntimeOutcome {
 export interface LocalRuntimeTurnRunnerPort<
   TContext extends ToolExecutionContext = LocalRuntimeTurnToolContext,
 > {
+  /** The runner can consume an outcome summary instead of a retained event array. */
+  readonly acceptsEventSummary?: boolean;
   runTurn(
     input: LocalRuntimeTurnRunnerInput<TContext>,
   ): Promise<LocalRuntimeTurnRunnerResult | void>;

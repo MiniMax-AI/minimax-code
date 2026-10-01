@@ -307,7 +307,7 @@ describe('TUI automatic incident HTTP privacy boundary', () => {
     reporter.capture(input(new Error(privateText)));
     await reporter.drain();
     expect(requests).toEqual([]);
-    const name = readdirSync(directory).find((name) => name.startsWith('pending-'))!;
+    const name = readdirSync(directory).find((filename) => filename.startsWith('pending-'))!;
     const path = join(directory, name);
     const stored = JSON.parse(readFileSync(path, 'utf8'));
     const log = JSON.parse(stored.eventLog);

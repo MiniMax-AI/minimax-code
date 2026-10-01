@@ -1,3 +1,4 @@
+import { formatTokensPerSecond } from '../rendering/output-rate.js';
 import type { ChalkInstance } from 'chalk';
 import { formatTuiDuration } from '../rendering/duration.js';
 import type { Component } from '../rendering/component.js';
@@ -284,7 +285,7 @@ function formatOutputRate(
 ): string {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return '';
   return `${chalk.hex(colors.dim)(' · ')}${chalk.bold.hex(colors.signal)(
-    `⚡ ${estimated ? '~' : ''}${value.toFixed(1)} tok/s`,
+    `⚡ ${estimated ? '~' : ''}${formatTokensPerSecond(value)} tok/s`,
   )}`;
 }
 

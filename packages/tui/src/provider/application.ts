@@ -3,6 +3,7 @@ import type {
   McodeCodexOAuthLoginOptions,
   McodeCodexOAuthStatus,
   McodeCreateProviderInput,
+  McodeDiscoverProviderModelsInput,
   McodeMiniMaxModelSource,
   McodeProviderRuntimePort,
   McodeSaveProviderCandidateInput,
@@ -87,6 +88,10 @@ export class McodeProviderApplication {
 
   saveCandidate(input: McodeSaveProviderCandidateInput): Promise<McodeSaveProviderCandidateResult> {
     return this.port.saveUserModelProviderCandidate(input);
+  }
+
+  discoverModels(input: McodeDiscoverProviderModelsInput) {
+    return this.port.discoverUserModelsCandidate(input);
   }
 
   async refreshModels(provider: McodeProviderView): Promise<number> {
@@ -199,6 +204,7 @@ function normalizeCustomProvider(provider: McodeRuntimeProviderView): McodeProvi
 
 export type {
   McodeCreateProviderInput,
+  McodeDiscoverProviderModelsInput,
   McodeProviderRuntimePort,
   McodeProviderSnapshot,
   McodeUpdateProviderInput,

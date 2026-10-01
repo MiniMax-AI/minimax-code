@@ -1,4 +1,4 @@
-import { createLocalBashOperations, type BashOperations } from '@earendil-works/pi-coding-agent';
+import { createLocalBashOperations, type BashOperations } from '@earendil-works/pi-coding-agent/tools';
 import type { BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
 import type { LocalSandboxBashOperationsFactory } from '@mavis/agent-tools/desktop';
 

@@ -1,4 +1,6 @@
 interface SemanticReplay<T> {
+  readonly identity: string;
+  readonly order: bigint;
   readonly fingerprint: string;
   execution: Promise<T> | undefined;
   settled: boolean;
@@ -43,6 +45,9 @@ class SemanticReplayResultUnavailableError extends Error {
 export class SemanticReplayRegistry<T> {
   private readonly entries = new Map<string, SemanticReplay<T>>();
   private readonly settlements = new WeakSet<Promise<void>>();
+  private readonly settledEntries = new ReplayOrderIndex<T>();
+  private readonly retainedEntries = new ReplayOrderIndex<T>();
+  private nextOrder = 0n;
   private retainedSettledBytes = 0;
 
   constructor(
@@ -74,6 +79,8 @@ export class SemanticReplayRegistry<T> {
     }
     const execution = request.execute();
     const replay: SemanticReplay<T> = {
+      identity: request.identity,
+      order: this.nextOrder++,
       fingerprint: request.fingerprint,
       execution,
       settled: false,
@@ -92,9 +99,14 @@ export class SemanticReplayRegistry<T> {
   ): Promise<void> {
     try {
       const value = await execution;
+      if (this.entries.get(identity) !== replay) return;
       replay.settled = true;
+      this.settledEntries.add(replay);
       replay.retainedBytes = this.measureSettledBytes(value);
       this.retainedSettledBytes += replay.retainedBytes;
+      if (replay.retainedBytes > 0 && this.entries.get(identity) === replay) {
+        this.retainedEntries.add(replay);
+      }
     } catch {
       // The original execution preserves and reports its rejection to the caller.
       if (this.entries.get(identity) === replay) this.delete(identity, replay);
@@ -117,18 +129,16 @@ export class SemanticReplayRegistry<T> {
 
   private trim(): void {
     while (this.entries.size > this.maximum) {
-      const settled = [...this.entries].find(([, replay]) => replay.settled);
+      const settled = this.settledEntries.first;
       if (!settled) return;
-      this.delete(...settled);
+      this.delete(settled.identity, settled);
     }
     const maximumSettledBytes = this.options?.maximumSettledBytes;
     if (maximumSettledBytes === undefined) return;
     while (this.retainedSettledBytes > maximumSettledBytes) {
-      const candidate = [...this.entries].find(
-        ([, replay]) => replay.settled && replay.execution && replay.retainedBytes > 0,
-      );
-      if (!candidate) return;
-      const [, replay] = candidate;
+      const replay = this.retainedEntries.first;
+      if (!replay) return;
+      this.retainedEntries.remove(replay);
       this.retainedSettledBytes -= replay.retainedBytes;
       replay.retainedBytes = 0;
       replay.execution = undefined;
@@ -138,6 +148,65 @@ export class SemanticReplayRegistry<T> {
   private delete(identity: string, replay: SemanticReplay<T>): void {
     if (this.entries.get(identity) !== replay) return;
     this.entries.delete(identity);
+    this.settledEntries.remove(replay);
+    this.retainedEntries.remove(replay);
     this.retainedSettledBytes -= replay.retainedBytes;
+  }
+}
+
+/** Oldest insertion first, even when requests settle out of order. */
+class ReplayOrderIndex<T> {
+  private readonly heap: SemanticReplay<T>[] = [];
+  private readonly positions = new WeakMap<SemanticReplay<T>, number>();
+
+  get first(): SemanticReplay<T> | undefined { return this.heap[0]; }
+
+  add(replay: SemanticReplay<T>): void {
+    const index = this.heap.length;
+    this.heap.push(replay);
+    this.positions.set(replay, index);
+    this.up(index);
+  }
+
+  remove(replay: SemanticReplay<T>): void {
+    const index = this.positions.get(replay);
+    if (index === undefined) return;
+    const last = this.heap.pop()!;
+    this.positions.delete(replay);
+    if (index === this.heap.length) return;
+    this.heap[index] = last;
+    this.positions.set(last, index);
+    if (index > 0 && last.order < this.heap[Math.floor((index - 1) / 2)]!.order) this.up(index);
+    else this.down(index);
+  }
+
+  private swap(a: number, b: number): void {
+    const left = this.heap[a]!;
+    const right = this.heap[b]!;
+    this.heap[a] = right;
+    this.heap[b] = left;
+    this.positions.set(right, a);
+    this.positions.set(left, b);
+  }
+
+  private up(index: number): void {
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (this.heap[parent]!.order <= this.heap[index]!.order) return;
+      this.swap(parent, index);
+      index = parent;
+    }
+  }
+
+  private down(index: number): void {
+    for (;;) {
+      const left = index * 2 + 1;
+      if (left >= this.heap.length) return;
+      const right = left + 1;
+      const child = right < this.heap.length && this.heap[right]!.order < this.heap[left]!.order ? right : left;
+      if (this.heap[index]!.order <= this.heap[child]!.order) return;
+      this.swap(index, child);
+      index = child;
+    }
   }
 }

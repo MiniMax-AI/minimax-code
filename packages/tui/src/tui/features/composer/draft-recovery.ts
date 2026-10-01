@@ -1,3 +1,4 @@
+import { validPluginMentions } from '../../widgets/editor/plugin-mentions.js';
 import { createHash } from 'node:crypto';
 import {
   chmod,
@@ -431,12 +432,16 @@ export class TuiDraftRecovery {
               const relocatedPath = attachment.filePath
                 ? relocatedPaths.get(attachment.filePath)
                 : undefined;
-              return { ...attachment, ...(relocatedPath ? { filePath: relocatedPath } : {}) };
+              return {
+                ...attachment,
+                ...(relocatedPath ? { filePath: relocatedPath } : {}),
+              };
             }),
           }
         : {}),
       createdAtMs: snapshot.createdAtMs,
       ...(snapshot.clientIntent ? { clientIntent: snapshot.clientIntent } : {}),
+      ...(snapshot.reviewRequest ? { reviewRequest: snapshot.reviewRequest } : {}),
     };
   }
 
@@ -449,7 +454,9 @@ export class TuiDraftRecovery {
         .map((attachment) => resolve(attachment.filePath))
         .filter((filePath) => dirname(filePath) === resolve(this.assetsDirectory)),
     );
-    const entries = await readdir(this.assetsDirectory, { withFileTypes: true }).catch(() => []);
+    const entries = await readdir(this.assetsDirectory, {
+      withFileTypes: true,
+    }).catch(() => []);
     await Promise.all(
       entries.map(async (entry) => {
         if (!entry.isFile()) return;
@@ -508,6 +515,7 @@ function cloneDraft(draft: TuiRecoverableDraft): TuiRecoverableDraft {
   return {
     editor: {
       ...draft.editor,
+      pluginMentions: draft.editor.pluginMentions?.map((mention) => ({ ...mention })),
       pastes: draft.editor.pastes.map((paste) => ({ ...paste })),
       ...(draft.editor.attachmentPlaceholders
         ? {
@@ -537,7 +545,9 @@ function cloneRetrySubmission(retry: TuiRetrySubmission): TuiRetrySubmission {
       ...(retry.snapshot.transportContent
         ? { transportContent: retry.snapshot.transportContent }
         : {}),
-      attachments: retry.snapshot.attachments.map((attachment) => ({ ...attachment })),
+      attachments: retry.snapshot.attachments.map((attachment) => ({
+        ...attachment,
+      })),
       ...(retry.snapshot.transportAttachments
         ? {
             transportAttachments: retry.snapshot.transportAttachments.map((attachment) => ({
@@ -547,6 +557,7 @@ function cloneRetrySubmission(retry: TuiRetrySubmission): TuiRetrySubmission {
         : {}),
       createdAtMs: retry.snapshot.createdAtMs,
       ...(retry.snapshot.clientIntent ? { clientIntent: retry.snapshot.clientIntent } : {}),
+      ...(retry.snapshot.reviewRequest ? { reviewRequest: retry.snapshot.reviewRequest } : {}),
     },
   };
 }
@@ -554,6 +565,7 @@ function cloneRetrySubmission(retry: TuiRetrySubmission): TuiRetrySubmission {
 function cloneEditorDraft(editor: EditorDraftSnapshot): EditorDraftSnapshot {
   return {
     ...editor,
+    pluginMentions: editor.pluginMentions?.map((mention) => ({ ...mention })),
     pastes: editor.pastes.map((paste) => ({ ...paste })),
     ...(editor.attachmentPlaceholders
       ? {
@@ -579,7 +591,8 @@ function relocateEditorAttachmentPlaceholders(
   };
 }
 
-function retainAvailableAttachmentPlaceholders(
+/** Drops editor attachment placeholders whose backing file no longer exists. */
+export function retainAvailableAttachmentPlaceholders(
   editor: EditorDraftSnapshot,
   attachments: readonly TuiAttachment[],
 ): EditorDraftSnapshot {
@@ -620,6 +633,16 @@ function relocateStoredDraftAssets(
         ...retry.snapshot,
         attachments: retryAttachments,
         editor: relocateEditorAttachmentPlaceholders(retry.snapshot.editor, relocatedPaths),
+        ...(retry.snapshot.transportAttachments
+          ? {
+              transportAttachments: retry.snapshot.transportAttachments.map((attachment) => ({
+                ...attachment,
+                ...(attachment.filePath && relocatedPaths.has(attachment.filePath)
+                  ? { filePath: relocatedPaths.get(attachment.filePath) }
+                  : {}),
+              })),
+            }
+          : {}),
       },
     };
   });
@@ -711,6 +734,8 @@ function isSubmissionSnapshot(value: unknown): value is TuiSubmissionSnapshot {
     (value.clientIntent !== undefined &&
       value.clientIntent !== 'plan-entry' &&
       value.clientIntent !== 'plan-exit') ||
+    (value.reviewRequest !== undefined &&
+      (!isRecord(value.reviewRequest) || value.reviewRequest.scope !== 'local_changes')) ||
     !Number.isFinite(value.createdAtMs)
   ) {
     return false;
@@ -734,6 +759,7 @@ function isEditorDraft(value: unknown): value is EditorDraftSnapshot {
     !isRecord(value) ||
     value.schemaVersion !== 1 ||
     typeof value.text !== 'string' ||
+    !validPluginMentions(value.text, value.pluginMentions) ||
     !Number.isInteger(value.cursor) ||
     (value.cursor as number) < 0 ||
     (value.cursor as number) > value.text.length ||

@@ -80,7 +80,12 @@ export interface GoalTurnSignal {
   readonly summary?: string;
 }
 
-export type ThreadGoalSignalCollectionResult = 'accepted' | 'stale' | 'no_goal' | 'paused';
+export type ThreadGoalSignalCollectionResult =
+  | 'accepted'
+  | 'not_a_goal_turn'
+  | 'stale'
+  | 'no_goal'
+  | 'paused';
 
 export const THREAD_GOAL_STATUS_REASONS = [
   'complete(worker_proposal)',

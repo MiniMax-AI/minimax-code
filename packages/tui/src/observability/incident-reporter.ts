@@ -661,8 +661,8 @@ function minimizeEventLog(value: unknown, eventType: string): string {
   // An already minimized unknown thrown value stays unknown after disk replay.
   const breadcrumbs = (Array.isArray(log.breadcrumbs) ? log.breadcrumbs : [])
     .slice(-MAX_BREADCRUMBS)
-    .flatMap((value) => {
-      const crumb = record(value);
+    .flatMap((breadcrumb) => {
+      const crumb = record(breadcrumb);
       const name = allowedString(crumb.name, BREADCRUMB_NAMES);
       const phase = allowedString(record(crumb.details).phase, PHASES);
       return name && timestamp(crumb.occurredAtMs)

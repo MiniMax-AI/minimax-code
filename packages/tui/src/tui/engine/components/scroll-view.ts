@@ -192,9 +192,6 @@ export class ScrollView extends Container {
 		if (this.followingEnd) this.currentScrollTop = maxScrollTop;
 		else this.currentScrollTop = Math.max(0, Math.min(this.currentScrollTop, maxScrollTop));
 		if (this.currentScrollTop < maxScrollTop) this.followSuppressedAtEnd = false;
-		if (this.followEnd && this.currentScrollTop === maxScrollTop && !this.followSuppressedAtEnd) {
-			this.followingEnd = true;
-		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
 	}
 

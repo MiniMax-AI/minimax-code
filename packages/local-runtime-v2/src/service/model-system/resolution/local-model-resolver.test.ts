@@ -405,7 +405,7 @@ describe('LocalModelResolver model routing', () => {
         id: 'MiniMax-M3',
         api: 'anthropic-messages',
         baseUrl: 'https://byok.example/messages-api',
-        contextWindow: 512_000,
+        contextWindow: 400_000,
       },
     });
     expect(resolved.streamFn).toBeTypeOf('function');
@@ -416,7 +416,7 @@ describe('LocalModelResolver model routing', () => {
 });
 
 describe('LocalModelResolver request-body byte authority', () => {
-  it('exposes only positive safe integers', async () => {
+  it('preserves positive safe integers and defaults missing or invalid legacy limits', async () => {
     const resolver = new LocalModelResolver({
       providerConfig: {
         'provider-native': {
@@ -457,15 +457,7 @@ describe('LocalModelResolver request-body byte authority', () => {
     );
 
     expect(resolved.map((model) => model.maxRequestBodyBytes)).toEqual([
-      128,
-      256,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+      128, 256, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864,
     ]);
   });
 });
@@ -1528,5 +1520,93 @@ describe('LocalModelResolver custom provider compat overrides', () => {
         'https://api.kimi.com/coding/v1',
       ),
     ).toBe('developer');
+  });
+});
+
+// A relay keyed on session identity only sees it when the provider entry opts in, so these
+// cases pin the wire-level request for an Anthropic-compatible custom provider.
+describe('LocalModelResolver custom provider session affinity', () => {
+  const readHeaders = (source: unknown): Record<string, string> => {
+    if (!source) return {};
+    const entries =
+      typeof Headers !== 'undefined' && source instanceof Headers
+        ? [...source.entries()]
+        : Object.entries(source as Record<string, unknown>);
+    return Object.fromEntries(
+      entries.flatMap(([key, value]) =>
+        typeof value === 'string' ? [[key.toLowerCase(), value]] : [],
+      ),
+    );
+  };
+
+  const requestFor = async (
+    compat: LocalModelConfig['compat'],
+    cacheRetention?: 'none',
+  ) => {
+    const modelConfig: LocalModelConfig = compat ? { compat } : {};
+    const resolver = new LocalModelResolver({
+      byokConfigGetter: () => ({
+        custom_provider: {
+          relay: {
+            api: 'anthropic-messages',
+            options: { apiKey: 'relay-key', baseURL: 'https://relay.example' },
+            models: { 'MiniMax-M2': modelConfig },
+          },
+        },
+      }),
+    });
+    const resolved = await resolver.resolveModel({
+      sessionId: 'session-affinity-wire',
+      turnId: 'turn-affinity-wire',
+      agentConfig: {
+        ...AGENT_CONFIG,
+        model: modelRefForModel('custom_provider:relay', 'MiniMax-M2', modelConfig),
+      },
+    });
+
+    let headers: Record<string, string> = {};
+    let payload: unknown;
+    await streamSimple(
+      resolved.model,
+      {
+        systemPrompt: 'Follow instructions.',
+        messages: [{ role: 'user', content: 'Hi', timestamp: Date.now() }],
+      },
+      {
+        apiKey: 'relay-key',
+        sessionId: 'session-affinity-wire',
+        ...(cacheRetention ? { cacheRetention } : {}),
+        onPayload: (params: unknown) => {
+          payload = params;
+        },
+        // Headers are captured before transport, so the request never leaves the test.
+        fetch: ((_url: unknown, init?: { headers?: unknown }) => {
+          headers = readHeaders(init?.headers);
+          return Promise.reject(new Error('offline'));
+        }) as unknown as typeof globalThis.fetch,
+      },
+    ).result();
+    return { headers, payload: payload as { metadata?: { user_id?: string } } };
+  };
+
+  it('omits session identity when the provider entry declares no compat', async () => {
+    const { headers, payload } = await requestFor(undefined);
+
+    expect(headers['x-session-affinity']).toBeUndefined();
+    expect(payload.metadata).toBeUndefined();
+  });
+
+  it('sends x-session-affinity once the provider entry opts in', async () => {
+    const { headers, payload } = await requestFor({ sendSessionAffinityHeaders: true });
+
+    expect(headers['x-session-affinity']).toBe('session-affinity-wire');
+    // The session id stays out of `metadata.user_id`, which is an attribution field.
+    expect(payload.metadata).toBeUndefined();
+  });
+
+  it('withholds the header when the turn runs without prompt caching', async () => {
+    const { headers } = await requestFor({ sendSessionAffinityHeaders: true }, 'none');
+
+    expect(headers['x-session-affinity']).toBeUndefined();
   });
 });

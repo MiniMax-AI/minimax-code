@@ -13,6 +13,7 @@ import {
 } from './submission.js';
 
 const ADOPTION_RETRY_DELAY_MS = 30_000;
+const RESTORED_SUBMISSION_CODE = 'submission.restored';
 
 export class TuiDraftLifecycle {
   private recovery?: TuiDraftRecovery;
@@ -122,6 +123,39 @@ export class TuiDraftLifecycle {
     void this.recovery.flush(this.capture()).catch((error: unknown) => this.report(error));
   }
 
+  /** Persist an aborted submission's opaque metadata without replaying its text on hydrate. */
+  recordRestoredSubmission(snapshot: TuiSubmissionSnapshot): void {
+    if (this.stopped) return;
+    for (const [submissionToken, pending] of this.pendingSubmissions) {
+      if (pending.sessionKey !== this.sessionKey) continue;
+      this.pendingSubmissions.delete(submissionToken);
+    }
+    const hasTransportOnlyAttachment = snapshot.transportAttachments?.some(
+      (attachment) =>
+        !attachment.filePath ||
+        !snapshot.attachments.some((draft) => draft.filePath === attachment.filePath),
+    );
+    if (
+      snapshot.transportContent ||
+      snapshot.clientIntent ||
+      snapshot.reviewRequest ||
+      hasTransportOnlyAttachment
+    ) {
+      const retryId = `retry:restored:${snapshot.submissionId}`;
+      this.pendingSubmissions.set(retryId, {
+        sessionKey: this.sessionKey,
+        retry: {
+          retryId,
+          failureCode: RESTORED_SUBMISSION_CODE,
+          failedReason: 'Aborted submission returned to the composer.',
+          snapshot,
+        },
+      });
+    }
+    // This also removes the matching interrupted retry from the recovery file.
+    void this.recovery?.flush(this.capture()).catch((error: unknown) => this.report(error));
+  }
+
   switchSession(sessionKey: string): Promise<void> {
     return this.enqueueTransition(async () => {
       if (this.stopped || sessionKey === this.sessionKey) return;
@@ -202,12 +236,15 @@ export class TuiDraftLifecycle {
 
   async stop(): Promise<void> {
     if (this.stopped) return;
+    // The app disposes the editor immediately after calling stop(); capture
+    // placeholder metadata before its dispose() clears that state.
+    const finalDraft = this.capture();
     this.stopped = true;
     await this.transitionTail.catch(() => undefined);
     let releaseDraft = true;
     if (this.recovery) {
       try {
-        await this.recovery.flush(this.capture(), { materializeVolatileAttachments: true });
+        await this.recovery.flush(finalDraft, { materializeVolatileAttachments: true });
       } catch (error) {
         releaseDraft = false;
         this.report(error);
@@ -251,8 +288,21 @@ export class TuiDraftLifecycle {
 
   private capture() {
     const draft = this.options.composerDraft.snapshot();
+    const editor = this.options.editor.captureDraft();
+    // Clearing a visible restored draft also discards its hidden metadata.
+    if (!editor.text && draft.attachments.length === 0) {
+      for (const [token, pending] of this.pendingSubmissions) {
+        if (
+          pending.sessionKey === this.sessionKey &&
+          pending.retry.failureCode === RESTORED_SUBMISSION_CODE &&
+          (pending.retry.snapshot.editor.text || pending.retry.snapshot.content)
+        ) {
+          this.pendingSubmissions.delete(token);
+        }
+      }
+    }
     return {
-      editor: this.options.editor.captureDraft(),
+      editor,
       attachments: [...draft.attachments],
       retrySubmissions: this.captureRetrySubmissions(this.sessionKey),
     };
@@ -262,6 +312,11 @@ export class TuiDraftLifecycle {
     let restoredEditor = this.options.editor.restoreDraft(recovered.editor);
     this.options.composerDraft.restoreAttachments(recovered.attachments);
     for (const retry of recovered.retrySubmissions ?? []) {
+      if (retry.failureCode === RESTORED_SUBMISSION_CODE) {
+        this.pendingSubmissions.set(retry.retryId, { sessionKey: this.sessionKey, retry });
+        this.options.onRetryRestored?.(retry.snapshot);
+        continue;
+      }
       if (retry.failureCode !== 'submission.interrupted') continue;
       restoredEditor =
         this.options.editor.restoreSubmittedDraft(retry.snapshot.editor) || restoredEditor;

@@ -1,3 +1,4 @@
+import { buildPluginId } from '@mavis/shared/plugin-mention';
 import type {
   CliService,
   InstalledPluginSummary,
@@ -124,7 +125,7 @@ function toPluginView(
   const name = plugin.name.trim();
   if (!name) return undefined;
   return {
-    pluginId: `${name}@${marketplace}`,
+    pluginId: buildPluginId(name, marketplace),
     name,
     displayName: plugin.displayName?.trim() || name,
     marketplace,

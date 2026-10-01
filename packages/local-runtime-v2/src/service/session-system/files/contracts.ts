@@ -3,7 +3,7 @@ import type { SessionRepository } from '../sessions/repo/contract.js';
 import type { SessionAssetRepository } from './repo/contract.js';
 
 export interface SessionFilesServiceOptions {
-  readonly messages: Pick<MessageRepository, 'list' | 'latestDisplayRowId'>;
+  readonly messages: Pick<MessageRepository, 'latestDisplayRowId'>;
   readonly assets: SessionAssetRepository;
   readonly sessions: Pick<SessionRepository, 'has'>;
   readonly nowMs?: () => number;

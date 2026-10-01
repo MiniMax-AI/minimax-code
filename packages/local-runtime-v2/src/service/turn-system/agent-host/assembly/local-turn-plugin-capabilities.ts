@@ -1,3 +1,4 @@
+import { buildPluginId, parsePluginMentions } from '@mavis/shared/plugin-mention';
 import type { RuntimeTool } from '@mavis/agent-core/tools';
 import {
   attachPluginCapabilityAttribution,
@@ -66,7 +67,10 @@ export interface MergeAgentHostTurnCapabilitiesInput {
   readonly capabilities?: AgentHostTurnCapabilityView;
   readonly model: McpModelIdentity;
   readonly options: McpDisclosureOptions;
-  readonly effectivePluginSkills: readonly { readonly pluginName: string; readonly name: string }[];
+  readonly effectivePluginSkills: readonly {
+    readonly pluginName: string;
+    readonly name: string;
+  }[];
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
   readonly surface?: HostCapabilitySurface;
   readonly userText?: string;
@@ -84,7 +88,13 @@ export function mergeAgentHostTurnCapabilities(
 ): MergedAgentHostTurnCapabilities {
   const merged = mergeTools(input);
   const capabilities = input.capabilities;
-  if (!capabilities) return merged;
+  if (!capabilities) {
+    const reminder = buildPluginReferenceReminder(
+      [],
+      parsePluginMentions(input.userText ?? '').map((mention) => mention.pluginId),
+    );
+    return { ...merged, ...(reminder ? { reminder } : {}) };
+  }
   const attributed = {
     ...merged,
     tools: attachPluginCapabilityAttribution(
@@ -98,29 +108,38 @@ export function mergeAgentHostTurnCapabilities(
     ),
   };
   if (input.userText === undefined) return attributed;
-  const reminder = buildPluginReferenceReminder(
-    detectPluginReferencesForMessages(
-      [{ content: input.userText }],
-      input.userText,
-      buildCapabilityInventory({
-        capabilities,
-        effectivePluginSkills: input.effectivePluginSkills,
-        // Attribution decorates relevant tools with cloned wrapper objects.
-        // Inventory filtering must retain the pre-decoration identities used
-        // by runtimeToolBindings and the deferred registry.
-        finalTools: merged.tools,
-        deferredToolNames: new Set(
-          attributed.plan.deferred ? attributed.plan.deferredRegistry.keys() : [],
-        ),
-      }),
+  const inventory = buildCapabilityInventory({
+    capabilities,
+    effectivePluginSkills: input.effectivePluginSkills,
+    // Inventory filtering uses the pre-attribution tool identities.
+    finalTools: merged.tools,
+    deferredToolNames: new Set(
+      attributed.plan.deferred ? attributed.plan.deferredRegistry.keys() : [],
     ),
+  });
+  const unavailable = [
+    ...new Set(parsePluginMentions(input.userText).map((mention) => mention.pluginId)),
+  ].filter(
+    (id) =>
+      !inventory.some(
+        (plugin) =>
+          plugin.pluginId === id &&
+          (plugin.skills.length > 0 || plugin.appTools.length > 0 || plugin.mcpTools.length > 0),
+      ),
+  );
+  const reminder = buildPluginReferenceReminder(
+    detectPluginReferencesForMessages([{ content: input.userText }], input.userText, inventory),
+    unavailable,
   );
   return { ...attributed, ...(reminder ? { reminder } : {}) };
 }
 
 function buildAttributionIndex(input: {
   readonly capabilities: AgentHostTurnCapabilityView;
-  readonly effectivePluginSkills: readonly { readonly pluginName: string; readonly name: string }[];
+  readonly effectivePluginSkills: readonly {
+    readonly pluginName: string;
+    readonly name: string;
+  }[];
   readonly finalTools: readonly RuntimeTool[];
   readonly plan: McpDisclosurePlan;
 }): PluginCapabilityAttributionIndex {
@@ -273,7 +292,10 @@ function mergeSearchableTools(
   );
   for (const tool of selected.searchable) deferredRegistry.set(tool.def.name, tool);
   const index = buildOrReuseIndex(
-    [...deferredRegistry.values()].map((tool) => ({ tool, source: 'configured' as const })),
+    [...deferredRegistry.values()].map((tool) => ({
+      tool,
+      source: 'configured' as const,
+    })),
     { maxSchemaTextLen: input.options.maxSchemaTextLen },
   );
   const estimate = input.options.estimateTokens ?? estimateToolTokens;
@@ -312,16 +334,20 @@ function mergeSearchableTools(
 
 function buildCapabilityInventory(input: {
   readonly capabilities: AgentHostTurnCapabilityView;
-  readonly effectivePluginSkills: readonly { readonly pluginName: string; readonly name: string }[];
+  readonly effectivePluginSkills: readonly {
+    readonly pluginName: string;
+    readonly name: string;
+  }[];
   readonly finalTools: readonly RuntimeTool[];
   readonly deferredToolNames: ReadonlySet<string>;
 }): EffectivePluginCapabilityInventory[] {
   const finalTools = new Set(input.finalTools);
-  const searchableAppToolsAvailable =
+  const searchableToolsAvailable =
     input.finalTools.some((tool) => tool.def.name === 'tool_search') &&
     input.finalTools.some((tool) => tool.def.name === 'mcp_invoke');
   return input.capabilities.plugins.map((plugin) => ({
     name: plugin.name,
+    pluginId: buildPluginId(plugin.name, plugin.source),
     appTools: plugin.appProviders.flatMap((provider) => {
       const bindings = input.capabilities.runtimeToolBindings.filter(
         (binding) => binding.kind === 'app' && binding.source === provider,
@@ -333,7 +359,7 @@ function buildCapabilityInventory(input: {
           ? [binding.tool.def.name]
           : [],
       );
-      const searchable = searchableAppToolsAvailable
+      const searchable = searchableToolsAvailable
         ? bindings.flatMap((binding) =>
             binding.toolMode === 'tool_search' && input.deferredToolNames.has(binding.tool.def.name)
               ? [binding.tool.def.name]
@@ -343,18 +369,37 @@ function buildCapabilityInventory(input: {
       return [
         ...(direct.length > 0 ? [{ source: provider, tools: direct }] : []),
         ...(searchable.length > 0
-          ? [{ source: provider, tools: searchable, access: 'tool_search' as const }]
+          ? [
+              {
+                source: provider,
+                tools: searchable,
+                access: 'tool_search' as const,
+              },
+            ]
           : []),
       ];
     }),
-    mcpTools: groupMcpTools(
-      input.capabilities.runtimeToolBindings.filter(
-        (binding) =>
-          binding.kind === 'mcp' &&
-          binding.pluginName === plugin.name &&
-          finalTools.has(binding.tool),
+    mcpTools: [
+      ...groupMcpTools(
+        input.capabilities.runtimeToolBindings.filter(
+          (binding) =>
+            binding.kind === 'mcp' &&
+            binding.pluginName === plugin.name &&
+            finalTools.has(binding.tool),
+        ),
       ),
-    ),
+      ...(searchableToolsAvailable
+        ? groupMcpTools(
+            input.capabilities.runtimeToolBindings.filter(
+              (binding) =>
+                binding.kind === 'mcp' &&
+                binding.pluginName === plugin.name &&
+                !finalTools.has(binding.tool) &&
+                input.deferredToolNames.has(binding.tool.def.name),
+            ),
+          ).map((group) => ({ ...group, access: 'tool_search' as const }))
+        : []),
+    ],
     skills: input.effectivePluginSkills.flatMap((skill) =>
       skill.pluginName === plugin.name ? [skill.name] : [],
     ),

@@ -37,14 +37,29 @@ export function buildCheckpointControl(instructions?: string): string {
   ].join('\n');
 }
 
+/** Share of the context window granted to checkpoint output (1/8). */
+const CHECKPOINT_OUTPUT_WINDOW_DIVISOR = 8;
+
+/**
+ * Checkpoint output budget. Reasoning and checkpoint text share one output
+ * budget, so larger windows (longer histories) get proportionally more room.
+ * The Pi reserve cap stays the floor and the model output limit the ceiling.
+ * A missing or invalid context window only drops the window share.
+ */
 export function checkpointMaxOutputTokens(
   reserveTokens: number,
   modelMaxOutputTokens: number,
+  contextWindow: number,
 ): number {
   validateNonNegativeSafeInteger(reserveTokens, 'reserveTokens');
   validateNonNegativeSafeInteger(modelMaxOutputTokens, 'modelMaxOutputTokens');
   const reserveCap = Number((BigInt(reserveTokens) * 4n) / 5n);
-  return Math.min(reserveCap, modelMaxOutputTokens);
+  return Math.min(Math.max(reserveCap, windowShare(contextWindow)), modelMaxOutputTokens);
+}
+
+function windowShare(contextWindow: number): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return 0;
+  return Math.floor(contextWindow / CHECKPOINT_OUTPUT_WINDOW_DIVISOR);
 }
 
 function escapeInstructionData(instructions: string): string {

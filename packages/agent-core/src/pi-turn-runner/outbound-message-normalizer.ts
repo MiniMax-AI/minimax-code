@@ -8,7 +8,7 @@ import type {
   ThinkingContent,
   UserMessage,
 } from '@earendil-works/pi-ai';
-import { convertToLlm } from '@earendil-works/pi-coding-agent';
+import { convertToLlm } from '@earendil-works/pi-coding-agent/messages';
 
 import { imageDimensions } from './image-dimensions.js';
 

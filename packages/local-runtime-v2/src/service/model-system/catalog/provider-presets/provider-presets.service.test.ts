@@ -178,6 +178,46 @@ async function parsePresetsForTest(catalog: Record<string, unknown>, iconBaseUrl
 }
 
 describe('models.dev Provider Presets', () => {
+  it('distinguishes all Z.AI and Zhipu plans without changing catalog IDs or endpoints', async () => {
+    const plans = [
+      ['zai', 'Z.AI API', 'https://api.z.ai/api/paas/v4'],
+      ['zai-coding-plan', 'Z.AI Coding Plan', 'https://api.z.ai/api/coding/paas/v4'],
+      ['zhipuai', 'Zhipu AI API', 'https://open.bigmodel.cn/api/paas/v4'],
+      [
+        'zhipuai-coding-plan',
+        'Zhipu AI Coding Plan',
+        'https://open.bigmodel.cn/api/coding/paas/v4',
+      ],
+    ];
+    const presets = await parsePresetsForTest(
+      Object.fromEntries(
+        plans.map(([id, , api]) => [
+          id,
+          {
+            name: 'Ambiguous upstream label',
+            npm: '@ai-sdk/openai-compatible',
+            api,
+            models: { 'glm-5.3': { name: 'GLM-5.3', tool_call: true } },
+          },
+        ]),
+      ),
+    );
+    expect(presets).toHaveLength(4);
+    for (const [providerId, name, baseUrl] of plans) {
+      const preset = presets.find((item) => item.providerId === providerId);
+      expect(preset).toMatchObject({
+        providerId,
+        name,
+        baseUrl,
+        apiFormat: 'openai-completions',
+        models: [{ modelId: 'glm-5.3' }],
+      });
+      expect(providerCompletionUrl('openai-completions', preset!.baseUrl)).toBe(
+        `${baseUrl}/chat/completions`,
+      );
+    }
+  });
+
   it('builds each Provider icon URL from the catalog snapshot prefix', async () => {
     const [preset] = await parsePresetsForTest(
       providerCatalog(['vendor.with.dots']),
@@ -686,6 +726,7 @@ describe('Provider Preset ordering', () => {
   it('uses the region-local CN and Global pin order when Apollo is unavailable', async () => {
     const cnIds = [
       'minimax-cn',
+      'zhipuai-coding-plan',
       'zhipuai',
       'deepseek',
       'moonshotai-cn',
@@ -705,6 +746,7 @@ describe('Provider Preset ordering', () => {
 
     const globalIds = [
       'minimax',
+      'zai-coding-plan',
       'zai',
       'deepseek',
       'moonshotai',

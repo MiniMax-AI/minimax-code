@@ -28,6 +28,8 @@ export interface ForkRequest {
 }
 
 export type ResolvedForkRequest = ForkRequest & {
+  /** Frozen inclusive history boundary for a side conversation; may be a tool result. */
+  readonly sideHistoryMessageId?: string;
   readonly assistantDisplayMessageId: string;
 };
 
@@ -77,6 +79,8 @@ export interface ForkResumeResult {
 }
 
 export interface ForkBoundary {
+  /** Inclusive complete-prefix boundary selected for a side conversation. */
+  readonly sideHistoryMessageId?: string;
   readonly messages: readonly DisplayMessageRecord[];
   readonly assistant: DisplayMessageRecord;
   readonly assistantIndex: number;
@@ -91,6 +95,7 @@ export interface ForkBoundary {
 
 export interface ForkBoundaryPort {
   resolve(input: {
+    readonly sideHistory?: { readonly throughMessageId?: string };
     readonly sessionId: string;
     readonly assistantDisplayMessageId?: string;
   }): Promise<ForkBoundary | undefined>;
@@ -159,6 +164,7 @@ export interface ForkHistoryPort {
     readonly targetSessionId: string;
     readonly targetWorkspaceDir: string;
     readonly throughAssistantMessageId?: string;
+    readonly throughMessageId?: string;
     readonly beforeUserMessageId?: UserMessageId;
     readonly rewindTargetWorkspace?: boolean;
     readonly operationId: string;

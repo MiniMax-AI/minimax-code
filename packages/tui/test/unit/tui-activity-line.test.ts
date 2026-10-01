@@ -153,7 +153,7 @@ describe('TuiActivityLine', () => {
       outputTokensPerSecond: 63,
     });
 
-    expect(output).toContain('⚡ 63.0 tok/s');
+    expect(output).toContain('⚡ 63 tok/s');
   });
 
   it.each([undefined, 0, Number.NaN, Number.POSITIVE_INFINITY])(

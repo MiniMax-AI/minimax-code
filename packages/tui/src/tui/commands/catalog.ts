@@ -371,6 +371,15 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
     unavailableReason: 'Finish the pending interaction before configuring the status line.',
   },
   {
+    name: 'theme',
+    description: 'Choose the MCode color theme and terminal appearance',
+    category: 'Application',
+    // Reachable by typing, but kept out of the default slash list: theme
+    // selection is a preference, not a primary verb.
+    discoverability: 'search-only',
+    readiness: 'immediate',
+  },
+  {
     name: 'hotkeys',
     description: 'View and customize TUI keyboard shortcuts',
     category: 'Application',

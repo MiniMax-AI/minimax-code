@@ -3,18 +3,22 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TextDecoder } from "node:util";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateHead, truncateTail } from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
 	tempFilePrefix?: string;
+	strategy?: "tail" | "head_tail";
+	/** Disable when the host already owns the complete output log. */
+	persistOutput?: boolean;
 }
 
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
 	fullOutputPath?: string;
+	rawBytes: number;
 }
 
 function defaultTempFilePath(prefix: string): string {
@@ -38,10 +42,15 @@ export class OutputAccumulator {
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
 	private readonly tempFilePrefix: string;
+	private readonly strategy: "tail" | "head_tail";
+	private readonly persistOutput: boolean;
 	private readonly decoders = new Map<string, TextDecoder>();
 
 	private decodedChunks: Buffer[] = [];
 	private tailText = "";
+	private headText = "";
+	private headBytes = 0;
+	private headClosed = false;
 	private tailBytes = 0;
 	private tailStartsAtLineBoundary = true;
 	private totalRawBytes = 0;
@@ -54,12 +63,15 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private tempFileError: Error | undefined;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
+		this.strategy = options.strategy ?? "tail";
+		this.persistOutput = options.persistOutput !== false;
 	}
 
 	append(data: Buffer, stream: "stdout" | "stderr" | "combined" = "combined"): void {
@@ -90,11 +102,21 @@ export class OutputAccumulator {
 	}
 
 	snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
-		const tailTruncation = truncateTail(this.getSnapshotText(), {
+		let tailTruncation = truncateTail(this.getSnapshotText(), {
 			maxLines: this.maxLines,
 			maxBytes: this.maxBytes,
 		});
 		const truncated = this.totalLines > this.maxLines || this.totalDecodedBytes > this.maxBytes;
+		if (this.strategy === "head_tail" && truncated) {
+			const marker = "\n\n[... output omitted ...]\n\n";
+			const budget = Math.max(0, this.maxBytes - byteLength(marker));
+			const headBudget = Math.floor(budget * 0.45);
+			const head = truncateHead(this.headText, { maxBytes: headBudget, maxLines: this.maxLines }).content
+				|| utf8Prefix(this.headText, headBudget);
+			const tail = truncateTail(this.tailText, { maxBytes: budget - headBudget, maxLines: this.maxLines }).content;
+			const content = utf8Prefix(head + marker + tail, this.maxBytes);
+			tailTruncation = { ...tailTruncation, content, outputBytes: byteLength(content), outputLines: content.split("\n").length };
+		}
 		const truncatedBy = truncated
 			? (tailTruncation.truncatedBy ?? (this.totalDecodedBytes > this.maxBytes ? "bytes" : "lines"))
 			: null;
@@ -115,11 +137,13 @@ export class OutputAccumulator {
 		return {
 			content: truncation.content,
 			truncation,
-			fullOutputPath: this.tempFilePath,
+			fullOutputPath: this.tempFileError ? undefined : this.tempFilePath,
+			rawBytes: this.totalRawBytes,
 		};
 	}
 
 	async closeTempFile(): Promise<void> {
+		if (this.tempFileError) throw this.tempFileError;
 		if (!this.tempFileStream) {
 			return;
 		}
@@ -153,6 +177,11 @@ export class OutputAccumulator {
 
 		const bytes = byteLength(text);
 		this.totalDecodedBytes += bytes;
+		if (this.strategy === "head_tail" && !this.headClosed) {
+			this.headClosed = this.headBytes + bytes >= this.maxBytes;
+			this.headText += utf8Prefix(text, this.maxBytes - this.headBytes);
+			this.headBytes = byteLength(this.headText);
+		}
 		this.tailText += text;
 		this.tailBytes += bytes;
 		if (this.tailBytes > this.maxRollingBytes * 2) {
@@ -179,6 +208,7 @@ export class OutputAccumulator {
 
 	private appendDecodedChunk(text: string): void {
 		this.appendDecodedText(text);
+		if (!this.persistOutput || this.tempFileError) return;
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
 			if (text.length > 0) this.tempFileStream?.write(text, "utf-8");
@@ -220,14 +250,24 @@ export class OutputAccumulator {
 	}
 
 	private ensureTempFile(): void {
-		if (this.tempFilePath) {
+		if (!this.persistOutput || this.tempFilePath) {
 			return;
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
 		this.tempFileStream = createWriteStream(this.tempFilePath);
+		this.tempFileStream.on("error", (error) => {
+			this.tempFileError = error;
+		});
 		for (const chunk of this.decodedChunks) {
 			this.tempFileStream.write(chunk);
 		}
 		this.decodedChunks = [];
 	}
+}
+
+function utf8Prefix(text: string, maxBytes: number): string {
+	const buffer = Buffer.from(text, "utf8");
+	let end = Math.min(buffer.length, Math.max(0, maxBytes));
+	while (end > 0 && (buffer[end] & 0xc0) === 0x80) end--;
+	return buffer.subarray(0, end).toString("utf8");
 }

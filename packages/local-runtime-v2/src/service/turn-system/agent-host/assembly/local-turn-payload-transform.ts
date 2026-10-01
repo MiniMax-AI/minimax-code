@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+
 import { isDefaultThinkingModelId, type Api, type Model } from '@earendil-works/pi-ai';
 import type { LLMModelConfig } from '@mavis/agent-core/pi-turn-runner';
 import { ThinkingLevel, ThinkingMode } from '@mavis/protocol';
@@ -19,6 +21,8 @@ const DEFAULT_FILE_API_REF_SCHEME = 'mm_file://';
 const DEFAULT_FILE_API_TTL_SEC = 43_200;
 
 export interface LocalTurnPayloadTransformOptions {
+  /** Effective client byte budget; enforced after all payload transformations. */
+  readonly maxRequestBodyBytes?: number;
   readonly thinkingLevel?: NonNullable<LocalResolvedModelConfig['thinkingLevel']>;
   readonly thinkingRequestPatch?: LocalResolvedModelConfig['thinkingRequestPatch'];
   readonly managedProvider?: boolean;
@@ -75,6 +79,7 @@ export function buildLocalTurnPayloadTransform(
       thinkingRequestPatch: options.thinkingRequestPatch,
       outputContract: options.outputContract,
       jsonObjectOutputEnabled: options.supportsJsonObjectOutput === true,
+      maxRequestBodyBytes: options.maxRequestBodyBytes,
     });
 }
 
@@ -121,6 +126,7 @@ export function buildLocalRequestPayloadTransform(
   const fileApiFetch = resolveFileApiFetch(input.llm, runtime.fileApi?.fetchImpl);
   return buildLocalTurnPayloadTransform(input.agentConfig, {
     thinkingLevel: input.llm.thinkingLevel ?? 'off',
+    maxRequestBodyBytes: input.llm.maxRequestBodyBytes,
     ...(input.llm.thinkingRequestPatch
       ? { thinkingRequestPatch: input.llm.thinkingRequestPatch }
       : {}),
@@ -184,6 +190,7 @@ async function transformLocalTurnPayload(input: {
   readonly thinkingRequestPatch: Readonly<Record<string, unknown>> | undefined;
   readonly outputContract: TurnOutputContract | undefined;
   readonly jsonObjectOutputEnabled: boolean;
+  readonly maxRequestBodyBytes: number | undefined;
 }): Promise<unknown | undefined> {
   if (!isRecord(input.payload)) return undefined;
   let changed = false;
@@ -206,7 +213,22 @@ async function transformLocalTurnPayload(input: {
     input.outputContract,
     input.jsonObjectOutputEnabled,
   );
+  assertRequestBodyFits(input.payload, input.maxRequestBodyBytes);
   return changed || requestPatchChanged || outputFormatChanged ? input.payload : undefined;
+}
+
+/** The estimate used to trigger compaction is not the final request body. */
+function assertRequestBodyFits(payload: Record<string, unknown>, limit: number | undefined): void {
+  if (limit === undefined) return;
+  const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  if (bytes <= limit) return;
+  throw Object.assign(
+    new Error(`Request body too large: ${bytes} bytes exceeds client limit ${limit} bytes.`),
+    {
+      code: 'REQUEST_BODY_TOO_LARGE',
+      retryable: false,
+    },
+  );
 }
 
 function patchOutputFormatPayload(

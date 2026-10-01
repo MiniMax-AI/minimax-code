@@ -319,6 +319,21 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
+		// Some terminal paste actions send plain text even with mode 2004 enabled.
+		// Preserve a multiline text chunk before splitting it into keypresses: CR
+		// would otherwise submit each line. Require text after a newline so ordinary
+		// text + Enter still submits. Never guess across chunks or control sequences;
+		// bracketed paste remains the only unambiguous framing for those inputs.
+		if (
+			!this.pasteMode && this.buffer.length === 0 &&
+			!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(str) &&
+			/[\r\n][^\r\n]/.test(str)
+		) {
+			this.pendingKittyPrintableCodepoint = undefined;
+			this.emit("paste", str);
+			return;
+		}
+
 		this.buffer += str;
 
 		if (this.pasteMode) {

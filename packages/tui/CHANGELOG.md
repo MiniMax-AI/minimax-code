@@ -7,6 +7,19 @@ This changelog covers important changes that directly affect MCode TUI users. It
 
 Internal refactors, test-only changes, and changes limited to other product surfaces are excluded.
 
+## 0.5.5 · 2026-09-25
+
+### Improved
+
+- Bash commands that automatically move to the background now have a one-hour default and maximum
+  total timeout. Explicit background tasks also default to one hour when no timeout is specified.
+  Foreground calls may return a task ID after 60 seconds without resetting the command timer.
+- Reduced the dependencies loaded at startup to keep the startup bundle smaller.
+
+- Improved automatic context compaction reliability: large-context models reserve room for replies
+  and start compacting earlier, and adaptive-thinking models at high reasoning effort no longer fail
+  repeatedly when reasoning consumes the output budget.
+
 ## 0.4.12 · 2026-09-18
 
 ### Improved

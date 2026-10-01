@@ -1,9 +1,12 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { McodeUpdateService, type McodeUpdateDependencies } from '../../src/update/service.js';
+import { resolveMcodeNpmDistribution } from '../../src/update/install-source.js';
 import type { McodeReleaseManifestV1 } from '../../src/update/release.js';
 
 const temporaryRoots: string[] = [];
@@ -54,6 +57,150 @@ afterEach(() => {
 });
 
 describe('McodeUpdateService', () => {
+  it
+    .skipIf(process.platform !== 'win32')
+    .each(['standard npm', 'custom npm wrapper', 'custom npm wrapper with adjacent CLI'])(
+    'installs and validates a managed update in a complex path with %s',
+    async (npmLayout) => {
+      const root = temporaryRoot();
+      const fixtureRoot = path.join(root, 'package');
+      mkdirSync(fixtureRoot);
+      writeFileSync(
+        path.join(fixtureRoot, 'package.json'),
+        JSON.stringify({
+          name: resolveMcodeNpmDistribution().packageName,
+          version: '1.2.4',
+          bin: { mcode: 'cli.cjs' },
+        }),
+      );
+      writeFileSync(
+        path.join(fixtureRoot, 'cli.cjs'),
+        "#!/usr/bin/env node\nconsole.log('1.2.4');\n",
+      );
+      const environment: NodeJS.ProcessEnv = {
+        ...process.env,
+        npm_config_offline: 'true',
+        npm_config_update_notifier: 'false',
+        npm_config_bin_links: 'true',
+        npm_config_cache: path.join(root, 'cache'),
+        npm_config_userconfig: path.join(root, 'npmrc'),
+      };
+      writeFileSync(path.join(root, 'npmrc'), '');
+      const npmCli = path.join(
+        path.dirname(process.execPath),
+        'node_modules',
+        'npm',
+        'bin',
+        'npm-cli.js',
+      );
+      const packed = JSON.parse(
+        execFileSync(
+          process.execPath,
+          [npmCli, 'pack', '--json', '--ignore-scripts', '--pack-destination', root],
+          { cwd: fixtureRoot, env: environment, encoding: 'utf8', timeout: 30_000 },
+        ),
+      );
+      if (npmLayout !== 'standard npm') {
+        const wrapperRoot = path.join(root, 'npm-wrapper');
+        mkdirSync(wrapperRoot);
+        let wrapperCli = npmCli;
+        if (npmLayout === 'custom npm wrapper with adjacent CLI') {
+          wrapperCli = path.join(wrapperRoot, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+          mkdirSync(path.dirname(wrapperCli), { recursive: true });
+          writeFileSync(wrapperCli, `require(${JSON.stringify(npmCli)});\n`);
+        }
+        environment.npm_config_bin_links = 'false';
+        writeFileSync(
+          path.join(wrapperRoot, 'npm.cmd'),
+          `@echo off\r\nset "npm_config_bin_links=true"\r\necho used> "%~dp0invoked"\r\n"${process.execPath}" "${wrapperCli}" %*\r\n`,
+        );
+        const pathKey = Object.keys(environment)
+          .filter((key) => key.toLowerCase() === 'path')
+          .sort()[0];
+        const inheritedPath = pathKey ? environment[pathKey] : undefined;
+        for (const key of Object.keys(environment)) {
+          if (key.toLowerCase() === 'path') delete environment[key];
+        }
+        environment.PATH = [wrapperRoot, inheritedPath].filter(Boolean).join(path.delimiter);
+      }
+      const artifact = readFileSync(path.join(root, packed[0].filename));
+      const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+      const manifest = Buffer.from(
+        JSON.stringify({
+          schemaVersion: 1,
+          product: 'minimax-code',
+          channel: 'stable',
+          version: '1.2.4',
+          publishedAt: '2026-09-24T00:00:00.000Z',
+          minNodeVersion: '22.19.0',
+          registry: 'https://registry.npmjs.org/',
+          installArtifact: {
+            url: 'https://updates.example.invalid/mcode.tgz',
+            sha256: createHash('sha256').update(artifact).digest('hex'),
+            size: artifact.length,
+          },
+          targets: Object.fromEntries(
+            ['darwin-arm64', 'darwin-x64', 'linux-x64', 'windows-x64', 'windows-arm64'].map(
+              (target) => [target, { sha256: 'a'.repeat(64), size: 1 }],
+            ),
+          ),
+        }),
+      );
+      const signature = Buffer.from(sign(null, manifest, privateKey).toString('base64'));
+      const installRoot = path.join(root, '用户 files & (test)');
+      mkdirSync(installRoot);
+      writeFileSync(path.join(installRoot, 'current'), '1.2.3\n');
+      const service = new McodeUpdateService({
+        currentVersion: '1.2.3',
+        installRoot,
+        environment,
+        publicKey: publicKey.export({ format: 'pem', type: 'spki' }).toString(),
+        releaseBaseUrl: 'https://updates.example.invalid',
+        dependencies: {
+          fetchBytes: async (url) =>
+            url.endsWith('.sig') ? signature : url.endsWith('.tgz') ? artifact : manifest,
+        },
+      });
+      const result = await service.apply({ channel: 'stable' });
+      expect(result.applied).toBe(true);
+      expect(readFileSync(path.join(installRoot, 'current'), 'utf8')).toBe('1.2.4\n');
+      if (npmLayout !== 'standard npm') {
+        expect(readFileSync(path.join(root, 'npm-wrapper', 'invoked'), 'utf8')).toMatch(/^used/);
+      }
+    },
+    60_000,
+  );
+
+  it.each(['HTTP_PROXY', 'ALL_PROXY', 'all_proxy'])(
+    'routes release downloads through %s',
+    async (variable) => {
+      const connects: string[] = [];
+      const proxy = createServer();
+      proxy.on('connect', (request, socket) => {
+        connects.push(request.url ?? '');
+        socket.end('HTTP/1.1 502 Fixture Proxy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+      });
+      await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+      try {
+        const address = proxy.address();
+        if (!address || typeof address === 'string') throw new Error('Expected TCP proxy');
+        const service = new McodeUpdateService({
+          currentVersion: '1.2.3',
+          installRoot: temporaryRoot(),
+          releaseBaseUrl: 'https://updates.example.invalid',
+          publicKey: releaseFixture().publicKey,
+          environment: { [variable]: `http://127.0.0.1:${address.port}` },
+        });
+        await expect(service.check({ timeoutMs: 1_000 })).rejects.toThrow();
+        expect(connects.length).toBeGreaterThan(0);
+        expect(connects.every((target) => target === 'updates.example.invalid:443')).toBe(true);
+      } finally {
+        proxy.closeAllConnections();
+        await new Promise<void>((resolve) => proxy.close(() => resolve()));
+      }
+    },
+  );
+
   it('checks a signed channel manifest without mutating the install root', async () => {
     const root = temporaryRoot();
     const fixture = releaseFixture();

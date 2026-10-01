@@ -39,7 +39,8 @@ export function tuiAgentAccessNeedsLogin(account: TuiAccountStatus): boolean {
 }
 
 export function tuiAccountNeedsLoginPrompt(account: TuiAccountStatus): boolean {
-  return tuiAgentAccessNeedsLogin(account) || account.managedTokenPresent === false;
+  // A missing MiniMax account does not block the selected BYOK route.
+  return tuiAgentAccessNeedsLogin(account);
 }
 
 async function readTuiAccount(

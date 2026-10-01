@@ -1,8 +1,7 @@
 /**
  * Default maximum wall-clock lifetime for a desktop background bash task.
- * This mirrors the cloud governance ceiling so local and cloud do not diverge.
  */
-export const DEFAULT_BACKGROUND_BASH_MAX_RUN_MS = 30 * 60 * 1000;
+export const DEFAULT_BACKGROUND_BASH_MAX_RUN_MS = 60 * 60 * 1000;
 export const MAX_BACKGROUND_BASH_MAX_RUN_MS = 2_147_483_647;
 
 /**
