@@ -131,6 +131,8 @@
       "packages/local-runtime/test/unit/local-output-safety-writer-v2-guide-review.test.ts",
       "packages/agent-modules/goal/test/unit/thread-goal/continuation.test.ts",
       "packages/agent-modules/goal/test/unit/thread-goal/tool-impls.test.ts",
+      "packages/agent-modules/goal/test/unit/thread-goal/final-reply.test.ts",
+      "packages/local-runtime-v2/src/application/agent/goal-final-reply.test.ts",
       "packages/local-runtime-v2/src/application/session/process-local-application.test.ts",
       "packages/local-runtime-v2/src/compat/v1/agent-host.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/queue.dispatcher.test.ts",

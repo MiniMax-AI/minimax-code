@@ -308,16 +308,29 @@ async function runBeforeLLM(
           marker: decision.message,
         });
         if (typeof placement === 'string') {
+          turn.logger.error(
+            {
+              session_id: turn.input.sessionId,
+              turn_id: turn.input.turnId,
+              phase,
+              reason: placement,
+            },
+            '[pi-turn-runner] beforeLlmCall placement aborted provider call',
+          );
           return { type: 'abort', reason: placement };
         }
         if (placement.type === 'defer') continue;
-        return {
-          type: 'append',
-          messages: placement.messages,
-          message: decision.message,
-          tailMessages: [],
-          durableReplacement: placement.durableReplacement,
-        };
+        if (placement.type === 'placed') {
+          return {
+            type: 'append',
+            messages: placement.messages,
+            message: decision.message,
+            tailMessages: [],
+            durableReplacement: placement.durableReplacement,
+          };
+        }
+        // 'tail': a continuation has no current user to precede, so the ordinary
+        // tail append already keeps real user input last.
       }
       return {
         type: 'append',
@@ -409,6 +422,7 @@ function placeBeforeCurrentUser(input: {
 }):
   | string
   | { readonly type: 'defer' }
+  | { readonly type: 'tail' }
   | {
       readonly type: 'placed';
       readonly messages: AgentMessage[];
@@ -420,7 +434,13 @@ function placeBeforeCurrentUser(input: {
   if (input.phase !== 'initial') return 'before-current-user requires the initial phase';
   if (!input.durableReplacement) return { type: 'defer' };
   const currentUser = input.initialCurrentUser;
-  if (!currentUser) return 'before-current-user could not locate one current real user';
+  if (!currentUser) {
+    // Continuation re-enters from history that can end with a tool round; with
+    // no real user at the tail there is nothing to precede. Aborting here would
+    // discard the durable replacement (e.g. a finished compaction) every retry.
+    if (input.initialMessages.at(-1)?.role !== 'user') return { type: 'tail' };
+    return 'before-current-user could not locate one current real user';
+  }
   const sourceIndex = input.initialMessages.length - 1;
   const sourceIndexes = input.durableReplacement.metadata.replacementSourceIndexes;
   const durableMatches = input.durableReplacement.messages.flatMap((message, index) =>

@@ -179,3 +179,17 @@ export type {
   ThreadGoalTokenBudgetMutationPort,
   ThreadGoalTokenBudgetMutationResult,
 } from './tool-impls.js';
+export {
+  GOAL_COMPLETION_TOOL_REFUSAL,
+  GOAL_FINAL_REPLY_INSTRUCTION,
+  GOAL_FINAL_REPLY_RETRY_PROMPT,
+  GOAL_FINAL_REPLY_RETRY_REASON,
+  createGoalFinalReplyGate,
+  isAcceptedGoalCompletionResult,
+} from './final-reply.js';
+export type {
+  GoalFinalReplyGate,
+  GoalFinalReplyResponse,
+  GoalFinalReplyResponseDecision,
+  GoalFinalReplyTurn,
+} from './final-reply.js';

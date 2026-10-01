@@ -315,7 +315,7 @@ test(
     }
     const configPath = path.join(dataDir, "config.yaml");
     const savedConfig = () => parseYaml(readFileSync(configPath, "utf8"));
-    assert.equal(savedConfig().defaultModel, "minimax/MiniMax-M3");
+    assert.equal(savedConfig().defaultModel, "minimax/MiniMax-M3.1-Flash-Preview");
     assert.equal(savedConfig().custom_provider.fixture.models["fixture-model"].limit, undefined);
     assert.equal(selected.active, false);
     assert.equal(selected.models[0].contextLimit, undefined);

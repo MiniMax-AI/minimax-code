@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-10-01 — keep Anthropic classifier refusal details
+
+- Reason: Claude safety-classifier refusals arrive as HTTP 200 with `stop_reason: "refusal"` (see [Refusals and fallback](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback)). They were mapped to `error` and surfaced as `An unknown error occurred`, which dropped `stop_details.category` / `explanation`, hid the refusal from downstream classification, and let BYOK retry it as an unknown failure.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), Anthropic-compatible stream.
+- Change type: generic, upstreamable. `stopReason` stays `error`; `errorMessage` becomes `Model declined the request (stop_reason: refusal[; category: …])[: explanation]` for refusals both before and during output, omitting a null `category` / `explanation`. Hosts detect `stop_reason: refusal` and do not parse the explanation.
+- Upstream PR: not opened.
+- Validation: host-side non-retry and refusal classification are covered by the `@mavis/shared` classifier and `@mavis/agent-core` retry tests. Vendored upstream suites remain outside this distribution's verification; no live Claude service was called.
+
 ### 2026-09-23 — preserve Bash execution facts and bounded output
 
 - Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), Bash execution, child-process observation, and output accumulation.

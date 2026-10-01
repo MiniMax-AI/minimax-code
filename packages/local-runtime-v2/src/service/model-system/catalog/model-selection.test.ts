@@ -86,7 +86,7 @@ describe('legacy MiniMax compatibility', () => {
       const config: LocalRuntimeConfig = {
         dataDir: '/tmp/legacy-model-selection',
         defaultModel: `custom_provider:${key}/retired`,
-        provider: { minimax: { models: { 'MiniMax-M3': {} } } },
+        provider: { minimax: { models: { 'MiniMax-M3.1-Flash-Preview': {}, 'MiniMax-M3': {} } } },
         custom_provider: {
           [key]: {
             options: {
@@ -105,7 +105,7 @@ describe('legacy MiniMax compatibility', () => {
         }),
       ).toEqual({
         providerId: 'minimax',
-        modelId: 'MiniMax-M3',
+        modelId: 'MiniMax-M3.1-Flash-Preview',
       });
       expect(config).toEqual(before);
       config.custom_provider![key]!.options!.baseURL = 'https://proxy.example/v1';

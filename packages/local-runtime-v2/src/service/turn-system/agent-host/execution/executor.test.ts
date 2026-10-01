@@ -53,6 +53,8 @@ import type {
   SessionLlmCallReportCapability,
   SessionRecord,
 } from "../../../session-system/index.js";
+import { repairCanonicalHistory } from "../../../session-system/messages/history/canonical-history-recovery.js";
+import type { CanonicalHistoryEnvelope } from "../../../session-system/sessions/representation/canonical-history-contract.js";
 import { ContextUsageAnchorState } from "../../compaction/execution/usage-anchor.js";
 import { createTurnController } from "../../execution/turn-controller/turn.controller.js";
 import { createBackgroundCadenceReminder } from "../../execution/reminder/background-cadence-reminder.js";
@@ -64,6 +66,7 @@ import type {
 } from "../runner/contracts.js";
 import type { AgentEventDelivery } from "../events/contracts.js";
 import type { CanonicalHistoryStore } from "../history/contracts.js";
+import { copyCanonicalHistoryForPiCompatibility } from "../history/canonical-history-validation.js";
 import { AgentHostCommittedHistoryWriter } from "../history/committed-history-writer.js";
 import {
   AgentTerminalConfirmationError,
@@ -4556,6 +4559,173 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
       expect(JSON.stringify(history)).not.toContain("Execution time remaining");
     },
   );
+});
+
+describe("LocalRuntimeTurnExecutor continuation recovery with compaction reminders", () => {
+  it("removes a pending tool round before compaction appends a background reminder", async () => {
+    const usage = {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    const history = [
+      {
+        message_id: "msg-user-v1-request",
+        turn_id: "turn-original",
+        message: { role: "user", content: "finish the work", timestamp: 1 },
+      },
+      {
+        message_id: "msg-assistant-complete",
+        turn_id: "turn-original",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-call-complete", name: "read", arguments: {} }],
+          api: "anthropic-messages",
+          provider: "provider",
+          model: "model",
+          usage,
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+      },
+      {
+        message_id: "msg-tool-result-complete",
+        turn_id: "turn-original",
+        message: {
+          role: "toolResult",
+          toolCallId: "tool-call-complete",
+          toolName: "read",
+          content: [{ type: "text", text: "completed result" }],
+          isError: false,
+          timestamp: 3,
+        },
+      },
+      {
+        message_id: "msg-assistant-pending",
+        turn_id: "turn-original",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "tool-call-pending", name: "read", arguments: {} }],
+          api: "anthropic-messages",
+          provider: "provider",
+          model: "model",
+          usage,
+          stopReason: "toolUse",
+          timestamp: 4,
+        },
+      },
+    ] satisfies CanonicalHistoryEnvelope[];
+    const recovered = repairCanonicalHistory(history, { allowPendingToolCallTail: false });
+    const recoveredMessages = copyCanonicalHistoryForPiCompatibility(
+      recovered.records.map((record) => record.message),
+    );
+    expect(recovered.issues).toEqual([
+      { kind: "pending-tool-call-tail", recordIndex: 3, droppedCount: 1 },
+    ]);
+    expect(JSON.stringify(recoveredMessages)).not.toContain("tool-call-pending");
+    expect(recoveredMessages.map((message) => (message as { role: string }).role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+
+    const marker = {
+      role: "custom" as const,
+      customType: "background_task_cadence_reminder",
+      content: "<background-task-finished>task ready</background-task-finished>",
+      display: false as const,
+      timestamp: 5,
+    };
+    const backgroundHook = vi.fn(() => ({
+      type: "appendMessage" as const,
+      reason: "background_task_cadence_reminder",
+      placement: "before-current-user" as const,
+      message: marker,
+    }));
+    const compactionHook = vi.fn((hookInput: PiBeforeLlmCallHookInput) => ({
+      type: "replaceMessages" as const,
+      messages: [
+        {
+          role: "compactionSummary" as const,
+          summary: "The completed tool round was summarized.",
+          tokensBefore: 1_000,
+          timestamp: 5,
+        },
+      ],
+      metadata: {
+        replacementId: "pending-round-continuation-compaction",
+        strategyVersion: "test",
+        summary: "The completed tool round was summarized.",
+        firstKeptIndex: hookInput.canonicalMessages.length,
+        compactedMessages: hookInput.canonicalMessages,
+        keptMessages: [],
+      },
+    }));
+    const providerContexts: string[] = [];
+    const executorOptions = options((runInput) =>
+      new PiTurnRunner().runTurn({
+        ...runInput,
+        toolConfig: { tools: runInput.tools, context: runInput.toolContext! },
+        llm: {
+          ...runInput.llm,
+          streamFn: (model, context) => {
+            providerContexts.push(JSON.stringify(context.messages));
+            const final = {
+              ...afterToolContext().assistantMessage,
+              role: "assistant" as const,
+              api: model.api,
+              content: [{ type: "text" as const, text: "continued safely" }],
+              stopReason: "stop" as const,
+            };
+            const stream = createAssistantMessageEventStream();
+            stream.push({ type: "done", reason: "stop", message: final });
+            stream.end(final);
+            return stream;
+          },
+        },
+      }),
+    );
+    const base = executionInput();
+    const input = executionInput({
+      request: {
+        ...base.request,
+        requiresInputReview: false,
+        executionMode: "continuation",
+      },
+      history: { revision: "r-recovered", messages: recoveredMessages },
+      runnerHistory: { revision: "r-recovered", messages: recoveredMessages },
+    });
+
+    await expect(
+      new LocalRuntimeTurnExecutor({
+        ...executorOptions,
+        backgroundCadenceReminder: {
+          prepare: async () => ({ beforeUserMessages: [], hook: backgroundHook }),
+        },
+        resolveBeforeLlmCallHooks: async () => [compactionHook],
+      }).execute(input),
+    ).resolves.toEqual({ status: "completed" });
+
+    expect(compactionHook).toHaveBeenCalledOnce();
+    expect(backgroundHook).toHaveBeenCalledOnce();
+    expect(providerContexts).toHaveLength(1);
+    expect(providerContexts[0]).toContain("The completed tool round was summarized.");
+    expect(providerContexts[0]).toContain(marker.content);
+    expect(providerContexts[0]).not.toContain("tool-call-pending");
+    expect(providerContexts[0]).not.toContain("tool-call-complete");
+    const changes = vi.mocked(input.onHistoryChanged).mock.calls.map(([change]) => change);
+    expect(changes.slice(0, 2).map((change) => change.reason)).toEqual([
+      "replaceMessages",
+      "messageDelta",
+    ]);
+    expect(changes[0]?.messages.map((message) => (message as { role: string }).role)).toEqual([
+      "compactionSummary",
+    ]);
+    expect(changes[1]?.messages).toEqual([marker]);
+  });
 });
 
 describe("LocalRuntimeTurnExecutor beforeLlmCall and reconcile", () => {

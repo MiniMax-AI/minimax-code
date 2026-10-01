@@ -33,6 +33,7 @@ import {
   type ThreadGoalStore,
 } from "../../../src/store-port.js";
 import type { ThreadGoalState } from "../../../src/types.js";
+import { GOAL_FINAL_REPLY_INSTRUCTION } from "../../../src/final-reply.js";
 
 class InMemoryThreadGoalStore implements ThreadGoalStore {
   private bySession = new Map<string, ThreadGoalState>();
@@ -514,7 +515,7 @@ describe("thread-goal tool impls", () => {
         summary: "Done.",
         accepted: true,
       });
-      expect(result.terminate).toBe(true);
+      expect(result.terminate).not.toBe(true);
       expect(mutation.updateTokenBudget).not.toHaveBeenCalled();
     });
 
@@ -645,7 +646,7 @@ describe("thread-goal tool impls", () => {
         });
         expect(payload.goal.status).toBe("active");
         expect(payload.goalSnapshotPhase).toBe("before_host_settlement");
-        expect(result.terminate).toBe(true);
+        expect(result.terminate === true).toBe(status === "blocked");
         expect(collector.collect).toHaveBeenCalledWith(ctx, {
           type,
           goalId: "tg_1",
@@ -657,6 +658,43 @@ describe("thread-goal tool impls", () => {
         );
       },
     );
+
+    it("keeps the Turn open after an accepted completion and asks for the final reply", async () => {
+      await new CreateGoalTool(store).execute(ctx, { objective: "x" });
+      const result = await new UpdateGoalTool(store, signalCollector()).execute(ctx, {
+        status: "complete",
+        summary: "Wrote hello.html.",
+      });
+      const payload = JSON.parse(result.text) as { instruction: string };
+
+      expect(result.terminate).not.toBe(true);
+      expect(result.isError).not.toBe(true);
+      expect(payload.instruction).toBe(GOAL_FINAL_REPLY_INSTRUCTION);
+      expect(result.details).toMatchObject({ instruction: GOAL_FINAL_REPLY_INSTRUCTION });
+    });
+
+    it("ends the Turn after an accepted block without a final-reply instruction", async () => {
+      await new CreateGoalTool(store).execute(ctx, { objective: "x" });
+      const result = await new UpdateGoalTool(store, signalCollector()).execute(ctx, {
+        status: "blocked",
+      });
+
+      expect(result.terminate).toBe(true);
+      expect(JSON.parse(result.text)).not.toHaveProperty("instruction");
+    });
+
+    it("asks for every part of the final reply in the accepted completion result", () => {
+      const instruction = GOAL_FINAL_REPLY_INSTRUCTION;
+      expect(instruction).toContain("final reply to the user");
+      expect(instruction).toContain("what was accomplished");
+      expect(instruction).toContain("where each deliverable file is");
+      expect(instruction).toContain("how to use it");
+      expect(instruction).toContain("<deliver-assets>");
+      expect(instruction).toContain("write each file path in the reply text");
+      expect(instruction).toContain("Do not call any more tools");
+      expect(instruction).toContain("do not claim that verification has passed");
+      expect(instruction).toContain("describe checks you ran yourself as checks you ran");
+    });
 
     it.each([
       ["complete", "completion_proposed"],
@@ -691,7 +729,7 @@ describe("thread-goal tool impls", () => {
           accepted: true,
           settlement: "pending_host_validation",
         });
-        expect(result.terminate).toBe(true);
+        expect(result.terminate === true).toBe(status === "blocked");
         expect(collector.collect).toHaveBeenCalledWith(ctx, {
           type,
           goalId: goal.goalId,

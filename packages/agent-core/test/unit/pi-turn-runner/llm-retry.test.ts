@@ -740,6 +740,95 @@ describe("withLLMRetry", () => {
     expect(observed).toEqual([]);
   });
 
+  it.each(["throw", "stream"] as const)(
+    "recovers a TLS record failure from %s before output",
+    async (failureKind) => {
+      let attempts = 0;
+      const observed: LLMRetryEvent[] = [];
+      const inner = (async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          if (failureKind === "throw") {
+            throw Object.assign(new Error("TLS record failure"), {
+              code: "ERR_SSL_BAD_RECORD_MAC_ALERT",
+            });
+          }
+          return errorStream("net::ERR_SSL_BAD_RECORD_MAC_ALERT");
+        }
+        return successStream("recovered");
+      }) as StreamFn;
+      const wrapped = withLLMRetry(
+        inner,
+        retryOptions({ observer: (event: LLMRetryEvent) => observed.push(event) }),
+      );
+
+      const result = await wrapped(fakeModel("minimax"), CONTEXT, {});
+      const events = await collectEvents(result);
+
+      expect(attempts).toBe(2);
+      expect(observed.map((event) => event.status)).toEqual(["waiting", "recovered"]);
+      expect(observed[0]?.error?.reason).toBe("network");
+      expect(events.some((event) => event.type === "error")).toBe(false);
+      await expect(result.result()).resolves.toMatchObject({
+        stopReason: "stop",
+        content: [{ type: "text", text: "recovered" }],
+      });
+    },
+  );
+
+  it("does not retry a TLS record failure after visible output", async () => {
+    let attempts = 0;
+    const observed: LLMRetryEvent[] = [];
+    const inner = (async () => {
+      attempts += 1;
+      return errorStream("net::ERR_SSL_BAD_RECORD_MAC_ALERT", "partial");
+    }) as StreamFn;
+    const wrapped = withLLMRetry(
+      inner,
+      retryOptions({ observer: (event: LLMRetryEvent) => observed.push(event) }),
+    );
+
+    const result = await wrapped(fakeModel(), CONTEXT, {});
+    const events = await collectEvents(result);
+
+    expect(attempts).toBe(1);
+    expect(events.at(-1)?.type).toBe("error");
+    expect(observed).toEqual([]);
+  });
+
+  it.each(["fake-provider", "custom_provider:work"])(
+    "treats a model safety refusal from %s as a terminal content_filter without retrying",
+    async (provider) => {
+      let attempts = 0;
+      const observed: LLMRetryEvent[] = [];
+      const settled: LLMCallSettledEvent[] = [];
+      const inner = (async () => {
+        attempts += 1;
+        return errorStream(
+          'Model declined the request (stop_reason: refusal; category: cyber): could enable cyber harm, see 500 {"x":1}',
+        );
+      }) as StreamFn;
+      const wrapped = withLLMRetry(
+        inner,
+        retryOptions({
+          observer: (event: LLMRetryEvent) => observed.push(event),
+          onCallSettled: (event: LLMCallSettledEvent) => settled.push(event),
+        }),
+      );
+
+      const result = await wrapped(fakeModel(provider), CONTEXT, {});
+      const events = await collectEvents(result);
+
+      expect(attempts).toBe(1);
+      expect(observed).toEqual([]);
+      expect(events.at(-1)?.type).toBe("error");
+      expect((await result.result()).errorMessage).toContain("stop_reason: refusal");
+      expect(settled).toMatchObject([
+        { retryTriggered: false, final: { outcome: "error", errorKind: "content_filter" } },
+      ]);
+    },
+  );
+
   it("commits BYOK streaming after visible output in every host composition", async () => {
     let attempts = 0;
     const observed: LLMRetryEvent[] = [];

@@ -4456,6 +4456,65 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it("retries a failed side conversation response inside the side Session", async () => {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    vi.mocked(runtime.createSession)
+      .mockResolvedValueOnce({ sessionId: "session-1", title: "Main", workspaceDir: "/workspace" })
+      .mockResolvedValueOnce({
+        sessionId: "session-side",
+        parentSessionId: "session-1",
+        title: "Side conversation",
+        workspaceDir: "/workspace",
+      });
+    vi.mocked(runtime.getSession).mockImplementation(async (sessionId: string) =>
+      sessionId === "session-side"
+        ? {
+            sessionId,
+            parentSessionId: "session-1",
+            title: "Side conversation",
+            workspaceDir: "/workspace",
+          }
+        : { sessionId, title: "Main", workspaceDir: "/workspace" },
+    );
+    let sideAttempt = 0;
+    vi.mocked(runtime.sendMessage).mockImplementation(async function* sendMessage(request) {
+      if (request.id === "session-side") {
+        sideAttempt += 1;
+        if (sideAttempt === 1) {
+          yield { type: "error", message: "terminated" };
+          return;
+        }
+        yield { type: "delta", content: "Side answer" };
+        yield { type: "done" };
+        return;
+      }
+      yield { type: "delta", content: "Main answer" };
+      yield { type: "done" };
+    });
+    const app = createTuiApp({ runtime, terminal, version: "0.1.0", workspaceDir: "/workspace" });
+
+    await app.submit("Main task");
+    await app.submit("/btw Side question");
+    expect(app.tui.render(100).join("\n")).toContain("Run /retry to resend your last message.");
+
+    await app.submit("/retry");
+
+    const rendered = app.tui.render(100).join("\n");
+    expect(rendered).not.toContain("unavailable in side conversations");
+    expect(
+      vi.mocked(runtime.sendMessage).mock.calls.map(([request]) => [request.id, request.content]),
+    ).toEqual([
+      ["session-1", "Main task"],
+      ["session-side", "Side question"],
+      ["session-side", "Side question"],
+    ]);
+    expect(app.transcript.snapshot()).toContainEqual(
+      expect.objectContaining({ kind: "assistant", content: "Side answer" }),
+    );
+    await app.stop();
+  });
+
   it.each(["/retry", "Continue the task"])(
     "dismisses a previous terminal failure when %s succeeds and history refreshes",
     async (submission) => {

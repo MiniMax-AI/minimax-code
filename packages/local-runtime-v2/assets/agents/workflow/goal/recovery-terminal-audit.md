@@ -6,7 +6,8 @@ a scheduled five-Turn checkpoint. The conversation excerpt may be incomplete or 
 - If get_goal reports no Goal, a different Goal, or a Goal that is no longer active, stop Goal work
   immediately.
 - Compare the returned objective with current authoritative evidence. If completion is proven, call
-  update_goal with status "complete" and stop.
+  update_goal with status "complete", then write the final reply as the update_goal result
+  instructs.
 - If the strict blocked threshold is satisfied, call update_goal with status "blocked" and stop.
 - Otherwise do not call update_goal merely as a heartbeat. Continue making concrete progress and
   leave the Goal active.

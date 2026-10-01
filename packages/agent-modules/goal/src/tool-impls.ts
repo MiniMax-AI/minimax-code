@@ -31,6 +31,7 @@ import {
   type ThreadGoalStatus,
 } from './types.js';
 import { digestThreadGoalObjective } from './objective-digest.js';
+import { GOAL_FINAL_REPLY_INSTRUCTION } from './final-reply.js';
 
 /**
  * Host hook invoked after a successful mutation. local-runtime wires
@@ -274,19 +275,20 @@ export class UpdateGoalTool implements ToolImpl<
       );
     }
 
-    return {
-      ...ok(UpdateGoalToolDef.name, {
-        proposal: {
-          status,
-          ...(summary ? { summary } : {}),
-          accepted: true,
-          settlement: 'pending_host_validation',
-        },
-        goal: serializeGoal(existing),
-        goalSnapshotPhase: 'before_host_settlement',
-      }),
-      terminate: true,
-    };
+    const accepted = ok(UpdateGoalToolDef.name, {
+      proposal: {
+        status,
+        ...(summary ? { summary } : {}),
+        accepted: true,
+        settlement: 'pending_host_validation',
+      },
+      goal: serializeGoal(existing),
+      goalSnapshotPhase: 'before_host_settlement',
+      ...(status === 'complete' ? { instruction: GOAL_FINAL_REPLY_INSTRUCTION } : {}),
+    });
+    // An accepted `complete` proposal does not end the Turn: the worker still
+    // writes its final reply (see `final-reply.ts`). `blocked` ends the Turn.
+    return status === 'complete' ? accepted : { ...accepted, terminate: true };
   }
 
   private async updateTokenBudget(

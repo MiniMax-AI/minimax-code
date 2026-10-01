@@ -578,8 +578,13 @@ function failureResult(input: {
     ...(input.response ? { statusCode: input.response.status } : {}),
     explicitAbort: input.final?.stopReason === 'aborted',
   });
+  // BYOK retries every pre-output failure because custom gateways report errors
+  // inconsistently, but a model safety refusal is deterministic: retrying the
+  // same request only repeats (and may re-bill) the decline.
   const decision =
-    input.retryAllErrors && !normalized.facts.explicitAbort
+    input.retryAllErrors &&
+    !normalized.facts.explicitAbort &&
+    !normalized.facts.signals.has('refusal')
       ? { retryable: true, reason: 'network' as const }
       : toLLMRetryDecision(normalized);
   if (!decision.retryable) {

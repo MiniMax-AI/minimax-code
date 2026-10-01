@@ -532,6 +532,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		let refusal: RefusalDetails | undefined;
 
 		try {
 			let client: Anthropic;
@@ -726,6 +727,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				} else if (event.type === "message_delta") {
 					if (event.delta.stop_reason) {
 						output.stopReason = mapStopReason(event.delta.stop_reason);
+						if (event.delta.stop_reason === "refusal") {
+							refusal = readRefusalDetails(event.delta);
+						}
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
@@ -750,6 +754,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
+			}
+
+			if (refusal) {
+				throw new Error(formatRefusalErrorMessage(refusal));
 			}
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
@@ -1292,6 +1300,35 @@ function convertTools(
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};
 	});
+}
+
+interface RefusalDetails {
+	category?: string;
+	explanation?: string;
+}
+
+/**
+ * Classifier refusals (`stop_reason: "refusal"`) are deterministic policy declines, not transport
+ * failures. `stop_details` is not in the SDK types yet; `category` / `explanation` may be null.
+ */
+function readRefusalDetails(delta: unknown): RefusalDetails {
+	const details = (delta as { stop_details?: unknown }).stop_details;
+	if (!details || typeof details !== "object") return {};
+	const { category, explanation } = details as { category?: unknown; explanation?: unknown };
+	return {
+		...(typeof category === "string" && category.trim() ? { category: category.trim() } : {}),
+		...(typeof explanation === "string" && explanation.trim() ? { explanation: explanation.trim() } : {}),
+	};
+}
+
+/**
+ * Stable, human-readable refusal error. The `stop_reason: refusal` token lets hosts recognise
+ * the decline without parsing the provider-controlled explanation text.
+ */
+function formatRefusalErrorMessage(refusal: RefusalDetails): string {
+	const category = refusal.category ? `; category: ${refusal.category}` : "";
+	const explanation = refusal.explanation ? `: ${refusal.explanation}` : "";
+	return `Model declined the request (stop_reason: refusal${category})${explanation}`;
 }
 
 function mapStopReason(reason: Anthropic.Messages.StopReason | string): StopReason {

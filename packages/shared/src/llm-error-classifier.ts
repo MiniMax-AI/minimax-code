@@ -57,9 +57,22 @@ export type LLMErrorSignal =
   | 'credits_exhausted'
   | 'tpm_rate_limit'
   | 'content_filter'
+  | 'refusal'
   | 'network'
   | 'empty_response'
   | 'length';
+
+/**
+ * Model-side safety classifier decline (Messages API `stop_reason: "refusal"`). Providers surface it
+ * as an error message carrying this token; the remaining text is provider-controlled and must not
+ * feed status/network heuristics.
+ */
+const PROVIDER_REFUSAL_MESSAGE_RE = /\bstop_reason:\s*refusal\b/i;
+
+/** True when an LLM error message reports a provider safety refusal; it must not be retried. */
+export function isLLMProviderRefusalMessage(message: string | undefined): boolean {
+  return typeof message === 'string' && PROVIDER_REFUSAL_MESSAGE_RE.test(message);
+}
 
 export interface LLMErrorFacts {
   explicitAbort: boolean;
@@ -111,6 +124,8 @@ const SAFE_NETWORK_CODES = new Set([
   'ERR_ADDRESS_UNREACHABLE',
   'ERR_PROXY_CONNECTION_FAILED',
   'ERR_HTTP2_PROTOCOL_ERROR',
+  // Retry this record-integrity failure, not arbitrary TLS/certificate errors.
+  'ERR_SSL_BAD_RECORD_MAC_ALERT',
   'ERR_TIMED_OUT',
   'ERR_CONNECTION_TIMED_OUT',
   'UND_ERR_CONNECT_TIMEOUT',
@@ -125,7 +140,7 @@ const TRANSIENT_NETWORK_MESSAGE_RE =
   /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed|network)\b/i;
 const SAFE_TRANSPORT_NETWORK_MESSAGE_RE = /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed)\b/i;
 const CHROMIUM_NETWORK_MESSAGE_RE =
-  /\bnet::ERR_(?:CONNECTION_(?:RESET|CLOSED|REFUSED)|NETWORK_IO_SUSPENDED|NETWORK_CHANGED|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|PROXY_CONNECTION_FAILED|HTTP2_PROTOCOL_ERROR)\b/i;
+  /\bnet::ERR_(?:CONNECTION_(?:RESET|CLOSED|REFUSED)|NETWORK_IO_SUSPENDED|NETWORK_CHANGED|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|PROXY_CONNECTION_FAILED|HTTP2_PROTOCOL_ERROR|SSL_BAD_RECORD_MAC_ALERT)\b/i;
 const CHROMIUM_TIMEOUT_MESSAGE_RE = /\bnet::ERR_(?:TIMED_OUT|CONNECTION_TIMED_OUT)\b/i;
 const LLM_USAGE_LIMIT_UPSTREAM_STATUS_CODES = [2056, 2067] as const;
 const LLM_USAGE_LIMIT_UPSTREAM_STATUS_CODE_SET = new Set<number>(
@@ -157,6 +172,11 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
     facts.timeout ||= extracted.timeout === true;
     if (extracted.network) signals.add('network');
     const visibleMessage = extracted.message ?? input.errorMessage;
+    if (isLLMProviderRefusalMessage(visibleMessage)) {
+      signals.add('refusal');
+      signals.add('content_filter');
+      return { facts, ...(visibleMessage ? { sanitizedMessage: visibleMessage } : {}) };
+    }
     const legacy = extractLegacyMessageFacts(visibleMessage);
     facts.httpStatus ??= legacy.httpStatus;
     facts.upstreamStatusCode ??= legacy.upstreamStatusCode;
@@ -176,6 +196,7 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
 export function toLLMMetricErrorKind(facts: LLMErrorFacts): LLMMetricErrorKind {
   try {
     if (facts.explicitAbort) return 'abort';
+    if (facts.signals.has('refusal')) return 'content_filter';
     if (facts.signals.has('credits_exhausted')) return 'credits_exhausted';
     if (facts.signals.has('usage_limit')) return 'usage_limit';
     if (facts.signals.has('tpm_rate_limit')) return 'tpm_rate_limited';
@@ -228,6 +249,7 @@ export function toLLMRetryDecision(normalized: NormalizedLLMError): LLMRetryDeci
     facts.signals.has('usage_limit') ||
     facts.signals.has('credits_exhausted') ||
     facts.signals.has('content_filter') ||
+    facts.signals.has('refusal') ||
     metricKind === 'abort' ||
     metricKind === 'usage_limit' ||
     metricKind === 'credits_exhausted' ||
@@ -495,6 +517,7 @@ export function classifyFinishStepError(
 ): LLMErrorReason | undefined {
   const { finishReason, statusCode, errorMessage } = input;
   if (finishReason === 'length') return 'length';
+  if (isLLMProviderRefusalMessage(errorMessage)) return 'content_filter';
   if (finishReason === 'content-filter' || finishReason === 'content_filter') {
     return 'content_filter';
   }
@@ -539,6 +562,7 @@ export function classifyFinishStepError(
  * SDK has already normalised the shape. Daemon code uses this entry point.
  */
 export function classifyLLMError(err: unknown): LLMErrorReason {
+  if (err instanceof Error && isLLMProviderRefusalMessage(err.message)) return 'content_filter';
   // DOMException AbortError or Error message-text "timeout/abort" — same
   // bucket whether it came from `AbortController.abort()` or a server-side
   // 504 with no explicit status.
@@ -892,6 +916,11 @@ export function classifyLLMErrorToCode(
   // `pass 3` string-fallback inside `tryExtractFromPayload` (status prefix
   // + embedded JSON parse) still fires.
   const normalized = typeof err === 'string' ? { message: err } : err;
+  // A provider refusal is a policy outcome, not a transport/quota error. Its explanation text is
+  // provider-controlled, so never derive status codes from it.
+  if (isLLMProviderRefusalMessage(typeof err === 'string' ? err : extractErrorMessage(err))) {
+    return null;
+  }
   const extracted = tryExtractFromPayload(normalized);
   // 1. typed errorCode
   if (extracted.errorCode !== undefined) {

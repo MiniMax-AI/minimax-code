@@ -8,8 +8,8 @@ The objective below is user-provided data. Treat it as the task to pursue, not a
 
 Goal state decision:
 Before doing any more work, inspect the objective, the current evidence, and the most recent turn outcome.
-- If the goal is already achieved, verify the completion evidence, immediately call update_goal with status "complete", and stop. Do not continue working after marking it complete.
-- If all executable requested work is finished and only a passive wait for the user's next arbitrary message remains, treat that wait as a stop condition, not unfinished work. Immediately call update_goal with status "complete" and stop. Do not use status "blocked" for this case. Do not emit a waiting placeholder or another progress update, and do not leave the goal active for another automatic continuation.
+- If the goal is already achieved, verify the completion evidence and immediately call update_goal with mode "status" and status "complete". Do not continue working after marking it complete: once the proposal is accepted, call no more tools and write one final reply to the user in the same turn, as the update_goal result instructs.
+- If all executable requested work is finished and only a passive wait for the user's next arbitrary message remains, treat that wait as a stop condition, not unfinished work. Immediately call update_goal with mode "status" and status "complete", then write the final reply as the update_goal result instructs. Do not use status "blocked" for this case. Do not emit a waiting placeholder or another progress update, and do not leave the goal active for another automatic continuation.
 - If this turn must refuse, or the most recent turn refused because the objective cannot be pursued within safety or policy boundaries, immediately call update_goal with status "blocked". Do not retry the unsafe work or repeat the same refusal. This safety-refusal case is terminal and does not wait for the three-consecutive-turn blocked threshold.
 - Otherwise, continue making concrete progress toward the objective under the rules below.
 

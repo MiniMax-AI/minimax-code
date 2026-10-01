@@ -51,7 +51,8 @@ export const UpdateGoalToolDef = {
   description:
     'Propose a terminal status for the existing goal, or—only when explicitly requested by the user—update its token budget. ' +
     'Always set `mode` to choose exactly one operation per call; fields belonging to the other mode are ignored.\n' +
-    'Terminal mode (`mode: "status"`): pass `status` and optional `summary`; follow the rules documented on the `status` field. The host settles the proposal after this turn, and an accepted proposal ends the turn.\n' +
+    'Terminal mode (`mode: "status"`): pass `status` and optional `summary`; follow the rules documented on the `status` field. The host settles the proposal after this turn. An accepted `blocked` proposal ends the turn. ' +
+    'After an accepted `complete` proposal, do not call any more tools (they are refused): write one final reply to the user in the same turn that says what was accomplished, where each deliverable file is, and how to use it when that is not obvious; declare every deliverable file with delivery markup (<media /> tags inside <deliver-assets>) and write its path in the text; do not claim that verification has passed or that the result is verified, because the host verifies after this reply; describe checks you ran as checks, not as verification.\n' +
     'Budget mode (`mode: "token_budget"`): call `get_goal` immediately before `update_goal`, then pass only `token_budget`, `expected_goal_id`, and `expected_updated_at`. Use a positive integer token count, or `null` to clear the cap. A successful update does not end the turn and may reactivate a token-limited goal.\n' +
     'Do not combine the two modes. This tool cannot directly pause, resume, or edit the objective.',
   schema: Type.Object({
@@ -77,7 +78,7 @@ export const UpdateGoalToolDef = {
       Type.String({
         maxLength: 2_000,
         description:
-          'Recommended when status is `complete`: briefly state what was accomplished and where the evidence lives. The host passes this claim to an independent verifier as untrusted data.',
+          'Recommended when status is `complete`: briefly state what was accomplished and where the evidence lives. The host passes this claim to an independent verifier as untrusted data; it is not shown to the user and does not replace the final reply.',
       }),
     ),
     token_budget: Type.Optional(

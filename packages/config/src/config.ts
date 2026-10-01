@@ -1635,7 +1635,7 @@ function buildPresetEntry(key: PresetKey) {
   };
   return {
     provider: { minimax: provider } as ModelsConfig,
-    defaultModel: "minimax/MiniMax-M3",
+    defaultModel: "minimax/MiniMax-M3.1-Flash-Preview",
   };
 }
 

@@ -96,6 +96,17 @@ describe("thread-goal renderKickoffPrompt", () => {
     expect(prompt).toContain("Do not emit a waiting placeholder");
   });
 
+  it("asks for a final reply after completion instead of stopping at update_goal", () => {
+    const prompt = renderKickoffPrompt({ objective: "x" });
+    expect(prompt).not.toMatch(/status "complete",? and stop/u);
+    expect(prompt).toContain(
+      "once the proposal is accepted, call no more tools and write one final reply to the user in the same turn",
+    );
+    expect(prompt).toContain("then write the final reply as the update_goal result instructs");
+    // Blocking still ends the Turn.
+    expect(prompt).toContain('immediately call update_goal with mode "status" and status "blocked"');
+  });
+
   it("keeps ordinary uncertainty moving without ask_user", () => {
     const prompt = renderKickoffPrompt({ objective: "x" });
     expect(prompt).toContain("ordinary engineering uncertainty");
@@ -287,6 +298,10 @@ describe("thread-goal terminal audit reminders", () => {
     expect(prompt).toContain("call get_goal");
     expect(prompt).toContain('call update_goal with status "complete"');
     expect(prompt).toContain("do not call update_goal merely as a heartbeat");
+    expect(prompt).toContain(
+      'call update_goal with status "complete", then write the final reply as the update_goal result instructs',
+    );
+    expect(prompt).toContain('call update_goal with status "blocked" and stop');
   });
 
   it("deduplicates get_goal when recovery and the audit coincide", () => {
@@ -298,5 +313,8 @@ describe("thread-goal terminal audit reminders", () => {
     expect(prompt.match(/call get_goal/g)).toHaveLength(1);
     expect(prompt).toContain("retracted Turn or Runtime recovery");
     expect(prompt).toContain("scheduled five-Turn checkpoint");
+    expect(prompt).toContain(
+      'call update_goal with status "complete", then write the final reply as the update_goal result instructs',
+    );
   });
 });

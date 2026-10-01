@@ -135,14 +135,19 @@ describe('resolveAgentModelSelection', () => {
       defaultModel: 'custom_provider:minimax-legacy/retired',
       provider: {
         ...config.provider,
-        minimax: { models: { 'MiniMax-M3': { limit: { context: 512_000, output: 128_000 } } } },
+        minimax: {
+          models: {
+            'MiniMax-M3.1-Flash-Preview': { limit: { context: 512_000, output: 128_000 } },
+            'MiniMax-M3': { limit: { context: 512_000, output: 128_000 } },
+          },
+        },
       },
     };
     expect(
       resolveEffectiveAgentModelSelection({ config: legacyConfig, sources: [] }),
     ).toMatchObject({
       providerId: 'minimax',
-      modelId: 'MiniMax-M3',
+      modelId: 'MiniMax-M3.1-Flash-Preview',
       contextWindow: 512_000,
     });
     expect(legacyConfig.defaultModel).toBe('custom_provider:minimax-legacy/retired');

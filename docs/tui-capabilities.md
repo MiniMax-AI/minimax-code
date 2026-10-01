@@ -254,6 +254,10 @@ to the main view. Press `Ctrl+C` on an empty Composer to discard the side
 conversation. Side conversations retain the main session's permission mode and
 remain hidden from `/sessions` and `/resume`.
 
+When a side-conversation model request fails and can be retried, run `/retry`
+in the side view to resend the side conversation's last message without
+returning to the main view.
+
 Creation and activation failures record a bounded, redacted cause chain in the
 local `session.side.failed` diagnostic event. Feedback uploads still apply the
 existing diagnostic-counts projection; raw error text, stacks and session IDs

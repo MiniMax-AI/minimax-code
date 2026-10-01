@@ -200,7 +200,8 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
       proposal: { status: "complete" },
       goal: { status: "active" },
     });
-    expect(proposal.terminate).toBe(true);
+    // The accepted completion keeps the Turn open for the final reply.
+    expect(proposal.terminate).not.toBe(true);
     expect(current.status).toBe("active");
 
     const decision = await integration.settleInjectedTurn({
