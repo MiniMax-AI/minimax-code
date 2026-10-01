@@ -17,10 +17,14 @@ jobs:
       fail-fast: false
       matrix:
         # Windows validation is temporarily paused until its checks are reliable.
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-24.04-arm validates ARM64 Linux.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         node: ["22.19.0", "24.2.0", "25", "26"]
         include:
           - os: ubuntu-latest
+            node: "22.19.0"
+            profile: full
+          - os: ubuntu-24.04-arm
             node: "22.19.0"
             profile: full
     steps:

@@ -27,5 +27,6 @@ export const cliExternalModules = [
   '@larksuiteoapi/node-sdk',
 ];
 
-export const cliReleaseTargets = ['ubuntu-latest', 'macos-latest'].flatMap(os =>
+// ubuntu-24.04-arm validates ARM64 Linux before release publication.
+export const cliReleaseTargets = ['ubuntu-latest', 'ubuntu-24.04-arm', 'macos-latest'].flatMap(os =>
   ['22.19.0', '24.2.0', '25', '26'].map(node => ({ os, node })));

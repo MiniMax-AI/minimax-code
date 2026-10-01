@@ -83,6 +83,7 @@ test("CLI defaults to the shared user config without migrating the old source di
   Object.assign(options.env, {
     HOME: home,
     USERPROFILE: home,
+    XDG_DATA_HOME: path.join(home, "unused-xdg"),
     MCODE_DISABLE_TELEMETRY: "1",
   });
   const result = spawnSync(process.execPath, [cli, "telemetry", "status"], {
@@ -96,6 +97,37 @@ test("CLI defaults to the shared user config without migrating the old source di
   assert.equal(status.configured, true);
   assert.equal(readFileSync(oldConfig, "utf8"), oldContents);
 });
+for (const xdgMode of ['absolute', 'relative', 'unset']) {
+  test(`CLI reads Linux XDG configuration with ${xdgMode} XDG_DATA_HOME`, {
+    skip: process.platform !== 'linux',
+  }, (t) => {
+    const options = fixture(t);
+    const home = options.cwd;
+    const xdgHome = path.join(home, 'custom data');
+    const selected = xdgMode === 'absolute' ? xdgHome : path.join(home, '.local', 'share');
+    const config = path.join(selected, 'minimax', 'config.yaml');
+    mkdirSync(path.dirname(config), { recursive: true });
+    writeFileSync(config, 'telemetry:\n  enabled: true\n', { mode: 0o600 });
+    for (const name of Object.keys(options.env)) {
+      if (name.startsWith('__MAVIS_RUNTIME')) delete options.env[name];
+    }
+    delete options.env.MINIMAX_DATA_DIR;
+    delete options.env.MAVIS_DATA_DIR;
+    delete options.env.XDG_DATA_HOME;
+    if (xdgMode !== 'unset') options.env.XDG_DATA_HOME = xdgMode === 'absolute' ? xdgHome : 'relative-data';
+    Object.assign(options.env, { HOME: home, USERPROFILE: home, MCODE_DISABLE_TELEMETRY: '1' });
+    for (let startup = 0; startup < 2; startup += 1) {
+      const result = spawnSync(process.execPath, [cli, 'telemetry', 'status'], {
+        ...options, encoding: 'utf8', timeout: runtimeTimeoutMs,
+      });
+      assertSuccessfulChild(result);
+      const status = JSON.parse(result.stdout);
+      assert.equal(status.configFile, config);
+      assert.equal(status.configured, true);
+    }
+    assert.equal(existsSync(path.join(home, '.minimax')), false);
+  });
+}
 test("provider configuration loads from an isolated data directory", (t) => {
   const result = spawnSync(process.execPath, [cli, "provider", "list"], {
     ...fixture(t),
