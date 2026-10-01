@@ -164,7 +164,7 @@ export class EventBridge {
   private awaitingMessageId: boolean = false;
   /** Wall-clock ms when the first thinking_delta of the current msg arrived. */
   private thinkingStartMs: number | undefined;
-  /** First nonempty text/thinking/tool token; excludes first-token wait from throughput. */
+  /** First thinking_start or nonempty text/thinking/tool token; excludes first-token wait from throughput. */
   private firstTokenMs: number | undefined;
   /** Wall-clock ms when thinking ended (first non-thinking delta or message_end). */
   private thinkingEndMs: number | undefined;
