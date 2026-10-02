@@ -14,6 +14,7 @@ import {
   TuiStateStore,
 } from '../../../../../src/tui/state/index.js';
 import { TranscriptStore } from '../../../../../src/tui/transcript/store.js';
+import { TuiTurnStartLedger } from '../../../../../src/tui/controller/run/turn-start-ledger.js';
 
 function lifecycle(
   type: 'session.start' | 'session.finish' | 'session.error' | 'session.abort',
@@ -126,6 +127,7 @@ function createFixture(options?: {
   };
   const settleRuntimeTurnProjection = vi.fn();
   const reconcileOwnerHistory = vi.fn(async () => true);
+  const turnStarts = new TuiTurnStartLedger();
   const controller = {
     snapshot: vi.fn(() => ({
       session: { sessionId: 'session-1' },
@@ -134,6 +136,9 @@ function createFixture(options?: {
     refreshCurrentSessionHistory: vi.fn(async () => undefined),
     refreshSessionMetadata: vi.fn(async () => undefined),
     beginRuntimeTurn: vi.fn(),
+    recordTurnStart: (turnId: string, timestampMs: number) =>
+      turnStarts.record(turnId, timestampMs),
+    turnStartedAtMs: (turnId: string) => turnStarts.get(turnId),
     applyRuntimeTurnEvent: vi.fn(),
     runtimeTurnSettlement: {
       settle: vi.fn(async () => undefined),
@@ -182,6 +187,7 @@ function createFixture(options?: {
 
   return {
     flow,
+    controller,
     runtime,
     runProjection,
     activeRunFlow,
@@ -520,5 +526,37 @@ describe('TuiRuntimeEventFlow stale-run safety net', () => {
       queuedCount: 1,
     });
     fixture.flow.stop();
+  });
+});
+
+describe('TuiRuntimeEventFlow Turn start ledger', () => {
+  it('keeps the first observed Turn start when a projection switch re-adopts the Turn', async () => {
+    const fixture = createFixture();
+
+    // Submitted while the main Session was visible, then hidden behind a side view.
+    fixture.controller.recordTurnStart('turn-main', 100);
+    // Switching back re-adopts the still-running Turn at the switch time.
+    fixture.flow.adoptRuntimeTurn('session-1', 'turn-main', 5_000);
+
+    await vi.waitFor(() =>
+      expect(fixture.controller.beginRuntimeTurn).toHaveBeenCalledWith('turn-main', 100),
+    );
+    expect(fixture.controller.turnStartedAtMs('turn-main')).toBe(100);
+  });
+
+  it('records Turn starts observed for a hidden Session', async () => {
+    const fixture = createFixture();
+
+    await handle(fixture.flow, {
+      ...lifecycle('session.start', 'turn-hidden'),
+      sessionId: 'session-hidden',
+      timestampMs: 40,
+    });
+
+    expect(fixture.controller.turnStartedAtMs('turn-hidden')).toBe(40);
+    expect(fixture.controller.beginRuntimeTurn).not.toHaveBeenCalledWith(
+      'turn-hidden',
+      expect.anything(),
+    );
   });
 });

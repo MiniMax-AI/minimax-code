@@ -527,6 +527,11 @@ export class TuiRuntimeEventFlow {
     }
     const currentSessionId = this.options.controller.snapshot().session?.sessionId;
     const matchesCurrentSession = Boolean(currentSessionId) && event.sessionId === currentSessionId;
+    if (event.type === 'session.start' && event.turnId && event.timestampMs !== undefined) {
+      // Also for hidden Sessions (e.g. the main Session behind a side view), so
+      // switching back later shows the true elapsed time.
+      this.options.controller.recordTurnStart(event.turnId, event.timestampMs);
+    }
     let liveTurnDurationMs: number | undefined;
     const sessionScopedResult = this.handleSessionScopedEvent(event, matchesCurrentSession);
     if (sessionScopedResult === true) return;
@@ -738,8 +743,14 @@ export class TuiRuntimeEventFlow {
     void previousLiveTurn?.task.catch(() => undefined);
 
     const controller = new AbortController();
+    // Re-adopting a Turn after a projection switch passes the adoption time;
+    // keep the earliest observed start so the visible timer does not reset.
+    const startedAtMs =
+      timestampMs === undefined
+        ? this.options.controller.turnStartedAtMs(turnId)
+        : this.options.controller.recordTurnStart(turnId, timestampMs);
     if (!isSameTurn) {
-      this.options.controller.beginRuntimeTurn(turnId, timestampMs ?? Date.now());
+      this.options.controller.beginRuntimeTurn(turnId, startedAtMs ?? Date.now());
       this.options.runProjection.markRecoveredTurn(turnId);
     }
     const liveTurn = {
@@ -747,7 +758,7 @@ export class TuiRuntimeEventFlow {
       turnId,
       controller,
       afterMsgId,
-      startedAtMs: timestampMs,
+      startedAtMs,
       task: Promise.resolve(),
     };
     // The stream can end before the lifecycle terminal event supplies the end time.

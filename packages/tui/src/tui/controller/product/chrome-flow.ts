@@ -75,6 +75,8 @@ export class TuiChromeFlow {
       readonly sideConversation?: () => TuiSideConversationSnapshot | undefined;
       /** Multi-Session state kernel, including the background parent Turn. */
       readonly sessionState?: () => Pick<TuiState, 'sessions'>;
+      /** Earliest observed start of a Turn, kept across Session projection switches. */
+      readonly turnStartedAtMs?: (turnId: string) => number | undefined;
       readonly welcome: PresentationSink<'shell'>;
       readonly status: PresentationSink<'shell'>;
       readonly activity: PresentationSink<'activity'>;
@@ -199,6 +201,7 @@ export class TuiChromeFlow {
         const sideConversation = this.resolveSideConversationPresentation(snapshot);
         return sideConversation ? { sideConversation } : {};
       })(),
+      ...(this.options.turnStartedAtMs ? { turnStartedAtMs: this.options.turnStartedAtMs } : {}),
     });
     const agentCounts = this.options.agentCounts?.();
     const backgroundTasks = this.options.backgroundTaskCount?.();

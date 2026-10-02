@@ -846,6 +846,37 @@ describe("TuiInputFlow steer Draft handling", () => {
     expect(harness.abortLiveTurn).not.toHaveBeenCalled();
   });
 
+  it("neither advertises nor opens Edit on double Escape in an idle side session", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const harness = createHarness(
+        "",
+        { attachments: [] },
+        false,
+        false,
+        false,
+        "consumed",
+        false,
+        vi.fn(() => false),
+        undefined,
+        true,
+      );
+
+      expect(harness.inputListener?.("\u001b")).toBeUndefined();
+      now.mockReturnValue(1_200);
+      expect(harness.inputListener?.("\u001b")).toBeUndefined();
+
+      expect(harness.setHint).not.toHaveBeenCalledWith(
+        "Press Esc again to edit the latest message",
+      );
+      await Promise.resolve();
+      expect(harness.commandFlow.submit).not.toHaveBeenCalled();
+      expect(harness.abortLiveTurn).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("uses Pi app semantics: Ctrl+C clears while Escape interrupts a live turn", () => {
     const harness = createHarness("keep this Draft", { attachments: [] });
 

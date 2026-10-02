@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveTuiVisiblePresentation } from "../../../../../src/tui/controller/projection/visible-presentation.js";
 import { createTranscriptCell } from "../../../../../src/tui/transcript/model.js";
 import { TranscriptStore } from "../../../../../src/tui/transcript/store.js";
@@ -230,6 +230,25 @@ describe("visible presentation selector", () => {
       headerHidden: true,
     });
     expect(presentation.composer.hint).toBeUndefined();
+  });
+
+  it("anchors the run timer to the recorded Turn start instead of the projection switch", () => {
+    const turnStartedAtMs = vi.fn((turnId: string) => (turnId === "turn-1" ? 1_000 : undefined));
+
+    expect(
+      resolve({
+        snapshot: { ...idleChat, status: "running", activeTurnId: "turn-1" },
+        currentLiveRunId: "turn-1",
+        turnStartedAtMs,
+      }).activity,
+    ).toMatchObject({ phase: "loading", runId: "turn-1", startedAtMs: 1_000 });
+    expect(
+      resolve({
+        snapshot: { ...idleChat, status: "running", activeTurnId: "turn-unknown" },
+        currentLiveRunId: "turn-unknown",
+        turnStartedAtMs,
+      }).activity,
+    ).not.toHaveProperty("startedAtMs");
   });
 
   it("keeps a pending Runtime stop more urgent than a transient warning", () => {

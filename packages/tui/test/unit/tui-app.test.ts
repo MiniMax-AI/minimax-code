@@ -7367,6 +7367,90 @@ describe("createTuiApp", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("keeps the main run timer when switching to a side conversation and back", async () => {
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const terminal = new FakeTerminal();
+    terminal.columns = 100;
+    terminal.rows = 20;
+    const runtime = createRuntime();
+    let mainTurnId: string | undefined;
+    let releaseMainTurn: () => void = () => undefined;
+    const mainTurnReleased = new Promise<void>((resolve) => {
+      releaseMainTurn = resolve;
+    });
+    const mainSession = {
+      sessionId: "session-1",
+      title: "New session",
+      workspaceDir: "/workspace",
+    };
+    const sideSession = {
+      sessionId: "side-1",
+      title: "BTW",
+      workspaceDir: "/workspace",
+      parentSessionId: "session-1",
+      purpose: "peek_btw_session",
+      sessionKind: "peek" as const,
+    };
+    vi.mocked(runtime.createSession).mockImplementation(async (input) =>
+      input?.purpose === sideSession.purpose ? { ...sideSession } : { ...mainSession },
+    );
+    vi.mocked(runtime.getSession).mockImplementation(async (sessionId) =>
+      sessionId === sideSession.sessionId ? { ...sideSession } : { ...mainSession, sessionId },
+    );
+    vi.mocked(runtime.getActiveRun).mockImplementation(async (sessionId) => {
+      const running = sessionId === "session-1" && mainTurnId !== undefined;
+      return {
+        schemaVersion: 1 as const,
+        sessionId,
+        state: running ? ("running" as const) : ("idle" as const),
+        ...(running ? { turnId: mainTurnId } : {}),
+        actions: { steer: false },
+      };
+    });
+    vi.mocked(runtime.watchSessionTurn).mockImplementation(
+      async function* watchSessionTurn(_sessionId, _turnId, signal) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        for (const event of [] as TuiStreamEvent[]) yield event;
+      },
+    );
+    vi.mocked(runtime.sendMessage).mockImplementation(
+      async function* sendMessage(request): AsyncGenerator<TuiStreamEvent> {
+        mainTurnId = request.turnId;
+        yield { type: "delta", content: "Working on main" };
+        await mainTurnReleased;
+        yield { type: "done" };
+      },
+    );
+    const app = createTuiApp({ runtime, terminal, version: "0.1.0", workspaceDir: "/workspace" });
+    app.start();
+    await app.ready;
+    try {
+      void app.submit("main task");
+      await vi.waitFor(() => expect(mainTurnId).toBeDefined());
+      clock += 42_000;
+      await vi.waitFor(() => expect(renderTerminalViewport(app, terminal)).toContain("42s"));
+
+      await app.submit("/btw");
+      await vi.waitFor(() => expect(app.controller.snapshot().session?.sessionId).toBe("side-1"));
+      clock += 5_000;
+      await app.submit("/parent");
+      await vi.waitFor(() =>
+        expect(app.controller.snapshot().session?.sessionId).toBe("session-1"),
+      );
+      clock += 3_000;
+
+      // 42s before the switch + 5s in the side view + 3s back on main.
+      await vi.waitFor(() => expect(renderTerminalViewport(app, terminal)).toMatch(/\b50s\b/u));
+    } finally {
+      releaseMainTurn();
+      await app.stop();
+      now.mockRestore();
+    }
+  });
+
   it("does not call forkSession when /fork is cancelled, unavailable, or fails", async () => {
     const scenarios: ReadonlyArray<{
       readonly label: string;

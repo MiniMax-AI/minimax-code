@@ -46,6 +46,7 @@ import type {
 import { abortTuiChatTurn } from './run/chat-turn-abort.js';
 import { TuiRuntimeTurnSettlement } from './run/runtime-turn-settlement.js';
 import { createTuiSettledTurn } from './run/turn-settlement.js';
+import { TuiTurnStartLedger } from './run/turn-start-ledger.js';
 
 export type { TuiSubmitStatus } from './chat-controller-support.js';
 export type {
@@ -73,6 +74,8 @@ export class TuiChatController {
   private readonly turnProjection: TuiTurnProjection;
   private readonly statusMetrics: TuiStatusMetricsFlow;
   private readonly outputRate: TuiTurnOutputRate;
+  /** Survives projection switches so a re-adopted live Turn keeps its original start. */
+  private readonly turnStarts = new TuiTurnStartLedger();
   readonly runtimeTurnSettlement: TuiRuntimeTurnSettlement;
   private state: TuiChatSnapshot = { status: 'idle', sessions: [] };
   private activeTurn?: TuiActiveTurn;
@@ -368,6 +371,7 @@ export class TuiChatController {
       this.turnProjection.removeOptimisticUserMessage(options.optimisticRequestId);
     }
     const timestamp = optimisticCell?.createdAtMs ?? this.now();
+    this.turnStarts.record(turnId, timestamp);
     this.outputRate.beginTurn(turnId);
     if (!isRetryContinuation) {
       this.transcript.upsert({
@@ -655,6 +659,16 @@ export class TuiChatController {
   dismissTerminalDuration(id: string | undefined): void {
     if (!id || this.transcript.get(id)?.kind !== 'turn-duration') return;
     if (this.transcript.remove(id)) this.notify();
+  }
+
+  /** Records an observed Turn start; returns the earliest start known for that Turn. */
+  recordTurnStart(turnId: string, timestampMs: number): number {
+    return this.turnStarts.record(turnId, timestampMs);
+  }
+
+  /** Earliest observed start of a Turn, independent of the currently loaded projection. */
+  turnStartedAtMs(turnId: string): number | undefined {
+    return this.turnStarts.get(turnId);
   }
 
   beginRuntimeTurn(turnId: string, timestamp: number): void {

@@ -450,6 +450,13 @@ export class TuiInputFlow {
         this.lastEscapeAtMs = 0;
         return undefined;
       }
+      if (this.options.isSideModeActive?.()) {
+        // /edit is outside the side-mode command surface, so double Escape
+        // must neither advertise nor attempt it in a side conversation.
+        this.lastEscapeAtMs = 0;
+        this.options.setHint(undefined);
+        return undefined;
+      }
       const now = Date.now();
       if (this.lastEscapeAtMs > 0 && now - this.lastEscapeAtMs < DOUBLE_ESCAPE_WINDOW_MS) {
         this.lastEscapeAtMs = 0;

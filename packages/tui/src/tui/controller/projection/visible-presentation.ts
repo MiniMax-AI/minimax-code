@@ -48,6 +48,8 @@ export interface ResolveTuiVisiblePresentationInput {
   readonly planMode?: TuiPlanModeSnapshot;
   /** Present while a paired BTW side conversation exists; identifies the visible half. */
   readonly sideConversation?: TuiSideConversationPresentation;
+  /** Earliest observed start of a Turn, kept across Session projection switches. */
+  readonly turnStartedAtMs?: (turnId: string) => number | undefined;
 }
 
 export interface TuiVisiblePresentation {
@@ -59,7 +61,14 @@ export interface TuiVisiblePresentation {
 export function resolveTuiVisiblePresentation(
   input: ResolveTuiVisiblePresentationInput,
 ): TuiVisiblePresentation {
-  const visibleActivity = resolveVisibleActivity(input);
+  const resolvedActivity = resolveVisibleActivity(input);
+  // Anchor the timer to the Turn's real start; the activity line would otherwise
+  // restart it whenever a projection switch briefly hides the run.
+  const startedAtMs = resolvedActivity.runId
+    ? input.turnStartedAtMs?.(resolvedActivity.runId)
+    : undefined;
+  const visibleActivity =
+    startedAtMs === undefined ? resolvedActivity : { ...resolvedActivity, startedAtMs };
   const activity =
     visibleActivity.phase !== 'idle' &&
     visibleActivity.phase !== 'error' &&
