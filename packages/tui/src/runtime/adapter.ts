@@ -104,6 +104,14 @@ export interface TuiRuntimeAdapterOptions {
   dailyCheckin?: {
     run(): Promise<TuiDailyCheckinOutcome>;
   };
+  /**
+   * Process-scoped `--model` override. Every Session this process creates
+   * (first launch, `/new`, catalog resume) starts on it, so the flag does not
+   * silently fall back to the saved global default on the next Session.
+   * Intentionally absent when `--model` was combined with an existing
+   * Session id or `--continue`: there the flag only retargets that Session.
+   */
+  startupModelOverride?: TuiModelSelection;
 }
 
 export class TuiRuntimeAdapter implements TuiRuntime {
@@ -127,11 +135,13 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   private readonly accountIdentityGetter: TuiRuntimeAdapterOptions["accountIdentityGetter"];
   private readonly feedback: TuiRuntimeAdapterOptions["feedback"];
   private readonly dailyCheckin: TuiRuntimeAdapterOptions["dailyCheckin"];
+  private readonly startupModelOverride: TuiModelSelection | undefined;
 
   constructor(cliService: CliService, options: TuiRuntimeAdapterOptions = {}) {
     this.cliService = cliService;
     const defaultAgentName =
       options.defaultAgentName ?? MINIMAX_CODE_DEFAULT_AGENT_NAME;
+    this.startupModelOverride = options.startupModelOverride;
     this.tokenPlanAccountStatusGetter = options.tokenPlanAccountStatusGetter;
     this.synchronizeAuth = options.synchronizeAuth;
     this.accountIdentityGetter = options.accountIdentityGetter;
@@ -185,6 +195,12 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   }
 
   async createSession(input: CreateTuiSessionInput): Promise<TuiSession> {
+    // A `--model` startup override outranks the saved global default: the user
+    // asked for this model for the whole invocation, so `/new` must keep it
+    // instead of snapping back to whatever config.yaml happens to hold.
+    if (this.startupModelOverride) {
+      return this.sessionAccess.createSession(input, this.startupModelOverride);
+    }
     const defaultModel = await this.productAccess
       .listModels()
       .then((models) => models.find((model) => model.selected === true))
