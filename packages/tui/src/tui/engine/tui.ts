@@ -398,6 +398,13 @@ export abstract class TuiBase extends Container implements TUI {
 		this.requestRender();
 	}
 
+	/**
+	 * Called for input the host terminal attributes to the user (keys and paste).
+	 * Terminal reports such as focus, size and mode replies are excluded. Hosts
+	 * normally scroll their viewport back to the bottom on such input (L047).
+	 */
+	protected onUserInput(): void {}
+
 	protected beforeTerminalStart(): void {}
 
 	protected afterTerminalStart(): void {}
@@ -877,6 +884,7 @@ export abstract class TuiBase extends Container implements TUI {
 			return;
 		}
 		data = remaining;
+		if (isUserOriginatedInput(data)) this.onUserInput();
 
 		if (this.inputListeners.size > 0) {
 			let current = data;
@@ -1322,4 +1330,12 @@ export abstract class TuiBase extends Container implements TUI {
 			this.terminal.write("\x1b[?996n");
 		});
 	}
+}
+
+/** Excludes terminal-generated reports, which do not make hosts scroll to the bottom (L047). */
+function isUserOriginatedInput(data: string): boolean {
+	if (data === "\x1b[I" || data === "\x1b[O") return false;
+	if (/^\x1b\[\d+(?:;\d+)*t$/.test(data)) return false;
+	if (/^\x1b\[\?[\d;]*(?:c|n|u|\$y)$/.test(data)) return false;
+	return !isKeyRelease(data);
 }

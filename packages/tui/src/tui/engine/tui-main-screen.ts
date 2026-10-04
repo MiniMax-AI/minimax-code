@@ -118,6 +118,13 @@ export interface TuiMainScreenRenderState {
 	hadOverlays: boolean;
 }
 
+/**
+ * How long after user input the host is assumed to follow the bottom again.
+ * Terminals scroll to the bottom on key input, so a reconstruction in this
+ * window cannot strand a reader at the top of the replayed history (L047).
+ */
+const USER_INPUT_FOLLOW_WINDOW_MS = 1000;
+
 /** TUI implementation that renders into the terminal's main screen and scrollback. */
 export class TuiMainScreen extends TuiBase implements TUI {
 	readonly mode = "regular" as const;
@@ -131,6 +138,16 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private previousViewportTop = 0;
 	private resizeTimer: ReturnType<typeof setTimeout> | undefined;
 	private historyReplayPending = false;
+	// L047: a full reconstruction (ED 3 + replay) moves a host that is scrolled
+	// up to the top of the replayed history, because the host keeps its scrolled
+	// state while scrollback is rebuilt beneath it. Output-driven reconstructions
+	// are therefore deferred until the next user input, which makes hosts return
+	// to the bottom first.
+	private historyReplayDeferred = false;
+	private historyReplayDeferredAt = 0;
+	private lastResizeAt = 0;
+	private lastUserInputAt = Number.NEGATIVE_INFINITY;
+	private forceHistoryReplay = false;
 	private viewportLayouts: TuiMainScreenRenderState['viewportLayouts'] = [];
 	private hadOverlays = false;
 
@@ -142,12 +159,36 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		if (this.previousLines.length > 0 && !isTermuxSession()) {
 			if (this.resizeTimer) clearTimeout(this.resizeTimer);
 			this.historyReplayPending = true;
+			this.lastResizeAt = performance.now();
 			this.resizeTimer = setTimeout(() => {
 				this.resizeTimer = undefined;
 				this.requestRender();
 			}, 150);
 		}
 		this.requestImmediateRender();
+	}
+
+	protected override onUserInput(): void {
+		this.lastUserInputAt = performance.now();
+		if (this.historyReplayDeferred) this.requestRender();
+	}
+
+	/** Whether the host has just scrolled back to the bottom for user input (L047). */
+	private hostFollowsBottom(): boolean {
+		return this.forceHistoryReplay || performance.now() - this.lastUserInputAt <= USER_INPUT_FOLLOW_WINDOW_MS;
+	}
+
+	/**
+	 * Whether user input arrived after the given time (L047). Input before an
+	 * output-driven event does not count: the reader may have scrolled up since.
+	 */
+	private userInputSince(time: number): boolean {
+		return this.forceHistoryReplay || this.lastUserInputAt >= time;
+	}
+
+	private deferHistoryReplay(): void {
+		if (!this.historyReplayDeferred) this.historyReplayDeferredAt = performance.now();
+		this.historyReplayDeferred = true;
 	}
 
 	private cancelResize(): void {
@@ -160,8 +201,16 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.cancelResize();
 		// Ordinary stop must retain the latest transcript even when output is held.
 		// Mode switches already captured the current render state before stop.
-		if (!this.stopped && (this.historyReplayPending || (!options.preserveScreen && this.hasPendingRender()))) {
-			this.doRender();
+		if (
+			!this.stopped &&
+			(this.historyReplayPending || this.historyReplayDeferred || (!options.preserveScreen && this.hasPendingRender()))
+		) {
+			this.forceHistoryReplay = true;
+			try {
+				this.doRender();
+			} finally {
+				this.forceHistoryReplay = false;
+			}
 		}
 		super.stop(options);
 	}
@@ -183,6 +232,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	restoreRenderState(state: TuiMainScreenRenderState): void {
 		this.cancelResize();
 		this.historyReplayPending = false;
+		this.historyReplayDeferred = false;
 		this.previousLines = state.previousLines.map((line) => (isImageLine(line) ? "" : line));
 		this.previousKittyImageIds = new Set();
 		this.previousWidth = state.previousWidth;
@@ -200,6 +250,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.hadOverlays = false;
 		this.cancelResize();
 		this.historyReplayPending = false;
+		this.historyReplayDeferred = false;
 		this.previousLines = [];
 		this.previousWidth = -1;
 		this.previousHeight = -1;
@@ -297,6 +348,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const previousBufferLength = this.previousHeight > 0 ? this.previousViewportTop + this.previousHeight : height;
 		let prevViewportTop = heightChanged ? Math.max(0, previousBufferLength - height) : this.previousViewportTop;
 		let viewportTop = prevViewportTop;
+		const followsBottom = this.hostFollowsBottom();
+		const runDeferredReplay = this.historyReplayDeferred && this.userInputSince(this.historyReplayDeferredAt);
 		let hardwareCursorRow = this.hardwareCursorRow;
 		const computeLineDiff = (targetRow: number): number => {
 			const currentScreenRow = hardwareCursorRow - prevViewportTop;
@@ -349,8 +402,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// When only addressable rows shrink, absorb the freed rows at the top of the
 		// screen instead. The composer stays at the bottom, historical rows stay unique,
 		// and later output consumes this temporary space before scrolling again.
+		// L047: an output-driven layout shrink uses the same padding instead of an
+		// immediate reconstruction, and reconstructs after the next user input.
 		if (
-			stableLayout && !hadOverlays && !widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
+			(stableLayout || !followsBottom) && !runDeferredReplay &&
+			!hadOverlays && !widthChanged && !heightChanged && !this.historyReplayPending && !this.hasOverlayEntries &&
 			prevViewportTop > 0 && newLines.length > prevViewportTop &&
 			newLines.length < prevViewportTop + height &&
 			this.previousKittyImageIds.size === 0 && !newLines.some(isImageLine)
@@ -365,6 +421,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (unchangedHistory) {
 				const padding = Array<string>(prevViewportTop + height - newLines.length).fill("");
 				newLines = [...newLines.slice(0, prevViewportTop), ...padding, ...newLines.slice(prevViewportTop)];
+				if (!stableLayout) this.deferHistoryReplay();
 			}
 		}
 
@@ -452,9 +509,28 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		};
 
 		if (this.historyReplayPending) {
-			const viewportOnly = this.resizeTimer !== undefined;
-			fullRender(true, viewportOnly);
-			if (!viewportOnly) this.historyReplayPending = false;
+			const settling = this.resizeTimer !== undefined;
+			if (!settling && this.userInputSince(this.lastResizeAt)) {
+				this.historyReplayPending = false;
+				this.historyReplayDeferred = false;
+				fullRender(true);
+				return;
+			}
+			// Keep showing the resized tail. Once the resize settled without user
+			// input, finish it as the current frame and replay history later (L047).
+			fullRender(true, true);
+			if (!settling) {
+				logRedraw("resize history replay deferred until user input");
+				this.historyReplayPending = false;
+				this.deferHistoryReplay();
+			}
+			return;
+		}
+
+		if (runDeferredReplay) {
+			logRedraw("deferred history replay after user input");
+			this.historyReplayDeferred = false;
+			fullRender(true);
 			return;
 		}
 

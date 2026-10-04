@@ -52,6 +52,16 @@ class ClearToScrollbackTerminal extends RecordingVirtualTerminal {
   }
 }
 
+/**
+ * A key reaches the TUI through the host terminal, which scrolls back to the
+ * bottom before delivering it. Tests that call component handlers directly
+ * model that delivery explicitly (L047).
+ */
+function deliverUserKey(terminal: VirtualTerminal, tui: TuiMainScreen): void {
+  terminal.scrollLines(Number.MAX_SAFE_INTEGER);
+  (tui as unknown as { onUserInput(): void }).onUserInput();
+}
+
 class MutableLines implements Component {
   lines: string[] = [];
   viewportLayoutKey: string | undefined;
@@ -143,6 +153,7 @@ describe('MCode Pi Engine local deltas', () => {
       await terminal.flush();
       terminal.scrollLines(-5);
       terminal.takeWrites();
+      deliverUserKey(terminal, tui);
       picker.handleInput(key);
       tui.renderNow();
       await terminal.flush();
@@ -349,6 +360,7 @@ describe('MCode Pi Engine local deltas', () => {
         tui.renderNow();
         await terminal.flush();
         parts[part].lines = [...baseline];
+        deliverUserKey(terminal, tui);
         tui.renderNow();
         await terminal.flush();
 
@@ -449,6 +461,7 @@ describe('MCode Pi Engine local deltas', () => {
       tui.renderNow();
       await terminal.flush();
       component.lines = [...history, 'composer', 'status'];
+      deliverUserKey(terminal, tui);
       tui.renderNow();
       await terminal.flush();
 
@@ -477,6 +490,7 @@ describe('MCode Pi Engine local deltas', () => {
       await terminal.flush();
       component.viewportLayoutKey = 'closed';
       component.lines = [...history, 'composer', 'status'];
+      deliverUserKey(terminal, tui);
       tui.renderNow();
       await terminal.flush();
 
@@ -792,7 +806,18 @@ describe('MCode Pi Engine local deltas', () => {
       // A redundant notification must not discard the pending genuine resize replay.
       terminal.resize(60, 30);
 
+      // Without user input the settled resize keeps native scrollback (L047).
       await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(terminal.getViewport()).toEqual([
+        ...Array.from({ length: 29 }, (_, index) => `Answer line ${index + 51}`),
+        'composer',
+      ]);
+
+      // The next key, delivered after the host returns to the bottom, replays history.
+      deliverUserKey(terminal, tui);
       tui.renderNow();
       await terminal.flush();
       expect(terminal.takeWrites()).toContain('\x1b[3J');
@@ -804,6 +829,219 @@ describe('MCode Pi Engine local deltas', () => {
     } finally {
       tui.stop();
     }
+  });
+
+  // #426: ED 3 + replay leaves a scrolled-up xterm.js host at the top of the
+  // rebuilt history (it keeps its scrolled state), so output-driven
+  // reconstructions wait for user input, when hosts return to the bottom (L047).
+  describe('scrolled-up readers during output-driven reconstruction (#426)', () => {
+    const settleResize = async (terminal: VirtualTerminal, columns: number, rows: number) => {
+      terminal.resize(columns, rows);
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      await terminal.flush();
+    };
+    const topRow = (terminal: VirtualTerminal) => Number(/\d+$/.exec(terminal.getViewport()[0]?.trim() ?? '')?.[0]);
+
+    it.each([
+      ['width', 59, 30],
+      ['height', 60, 26],
+    ] as const)('keeps the viewport when a %s resize settles mid-stream', async (_kind, columns, rows) => {
+      const terminal = new RecordingVirtualTerminal(60, 30);
+      const tui = new TuiMainScreen(terminal);
+      const component = new MutableLines();
+      const answer = Array.from({ length: 120 }, (_, index) => `Answer line ${index}`);
+      component.lines = [...answer, `composer${CURSOR_MARKER}`, 'status'];
+      tui.addChild(component);
+      try {
+        tui.start();
+        tui.renderNow();
+        await terminal.flush();
+        terminal.scrollLines(-40);
+        const before = terminal.getScrollPosition();
+        const readingRow = topRow(terminal);
+        expect(before.viewport).toBeGreaterThan(0);
+        terminal.takeWrites();
+
+        await settleResize(terminal, columns, rows);
+        // Streaming continues after the resize settled.
+        for (let index = 120; index < 140; index++) {
+          component.lines.splice(-2, 0, `Answer line ${index}`);
+          tui.renderNow();
+          await terminal.flush();
+        }
+
+        const during = terminal.getScrollPosition();
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+        expect(during.viewport).not.toBe(0);
+        expect(during.viewport).toBeLessThan(during.bottom);
+        // The host may shift by the rows it moved itself while resizing, never to the top.
+        expect(Math.abs(topRow(terminal) - readingRow)).toBeLessThanOrEqual(Math.abs(30 - rows));
+
+        // The next key replays exact, unique history and leaves the host at the bottom.
+        deliverUserKey(terminal, tui);
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.takeWrites()).toContain('\x1b[3J');
+        const expected = [...Array.from({ length: 140 }, (_, index) => `Answer line ${index}`), 'composer', 'status'];
+        expect(terminal.getScrollBuffer()).toEqual(expected);
+        const after = terminal.getScrollPosition();
+        expect(after.viewport).toBe(after.bottom);
+        expect(terminal.getViewport().slice(-2)).toEqual(['composer', 'status']);
+      } finally {
+        tui.stop();
+      }
+    });
+
+    it('does not replay for a key sent before the reader scrolled up and resized', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 30);
+      const tui = new TuiMainScreen(terminal);
+      const component = new MutableLines();
+      component.lines = [...Array.from({ length: 120 }, (_, index) => `Answer line ${index}`), `composer${CURSOR_MARKER}`, 'status'];
+      tui.addChild(component);
+      try {
+        tui.start();
+        tui.renderNow();
+        await terminal.flush();
+        // Submit, then scroll up to read while the reply streams.
+        deliverUserKey(terminal, tui);
+        terminal.scrollLines(-40);
+        terminal.takeWrites();
+
+        await settleResize(terminal, 59, 30);
+        for (let index = 120; index < 130; index++) {
+          component.lines.splice(-2, 0, `Answer line ${index}`);
+          tui.renderNow();
+          await terminal.flush();
+        }
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+        expect(terminal.getScrollPosition().viewport).not.toBe(0);
+      } finally {
+        tui.stop();
+      }
+    });
+
+    it('keeps a tailing reader at the bottom when a resize settles mid-stream', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 30);
+      const tui = new TuiMainScreen(terminal);
+      const component = new MutableLines();
+      component.lines = [...Array.from({ length: 120 }, (_, index) => `Answer line ${index}`), `composer${CURSOR_MARKER}`, 'status'];
+      tui.addChild(component);
+      try {
+        tui.start();
+        tui.renderNow();
+        await terminal.flush();
+        await settleResize(terminal, 59, 28);
+        for (let index = 120; index < 140; index++) {
+          component.lines.splice(-2, 0, `Answer line ${index}`);
+          tui.renderNow();
+          await terminal.flush();
+          const position = terminal.getScrollPosition();
+          expect(position.viewport).toBe(position.bottom);
+        }
+        expect(terminal.getViewport().slice(-3)).toEqual(['Answer line 139', 'composer', 'status']);
+      } finally {
+        tui.stop();
+      }
+    });
+
+    it('pads an output-driven layout shrink and reconstructs after the next key', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const tui = new TuiMainScreen(terminal);
+      const parts = createMutableChatParts('conversation');
+      const history = Array.from({ length: 40 }, (_, index) => `History ${index}`);
+      parts.transcript.lines = history;
+      parts.tasks.lines = Array.from({ length: 6 }, (_, index) => `Task ${index}`);
+      const layout = new TuiChatLayout(terminal, parts);
+      tui.addChild(layout);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+
+      // Background tasks finish without user input while the reader is scrolled up.
+      parts.tasks.lines = [];
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(terminal.getScrollPosition()).toEqual(before);
+      for (const line of history) {
+        expect(terminal.getScrollBuffer().filter((row) => row.trim() === line)).toHaveLength(1);
+      }
+
+      deliverUserKey(terminal, tui);
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      const logicalDocument = layout.render(terminal.columns).map((line) => line.replace(CURSOR_MARKER, ''));
+      expect(terminal.getViewport()).toEqual(logicalDocument.slice(-terminal.rows));
+      expect(terminal.getScrollBuffer()).toEqual(logicalDocument);
+    });
+
+    it('ignores terminal reports and replays after real key input', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 30);
+      const tui = new TuiMainScreen(terminal);
+      const component: Component & { lines: string[] } = {
+        lines: [...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`), `composer${CURSOR_MARKER}`],
+        render() {
+          return [...this.lines];
+        },
+        invalidate: () => undefined,
+        handleInput: () => undefined,
+      };
+      tui.addChild(component);
+      tui.setFocus(component);
+      try {
+        tui.start();
+        tui.renderNow();
+        await terminal.flush();
+        await settleResize(terminal, 59, 30);
+        tui.renderNow();
+        await terminal.flush();
+        terminal.takeWrites();
+
+        for (const report of ['\x1b[I', '\x1b[O', '\x1b[8;30;59t', '\x1b[?1u', '\x1b[?62;22c']) {
+          terminal.sendInput(report);
+          tui.renderNow();
+          await terminal.flush();
+        }
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+
+        terminal.sendInput('x');
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.takeWrites()).toContain('\x1b[3J');
+        expect(terminal.getScrollBuffer()).toEqual([
+          ...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`),
+          'composer',
+        ]);
+      } finally {
+        tui.stop();
+      }
+    });
+
+    it('replays deferred history before stopping', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 30);
+      const tui = new TuiMainScreen(terminal);
+      const component = new MutableLines();
+      component.lines = [...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`), `composer${CURSOR_MARKER}`];
+      tui.addChild(component);
+      tui.start();
+      tui.renderNow();
+      await terminal.flush();
+      await settleResize(terminal, 59, 30);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.takeWrites();
+
+      tui.stop();
+      await terminal.flush();
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      expect(terminal.getScrollBuffer().slice(0, 81).map((line) => line.trim())).toEqual([
+        ...Array.from({ length: 80 }, (_, index) => `Answer line ${index}`),
+        'composer',
+      ]);
+    });
   });
 
   it('renders an urgent product interaction without resetting Main diff state', async () => {
