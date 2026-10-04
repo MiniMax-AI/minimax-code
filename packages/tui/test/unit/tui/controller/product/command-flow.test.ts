@@ -39,6 +39,7 @@ function createReadinessCommandFlow(options: {
   reloadTui?: () => Promise<void>;
   append?: (text: string, kind?: "info" | "warning" | "error") => void;
   queuedCount?: number;
+  liveRunId?: () => string | undefined;
 }) {
   return new TuiCommandFlow({
     workspaceDir: "/workspace",
@@ -79,7 +80,7 @@ function createReadinessCommandFlow(options: {
     showStatusLine: options.showStatusLine,
     reloadTui: options.reloadTui,
     queueEnabled: true,
-    liveRunId: () => undefined,
+    liveRunId: options.liveRunId ?? (() => undefined),
     runtimeStopping: () => false,
     abortLiveTurn: vi.fn(async () => false),
     leaveUi: vi.fn(async () => undefined),
@@ -118,6 +119,34 @@ describe("TuiCommandFlow", () => {
     await vi.waitFor(() => expect(showHelp).toHaveBeenCalledOnce());
     await expect(opening).resolves.toBe("consumed");
     releaseReady?.();
+  });
+
+  it("tells the user to stop an in-flight response before /retry instead of claiming nothing failed (#425)", async () => {
+    const append = vi.fn();
+    const setHint = vi.fn();
+    const live = createReadinessCommandFlow({
+      whenReady: async () => undefined,
+      hasSession: true,
+      append,
+      setHint,
+      liveRunId: () => "run-hung",
+    });
+    await live.submit("/retry");
+    const shown = [...append.mock.calls, ...setHint.mock.calls].map(([text]) => text);
+    expect(shown).toContain("Stop the running turn before using /retry.");
+    expect(shown).not.toContain("There is no failed response to retry in this Session.");
+
+    append.mockClear();
+    setHint.mockClear();
+    const idle = createReadinessCommandFlow({
+      whenReady: async () => undefined,
+      hasSession: true,
+      append,
+      setHint,
+    });
+    await idle.submit("/retry");
+    const idleShown = [...append.mock.calls, ...setHint.mock.calls].map(([text]) => text);
+    expect(idleShown).toContain("There is no failed response to retry in this Session.");
   });
 
   it("opens the packaged changelog through the command catalog", async () => {

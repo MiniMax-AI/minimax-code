@@ -25,6 +25,19 @@ export {
   type PiTurnRunnerOptions,
 } from './pi-turn-runner.js';
 export { composeStreamFn } from './llm.js';
+export {
+  LLM_FIRST_EVENT_TIMEOUT_ENV,
+  LLM_FIRST_EVENT_TIMEOUT_MS,
+  LLM_STREAM_IDLE_TIMEOUT_ENV,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+} from './defaults.js';
+export {
+  LLM_STREAM_TIMEOUT_MESSAGE_PREFIX,
+  resolveLLMStreamTimeouts,
+  withLLMStreamTimeouts,
+  type LLMStreamTimeoutConfig,
+  type LLMStreamTimeouts,
+} from './llm-stream-timeout.js';
 export { normalizeAbortSource } from './types.js';
 export {
   DEFAULT_LLM_RETRY_POLICY,

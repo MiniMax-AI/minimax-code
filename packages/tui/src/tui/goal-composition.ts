@@ -19,6 +19,7 @@ interface TuiGoalCompositionOptions {
   readonly scheduleDraft: () => void;
   readonly chrome: () => TuiChromeFlow | undefined;
   readonly isStopped: () => boolean;
+  readonly hasLiveRun?: () => boolean;
   readonly updateChrome: () => void;
   readonly onEditorChanged?: () => void;
   readonly requestRender: () => void;
@@ -78,6 +79,7 @@ export function createTuiGoalComposition(options: TuiGoalCompositionOptions): {
     surfaceHost: options.surfaceHost,
     append: options.append,
     setHint: (message) => options.chrome()?.setHint(message),
+    ...(options.hasLiveRun ? { hasLiveRun: options.hasLiveRun } : {}),
     onChanged: () => {
       options.updateChrome();
       options.requestRender();

@@ -215,6 +215,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     scheduleDraft: () => draftLifecycle?.schedule(),
     chrome: () => chromeFlow,
     isStopped: () => stopped,
+    hasLiveRun,
     updateChrome: () => updateChrome(controller.snapshot()),
     onEditorChanged: () => activeRunFlow?.onEditorChanged(),
     requestRender: () => (started && !stopped ? tui.requestRender() : undefined),

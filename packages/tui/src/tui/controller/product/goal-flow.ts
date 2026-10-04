@@ -27,7 +27,17 @@ export interface TuiGoalFlowOptions {
   readonly append: (content: string, kind?: 'warning' | 'error') => void;
   readonly setHint: (message: string | undefined) => void;
   readonly onChanged: () => void;
+  /**
+   * Whether a response is still in flight for the active Session. Clearing or
+   * pausing a Goal only stops future continuations, so the hint says how to
+   * stop the current response instead of implying it already stopped.
+   */
+  readonly hasLiveRun?: () => boolean;
 }
+
+/** Suffix for Goal hints issued while a response is still running. */
+export const TUI_GOAL_LIVE_RUN_HINT_SUFFIX =
+  'The current response keeps running; press Esc to interrupt it.';
 
 export class TuiGoalFlow {
   private refreshSequence = 0;
@@ -110,7 +120,7 @@ export class TuiGoalFlow {
         await this.options.runtime.clearGoal(sessionId);
         if (this.canProjectOperation(sessionId, operationSequence)) {
           this.options.banner.setGoal(undefined);
-          this.options.setHint('Goal cleared.');
+          this.options.setHint(this.withLiveRunNotice('Goal cleared.'));
           this.options.onChanged();
         }
         return 'consumed';
@@ -126,7 +136,9 @@ export class TuiGoalFlow {
       const updated = await this.options.runtime.patchGoal(sessionId, { status });
       if (this.canProjectOperation(sessionId, operationSequence)) {
         this.options.banner.setGoal(updated);
-        this.options.setHint(status === 'paused' ? 'Goal paused.' : 'Goal resumed.');
+        this.options.setHint(
+          status === 'paused' ? this.withLiveRunNotice('Goal paused.') : 'Goal resumed.',
+        );
         this.options.onChanged();
       }
       return 'consumed';
@@ -134,6 +146,10 @@ export class TuiGoalFlow {
       this.appendFailure(error);
       return 'retained';
     }
+  }
+
+  private withLiveRunNotice(message: string): string {
+    return this.options.hasLiveRun?.() ? `${message} ${TUI_GOAL_LIVE_RUN_HINT_SUFFIX}` : message;
   }
 
   async resumeBlocked(): Promise<'not-blocked' | 'resumed' | 'failed'> {

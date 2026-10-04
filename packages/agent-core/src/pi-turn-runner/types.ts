@@ -52,6 +52,19 @@ export interface LLMModelConfig {
    */
   hostMaxOutputTokens?: number;
   headers?: Record<string, string>;
+  /**
+   * Per-attempt wait (ms) for the first provider stream event before the
+   * request is aborted and reported as a retryable timeout. Absent: the
+   * `MCODE_LLM_FIRST_EVENT_TIMEOUT_MS` environment value, else
+   * `LLM_FIRST_EVENT_TIMEOUT_MS`. `0` disables the bound.
+   */
+  firstEventTimeoutMs?: number;
+  /**
+   * Per-attempt maximum gap (ms) between provider stream events after the
+   * first. Absent: `MCODE_LLM_STREAM_IDLE_TIMEOUT_MS`, else
+   * `LLM_STREAM_IDLE_TIMEOUT_MS`. `0` disables the bound.
+   */
+  streamIdleTimeoutMs?: number;
   fetch?: SimpleStreamOptions['fetch'];
   /** Provider payload transform for the main assistant response. */
   payloadTransform?: SimpleStreamOptions['onPayload'];

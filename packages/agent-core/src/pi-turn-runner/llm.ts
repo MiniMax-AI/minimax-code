@@ -1,6 +1,7 @@
 import type { Agent, AgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
 import { streamSimple, type CacheRetention, type SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { LLM_REQUEST_TIMEOUT_MS } from './defaults.js';
+import { resolveLLMStreamTimeouts, withLLMStreamTimeouts } from './llm-stream-timeout.js';
 import type {
   PiAfterLlmReplacementCommit,
   PiBeforeLlmCallAppendMessage,
@@ -27,7 +28,16 @@ export function composeStreamFn(resolved: LLMModelConfig): StreamFn {
     ? withHeaders(maxTokensWrapped, callerHeaders)
     : maxTokensWrapped;
   const fetchWrapped = resolved.fetch ? withFetch(headerWrapped, resolved.fetch) : headerWrapped;
-  return wrapStreamFnWithTimeout(fetchWrapped, LLM_REQUEST_TIMEOUT_MS);
+  const requestBounded = wrapStreamFnWithTimeout(fetchWrapped, LLM_REQUEST_TIMEOUT_MS);
+  // Outermost so every physical attempt (each `withLLMRetry` retry calls this
+  // function again) gets its own first-event / idle watchdog.
+  return withLLMStreamTimeouts(
+    requestBounded,
+    resolveLLMStreamTimeouts({
+      firstEventTimeoutMs: resolved.firstEventTimeoutMs,
+      streamIdleTimeoutMs: resolved.streamIdleTimeoutMs,
+    }),
+  );
 }
 
 export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory): void {

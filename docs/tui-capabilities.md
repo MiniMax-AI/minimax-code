@@ -80,6 +80,18 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | Files, shell, subagents, sessions, headless, ACP | Actual runtime retained | BYOK, file reads, session resume, ACP, sandbox, and status protocol tests |
 | Built-in skills, MCP, plugin tools | Original TUI assets and activation conditions retained | Asset build, plugin, and MCP tests; no claim that every skill has passed a real task |
 
+## Model request timeouts
+
+Each model request attempt has a first-response bound: if the provider accepts
+the request but sends no response within 120 seconds, the attempt is aborted
+and reported as a retryable timeout, so the normal model-request retry runs
+instead of waiting for the transport default. After the first response event, a
+stream that stays silent for 300 seconds is failed the same way; once visible
+output has started, the turn fails rather than retrying. Override the bounds in
+milliseconds with `MCODE_LLM_FIRST_EVENT_TIMEOUT_MS` and
+`MCODE_LLM_STREAM_IDLE_TIMEOUT_MS`; `0` disables a bound. The 20-minute overall
+request limit still applies.
+
 ## Local Bash execution
 
 When the current turn includes native `task_output`, foreground Bash waits up to
