@@ -24,12 +24,14 @@ export const LLM_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
  * Default per-attempt wait for the first provider stream event. Built-in
  * providers emit their first event once response headers arrive, so this is
  * a first-byte bound: a request the provider accepted but never answers is
- * failed as a retryable timeout instead of waiting for the transport default
- * (undici: 300 s) or {@link LLM_REQUEST_TIMEOUT_MS}. Override with
- * {@link LLM_FIRST_EVENT_TIMEOUT_ENV} or `LLMModelConfig.firstEventTimeoutMs`;
- * `0` disables it.
+ * failed as a retryable timeout instead of waiting for
+ * {@link LLM_REQUEST_TIMEOUT_MS}. The default matches undici's 300 s headers
+ * timeout, the effective previous wait, so no request that used to succeed
+ * now times out; the bound also applies to custom fetch implementations.
+ * Override with {@link LLM_FIRST_EVENT_TIMEOUT_ENV} or
+ * `LLMModelConfig.firstEventTimeoutMs`; `0` disables it.
  */
-export const LLM_FIRST_EVENT_TIMEOUT_MS = 120 * 1000;
+export const LLM_FIRST_EVENT_TIMEOUT_MS = 300 * 1000;
 
 /**
  * Default per-attempt maximum gap between provider stream events after the

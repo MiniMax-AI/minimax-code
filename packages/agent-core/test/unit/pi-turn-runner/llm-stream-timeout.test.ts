@@ -107,6 +107,9 @@ describe("withLLMStreamTimeouts", () => {
     expect(final.stopReason).toBe("error");
     expect(final.errorMessage).toContain(LLM_STREAM_TIMEOUT_MESSAGE_PREFIX);
     expect(final.errorMessage).toContain("within 50ms");
+    expect(final.errorMessage).toContain(LLM_FIRST_EVENT_TIMEOUT_ENV);
+    expect(final.errorMessage).toContain("firstEventTimeoutMs");
+    expect(final.errorMessage).not.toContain(LLM_STREAM_IDLE_TIMEOUT_ENV);
     expect(signals).toHaveLength(1);
     expect(signals[0]!.aborted).toBe(true);
   });
@@ -128,6 +131,9 @@ describe("withLLMStreamTimeouts", () => {
     expect(events.map((event) => event.type)).toEqual(["start", "error"]);
     expect(final.stopReason).toBe("error");
     expect(final.errorMessage).toContain("idle for 60ms");
+    expect(final.errorMessage).toContain(LLM_STREAM_IDLE_TIMEOUT_ENV);
+    expect(final.errorMessage).toContain("streamIdleTimeoutMs");
+    expect(final.errorMessage).not.toContain(LLM_FIRST_EVENT_TIMEOUT_ENV);
     expect(signal?.aborted).toBe(true);
   });
 
@@ -174,6 +180,60 @@ describe("withLLMStreamTimeouts", () => {
     expect(final.errorMessage ?? "").not.toContain(LLM_STREAM_TIMEOUT_MESSAGE_PREFIX);
   });
 
+  it.each(["first", "idle"] as const)(
+    "stops reading a stream that ignores abort after the %s bound fires",
+    async (phase) => {
+      let nextCalls = 0;
+      let returnCalls = 0;
+      // Yields `start` (idle case only), then never yields or settles again and
+      // ignores the abort signal entirely.
+      const ignoresAbort = {
+        [Symbol.asyncIterator]() {
+          let yieldedStart = phase === "first";
+          return {
+            next(): Promise<IteratorResult<AssistantMessageEvent>> {
+              nextCalls += 1;
+              if (!yieldedStart) {
+                yieldedStart = true;
+                return Promise.resolve({ done: false, value: { type: "start", partial: assistant("") } });
+              }
+              return new Promise(() => undefined);
+            },
+            return(): Promise<IteratorResult<AssistantMessageEvent>> {
+              returnCalls += 1;
+              return new Promise(() => undefined);
+            },
+          };
+        },
+        result: () => new Promise<AssistantMessage>(() => undefined),
+      };
+      const inner = (() => ignoresAbort) as unknown as StreamFn;
+      const wrapped = withLLMStreamTimeouts(inner, { firstEventTimeoutMs: 40, idleTimeoutMs: 40 });
+      const started = Date.now();
+      const stream = await wrapped(fakeModel(), CONTEXT, {});
+      const events = await collect(stream);
+      const final = await stream.result();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(events.at(-1)).toMatchObject({ type: "error", reason: "error" });
+      expect(final.errorMessage).toContain(LLM_STREAM_TIMEOUT_MESSAGE_PREFIX);
+      // The read loop left the pending next() and released the iterator.
+      expect(nextCalls).toBe(phase === "first" ? 1 : 2);
+      expect(returnCalls).toBe(1);
+    },
+  );
+
+  it("stops waiting for a provider call that never returns its stream", async () => {
+    const inner = (() => new Promise(() => undefined)) as unknown as StreamFn;
+    const wrapped = withLLMStreamTimeouts(inner, { firstEventTimeoutMs: 40, idleTimeoutMs: 0 });
+    const stream = await wrapped(fakeModel(), CONTEXT, {});
+    const final = await stream.result();
+
+    expect(final.stopReason).toBe("error");
+    expect(final.errorMessage).toContain("within 40ms");
+  });
+
   it("returns the inner StreamFn unchanged when both bounds are disabled", () => {
     const inner = neverResponding([]);
     expect(withLLMStreamTimeouts(inner, { firstEventTimeoutMs: 0, idleTimeoutMs: 0 })).toBe(inner);
@@ -181,6 +241,11 @@ describe("withLLMStreamTimeouts", () => {
 });
 
 describe("resolveLLMStreamTimeouts", () => {
+  it("defaults both bounds to the previous effective transport wait", () => {
+    expect(LLM_FIRST_EVENT_TIMEOUT_MS).toBe(300_000);
+    expect(LLM_STREAM_IDLE_TIMEOUT_MS).toBe(300_000);
+  });
+
   it("uses defaults, then environment overrides, then explicit host config", () => {
     expect(resolveLLMStreamTimeouts({}, {})).toEqual({
       firstEventTimeoutMs: LLM_FIRST_EVENT_TIMEOUT_MS,

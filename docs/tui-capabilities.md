@@ -83,14 +83,16 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 ## Model request timeouts
 
 Each model request attempt has a first-response bound: if the provider accepts
-the request but sends no response within 120 seconds, the attempt is aborted
+the request but sends no response within 300 seconds, the attempt is aborted
 and reported as a retryable timeout, so the normal model-request retry runs
-instead of waiting for the transport default. After the first response event, a
-stream that stays silent for 300 seconds is failed the same way; once visible
-output has started, the turn fails rather than retrying. Override the bounds in
-milliseconds with `MCODE_LLM_FIRST_EVENT_TIMEOUT_MS` and
-`MCODE_LLM_STREAM_IDLE_TIMEOUT_MS`; `0` disables a bound. The 20-minute overall
-request limit still applies.
+instead of waiting for the 20-minute overall request limit. 300 seconds matches
+the transport's previous effective wait for response headers. After the first
+response event, a stream that stays silent for 300 seconds is failed the same
+way; once visible output has started, the turn fails rather than retrying.
+Override the bounds in milliseconds with `MCODE_LLM_FIRST_EVENT_TIMEOUT_MS` and
+`MCODE_LLM_STREAM_IDLE_TIMEOUT_MS`; `0` disables a bound. Embedding hosts can
+also set `firstEventTimeoutMs` and `streamIdleTimeoutMs` per model. The timeout error names
+the setting that fired. The 20-minute overall request limit still applies.
 
 ## Local Bash execution
 

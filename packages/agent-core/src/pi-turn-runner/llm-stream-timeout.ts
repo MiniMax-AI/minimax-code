@@ -21,8 +21,8 @@ import {
  * `firstEventTimeoutMs` bounds the wait for the first stream event. The
  * built-in providers emit `start` only after the HTTP response headers
  * arrive, so this is effectively a first-byte timeout: a request the provider
- * accepted but never answers fails here instead of waiting for the transport
- * default (undici: 300 s headers timeout) or the 20 min outer request bound.
+ * accepted but never answers fails here and is retried instead of waiting for
+ * the 20 min outer request bound (or a custom fetch's own transport default).
  *
  * `idleTimeoutMs` bounds the gap between consecutive events after the first
  * one, so a stream that stalls mid-response is also failed.
@@ -86,6 +86,13 @@ export function withLLMStreamTimeouts(
     let finished = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let lastPartial: AssistantMessage | undefined;
+    // Resolves when the wrapper is finished for any reason, so the read loop
+    // below stops even if the inner stream ignores the abort and never yields
+    // or settles again.
+    let signalStopped!: () => void;
+    const stopped = new Promise<typeof STOPPED>((resolve) => {
+      signalStopped = () => resolve(STOPPED);
+    });
 
     const clearTimer = () => {
       if (timer !== undefined) clearTimeout(timer);
@@ -99,6 +106,7 @@ export function withLLMStreamTimeouts(
       finished = true;
       clearTimer();
       callerSignal?.removeEventListener('abort', onCallerAbort);
+      signalStopped();
     };
     const arm = (ms: number, phase: 'first' | 'idle') => {
       clearTimer();
@@ -129,12 +137,21 @@ export function withLLMStreamTimeouts(
 
     void (async () => {
       try {
-        const stream: AssistantMessageEventStream = await base(model, context, {
-          ...(options ?? {}),
-          signal: controller.signal,
-        });
-        for await (const event of stream) {
-          if (finished) break;
+        const opened = await Promise.race([
+          Promise.resolve(base(model, context, { ...(options ?? {}), signal: controller.signal })),
+          stopped,
+        ]);
+        if (opened === STOPPED) return;
+        const stream: AssistantMessageEventStream = opened;
+        const iterator = stream[Symbol.asyncIterator]();
+        for (;;) {
+          const next = await Promise.race([iterator.next(), stopped]);
+          if (next === STOPPED || finished) {
+            releaseIterator(iterator);
+            return;
+          }
+          if (next.done) break;
+          const event = next.value;
           const partial = partialOf(event);
           if (partial) lastPartial = partial;
           if (event.type === 'done' || event.type === 'error') {
@@ -178,14 +195,25 @@ export function withLLMStreamTimeouts(
   }) as StreamFn;
 }
 
+const STOPPED: unique symbol = Symbol('llm-stream-timeout-stopped');
+
+/** Ask the inner stream to stop without waiting on one that may never settle. */
+function releaseIterator(iterator: AsyncIterator<AssistantMessageEvent>): void {
+  void Promise.resolve()
+    .then(() => iterator.return?.())
+    .catch(() => undefined);
+}
+
 export class LLMStreamTimeoutError extends Error {
   override readonly name = 'TimeoutError';
 }
 
 function timeoutMessage(phase: 'first' | 'idle', ms: number): string {
   return phase === 'first'
-    ? `${LLM_STREAM_TIMEOUT_MESSAGE_PREFIX}: no response from the provider within ${ms}ms`
-    : `${LLM_STREAM_TIMEOUT_MESSAGE_PREFIX}: the provider stream was idle for ${ms}ms`;
+    ? `${LLM_STREAM_TIMEOUT_MESSAGE_PREFIX}: no response from the provider within ${ms}ms. ` +
+        `Raise it with ${LLM_FIRST_EVENT_TIMEOUT_ENV} (milliseconds, 0 disables) or the host's per-model firstEventTimeoutMs.`
+    : `${LLM_STREAM_TIMEOUT_MESSAGE_PREFIX}: the provider stream was idle for ${ms}ms. ` +
+        `Raise it with ${LLM_STREAM_IDLE_TIMEOUT_ENV} (milliseconds, 0 disables) or the host's per-model streamIdleTimeoutMs.`;
 }
 
 function partialOf(event: AssistantMessageEvent): AssistantMessage | undefined {
