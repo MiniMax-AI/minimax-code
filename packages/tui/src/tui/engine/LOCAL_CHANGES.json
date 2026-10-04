@@ -163,7 +163,7 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "1aceb55a3bda1514feb4a3f332d194774f3d7e1ca8ae7b807b523ab13e84c1b6",
+      "currentSha256": "b8f93a0b2e93f7295b3330d9af3d98a577d2c4a5d4023b1833c77d5226780ffb",
       "changeIds": [
         "L005",
         "L017",
@@ -179,12 +179,12 @@
         "L047"
       ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
-      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure. Defer output-driven history reconstruction until user input.",
-      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored. Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output. A scrolled-up reader stays in place when a resize settles or a layout shrinks during output; the reconstruction runs after the next key or at stop."
+      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure. Defer history reconstruction after output-driven layout shrink until user input.",
+      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored. Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output. A scrolled-up reader stays in place when a transient layout shrinks without user input; the reconstruction runs after the next key, a resize replay or at stop."
     },
     {
       "path": "tui.ts",
-      "currentSha256": "ae08b009e066cf1668acde2df0cb03e9781775055c8196a0a0c3f41fd779c009",
+      "currentSha256": "d5e21c53b782084104023744030926e9c0ad179b4422ebab47b7ab95366783c2",
       "changeIds": [
         "L005",
         "L015",
@@ -199,7 +199,7 @@
         "L047"
       ],
       "reason": "Keep strict TypeScript fixes, expose Pi's existing immediate scheduler as a non-destructive product interaction contract, dispatch the input left over after terminal color sequences are removed, and coalesce synchronous submission renders. 提供 resize hook 及焦点输入过滤 独立面板声明键盘分页归属。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure. Report user-originated input to the renderer.",
-      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output. Key and paste input, excluding terminal reports, lets the regular renderer run deferred history reconstruction."
+      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state or clearing native scrollback, and a coalesced color answer no longer discards the keystrokes sharing its chunk. A synchronous submission frame dismisses the previous interrupted footer without a second input render. 焦点先交给 viewport listener，不进入编辑器。 handlesViewportKeys 为 true 时，fullscreen 分页交给焦点面板；默认仍由外层视口处理。 Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output. Key and paste input, parsed apart from terminal reports in the same chunk, lets the regular renderer run deferred history reconstruction."
     },
     {
       "path": "utils.ts",

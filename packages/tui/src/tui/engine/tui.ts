@@ -884,7 +884,7 @@ export abstract class TuiBase extends Container implements TUI {
 			return;
 		}
 		data = remaining;
-		if (isUserOriginatedInput(data)) this.onUserInput();
+		if (containsUserInput(data)) this.onUserInput();
 
 		if (this.inputListeners.size > 0) {
 			let current = data;
@@ -1332,10 +1332,74 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 }
 
-/** Excludes terminal-generated reports, which do not make hosts scroll to the bottom (L047). */
-function isUserOriginatedInput(data: string): boolean {
-	if (data === "\x1b[I" || data === "\x1b[O") return false;
-	if (/^\x1b\[\d+(?:;\d+)*t$/.test(data)) return false;
-	if (/^\x1b\[\?[\d;]*(?:c|n|u|\$y)$/.test(data)) return false;
-	return !isKeyRelease(data);
+/**
+ * Whether a chunk contains input the user typed or pasted (L047). The chunk is
+ * split into control sequences so a key that shares a chunk with terminal
+ * reports still counts, while chunks made only of reports, key releases or
+ * mouse reports do not; hosts do not scroll to the bottom for those.
+ */
+function containsUserInput(data: string): boolean {
+	let index = 0;
+	while (index < data.length) {
+		// Printable text and C0 control keys (Enter, Tab, Ctrl+letter) are user input.
+		if (data[index] !== "\x1b") return true;
+		const end = escapeSequenceEnd(data, index);
+		const sequence = data.slice(index, end);
+		if (!isTerminalReport(sequence) && !isKeyRelease(sequence)) return true;
+		index = end;
+	}
+	return false;
+}
+
+/** End index of the escape sequence starting at `start`; an unterminated sequence runs to the end. */
+function escapeSequenceEnd(data: string, start: number): number {
+	const introducer = data[start + 1];
+	// A lone or doubled ESC is the Escape key.
+	if (introducer === undefined || introducer === "\x1b") return start + 1;
+	if (introducer === "[") {
+		let index = start + 2;
+		while (index < data.length && isInRange(data, index, 0x30, 0x3f)) index++;
+		while (index < data.length && isInRange(data, index, 0x20, 0x2f)) index++;
+		return index < data.length && isInRange(data, index, 0x40, 0x7e) ? index + 1 : data.length;
+	}
+	if (introducer === "]" || introducer === "P" || introducer === "_" || introducer === "^" || introducer === "X") {
+		for (let index = start + 2; index < data.length; index++) {
+			if (introducer === "]" && data[index] === "\x07") return index + 1;
+			if (data[index] === "\x1b" && data[index + 1] === "\\") return index + 2;
+		}
+		return data.length;
+	}
+	if (introducer === "O") return Math.min(start + 3, data.length);
+	// Alt+key.
+	return start + 2;
+}
+
+function isInRange(data: string, index: number, low: number, high: number): boolean {
+	const code = data.charCodeAt(index);
+	return code >= low && code <= high;
+}
+
+/** Replies and reports a terminal sends on its own or in answer to a query. */
+function isTerminalReport(sequence: string): boolean {
+	const introducer = sequence[1];
+	// OSC, DCS, APC, PM and SOS strings are terminal replies, never keys.
+	if (introducer === "]" || introducer === "P" || introducer === "_" || introducer === "^" || introducer === "X") return true;
+	const csi = /^\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])$/.exec(sequence);
+	if (!csi) return false;
+	const [, params = "", intermediates = "", final] = csi;
+	// Focus in/out.
+	if ((final === "I" || final === "O") && params === "" && intermediates === "") return true;
+	// Window size and state reports.
+	if (final === "t" && /^\d+(?:;\d+)*$/.test(params)) return true;
+	// Cursor position reports (CPR and DECXCPR).
+	if (final === "R" && /^\??\d+;\d+(?:;\d+)?$/.test(params)) return true;
+	// Device attributes, device status and kitty keyboard flag replies.
+	if (final === "c" && /^[?>=]/.test(params)) return true;
+	if (final === "n") return true;
+	if (final === "u" && params.startsWith("?")) return true;
+	// Mode reports (DECRPM).
+	if (final === "y" && intermediates === "$") return true;
+	// SGR mouse reports.
+	if ((final === "M" || final === "m") && params.startsWith("<")) return true;
+	return false;
 }

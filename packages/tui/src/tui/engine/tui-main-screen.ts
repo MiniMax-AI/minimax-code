@@ -140,12 +140,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private historyReplayPending = false;
 	// L047: a full reconstruction (ED 3 + replay) moves a host that is scrolled
 	// up to the top of the replayed history, because the host keeps its scrolled
-	// state while scrollback is rebuilt beneath it. Output-driven reconstructions
-	// are therefore deferred until the next user input, which makes hosts return
-	// to the bottom first.
+	// state while scrollback is rebuilt beneath it. Reconstruction after an
+	// output-driven layout shrink is therefore deferred until the next user
+	// input, which makes hosts return to the bottom first.
 	private historyReplayDeferred = false;
 	private historyReplayDeferredAt = 0;
-	private lastResizeAt = 0;
 	private lastUserInputAt = Number.NEGATIVE_INFINITY;
 	private forceHistoryReplay = false;
 	private viewportLayouts: TuiMainScreenRenderState['viewportLayouts'] = [];
@@ -159,7 +158,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		if (this.previousLines.length > 0 && !isTermuxSession()) {
 			if (this.resizeTimer) clearTimeout(this.resizeTimer);
 			this.historyReplayPending = true;
-			this.lastResizeAt = performance.now();
 			this.resizeTimer = setTimeout(() => {
 				this.resizeTimer = undefined;
 				this.requestRender();
@@ -509,20 +507,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		};
 
 		if (this.historyReplayPending) {
-			const settling = this.resizeTimer !== undefined;
-			if (!settling && this.userInputSince(this.lastResizeAt)) {
+			const viewportOnly = this.resizeTimer !== undefined;
+			fullRender(true, viewportOnly);
+			if (!viewportOnly) {
 				this.historyReplayPending = false;
+				// The resize replay rebuilt history, including any deferred shrink.
 				this.historyReplayDeferred = false;
-				fullRender(true);
-				return;
-			}
-			// Keep showing the resized tail. Once the resize settled without user
-			// input, finish it as the current frame and replay history later (L047).
-			fullRender(true, true);
-			if (!settling) {
-				logRedraw("resize history replay deferred until user input");
-				this.historyReplayPending = false;
-				this.deferHistoryReplay();
 			}
 			return;
 		}
