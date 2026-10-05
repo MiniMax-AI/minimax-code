@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { CheckpointAttemptMetadata } from '../../agent-host/contracts.js';
 import { readCompactionCompatibility } from '../compat.js';
-import { CheckpointCandidateTooLargeError } from '../contracts.js';
+import {
+  CheckpointCandidateMediaRejectedError,
+  CheckpointCandidateTooLargeError,
+} from '../contracts.js';
 import {
   compactContext,
   type CheckpointSession,
@@ -637,6 +640,141 @@ describe('compactContext historical video recovery', () => {
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(generate).toHaveBeenCalledTimes(3);
     expect(fits).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('compactContext provider image-limit recovery (#425)', () => {
+  function userWithImage(text: string, data: string, timestamp: number): AgentMessage {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text },
+        { type: 'image', data, mimeType: 'image/png' },
+      ],
+      timestamp,
+    };
+  }
+
+  it('falls back to the attachment-free candidate when the Provider rejects too many images', async () => {
+    const h0 = [
+      userWithImage('screenshot one', 'secret-image-1', 0),
+      assistantText('seen one', 1),
+      userWithImage('screenshot two', 'secret-image-2', 2),
+      assistantText('seen two', 3),
+      Object.assign(user('display wrapper', 4), { genuineUserQueryText: 'latest query' }),
+    ];
+    const generate = vi
+      .fn<CheckpointSession['generate']>()
+      .mockRejectedValueOnce(
+        new CheckpointCandidateMediaRejectedError(
+          new Error('400 Upstream [invalid_request_error] Too many images in request: 31 > 30'),
+        ),
+      )
+      .mockResolvedValueOnce(generation());
+    const attempts: CheckpointAttemptMetadata[] = [];
+    const input = policyInput(h0, { generate, fits: () => true });
+
+    const decision = await compactContext({
+      ...input,
+      checkpoint: { ...input.checkpoint, onAttemptSettled: (metadata) => attempts.push(metadata) },
+    });
+
+    expect(decision).toMatchObject({ method: 'llm_checkpoint', generationAttempts: 2 });
+    expect(generate).toHaveBeenCalledTimes(2);
+    const fallback = JSON.stringify(generate.mock.calls[1]?.[0]?.messages);
+    expect(fallback).not.toContain('secret-image-');
+    expect(fallback).not.toMatch(/"type":"image"/);
+    expect(fallback).toContain('screenshot one');
+    expect(attempts.map(({ candidate, attemptNumber, outcome }) => `${candidate}:${attemptNumber}:${outcome}`)).toEqual([
+      'h0:1:failed',
+      'hvideo:2:generated',
+    ]);
+    // Canonical history is never rewritten.
+    expect(JSON.stringify(h0)).toContain('secret-image-1');
+  });
+
+  it('continues down the attachment-free ladder when the image-free candidate overflows', async () => {
+    const h0 = [
+      userWithImage('old query', 'secret-image-1', 0),
+      ...threeRounds(),
+      Object.assign(user('display wrapper', 7), { genuineUserQueryText: 'latest query' }),
+    ];
+    const generate = vi
+      .fn<CheckpointSession['generate']>()
+      .mockRejectedValueOnce(new CheckpointCandidateMediaRejectedError(new Error('Too many images')))
+      .mockRejectedValueOnce(new CheckpointCandidateTooLargeError('Hvideo overflow'))
+      .mockResolvedValueOnce(generation());
+    const attempts: CheckpointAttemptMetadata[] = [];
+    const input = policyInput(h0, {
+      measurePair: async () => footprint(1_000, 301),
+      generate,
+      fits: () => true,
+    });
+
+    const decision = await compactContext({
+      ...input,
+      checkpoint: { ...input.checkpoint, onAttemptSettled: (metadata) => attempts.push(metadata) },
+    });
+
+    expect(decision).toMatchObject({ method: 'llm_checkpoint' });
+    const last = JSON.stringify(generate.mock.calls.at(-1)?.[0]?.messages);
+    expect(last).not.toContain('secret-image-1');
+    // Hall clears the tool bodies, so its attachment-free form is a new, smaller request.
+    expect(attempts.map(({ candidate }) => candidate)).toEqual(['h0', 'hvideo', 'hvideo']);
+  });
+
+  it('does not resend an identical attachment-free history after it overflows', async () => {
+    const h0 = [
+      userWithImage('old query', 'secret-image-1', 0),
+      assistantText('answer', 1),
+      Object.assign(user('display wrapper', 2), { genuineUserQueryText: 'latest query' }),
+    ];
+    const generate = vi
+      .fn<CheckpointSession['generate']>()
+      .mockRejectedValueOnce(new CheckpointCandidateMediaRejectedError(new Error('Too many images')))
+      .mockRejectedValueOnce(new CheckpointCandidateTooLargeError('Hvideo overflow'))
+      .mockResolvedValue(generation());
+    const attempts: CheckpointAttemptMetadata[] = [];
+    const input = policyInput(h0, { generate, fits: () => true });
+
+    await compactContext({
+      ...input,
+      checkpoint: { ...input.checkpoint, onAttemptSettled: (metadata) => attempts.push(metadata) },
+    }).catch(() => undefined);
+
+    expect(attempts.filter(({ candidate }) => candidate === 'hvideo')).toHaveLength(1);
+  });
+
+  it('fails as a Provider failure when the rejected candidate carries no media to strip', async () => {
+    const h0 = [
+      user('old query', 0),
+      assistantText('answer', 1),
+      Object.assign(user('display wrapper', 2), { genuineUserQueryText: 'latest query' }),
+    ];
+    const generate = vi
+      .fn<CheckpointSession['generate']>()
+      .mockRejectedValue(new CheckpointCandidateMediaRejectedError(new Error('Too many images')));
+
+    await expect(compactContext(policyInput(h0, { generate, fits: () => true }))).rejects.toMatchObject({
+      code: 'CHECKPOINT_PROVIDER_FAILED',
+      message: expect.stringContaining('too many images'),
+    });
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails as a Provider failure when the image-free candidate is rejected again', async () => {
+    const h0 = [
+      userWithImage('old query', 'secret-image-1', 0),
+      Object.assign(user('display wrapper', 1), { genuineUserQueryText: 'latest query' }),
+    ];
+    const generate = vi
+      .fn<CheckpointSession['generate']>()
+      .mockRejectedValue(new CheckpointCandidateMediaRejectedError(new Error('Too many images')));
+
+    await expect(compactContext(policyInput(h0, { generate, fits: () => true }))).rejects.toMatchObject({
+      code: 'CHECKPOINT_PROVIDER_FAILED',
+    });
+    expect(generate).toHaveBeenCalledTimes(2);
   });
 });
 

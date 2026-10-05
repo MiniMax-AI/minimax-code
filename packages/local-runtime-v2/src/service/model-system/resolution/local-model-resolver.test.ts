@@ -1610,3 +1610,48 @@ describe('LocalModelResolver custom provider session affinity', () => {
     expect(headers['x-session-affinity']).toBeUndefined();
   });
 });
+
+describe('LocalModelResolver request image ceiling (#425)', () => {
+  const resolveWith = async (modelConfig: LocalModelConfig, baseURL = 'https://gateway.example/v1') => {
+    const resolver = new LocalModelResolver({
+      byokConfigGetter: () => ({
+        custom_provider: {
+          gateway: {
+            api: 'openai-completions',
+            options: { apiKey: 'gateway-key', baseURL },
+            models: { vision: modelConfig },
+          },
+        },
+      }),
+    });
+    const resolved = await resolver.resolveModel({
+      sessionId: 'session-image-ceiling',
+      turnId: 'turn-image-ceiling',
+      agentConfig: {
+        ...AGENT_CONFIG,
+        model: modelRefForModel('custom_provider:gateway', 'vision', modelConfig),
+      },
+    });
+    return (resolved.model as { maxImagesPerRequest?: number }).maxImagesPerRequest;
+  };
+
+  it('carries a configured max_images_per_request onto the executor model', async () => {
+    expect(await resolveWith({ capabilities: { support_image: true, max_images_per_request: 6 } })).toBe(6);
+    expect(await resolveWith({ capabilities: { support_image: true, max_images_per_request: '12' } })).toBe(12);
+  });
+
+  it('leaves the shared default in charge when nothing is declared or the value is invalid', async () => {
+    expect(await resolveWith({ capabilities: { support_image: true } })).toBeUndefined();
+    expect(await resolveWith({ capabilities: { support_image: true, max_images_per_request: 0 } })).toBeUndefined();
+  });
+
+  it('applies the documented Mistral API limit by exact host unless the model overrides it', async () => {
+    expect(await resolveWith({ capabilities: { support_image: true } }, 'https://api.mistral.ai/v1')).toBe(8);
+    expect(
+      await resolveWith({ capabilities: { support_image: true, max_images_per_request: 4 } }, 'https://api.mistral.ai/v1'),
+    ).toBe(4);
+    expect(
+      await resolveWith({ capabilities: { support_image: true } }, 'https://gateway.example/api.mistral.ai/v1'),
+    ).toBeUndefined();
+  });
+});

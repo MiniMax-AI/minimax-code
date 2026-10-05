@@ -154,6 +154,23 @@ text-only again, remove `image` from `modalities.input` and remove or set
 declare image input support. Restart MCode after editing configuration and select
 the configured model with `/provider`, or use `exec --model` for a single run.
 
+Images stay in the conversation history, so a long session can carry more images
+than a provider accepts in one request. MCode sends only the 20 most recent images
+per request and replaces older ones with a short text note naming the original
+file; the stored history keeps every image. If your provider allows fewer images
+per request, set the limit on the model (Mistral's API is limited to 8
+automatically):
+
+```yaml
+custom_provider:
+  my-vision-provider:
+    models:
+      my-vision-model:
+        capabilities:
+          support_image: true
+          max_images_per_request: 8
+```
+
 After signing in to MiniMax, try a task that explicitly requires search:
 
 > Use web_search to find the official Node.js test runner documentation. Summarize how to run tests and include the source URL. If the tool is unavailable, say so.

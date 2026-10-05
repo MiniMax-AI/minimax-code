@@ -1,5 +1,6 @@
 import { isDefaultThinkingModelId, type Api, type ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { ThinkingLevel as PiThinkingLevel } from '@earendil-works/pi-agent-core';
+import { normalizeMaxImagesPerRequest } from '@mavis/agent-core/pi-turn-runner';
 import {
   ThinkingLevel,
   ThinkingMode,
@@ -500,6 +501,7 @@ export function capabilitiesFromModelConfig(
       modalities.includes('video') || modelConfig?.capabilities?.support_video === true,
     ...normalizeLocalFileApiCapabilities(modelConfig?.capabilities),
     ...normalizeLocalMultimodalLimitCapabilities(modelConfig?.capabilities),
+    ...maxImagesPerRequestCapability(modelConfig?.capabilities?.max_images_per_request),
     ...(modelConfig?.capabilities?.support_json_object_output === true
       ? { [SUPPORT_JSON_OBJECT_OUTPUT_CAPABILITY]: true }
       : {}),
@@ -512,6 +514,14 @@ export function capabilitiesFromModelConfig(
     Reflect.set(capabilities, OPENPLATFORM_THINKING_VARIANTS_CAPABILITY, variants);
   }
   return capabilities;
+}
+
+/** Per-request image ceiling (#425); absent unless the model config declares a positive integer. */
+function maxImagesPerRequestCapability(
+  value: unknown,
+): Pick<LocalModelRefCapabilities, 'max_images_per_request'> {
+  const maxImages = normalizeMaxImagesPerRequest(value);
+  return maxImages === undefined ? {} : { max_images_per_request: maxImages };
 }
 
 export function supportsJsonObjectOutput(modelRef: IModelRef): boolean {

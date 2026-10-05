@@ -185,6 +185,8 @@ export interface IModelCapabilities {
   max_video_bytes_inline?: number | string;
   max_request_body_bytes?: number | string;
   max_attachments_count?: number;
+  /** Most images one provider request may carry; older history images become placeholders. */
+  max_images_per_request?: number | string;
   support_files_api?: boolean;
   max_video_bytes_files_api?: number | string;
   files_api_upload_endpoint?: string;

@@ -101,3 +101,17 @@ export class CheckpointCandidateTooLargeError extends Error {
     );
   }
 }
+
+/**
+ * The Provider rejected the checkpoint request for the images it carries (for
+ * example `Too many images in request: 31 > 30`). Re-sending the same
+ * candidate fails identically, so the candidate ladder retries the same
+ * history with attachments replaced by text instead of failing (#425).
+ */
+export class CheckpointCandidateMediaRejectedError extends Error {
+  override readonly name = 'CheckpointCandidateMediaRejectedError';
+
+  constructor(cause: unknown) {
+    super('Provider rejected checkpoint input because it carried too many images.', { cause });
+  }
+}

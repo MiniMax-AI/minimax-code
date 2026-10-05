@@ -7,7 +7,13 @@ import type {
   Context,
   Model,
 } from "@earendil-works/pi-ai";
-import { LLM_ERROR_CODES } from "@mavis/shared/llm-error-classifier";
+import {
+  LLM_ERROR_CODES,
+  classifyLLMRequestRejectionMessage,
+  isLLMDeterministicRequestRejection,
+  isLLMImageLimitMessage,
+  normalizeLLMError,
+} from "@mavis/shared/llm-error-classifier";
 import {
   DEFAULT_LLM_RETRY_POLICY,
   LLM_RETRY_REQUEST_SETTLED_OBSERVER,
@@ -574,6 +580,48 @@ describe("withLLMRetry", () => {
     expect(attempts).toBe(6);
   });
 
+  // #425: a request the provider deterministically rejects (too many images,
+  // invalid_request_error) fails the same way on every resend, so the BYOK
+  // retry-all budget only delays the real reason by ~20 seconds.
+  it.each([
+    ["custom_provider:work", "400 Upstream [invalid_request_error] Too many images in request: 31 > 30"],
+    ["minimax_api", "400 Upstream [invalid_request_error] Too many images in request: 31 > 30"],
+    ["custom_provider:work", '400 {"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}'],
+    ["fake-provider", "400 Too many images in request: 31 > 30"],
+  ])("does not retry a deterministic request rejection from %s: %s", async (provider, message) => {
+    let attempts = 0;
+    const sleep = vi.fn(async () => {});
+    const inner = (async () => {
+      attempts += 1;
+      return errorStream(message);
+    }) as StreamFn;
+    const wrapped = withLLMRetry(inner, retryOptions({ sleep }));
+
+    const events = await collectEvents(await wrapped(fakeModel(provider), CONTEXT, {}));
+
+    expect(attempts).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" ? error.error.errorMessage : undefined).toBe(message);
+  });
+
+  it.each([
+    "[Error] 400 Bad Request",
+    "503 Service Unavailable: too many images queued, try again",
+    "429 rate limited while processing images",
+  ])("keeps the BYOK retry-all budget for transient or unclassified errors: %s", async (message) => {
+    let attempts = 0;
+    const inner = (async () => {
+      attempts += 1;
+      return errorStream(message);
+    }) as StreamFn;
+    const wrapped = withLLMRetry(inner, retryOptions({ sleep: vi.fn(async () => {}) }));
+
+    await collectEvents(await wrapped(fakeModel("custom_provider:work"), CONTEXT, {}));
+
+    expect(attempts).toBe(6);
+  });
+
   it("keeps the exhausted attempt open when returning its terminal failure stream", async () => {
     const attemptReturns: Array<ReturnType<typeof vi.fn>> = [];
     const inner = (async () => {
@@ -1080,5 +1128,57 @@ describe("withLLMRetry", () => {
       "waiting",
       "cancelled",
     ]);
+  });
+});
+
+describe("deterministic request rejection classification", () => {
+  const rejection = (errorMessage: string, statusCode?: number) =>
+    isLLMDeterministicRequestRejection(normalizeLLMError({ errorMessage, statusCode }));
+
+  it("recognises provider image-count limits in common phrasings", () => {
+    for (const message of [
+      "Upstream [invalid_request_error] Too many images in request: 31 > 30",
+      "A maximum of 8 images may be provided in one request.",
+      "Number of images exceeds the limit of 20",
+      "You can only include at most 100 images",
+    ]) {
+      expect(isLLMImageLimitMessage(message), message).toBe(true);
+      expect(classifyLLMRequestRejectionMessage(message), message).toBe("image_limit");
+    }
+    expect(isLLMImageLimitMessage("image too large")).toBe(false);
+  });
+
+  it("treats image limits and HTTP 400 invalid_request_error as terminal", () => {
+    expect(rejection("400 Upstream [invalid_request_error] Too many images in request: 31 > 30")).toBe(true);
+    expect(rejection("Too many images in request: 31 > 30")).toBe(true);
+    expect(rejection("Too many images", 413)).toBe(true);
+    expect(rejection('400 {"type":"invalid_request_error","message":"bad"}')).toBe(true);
+    expect(classifyLLMRequestRejectionMessage('400 {"type":"invalid_request_error"}')).toBe("invalid_request");
+  });
+
+  it("classifies the BYOK-attributed form the retry loop actually sees", () => {
+    // local-runtime-v2 wraps BYOK failures before withLLMRetry inspects them.
+    const byok = (detail: string) =>
+      `BYOK upstream error: ${JSON.stringify({
+        errorCode: LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
+        message: `BYOK provider custom_provider:fixture upstream error: ${detail}`,
+        errorSource: "byok_upstream",
+        errorDetail: detail,
+        errorProviderId: "custom_provider:fixture",
+      })}`;
+    expect(rejection(byok("400 Upstream [invalid_request_error] Too many images in request: 31 > 30"))).toBe(true);
+    expect(rejection(byok('400 {"type":"invalid_request_error","message":"bad"}'))).toBe(true);
+    expect(rejection(byok("400 Bad Request"))).toBe(false);
+    expect(rejection(byok("503 Service Unavailable"))).toBe(false);
+  });
+
+  it("keeps transient, unclassified or ambiguous errors retryable", () => {
+    expect(rejection("400 Bad Request")).toBe(false);
+    expect(rejection("invalid_request_error: overloaded")).toBe(false);
+    expect(rejection("Too many images", 503)).toBe(false);
+    expect(rejection("Too many images", 429)).toBe(false);
+    expect(rejection("invalid_request_error", 500)).toBe(false);
+    expect(rejection("401 invalid api key")).toBe(false);
+    expect(classifyLLMRequestRejectionMessage("invalid_request_error without a status")).toBeUndefined();
   });
 });

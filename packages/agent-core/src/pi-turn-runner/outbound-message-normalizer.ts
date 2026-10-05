@@ -11,6 +11,7 @@ import type {
 import { convertToLlm } from '@earendil-works/pi-coding-agent/messages';
 
 import { imageDimensions } from './image-dimensions.js';
+import { limitRequestImages, resolveMaxImagesPerRequest } from './request-image-limit.js';
 
 const PRIOR_THINKING_OPEN = '<|prior-thinking|>';
 const PRIOR_THINKING_CLOSE = '<|/prior-thinking|>';
@@ -52,6 +53,11 @@ export function projectAgentMessagesForModel(
    * cluster is the signal to teach `imageDimensions` another format.
    */
   undeterminedImageMimeTypes: Record<string, number>;
+  /**
+   * Older image blocks replaced by a placeholder so the request stays within
+   * the model's per-request image limit (see `request-image-limit.ts`).
+   */
+  omittedImageCount: number;
 } {
   const providerVisible = messages.filter((message) => !isHostOnlyMessage(message));
   const compatible = removeOrphanToolResults(
@@ -65,9 +71,13 @@ export function projectAgentMessagesForModel(
   const projected = normalized
     .map(projectVideoBlocks)
     .map((message) => projectUndersizedImageBlocks(message, undetermined));
+  // Last, so the ceiling counts exactly the images that would be sent: video
+  // frames projected to images count, undersized placeholders do not.
+  const limited = limitRequestImages(projected, resolveMaxImagesPerRequest(targetModel));
   return {
     removedCount: compatible.removedCount,
-    messages: projected,
+    messages: limited.messages,
+    omittedImageCount: limited.omittedCount,
     undeterminedImageMimeTypes: Object.fromEntries(undetermined),
   };
 }

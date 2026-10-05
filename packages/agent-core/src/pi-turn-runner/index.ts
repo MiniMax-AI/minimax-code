@@ -73,6 +73,14 @@ export {
   projectAgentMessagesForModel,
   removeOrphanToolResults,
 } from './outbound-message-normalizer.js';
+export {
+  DEFAULT_MAX_IMAGES_PER_REQUEST,
+  limitRequestImages,
+  knownMaxImagesPerRequestForBaseUrl,
+  normalizeMaxImagesPerRequest,
+  resolveMaxImagesPerRequest,
+} from './request-image-limit.js';
+export type { ModelRequestImageLimit, RequestImageLimitResult } from './request-image-limit.js';
 export { toPiUserMessage } from './agent.js';
 export {
   createToolContextHistogramBucketsByName,

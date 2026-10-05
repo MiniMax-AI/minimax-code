@@ -10,11 +10,13 @@ import {
   type LLMRequestSettledEvent,
 } from '@mavis/agent-core/pi-turn-runner';
 import { createDefaultTokenEstimator } from '@mavis/context-manager';
+import { isLLMImageLimitMessage } from '@mavis/shared/llm-error-classifier';
 
 import type { CheckpointSession } from '../algorithm/compact-context.js';
 import type { PromptSnapshotSource } from '../../agent-host/contracts.js';
 import type { CheckpointGeneration } from '../algorithm/checkpoint-format.js';
 import {
+  CheckpointCandidateMediaRejectedError,
   CheckpointCandidateTooLargeError,
   type CheckpointResponseContentKind,
 } from '../contracts.js';
@@ -82,6 +84,9 @@ export async function createCheckpointSession(
       if (isContextOverflow(final, options.model.contextWindow)) {
         throw new CheckpointCandidateTooLargeError(final);
       }
+      if (final.stopReason === 'error' && isLLMImageLimitMessage(final.errorMessage)) {
+        throw new CheckpointCandidateMediaRejectedError(final);
+      }
       const generation = toGeneration(final);
       options.onGenerated?.(generation);
       if (isOutputExhaustedWithoutText(generation)) {
@@ -139,6 +144,9 @@ async function requestCheckpoint(
       usageComplete: false,
     });
     if (isExplicitInputTooLargeError(error)) throw new CheckpointCandidateTooLargeError(error);
+    if (isLLMImageLimitMessage(error instanceof Error ? error.message : undefined)) {
+      throw new CheckpointCandidateMediaRejectedError(error);
+    }
     throw error;
   }
 }

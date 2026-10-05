@@ -1076,6 +1076,8 @@ export interface ModelCapabilitiesConfig {
   max_video_bytes_inline?: number | string;
   max_request_body_bytes?: number | string;
   max_attachments_count?: number | string;
+  /** Most images one provider request may carry; older history images become placeholders. */
+  max_images_per_request?: number | string;
   [key: string]: unknown;
 }
 

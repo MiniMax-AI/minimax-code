@@ -6,6 +6,7 @@ import type {
   CompactionTokenUsage,
 } from '../../agent-host/contracts.js';
 import {
+  CheckpointCandidateMediaRejectedError,
   CheckpointCandidateTooLargeError,
   ContextCompactionError,
   type ContextCompactionSizeDiagnostics,
@@ -354,6 +355,22 @@ async function generateCheckpoint(
         ...tokenUsageMetadata(input.checkpoint.getTokenUsage?.()),
       };
     } catch (cause) {
+      if (cause instanceof CheckpointCandidateMediaRejectedError) {
+        return recoverAfterMediaRejection({
+          input,
+          session,
+          rejectedMessages: checkpointCandidate.messages,
+          hallMessages: hall.messages,
+          // Hall differs from the rejected candidate only when it cleared tool
+          // results and was not itself the rejected candidate.
+          hallIsDistinct:
+            hall.trimmedResultCount > 0 && checkpointCandidate.messages !== hall.messages,
+          instructions,
+          counter,
+          priorOverflow: overflow,
+          cause,
+        });
+      }
       if (!(cause instanceof CheckpointCandidateTooLargeError)) throw cause;
       overflow = cause;
     }
@@ -367,6 +384,92 @@ async function generateCheckpoint(
     counter,
     priorOverflow: overflow,
   });
+}
+
+/**
+ * The Provider refused a candidate for the images it carries. Every candidate
+ * before the attachment-free one keeps those images, so skip straight to the
+ * same history with media replaced by text; if that still overflows, continue
+ * down the regular attachment-free ladder (Hvideo, Hmid, Hmin) from Hall.
+ * Without this, /compact on a session over the provider's image limit failed
+ * with the same rejection the session itself was stuck on (#425).
+ */
+async function recoverAfterMediaRejection({
+  input,
+  session,
+  rejectedMessages,
+  hallMessages,
+  hallIsDistinct,
+  instructions,
+  counter,
+  priorOverflow,
+  cause,
+}: {
+  readonly input: CompactContextInput;
+  readonly session: CheckpointSession;
+  readonly rejectedMessages: readonly AgentMessage[];
+  readonly hallMessages: readonly AgentMessage[];
+  readonly hallIsDistinct: boolean;
+  readonly instructions: string | undefined;
+  readonly counter: { value: number };
+  readonly priorOverflow: CheckpointCandidateTooLargeError | undefined;
+  readonly cause: CheckpointCandidateMediaRejectedError;
+}): ReturnType<typeof recoverAfterHall> {
+  input.signal?.throwIfAborted();
+  const attachmentFree = buildAttachmentFreeCandidate(rejectedMessages);
+  if (attachmentFree.replacedBlockCount === 0) throw mediaRejectedProviderFailure(cause);
+  let overflow = priorOverflow;
+  let attachmentFreeAttempted = false;
+  try {
+    if (session.fits(checkpointRequest(input, attachmentFree.messages, instructions))) {
+      attachmentFreeAttempted = true;
+      try {
+        const settled = await generateCandidateWithProviderRetry({
+          input,
+          session,
+          candidate: 'hvideo',
+          counter,
+          messages: attachmentFree.messages,
+          instructions,
+        });
+        return {
+          generation: settled.generation,
+          attempts: settled.attemptNumber,
+          maxOutputTokens: session.maxOutputTokens,
+          ...tokenUsageMetadata(input.checkpoint.getTokenUsage?.()),
+        };
+      } catch (next) {
+        if (!(next instanceof CheckpointCandidateTooLargeError)) throw next;
+        overflow = next;
+      }
+    }
+    return await recoverAfterHall({
+      input,
+      session,
+      hallMessages,
+      instructions,
+      counter,
+      priorOverflow: overflow,
+      // Do not send the same attachment-free history twice.
+      skipHvideo: attachmentFreeAttempted && !hallIsDistinct,
+    });
+  } catch (next) {
+    if (next instanceof CheckpointCandidateMediaRejectedError) {
+      throw mediaRejectedProviderFailure(next);
+    }
+    throw next;
+  }
+}
+
+function mediaRejectedProviderFailure(
+  cause: CheckpointCandidateMediaRejectedError,
+): ContextCompactionError {
+  return new ContextCompactionError(
+    'CHECKPOINT_PROVIDER_FAILED',
+    'llm_checkpoint',
+    'Checkpoint Provider rejected the request for carrying too many images.',
+    { cause },
+  );
 }
 
 function toolResultReplacementCount(
@@ -384,6 +487,7 @@ async function recoverAfterHall({
   instructions,
   counter,
   priorOverflow,
+  skipHvideo = false,
 }: {
   readonly input: CompactContextInput;
   readonly session: CheckpointSession;
@@ -391,6 +495,7 @@ async function recoverAfterHall({
   readonly instructions: string | undefined;
   readonly counter: { value: number };
   readonly priorOverflow: CheckpointCandidateTooLargeError | undefined;
+  readonly skipHvideo?: boolean;
 }): Promise<{
   readonly generation: CheckpointGeneration;
   readonly attempts: number;
@@ -402,6 +507,7 @@ async function recoverAfterHall({
   const hvideo = buildAttachmentFreeCandidate(hallMessages);
   let overflow = priorOverflow;
   if (
+    !skipHvideo &&
     hvideo.replacedBlockCount > 0 &&
     session.fits(checkpointRequest(input, hvideo.messages, instructions))
   ) {

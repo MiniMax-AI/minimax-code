@@ -15,7 +15,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { buildLocalRequestPayloadTransform } from '../../agent-host/assembly/local-turn-payload-transform.js';
 import { validateCheckpointGeneration } from '../algorithm/checkpoint-format.js';
-import { CheckpointCandidateTooLargeError } from '../contracts.js';
+import {
+  CheckpointCandidateMediaRejectedError,
+  CheckpointCandidateTooLargeError,
+} from '../contracts.js';
 import { buildCheckpointControl, CHECKPOINT_SYSTEM_PROMPT } from './checkpoint-prompt.js';
 import { createCheckpointSession } from './checkpoint-provider.js';
 
@@ -519,6 +522,78 @@ describe('checkpoint Provider overflow normalization', () => {
     await expect(session.generate({ messages: [user('context', 1)] })).resolves.toMatchObject({
       stopReason: 'error',
     });
+  });
+});
+
+describe('checkpoint Provider image limits (#425)', () => {
+  const PNG_16X16 =
+    'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAABzklEQVR4nAXB2wFAIABAUQsUkVT83qk8QkXafwDnNKyCTbALDkEQnIJLcAuiIAmy4BG8giL4BFU0rJJNsksOSZCckktyS6IkSbLkkbySIvkkVTasLVvL3nK0hJaz5Wq5W2JLasktT8vbUlq+lto2rB1bx95xdISOs+PquDtiR+rIHU/H21E6vo7aNayKTbErDkVQnIpLcSuiIimy4lG8iqL4FFU1rD1bz95z9ISes+fquXtiT+rJPU/P21N6vp7aN6wD28A+cAyEgXPgGrgH4kAayAPPwDtQBr6BOjSsmk2zaw5N0JyaS3NroiZpsubRvJqi+TRVN6wj28g+coyEkXPkGrlH4kgaySPPyDtSRr6ROjashs2wGw5DMJyGy3AboiEZsuExvIZi+AzVNKwT28Q+cUyEiXPimrgn4kSayBPPxDtRJr6JOjWsls2yWw5LsJyWy3JboiVZsuWxvJZi+SzVNqyOzbE7DkdwnI7LcTuiIzmy43G8juL4HNU1rJ7Ns3sOT/Ccnstze6InebLn8bye4vk81TesM9vMPnPMhJlz5pq5Z+JMmskzz8w7U2a+mTo3rAvbwr5wLISFc+FauBfiQlrIC8/Cu1AWvoW6/LBGnAFkC4sVAAAAAElFTkSuQmCC';
+  const IMAGE_LIMIT = '400 Upstream [invalid_request_error] Too many images in request: 31 > 30';
+
+  function imageModel(): Parameters<StreamFn>[0] {
+    return { ...model(), input: ['text', 'image'] };
+  }
+
+  function session(streamFn: StreamFn) {
+    return createCheckpointSession({
+      model: imageModel(),
+      streamFn,
+      thinkingLevel: 'off',
+      maxOutputTokens: 20,
+      providerInputLimit: 128_000,
+    });
+  }
+
+  it('normalizes an image-count error result to a media rejection', async () => {
+    const final = assistant({
+      stopReason: 'error',
+      errorMessage: `BYOK upstream error: ${JSON.stringify({ message: `BYOK provider custom_provider:x upstream error: ${IMAGE_LIMIT}` })}`,
+    });
+    const rejection = await (await session(vi.fn(() => completedStream(final))))
+      .generate({ messages: [user('context', 1)] })
+      .catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(CheckpointCandidateMediaRejectedError);
+    expect(rejection).toMatchObject({ cause: final });
+  });
+
+  it('normalizes a thrown image-count error to a media rejection', async () => {
+    const error = new Error(IMAGE_LIMIT);
+    const rejection = await (
+      await session(
+        vi.fn(() => {
+          throw error;
+        }),
+      )
+    )
+      .generate({ messages: [user('context', 1)] })
+      .catch((caught: unknown) => caught);
+
+    expect(rejection).toBeInstanceOf(CheckpointCandidateMediaRejectedError);
+    expect(rejection).toMatchObject({ cause: error });
+  });
+
+  it('caps the images sent in the checkpoint request with the shared target projection', async () => {
+    const streamFn: StreamFn = vi.fn(() => completedStream(assistant({ content: [] })));
+    const messages: AgentMessage[] = Array.from({ length: 31 }, (_, index) => ({
+      role: 'user',
+      content: [
+        { type: 'text', text: `screenshot ${index + 1}` },
+        { type: 'image', data: PNG_16X16, mimeType: 'image/png' },
+      ],
+      timestamp: index,
+    }));
+
+    await (await session(streamFn)).generate({ messages });
+
+    const sent = vi.mocked(streamFn).mock.calls[0]?.[1]?.messages ?? [];
+    const images = sent.flatMap((message) =>
+      Array.isArray(message.content) ? message.content.filter((block) => block.type === 'image') : [],
+    );
+    expect(images).toHaveLength(20);
+    expect(JSON.stringify(sent)).toContain('Earlier image omitted');
+    // The caller's history is untouched.
+    expect(messages.every((message) => JSON.stringify(message).includes('"type":"image"'))).toBe(true);
   });
 });
 
