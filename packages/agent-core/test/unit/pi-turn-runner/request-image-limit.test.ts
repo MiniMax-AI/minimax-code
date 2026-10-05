@@ -184,6 +184,35 @@ describe("limitRequestImages", () => {
     ]);
   });
 
+  it("reads escaped attachment paths and stays linear on adversarial reminder text", () => {
+    const escaped: UserMessage = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: '<attachment name="a" mime="image/png" path="/tmp/a &amp; &quot;b&quot;.png" kind="image" inline="true">',
+        },
+        { ...IMAGE },
+      ],
+      timestamp: 1,
+    };
+    const adversarial: UserMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: `<attachment ${"_".repeat(200_000)}> ${"<attachment".repeat(20_000)}` },
+        { ...IMAGE },
+      ],
+      timestamp: 2,
+    };
+    const startedAt = performance.now();
+    const result = limitRequestImages([escaped, adversarial, userWithImages(3, 1)], 1);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(texts(result.messages[0]!)[1]).toContain('Original file: /tmp/a & "b".png]');
+    expect(texts(result.messages[1]!)[1]).toBe(
+      "[Earlier image omitted: this request keeps only the 1 most recent images.]",
+    );
+  });
+
   it("omits the path when attachment reminders do not line up with the image blocks", () => {
     const messages: Message[] = [userWithImages(1, 2, false), userWithImages(2, 1)];
     const result = limitRequestImages(messages, 1);

@@ -132,8 +132,7 @@ function imageBlockCount(message: Message): number {
   return count;
 }
 
-const ATTACHMENT_TAG_RE = /<attachment\b([^>]*)>/gu;
-const ATTRIBUTE_RE = /([a-z_]+)="([^"]*)"/gu;
+const ATTACHMENT_TAG_OPEN = '<attachment';
 const PATH_ARGUMENT_KEYS = ['path', 'file_path', 'filePath'] as const;
 
 function imagePathsForMessage(
@@ -152,11 +151,7 @@ function imagePathsForMessage(
   const inlineImagePaths: string[] = [];
   for (const block of message.content) {
     if (block.type !== 'text') continue;
-    for (const tag of block.text.matchAll(ATTACHMENT_TAG_RE)) {
-      const attributes = new Map<string, string>();
-      for (const attribute of (tag[1] ?? '').matchAll(ATTRIBUTE_RE)) {
-        attributes.set(attribute[1]!, unescapeAttribute(attribute[2]!));
-      }
+    for (const attributes of attachmentTagAttributes(block.text)) {
       const path = attributes.get('path');
       if (attributes.get('inline') !== 'true' || !path) continue;
       const kind = attributes.get('kind');
@@ -187,6 +182,54 @@ function collectToolCallPaths(messages: readonly Message[]): Map<string, string>
     }
   }
   return paths;
+}
+
+/**
+ * Attributes of each `<attachment …>` tag in `text`. A linear scan rather than
+ * a regular expression, because message text is user-controlled and nested
+ * quantifiers over it can backtrack polynomially.
+ */
+function attachmentTagAttributes(text: string): Array<Map<string, string>> {
+  const tags: Array<Map<string, string>> = [];
+  let from = 0;
+  for (;;) {
+    const start = text.indexOf(ATTACHMENT_TAG_OPEN, from);
+    if (start < 0) break;
+    const end = text.indexOf('>', start);
+    // No later tag can be closed either.
+    if (end < 0) break;
+    const next = text.charAt(start + ATTACHMENT_TAG_OPEN.length);
+    if (next === '>' || next === '/' || /\s/u.test(next)) {
+      tags.push(parseTagAttributes(text.slice(start + ATTACHMENT_TAG_OPEN.length, end)));
+    }
+    from = end + 1;
+  }
+  return tags;
+}
+
+function parseTagAttributes(source: string): Map<string, string> {
+  const attributes = new Map<string, string>();
+  let position = 0;
+  while (position < source.length) {
+    const equals = source.indexOf('="', position);
+    if (equals < 0) break;
+    const close = source.indexOf('"', equals + 2);
+    if (close < 0) break;
+    let nameStart = equals;
+    while (nameStart > position && isAttributeNameChar(source.charCodeAt(nameStart - 1))) {
+      nameStart -= 1;
+    }
+    if (nameStart < equals) {
+      attributes.set(source.slice(nameStart, equals), unescapeAttribute(source.slice(equals + 2, close)));
+    }
+    position = close + 1;
+  }
+  return attributes;
+}
+
+/** `[a-z_]`, matching the attribute names the attachment reminder writes. */
+function isAttributeNameChar(code: number): boolean {
+  return (code >= 97 && code <= 122) || code === 95;
 }
 
 function unescapeAttribute(value: string): string {
