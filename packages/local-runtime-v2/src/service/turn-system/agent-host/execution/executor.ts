@@ -52,6 +52,7 @@ import { applyProcessLocalToolResultPolicy } from '../runner/policy/process-loca
 import type {
   LocalContextUsagePromptRange,
   LocalRuntimeTurnExecutorOptions,
+  LocalRuntimeTurnRunnerInput,
   LocalRuntimeTurnRunnerResult,
   LocalTurnHookMergeOptions,
   LocalTurnPermissionResolution,
