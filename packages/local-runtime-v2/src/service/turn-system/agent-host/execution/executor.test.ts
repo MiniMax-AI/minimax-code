@@ -1171,7 +1171,7 @@ describe("LocalRuntimeTurnExecutor", () => {
         })),
       }),
     ).toBe(standardFixture);
-    expect(standard.shouldStopAfterTurn).toBeUndefined();
+    expect(standard.stopOnUnexpectedToolCall).toBeUndefined();
 
     await runner.execute(
       executionInput({
@@ -1186,18 +1186,7 @@ describe("LocalRuntimeTurnExecutor", () => {
     expect(lightweight.systemPrompt).toBe(LIGHTWEIGHT_SYSTEM_PROMPT);
     expect(lightweight.tools).toEqual([]);
     expect(lightweight.contextUsagePromptRanges).toBeUndefined();
-    expect(
-      await lightweight.shouldStopAfterTurn?.({
-        message: {
-          content: [{ type: "toolCall", id: "call", name: "write", arguments: {} }],
-        },
-      } as never),
-    ).toBe(true);
-    expect(
-      await lightweight.shouldStopAfterTurn?.({
-        message: { content: [{ type: "text", text: "ordinary answer" }] },
-      } as never),
-    ).toBe(false);
+    expect(lightweight.stopOnUnexpectedToolCall).toBe(true);
   });
 
   it("does not propagate lightweight mode to task or branch child Sessions", async () => {
