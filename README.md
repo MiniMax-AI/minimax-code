@@ -164,7 +164,9 @@ mode.
 
 The mode is fixed when a root Session is created. `--mode lightweight` therefore cannot be combined
 with `--session` or `--continue`. Child/sub-agent Sessions do not inherit it, `/compact` continues to
-use the standard compaction context, and ACP and desktop Sessions remain standard.
+use the standard compaction context, and ACP and desktop Sessions remain standard. Reopening a
+lightweight Session keeps its mode and shows `Lightweight` in the TUI status line; opening a standard
+Session from a lightweight launch remains standard and shows no indicator.
 
 ### Continue your work
 

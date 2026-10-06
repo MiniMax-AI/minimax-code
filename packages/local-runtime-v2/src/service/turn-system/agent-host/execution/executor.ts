@@ -60,6 +60,7 @@ import type {
 import {
   joinPrompt,
   joinUserPrompt,
+  isLightweightRootSession,
   readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
   renderAgentRuntimeReminders,
@@ -471,6 +472,7 @@ export class LocalRuntimeTurnExecutor<
         : { maxSerializedInputBytes: maxRequestBodyBytes }),
     };
     const baseSystemPrompt = readPreparedSystemPrompt(input.preparation.agentConfig);
+    const lightweightMode = isLightweightRootSession(input.session);
     const preparedExecution = await this.options.executionPreparation.prepare({
       execution: input,
       eventWriter,
@@ -602,6 +604,12 @@ export class LocalRuntimeTurnExecutor<
       toolContext,
       beforeLlmCallHooks,
       caller,
+      ...(lightweightMode
+        ? {
+            shouldStopAfterTurn: ({ message }) =>
+              message.content.some((block) => block.type === 'toolCall'),
+          }
+        : {}),
       ...(contextUsagePromptRanges !== undefined
         ? {
             contextUsagePromptRanges,

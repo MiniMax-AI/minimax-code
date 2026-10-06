@@ -7,6 +7,7 @@ import { formatTuiShortcut } from "../../../../../src/tui/shell/shortcut-labels.
 import { normalizeAccountStatus } from "../../../../../src/runtime/adapters/normalizers.js";
 import { TuiWelcome } from "../../../../../src/tui/shell/welcome/component.js";
 import { stripAnsi } from "../../../../../src/tui/rendering/text.js";
+import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
 
 const defaultQueueLabel = `${formatTuiShortcut("alt+enter")} queue`;
 
@@ -118,6 +119,28 @@ describe("visible presentation selector", () => {
         },
       }).shell.workspace,
     ).toBe("/other/workspace");
+  });
+
+  it("projects lightweight mode only for the exact persisted Session purpose", () => {
+    const shellForPurpose = (purpose: string | undefined) =>
+      resolve({
+        snapshot: {
+          ...idleChat,
+          session: {
+            sessionId: "resumed",
+            ...(purpose ? { purpose } : {}),
+          },
+        },
+      }).shell;
+
+    expect(shellForPurpose(LIGHTWEIGHT_SESSION_PURPOSE).lightweightMode).toBe(true);
+    for (const purpose of [
+      undefined,
+      "code-review:context-mode:lightweight",
+      "context-mode:lightweight:im",
+    ]) {
+      expect(shellForPurpose(purpose)).not.toHaveProperty("lightweightMode");
+    }
   });
 
   it("projects Runtime context independently from account quota and cache metrics", () => {

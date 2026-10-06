@@ -20,6 +20,8 @@ import { renderCustomStatusLines } from './custom-status-text.js';
 export { type TuiRuntimeStatus, type TuiShellState } from './contracts.js';
 export { TuiWelcome } from './welcome/component.js';
 
+type ResolvedStatusLineItem = TuiStatusLineItem | 'lightweight-mode';
+
 export class TuiUpdateNotice implements Component {
   private availableVersion: string | undefined;
 
@@ -131,21 +133,21 @@ export class TuiStatusLine implements Component {
  * default line never leaks the marker regardless of how the bundle was built.
  * When configured, `build-mode` owns the line; an empty list renders nothing.
  */
-function resolveStatusLineItems(state: TuiShellState): readonly TuiStatusLineItem[] {
+function resolveStatusLineItems(state: TuiShellState): readonly ResolvedStatusLineItem[] {
   const items = state.statusLineItems ?? TUI_STATUS_LINE_DEFAULT_ITEMS;
-  if (!items.includes('build-mode')) {
-    if (state.statusLineItems !== undefined) {
-      // The opt-in meter replaces the percentage at the meter's configured position.
-      return items.includes('context-meter')
+  if (items.includes('build-mode')) return ['build-mode'];
+  const visibleItems: readonly TuiStatusLineItem[] =
+    state.statusLineItems !== undefined
+      ? // The opt-in meter replaces the percentage at the meter's configured position.
+        items.includes('context-meter')
         ? items.filter((item) => item !== 'context-remaining')
-        : items;
-    }
-    const remaining = contextRemainingPercent(state);
-    return items.filter((item) =>
-      remaining === undefined ? item !== 'context-remaining' : item !== 'context-window',
-    );
-  }
-  return ['build-mode'];
+        : items
+      : items.filter((item) =>
+          contextRemainingPercent(state) === undefined
+            ? item !== 'context-remaining'
+            : item !== 'context-window',
+        );
+  return state.lightweightMode ? ['lightweight-mode', ...visibleItems] : visibleItems;
 }
 
 /**
@@ -156,11 +158,20 @@ function resolveStatusLineItems(state: TuiShellState): readonly TuiStatusLineIte
  * space first on a narrow terminal.
  */
 function buildStatusSegment(
-  item: TuiStatusLineItem,
+  item: ResolvedStatusLineItem,
   state: TuiShellState,
   customStatusConfig?: TuiCustomStatusLineConfig,
 ): StatusSegment | undefined {
   switch (item) {
+    case 'lightweight-mode':
+      return createStatusSegment(
+        [
+          chalk.bold.hex(colors.signal)('Lightweight'),
+          chalk.bold.hex(colors.signal)('Light'),
+          chalk.bold.hex(colors.signal)('Lite'),
+        ],
+        { shrinkPriority: 75, preserveWhenNarrow: true },
+      );
     case 'build-mode':
       return createStatusSegment([renderBuildMode(state)], {
         shrinkPriority: 70,

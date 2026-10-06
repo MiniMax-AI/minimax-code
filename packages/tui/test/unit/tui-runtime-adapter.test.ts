@@ -47,6 +47,32 @@ describe("TuiRuntimeAdapter process-local facades", () => {
     );
   });
 
+  it("preserves the persisted mode when reopening Sessions regardless of launch mode", async () => {
+    const reopenedLightweight = new TuiRuntimeAdapter({
+      getSession: vi.fn(async () => ({
+        session: {
+          sessionId: "lightweight",
+          purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+        },
+      })),
+    } as never);
+    const reopenedStandardFromLightweightLaunch = new TuiRuntimeAdapter(
+      {
+        getSession: vi.fn(async () => ({
+          session: { sessionId: "standard" },
+        })),
+      } as never,
+      { contextMode: "lightweight" },
+    );
+
+    await expect(reopenedLightweight.getSession("lightweight")).resolves.toMatchObject({
+      purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+    });
+    await expect(
+      reopenedStandardFromLightweightLaunch.getSession("standard"),
+    ).resolves.not.toHaveProperty("purpose");
+  });
+
   it("projects active and recent terminal Runtime background work for the current Session", async () => {
     const listBackgroundTasks = vi.fn(
       async (input: { statuses?: readonly string[] }) =>

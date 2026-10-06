@@ -17,6 +17,7 @@ import {
   formatSideConversationLabel,
   type TuiSideConversationPresentation,
 } from '../../commands/side-session.js';
+import { LIGHTWEIGHT_SESSION_PURPOSE } from '@mavis/protocol/local';
 
 export interface ResolveTuiVisiblePresentationInput {
   readonly snapshot: TuiChatSnapshot;
@@ -314,6 +315,7 @@ function resolveStableShell(input: ResolveTuiVisiblePresentationInput): TuiShell
           ? 'offline'
           : 'ready',
     sessionTitle: session?.title ?? 'New session',
+    ...(session?.purpose === LIGHTWEIGHT_SESSION_PURPOSE ? { lightweightMode: true } : {}),
     sessionRole: delegatedSession ? 'subagent' : 'root',
     sessionAgentName: delegatedSession?.agentName,
     parentSessionTitle: delegatedSession

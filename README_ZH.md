@@ -162,7 +162,8 @@ mcode exec --mode lightweight "概述 CAP 定理。"
 
 模式在根会话创建时固定，因此 `--mode lightweight` 不能与 `--session` 或 `--continue`
 同时使用。子代理/子会话不会继承轻量模式，`/compact` 仍使用标准压缩上下文，ACP 与桌面端
-会话也始终使用标准模式。
+会话也始终使用标准模式。重新打开轻量会话时会保留该模式，并在 TUI 状态栏显示
+`Lightweight`；从轻量模式启动的 TUI 打开标准会话时仍保持标准模式，且不显示该标记。
 
 ### 继续之前的工作
 

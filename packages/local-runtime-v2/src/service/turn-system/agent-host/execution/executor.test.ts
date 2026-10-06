@@ -1171,6 +1171,7 @@ describe("LocalRuntimeTurnExecutor", () => {
         })),
       }),
     ).toBe(standardFixture);
+    expect(standard.shouldStopAfterTurn).toBeUndefined();
 
     await runner.execute(
       executionInput({
@@ -1185,6 +1186,18 @@ describe("LocalRuntimeTurnExecutor", () => {
     expect(lightweight.systemPrompt).toBe(LIGHTWEIGHT_SYSTEM_PROMPT);
     expect(lightweight.tools).toEqual([]);
     expect(lightweight.contextUsagePromptRanges).toBeUndefined();
+    expect(
+      await lightweight.shouldStopAfterTurn?.({
+        message: {
+          content: [{ type: "toolCall", id: "call", name: "write", arguments: {} }],
+        },
+      } as never),
+    ).toBe(true);
+    expect(
+      await lightweight.shouldStopAfterTurn?.({
+        message: { content: [{ type: "text", text: "ordinary answer" }] },
+      } as never),
+    ).toBe(false);
   });
 
   it("does not propagate lightweight mode to task or branch child Sessions", async () => {
@@ -1217,6 +1230,33 @@ describe("LocalRuntimeTurnExecutor", () => {
       "extension system\n\nbase system",
       "extension system\n\nbase system",
     ]);
+  });
+
+  it.each([
+    "code-review:context-mode:lightweight",
+    "context-mode:lightweight:im",
+    " context-mode:lightweight",
+  ])("keeps mixed purpose %j on the standard tool surface", async (purpose) => {
+    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
+    const tool = {
+      def: { name: "read", description: "Read", schema: { type: "object" } },
+      impl: { execute: vi.fn() },
+    } as never;
+    const runner = new LocalRuntimeTurnExecutor(
+      options(async (runInput) => {
+        captured = runInput;
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+      }),
+    );
+    const base = executionInput();
+    await runner.execute(
+      executionInput({
+        session: { ...base.session, purpose },
+        assembly: { ...assembly(), tools: [tool] },
+      }),
+    );
+    expect(captured?.tools?.map(({ def }) => def.name)).toEqual(["read"]);
+    expect(captured?.systemPrompt).toBe("extension system\n\nbase system");
   });
 
   it("keeps compaction on the standard provider context for a lightweight Session", () => {

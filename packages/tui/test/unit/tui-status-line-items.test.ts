@@ -71,6 +71,17 @@ describe('status line item parsing', () => {
 });
 
 describe('TuiStatusLine default items', () => {
+  it('adds a compact lightweight indicator without changing the standard footer', () => {
+    const standard = render(BASE_STATE);
+    expect(stripAnsi(standard)).toMatchInlineSnapshot();
+    expect(render({ ...BASE_STATE, lightweightMode: false })).toBe(standard);
+
+    const lightweight = stripAnsi(render({ ...BASE_STATE, lightweightMode: true }));
+    expect(lightweight).toContain('Lightweight');
+    expect(lightweight).toContain(stripAnsi(standard).trim());
+    expect(stripAnsi(render({ ...BASE_STATE, lightweightMode: true }, 12))).toContain('Lite');
+  });
+
   it('keeps build-mode and cache diagnostics out of the default order', () => {
     expect(TUI_STATUS_LINE_DEFAULT_ITEMS).not.toContain('build-mode');
     expect(TUI_STATUS_LINE_DEFAULT_ITEMS).toContain('context-remaining');
