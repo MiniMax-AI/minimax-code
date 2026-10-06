@@ -155,8 +155,8 @@ mcode --mode lightweight "解释 DNS 缓存的工作原理。"
 mcode exec --mode lightweight "概述 CAP 定理。"
 ```
 
-轻量模式只发送精简的对话系统提示词，不发送工具 schema，也不会加载工作区指令、Skills、
-memory、MCP 工具或环境信息，因此不能检查或修改本地文件。需要编程或工具能力时，请使用
+轻量模式只发送精简的对话系统提示词，不发送工具 schema，并从提供方上下文中省略工作区
+指令、Skills、memory 块、MCP schema 和完整环境块，因此不能检查或修改本地文件。需要编程或工具能力时，请使用
 `mcode --mode standard` 或 `mcode exec --mode standard` 创建新的标准会话；省略 `--mode`
 与标准模式完全一致。
 

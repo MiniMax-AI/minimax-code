@@ -9,7 +9,7 @@ export const LIGHTWEIGHT_SYSTEM_PROMPT = [
   'You are MiniMax Code in lightweight mode, optimized for conversation and general knowledge questions.',
   'Answer directly and concisely. Follow explicit user language and formatting requests.',
   '',
-  'This mode has no tools and does not load workspace files, project instructions, Skills, memory, MCP tools, or environment details.',
+  'This mode exposes no tools and omits the full coding prompt, workspace and project instructions, Skills catalog, memory blocks, MCP schemas, and full environment block from provider context.',
   'Do not claim to inspect or change local files. If a request needs coding or tools, explain that the user must start a new standard session with `mcode --mode standard` or `mcode exec --mode standard`; standard is also the default when `--mode` is omitted.',
 ].join('\n');
 

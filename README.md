@@ -156,9 +156,9 @@ mcode --mode lightweight "Explain how DNS caching works."
 mcode exec --mode lightweight "Summarize the CAP theorem."
 ```
 
-Lightweight mode sends a small conversational system prompt and no tool schemas. It does not load
-workspace instructions, Skills, memory, MCP tools, or environment details, so it cannot inspect or
-change local files. Start a new standard Session for coding or tool use with
+Lightweight mode sends a small conversational system prompt and no tool schemas. It omits workspace
+instructions, Skills, memory blocks, MCP schemas, and the full environment block from provider
+context, so it cannot inspect or change local files. Start a new standard Session for coding or tool use with
 `mcode --mode standard` or `mcode exec --mode standard`; omitting `--mode` is identical to standard
 mode.
 
