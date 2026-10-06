@@ -644,7 +644,6 @@ test(
               index: 0,
               delta: {
                 role: "assistant",
-                content: "LIGHTWEIGHT_TOOL_CALL_TEXT",
                 tool_calls: [
                   {
                     index: 0,
@@ -752,7 +751,8 @@ test(
     });
     const [code] = await once(child, "close");
     assert.equal(code, 0, `${stdout}\n${stderr}`);
-    assert.match(stdout, /LIGHTWEIGHT_TOOL_CALL_TEXT/u);
+    assert.match(stdout, /tools, which are unavailable in lightweight mode/u);
+    assert.match(stdout, /mcode --mode standard/u);
     assert.equal(streamRequests, 1, "The rejected tool call must not trigger another model step");
     assert.equal(existsSync(marker), false, "An unoffered tool call must never execute");
     assert.equal(existsSync(networkAudit), false, "No external requests are allowed");
