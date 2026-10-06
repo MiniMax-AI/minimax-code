@@ -52,4 +52,12 @@ describe('parseOnceRunAtMs relative `after` durations', () => {
       expect.objectContaining({ code: 'CRON_VALIDATION_ERROR', status: 400 }),
     );
   });
+
+  it('rejects long unit-less digit runs in linear time', () => {
+    // An unanchored global token pattern retried from every offset took seconds here.
+    const after = '1'.repeat(50_000) + 'x';
+    const started = performance.now();
+    expect(() => parseOnceRunAtMs({ after }, NOW)).toThrow(LocalMavisCronValidationError);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });

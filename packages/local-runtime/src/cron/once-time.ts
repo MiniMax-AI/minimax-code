@@ -167,17 +167,21 @@ const DURATION_UNIT_MS: Record<string, number> = {
 
 function parseDurationMs(input: string): number {
   const raw = input.trim().toLowerCase();
+  // Consume one anchored `<number><unit>` token at a time: a start-anchored pattern cannot be
+  // retried from every offset, so long digit runs fail in linear rather than quadratic time.
   // `ms` must precede `m` so millisecond tokens are not split into minutes plus a stray `s`.
-  const re = /(\d+(?:\.\d+)?)(ms|s|m|h|d|w)/g;
+  const token = /^(\d+(?:\.\d+)?)(ms|s|m|h|d|w)/;
   let total = 0;
-  let consumed = '';
-  for (const match of raw.matchAll(re)) {
+  let rest = raw;
+  while (rest) {
+    const match = token.exec(rest);
+    if (!match) break;
     const value = Number(match[1]);
     const unit = match[2]!;
-    consumed += match[0];
     total += value * DURATION_UNIT_MS[unit]!;
+    rest = rest.slice(match[0].length);
   }
-  if (!total || consumed !== raw) {
+  if (!total || rest) {
     throw Object.assign(new Error(`Invalid cron once after duration: ${JSON.stringify(input)}`), {
       status: 400,
       statusCode: 400,

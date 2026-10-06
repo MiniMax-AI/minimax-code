@@ -51,4 +51,14 @@ describe('local runtime cron once relative `after` durations', () => {
       'Invalid cron once after duration: "1week"',
     );
   });
+
+  it('rejects long unit-less digit runs in linear time', () => {
+    // An unanchored global token pattern retried from every offset took seconds here.
+    const after = '1'.repeat(50_000) + 'x';
+    const started = performance.now();
+    expect(() => parseOnceRunAtMs({ after }, NOW)).toThrow(
+      expect.objectContaining({ code: 'VALIDATION_ERROR', status: 400 }),
+    );
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });
