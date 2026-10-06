@@ -166,7 +166,8 @@ function getWallClockParts(timezone: string, utcMs: number): WallClockParts {
 
 function parseDurationMs(input: string): number {
   const raw = input.trim().toLowerCase();
-  const re = /(\d+(?:\.\d+)?)(ms|s|m|h|d)/g;
+  // `ms` must precede `m` so millisecond tokens are not split into minutes plus a stray `s`.
+  const re = /(\d+(?:\.\d+)?)(ms|s|m|h|d|w)/g;
   let total = 0;
   let consumed = '';
   for (const match of raw.matchAll(re)) {

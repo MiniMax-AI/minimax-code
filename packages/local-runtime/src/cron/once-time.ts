@@ -156,26 +156,26 @@ function getWallClockParts(timezone: string, utcMs: number): WallClockParts {
   };
 }
 
+const DURATION_UNIT_MS: Record<string, number> = {
+  ms: 1,
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+  w: 604_800_000,
+};
+
 function parseDurationMs(input: string): number {
   const raw = input.trim().toLowerCase();
-  const re = /(\d+(?:\.\d+)?)(ms|s|m|h|d)/g;
+  // `ms` must precede `m` so millisecond tokens are not split into minutes plus a stray `s`.
+  const re = /(\d+(?:\.\d+)?)(ms|s|m|h|d|w)/g;
   let total = 0;
   let consumed = '';
   for (const match of raw.matchAll(re)) {
     const value = Number(match[1]);
-    const unit = match[2];
+    const unit = match[2]!;
     consumed += match[0];
-    const factor =
-      unit === 'ms'
-        ? 1
-        : unit === 's'
-          ? 1000
-          : unit === 'm'
-            ? 60_000
-            : unit === 'h'
-              ? 3_600_000
-              : 86_400_000;
-    total += value * factor;
+    total += value * DURATION_UNIT_MS[unit]!;
   }
   if (!total || consumed !== raw) {
     throw Object.assign(new Error(`Invalid cron once after duration: ${JSON.stringify(input)}`), {
