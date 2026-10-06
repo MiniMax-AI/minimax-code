@@ -140,6 +140,45 @@ describe('Shell transcript block', () => {
     expectOrder(text());
   });
 
+  it('drops kept one-time feedback of turns that an edit removed from history', () => {
+    const transcript = new TranscriptStore();
+    const view = new TranscriptView(transcript);
+    const projection = new TuiTurnProjection({ transcript, now: () => 10, onChange: vi.fn() });
+    const messagesFor = (turnId: string): TuiMessage[] => [
+      { id: `prompt:${turnId}`, role: 'user', content: `Prompt ${turnId}`, turnId },
+      { id: `answer:${turnId}`, role: 'assistant', content: `Answer ${turnId}`, turnId },
+    ];
+    const runTurn = (turnId: string, seconds: number) => {
+      projection.beginTurn(turnId, 10);
+      for (const message of messagesFor(turnId)) projection.applyStreamEvent(turnId, { type: 'message', message });
+      projection.markTurn(turnId, 'succeeded', seconds * 1_000);
+    };
+    const notice = (id: string) =>
+      transcript.upsert({ id, kind: 'final-summary', status: 'succeeded', content: id, ephemeral: true, createdAtMs: 11 });
+    runTurn('t1', 4);
+    notice('local:1');
+    runTurn('t2', 3);
+    transcript.upsert({ id: 'terminal-error:t2:1', kind: 'error', status: 'failed', content: 'Stale error t2', turnId: 't2', ephemeral: true, createdAtMs: 12 });
+    notice('local:2');
+    runTurn('t3', 2);
+    expect(stripAnsi(view.render(80).join('\n'))).toContain('Completed in 3s');
+
+    // Editing t2's prompt removes t2 and t3 from history and starts a new turn.
+    transcript.replaceDurableProjection(() =>
+      projection.hydrateHistory([...messagesFor('t1'), ...messagesFor('t2-edited')]),
+    );
+    const rendered = stripAnsi(view.render(80).join('\n'));
+    expect(rendered.match(/Completed in 4s/g)).toHaveLength(1);
+    expect(rendered.indexOf('Answer t1')).toBeLessThan(rendered.indexOf('Completed in 4s'));
+    expect(rendered.indexOf('Completed in 4s')).toBeLessThan(rendered.indexOf('Answer t2-edited'));
+    expect(rendered).not.toContain('Completed in 3s');
+    expect(rendered).not.toContain('Completed in 2s');
+    expect(rendered).not.toContain('Stale error t2');
+    expect(transcript.snapshot().filter((cell) => cell.kind === 'turn-duration').map((cell) => cell.id)).toEqual([
+      'turn-duration:t1',
+    ]);
+  });
+
   it('re-anchors a retained run duration after its turn when history ids and counts differ', () => {
     const cell = (id: string, turnId: string, ephemeral = false) =>
       createTranscriptCell({

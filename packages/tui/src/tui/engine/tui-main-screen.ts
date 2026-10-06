@@ -547,7 +547,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				return;
 			}
 			this.deferHistoryReplay();
-			fullRender(true, true, tail);
+			// A repaint from the previous viewport origin needs the document to still
+			// reach it (callers check the shrink-reveal case first). Otherwise
+			// `fullRender` would turn it into an immediate ED 3, so paint the tail.
+			fullRender(true, true, tail || newLines.length <= prevViewportTop);
 		};
 
 		if (this.historyReplayPending) {

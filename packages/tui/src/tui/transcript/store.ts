@@ -228,11 +228,31 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
       ];
     });
 
+    const previousTurns = new Set(
+      current.flatMap((cell) => (!cell.ephemeral && cell.turnId ? [cell.turnId] : [])),
+    );
+
     this.clear();
     try {
       projectDurable();
     } finally {
       const projectedDurableIds = this.orderedIds.filter((id) => !this.cells.get(id)?.ephemeral);
+      const projectedTurns = new Set(
+        projectedDurableIds.flatMap((id) => {
+          const turnId = this.cells.get(id)?.turnId;
+          return turnId ? [turnId] : [];
+        }),
+      );
+      // Turn ids are comparable when at least one earlier turn is still projected.
+      const comparableTurns = [...previousTurns].some((turnId) => projectedTurns.has(turnId));
+      // An edit removes later turns from history. One-time feedback of a removed turn
+      // (its run duration, terminal error or shell block) has nowhere to go and is
+      // dropped instead of being placed by position in an unrelated spot (#426).
+      const removedTurn = (cell: TranscriptCell): boolean =>
+        comparableTurns &&
+        isTurnFeedback(cell) &&
+        previousTurns.has(cell.turnId ?? '') &&
+        !projectedTurns.has(cell.turnId ?? '');
       let turnEnds: Map<string, number> | undefined;
       const lastIndexOfTurn = (): Map<string, number> => {
         if (turnEnds) return turnEnds;
@@ -259,7 +279,7 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
         },
       );
       retained.forEach(({ cell }, index) => {
-        if (this.cells.has(cell.id)) return;
+        if (this.cells.has(cell.id) || removedTurn(cell)) return;
         this.upsert(cell);
         const anchor = anchors[index];
         if (anchor) this.moveBefore(cell.id, anchor);
@@ -303,6 +323,13 @@ function findDurableId(
     if (cell && !cell.ephemeral) return cell.id;
   }
   return undefined;
+}
+
+function isTurnFeedback(cell: TranscriptCell): boolean {
+  return (
+    cell.kind === 'turn-duration' ||
+    (cell.ephemeral === true && (cell.kind === 'error' || cell.kind === 'shell'))
+  );
 }
 
 function turnKey(cell: TranscriptCell): string {
