@@ -63,6 +63,7 @@ import {
   readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
   renderAgentRuntimeReminders,
+  resolveProviderContextMode,
 } from './prompt.js';
 import {
   createAgentHostPluginHookTranscript,
@@ -484,7 +485,7 @@ export class LocalRuntimeTurnExecutor<
       (tool) =>
         tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
     );
-    const tools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
+    const standardTools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
     const toolContext = {
       ...toolResolution.context,
       ...(input.pluginHooks?.length
@@ -496,12 +497,24 @@ export class LocalRuntimeTurnExecutor<
       canConsumeBackgroundBashOutput,
     } as TContext;
     const caller = preparedExecution.caller;
-    const systemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
-    const contextUsagePromptRanges = readPreparedContextUsagePromptRanges(
+    const standardSystemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
+    const standardContextUsagePromptRanges = readPreparedContextUsagePromptRanges(
       input.preparation.agentConfig,
       input.assembly.systemPromptPrefix,
       baseSystemPrompt,
     );
+    const providerContext = resolveProviderContextMode(input.session, {
+      systemPrompt: standardSystemPrompt,
+      tools: standardTools,
+      ...(standardContextUsagePromptRanges === undefined
+        ? {}
+        : { contextUsagePromptRanges: standardContextUsagePromptRanges }),
+    });
+    const {
+      systemPrompt,
+      tools,
+      contextUsagePromptRanges,
+    } = providerContext;
     input.onContextUsagePromptRangesResolved?.(contextUsagePromptRanges);
     const userPromptPrefix = joinUserPrompt(
       input.assembly.userPromptPrefix,

@@ -111,6 +111,26 @@ describe('headless invocation', () => {
     expect(readStdin).not.toHaveBeenCalled();
   });
 
+  it('opts only new exec Sessions into lightweight mode', async () => {
+    const cwd = await workspace();
+    const readStdin = vi.fn(async () => 'ignored');
+
+    await expect(
+      resolveTuiExecInvocation('hi', { cwd, mode: 'lightweight' }, readStdin),
+    ).resolves.toMatchObject({ contextMode: 'lightweight' });
+    await expect(
+      resolveTuiExecInvocation('hi', { cwd, mode: 'standard' }, readStdin),
+    ).resolves.not.toHaveProperty('contextMode');
+    for (const options of [
+      { cwd, mode: 'lightweight', session: 'existing' },
+      { cwd, mode: 'lightweight', continue: true },
+    ]) {
+      await expect(resolveTuiExecInvocation('hi', options, readStdin)).rejects.toThrow(
+        'requires a new Session',
+      );
+    }
+  });
+
   it('accepts JSON stdin and rejects prompt/source conflicts', async () => {
     const cwd = await workspace();
     await expect(

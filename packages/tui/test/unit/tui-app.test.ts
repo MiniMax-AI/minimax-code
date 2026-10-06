@@ -15362,6 +15362,32 @@ describe("interactive model argument contract", () => {
     expect(launch).toHaveBeenCalledWith({ initialPrompt: "hello" });
   });
 
+  it("opts a new Session into lightweight mode without changing the standard contract", async () => {
+    const lightweight = program();
+    await lightweight.command.parseAsync(["hello", "--mode", "lightweight"], { from: "user" });
+    expect(lightweight.launch).toHaveBeenCalledWith({
+      initialPrompt: "hello",
+      contextMode: "lightweight",
+    });
+
+    const standard = program();
+    await standard.command.parseAsync(["hello", "--mode", "standard"], { from: "user" });
+    expect(standard.launch).toHaveBeenCalledWith({ initialPrompt: "hello" });
+  });
+
+  it("rejects lightweight mode for resumed or selected Sessions", async () => {
+    for (const args of [
+      ["--continue", "--mode", "lightweight"],
+      ["--session", "existing", "--mode", "lightweight"],
+    ]) {
+      const { command, launch } = program();
+      await expect(command.parseAsync(args, { from: "user" })).rejects.toThrow(
+        "requires a new Session",
+      );
+      expect(launch).not.toHaveBeenCalled();
+    }
+  });
+
   it.each(["-m", "--model"])("scans startup environment after %s values", (flag) => {
     expect(
       resolveTuiStartupEnvironmentOption([flag, "provider/model", "--env", "staging"], true),

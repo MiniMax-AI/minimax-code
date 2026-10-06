@@ -13,6 +13,7 @@ import { inferTuiNativeVideoMimeType } from '../application/video-mime.js';
 import { resolveWslPath } from '../host/wsl-path.js';
 import { TuiExecError } from './exit-policy.js';
 import type { TuiExecFormat } from './output.js';
+import type { McodeContextMode } from '@mavis/protocol/local';
 
 export type TuiInputFormat = 'text' | 'json';
 export type TuiPermissionPolicy = 'smart' | 'full' | 'off';
@@ -26,6 +27,7 @@ export interface RawTuiExecOptions {
   file?: string[];
   model?: string;
   effort?: string;
+  mode?: string;
   promptMode?: string;
   session?: string;
   continue?: boolean;
@@ -46,6 +48,7 @@ export interface ResolvedTuiExecInvocation {
   attachments: TuiAttachment[];
   model?: string;
   effort?: string;
+  contextMode?: McodeContextMode;
   promptMode?: 'tui' | 'coding' | 'work';
   sessionId?: string;
   continueSession: boolean;
@@ -96,6 +99,13 @@ export async function resolveTuiExecInvocation(
   }
   if (options.session && options.continue) {
     throw invocationError('--session and --continue are mutually exclusive.');
+  }
+  const contextMode = readEnum('--mode', options.mode ?? 'standard', [
+    'standard',
+    'lightweight',
+  ] as const);
+  if (contextMode === 'lightweight' && (options.session || options.continue)) {
+    throw invocationError('--mode lightweight requires a new Session.');
   }
   const promptMode = readEnum('--prompt-mode', options.promptMode ?? 'tui', [
     'tui',
@@ -180,6 +190,7 @@ export async function resolveTuiExecInvocation(
     attachments,
     ...(options.model?.trim() ? { model: options.model.trim() } : {}),
     ...(effort === undefined ? {} : { effort }),
+    ...(contextMode === 'lightweight' ? { contextMode } : {}),
     ...(options.session?.trim() ? { sessionId: options.session.trim() } : {}),
     continueSession: options.continue === true,
     ...(configPath ? { configPath } : {}),

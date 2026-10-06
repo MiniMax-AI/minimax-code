@@ -3,6 +3,7 @@ import { parseHeadlessModelOverride } from '../headless/model-selection.js';
 import type { TuiMode } from '../tui/engine/public.js';
 import { parseTuiStartupEnvironment } from './environment.js';
 import type { TuiBuildEnvironment } from '../auth/environment.js';
+import type { McodeContextMode } from '@mavis/protocol/local';
 
 const RETIRED_TOP_LEVEL_COMMAND_NAMES = new Set(['git', 'changes', 'projects']);
 
@@ -15,6 +16,7 @@ export interface TuiInteractiveLaunchRequest {
   readonly workspaceDir?: string;
   readonly resumeDraftAfterLogin?: boolean;
   readonly tuiMode?: TuiMode;
+  readonly contextMode?: McodeContextMode;
   readonly lane?: string;
 }
 
@@ -24,6 +26,7 @@ export interface RawTuiInteractiveOptions {
   readonly continue?: boolean;
   readonly resume?: string;
   readonly tuiMode?: TuiMode;
+  readonly mode?: string;
   readonly lane?: string;
   readonly env?: TuiBuildEnvironment;
 }
@@ -43,6 +46,11 @@ export function applyInteractiveCliContract(
     .addOption(
       new Option('--tui-mode <mode>', 'TUI mode: regular (default) or fullscreen').argParser(
         parseTuiMode,
+      ),
+    )
+    .addOption(
+      new Option('--mode <mode>', 'Context mode: standard (default) or lightweight').argParser(
+        parseContextMode,
       ),
     )
     .addOption(new Option('--resume <id>').hideHelp())
@@ -78,6 +86,12 @@ export function resolveInteractiveLaunchRequest(
   if (requestedModes > 1) {
     throw new Error('--session, --continue, and --resume cannot be combined');
   }
+  if (
+    commandOptions.mode === 'lightweight' &&
+    (explicitSessionId || compatibilitySessionId || showSessionPicker || commandOptions.continue)
+  ) {
+    throw new Error('--mode lightweight requires a new Session');
+  }
   const sessionId = explicitSessionId || compatibilitySessionId;
   const model = commandOptions.model?.trim();
   if (commandOptions.model !== undefined) {
@@ -95,6 +109,7 @@ export function resolveInteractiveLaunchRequest(
     ...(showSessionPicker ? { showSessionPicker: true } : {}),
     ...(commandOptions.continue ? { continueLatestSession: true } : {}),
     ...(commandOptions.tuiMode ? { tuiMode: commandOptions.tuiMode } : {}),
+    ...(commandOptions.mode === 'lightweight' ? { contextMode: 'lightweight' as const } : {}),
     ...(commandOptions.lane ? { lane: commandOptions.lane } : {}),
   };
 }
@@ -112,6 +127,11 @@ export function applyExecCliContract(command: Command): Command {
     )
     .addOption(new Option('--model <provider/model>', 'override the model for this Run only'))
     .addOption(new Option('--effort <level>', 'override the reasoning effort for this Run only'))
+    .addOption(
+      new Option('--mode <mode>', 'Context mode: standard (default) or lightweight').argParser(
+        parseContextMode,
+      ),
+    )
     .addOption(
       new Option('--prompt-mode <mode>', 'Prompt mode: tui, coding, or work')
         .choices(['tui', 'coding', 'work'])
@@ -175,6 +195,11 @@ export function applyExecReviewCliContract(command: Command): Command {
 function parseTuiMode(value: string): TuiMode {
   if (value === 'regular' || value === 'fullscreen') return value;
   throw new InvalidArgumentError('TUI mode must be regular or fullscreen');
+}
+
+function parseContextMode(value: string): McodeContextMode {
+  if (value === 'standard' || value === 'lightweight') return value;
+  throw new InvalidArgumentError('mode must be standard or lightweight');
 }
 
 function parseStartupEnvironmentOption(value: string): TuiBuildEnvironment {

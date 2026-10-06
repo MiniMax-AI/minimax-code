@@ -1,7 +1,43 @@
 import type { ReminderEmission } from '@mavis/agent-runtime';
+import { LIGHTWEIGHT_SESSION_PURPOSE } from '@mavis/protocol/local';
 
 import { CONTEXT_USAGE_PROMPT_KINDS } from '../preparation/contracts.js';
+import type { SessionRecord } from '../../../session-system/index.js';
 import type { LocalContextUsagePromptRange } from './contracts.js';
+
+export const LIGHTWEIGHT_SYSTEM_PROMPT = [
+  'You are MiniMax Code in lightweight mode, optimized for conversation and general knowledge questions.',
+  'Answer directly and concisely. Follow explicit user language and formatting requests.',
+  '',
+  'This mode has no tools and does not load workspace files, project instructions, Skills, memory, MCP tools, or environment details.',
+  'Do not claim to inspect or change local files. If a request needs coding or tools, explain that the user must start a new standard session with `mcode --mode standard` or `mcode exec --mode standard`; standard is also the default when `--mode` is omitted.',
+].join('\n');
+
+export interface ProviderContext<TTool> {
+  readonly systemPrompt: string;
+  readonly tools: readonly TTool[];
+  readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
+}
+
+export function resolveProviderContextMode<TTool>(
+  session: SessionRecord,
+  context: ProviderContext<TTool>,
+  operation: 'turn' | 'compaction' = 'turn',
+): ProviderContext<TTool> {
+  if (operation === 'compaction' || !isLightweightRootSession(session)) return context;
+  return {
+    systemPrompt: LIGHTWEIGHT_SYSTEM_PROMPT,
+    tools: [],
+  };
+}
+
+export function isLightweightRootSession(session: SessionRecord): boolean {
+  return (
+    session.purpose === LIGHTWEIGHT_SESSION_PURPOSE &&
+    session.sessionKind === 'conversation' &&
+    !session.parentSessionId
+  );
+}
 
 export function renderAgentRuntimeReminders(reminders: readonly ReminderEmission[]): string {
   return reminders
