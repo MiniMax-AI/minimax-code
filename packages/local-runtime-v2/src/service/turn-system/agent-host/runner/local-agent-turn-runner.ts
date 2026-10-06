@@ -798,6 +798,7 @@ function toPiCoreInput(
       : {}),
     ...(input.includeDetailedUsage === true ? { includeDetailedUsage: true } : {}),
     ...(input.caller ? { caller: input.caller } : {}),
+    ...(input.stopOnUnexpectedToolCall === true ? { stopOnUnexpectedToolCall: true } : {}),
   };
 }
 
