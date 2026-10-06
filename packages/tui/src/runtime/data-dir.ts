@@ -1,4 +1,4 @@
-import { getPrimaryDataDirPath, getProfile } from '@mavis/config';
+import { getPrimaryDataDirPath, getProfile, resolveDataDir } from '@mavis/config';
 import { resolveMcodeDataEnvironment, type McodeDataEnvironment } from '../auth/environment.js';
 import { configureTuiRuntimeEnvironment } from '../cli/environment.js';
 
@@ -16,12 +16,20 @@ export interface PrepareTuiDataDirOptions {
   configureRuntimeEnvironment?: typeof configureTuiRuntimeEnvironment;
 }
 
+// Linux must finish legacy directory resolution before the entry point exports
+// MINIMAX_DATA_DIR; otherwise every later runtime treats that path as an override.
+const resolveCliDefaultDataDir: typeof resolveDataDir = (options) => (
+  process.platform === 'linux'
+    ? resolveDataDir(options)
+    : getPrimaryDataDirPath(options?.homeDir, options?.profile)
+);
+
 export function resolveDefaultTuiDataDir(
   _buildEnv: McodeDataEnvironment,
-  getPrimaryDataDir: typeof getPrimaryDataDirPath = getPrimaryDataDirPath,
+  resolveDefaultDataDir: typeof resolveDataDir = resolveCliDefaultDataDir,
   getCurrentProfile: typeof getProfile = getProfile,
 ): string {
-  return getPrimaryDataDir(undefined, getCurrentProfile());
+  return resolveDefaultDataDir({ profile: getCurrentProfile() });
 }
 
 function getDefaultTuiDataDir(): string {

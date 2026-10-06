@@ -36,7 +36,7 @@ function ensurePosixShellPath(binDir: string): void {
   const rcFiles =
     process.platform === 'darwin'
       ? [join(home, '.zshrc'), join(home, '.bashrc')]
-      : [join(home, '.bashrc')];
+      : [join(home, '.bashrc'), join(home, '.zshrc')];
   const exportLine = `export PATH="${binDir}:$PATH"`;
 
   for (const rc of rcFiles) {

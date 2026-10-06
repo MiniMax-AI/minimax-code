@@ -186,6 +186,27 @@ describe('terminal notification policy and transport', () => {
     }
   });
 
+  it('honors an explicit method override on an unidentified Linux terminal instead of falling back to BEL', () => {
+    for (const [method, prefix] of [
+      ['osc9', '\u001b]9;'] as const,
+      ['osc777', '\u001b]777;'] as const,
+    ]) {
+      const executeFile = vi.fn();
+      const terminal = { write: vi.fn() };
+      const notifications = new TuiTerminalNotifications(terminal, {
+        capabilities: capabilities(),
+        settings: { method },
+        executeFile,
+      });
+      notifications.setActive(true);
+      expect(notifications.notifyOnce('turn-complete', 'done')).toBe(true);
+      expect(executeFile).not.toHaveBeenCalled();
+      expect(terminal.write).toHaveBeenCalledTimes(1);
+      const written = terminal.write.mock.calls[0]?.[0] as string;
+      expect(written.startsWith(prefix)).toBe(true);
+    }
+  });
+
   it('quotes native notification text and ignores native failures from a suspended generation', () => {
     const env = { WT_SESSION: 'test' };
     const terminal = { write: vi.fn() };
