@@ -73,7 +73,10 @@ describe('status line item parsing', () => {
 describe('TuiStatusLine default items', () => {
   it('adds a compact lightweight indicator without changing the standard footer', () => {
     const standard = render(BASE_STATE);
-    expect(stripAnsi(standard)).toMatchInlineSnapshot();
+    expect(stripAnsi(standard)).toMatchInlineSnapshot(`
+      "
+      ~/repo │ ◇ Ship status line │ ⎇ feat/status-line │ Auto │ ✦ m2 · Thinking On"
+    `);
     expect(render({ ...BASE_STATE, lightweightMode: false })).toBe(standard);
 
     const lightweight = stripAnsi(render({ ...BASE_STATE, lightweightMode: true }));

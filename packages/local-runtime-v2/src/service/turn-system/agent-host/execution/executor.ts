@@ -367,6 +367,7 @@ export class LocalRuntimeTurnExecutor<
           input.request.provenance.sourceContext?.executionDiagnostics === true,
         ),
         caller: prepared.caller,
+        ...(prepared.stopOnUnexpectedToolCall ? { stopOnUnexpectedToolCall: true } : {}),
         getSteeringMessages: async (context) => {
           for (;;) {
             // Subscribe before draining so an append racing the wait cannot be missed.
@@ -800,6 +801,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly toolContext: TContext;
   readonly beforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
   readonly caller: RunTurnCaller;
+  readonly stopOnUnexpectedToolCall?: boolean;
   readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
   readonly contextUsageRequiresProviderAnchor?: boolean;
   readonly readTaskOutputTaskIds: Set<string>;
