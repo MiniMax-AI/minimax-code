@@ -86,6 +86,7 @@ import { LocalTurnInputPreparer } from "../assembly/local-turn-input-preparation
 import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
 import {
   LIGHTWEIGHT_SYSTEM_PROMPT,
+  LIGHTWEIGHT_TOOL_CALL_FALLBACK,
   resolveProviderContextMode,
 } from "./prompt.js";
 
@@ -1171,7 +1172,7 @@ describe("LocalRuntimeTurnExecutor", () => {
         })),
       }),
     ).toBe(standardFixture);
-    expect(standard.stopOnUnexpectedToolCall).toBeUndefined();
+    expect(standard.unexpectedToolCallFallback).toBeUndefined();
 
     await runner.execute(
       executionInput({
@@ -1186,7 +1187,7 @@ describe("LocalRuntimeTurnExecutor", () => {
     expect(lightweight.systemPrompt).toBe(LIGHTWEIGHT_SYSTEM_PROMPT);
     expect(lightweight.tools).toEqual([]);
     expect(lightweight.contextUsagePromptRanges).toBeUndefined();
-    expect(lightweight.stopOnUnexpectedToolCall).toBe(true);
+    expect(lightweight.unexpectedToolCallFallback).toBe(LIGHTWEIGHT_TOOL_CALL_FALLBACK);
   });
 
   it("does not propagate lightweight mode to task or branch child Sessions", async () => {

@@ -61,6 +61,7 @@ import {
   joinPrompt,
   joinUserPrompt,
   isLightweightRootSession,
+  LIGHTWEIGHT_TOOL_CALL_FALLBACK,
   readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
   renderAgentRuntimeReminders,
@@ -367,7 +368,9 @@ export class LocalRuntimeTurnExecutor<
           input.request.provenance.sourceContext?.executionDiagnostics === true,
         ),
         caller: prepared.caller,
-        ...(prepared.stopOnUnexpectedToolCall ? { stopOnUnexpectedToolCall: true } : {}),
+        ...(prepared.unexpectedToolCallFallback
+          ? { unexpectedToolCallFallback: prepared.unexpectedToolCallFallback }
+          : {}),
         getSteeringMessages: async (context) => {
           for (;;) {
             // Subscribe before draining so an append racing the wait cannot be missed.
@@ -607,7 +610,7 @@ export class LocalRuntimeTurnExecutor<
       caller,
       ...(lightweightMode
         ? {
-            stopOnUnexpectedToolCall: true,
+            unexpectedToolCallFallback: LIGHTWEIGHT_TOOL_CALL_FALLBACK,
           }
         : {}),
       ...(contextUsagePromptRanges !== undefined
@@ -801,7 +804,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly toolContext: TContext;
   readonly beforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
   readonly caller: RunTurnCaller;
-  readonly stopOnUnexpectedToolCall?: boolean;
+  readonly unexpectedToolCallFallback?: string;
   readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
   readonly contextUsageRequiresProviderAnchor?: boolean;
   readonly readTaskOutputTaskIds: Set<string>;

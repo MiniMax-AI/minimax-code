@@ -98,15 +98,12 @@ export function newAgent(turn: turnState): Agent {
     ...(turn.input.shouldStopAfterSteering
       ? { shouldStopAfterSteering: turn.input.shouldStopAfterSteering }
       : {}),
-    ...(turn.input.stopOnUnexpectedToolCall
-      ? {
-          shouldStopAfterTurn: async (context) =>
-            context.message.content.some((block) => block.type === 'toolCall') ||
-            (await turn.input.shouldStopAfterTurn?.()) === true,
-        }
-      : turn.input.shouldStopAfterTurn
-        ? { shouldStopAfterTurn: turn.input.shouldStopAfterTurn }
-        : {}),
+    ...(turn.input.shouldStopAfterTurn
+      ? { shouldStopAfterTurn: turn.input.shouldStopAfterTurn }
+      : {}),
+    ...(turn.input.unexpectedToolCallFallback
+      ? { unexpectedToolCallFallback: turn.input.unexpectedToolCallFallback }
+      : {}),
     ...(turn.llm.payloadTransform ? { onPayload: turn.llm.payloadTransform } : {}),
     ...(turn.llm.responseObserver ? { onResponse: turn.llm.responseObserver } : {}),
   });
