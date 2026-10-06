@@ -1491,6 +1491,93 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(llmCalls).toBe(1);
 	});
+
+	it.each(["error", "aborted"] as const)(
+		"does not normalize an interrupted unexpected tool call with stop reason %s",
+		async (stopReason) => {
+			const fallback = "Switch to standard mode.";
+			const message = {
+				...createAssistantMessage(
+					[{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+					stopReason,
+				),
+				errorMessage: "Synthetic provider failure",
+			};
+			const stream = agentLoop(
+				[createUserMessage("Read a file")],
+				{ systemPrompt: "", messages: [], tools: [] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					unexpectedToolCallFallback: fallback,
+				},
+				undefined,
+				() => {
+					const mockStream = new MockAssistantStream();
+					queueMicrotask(() => {
+						mockStream.push({ type: "error", reason: stopReason, error: message });
+					});
+					return mockStream;
+				},
+			);
+
+			for await (const _event of stream) {
+				// consume
+			}
+			const assistant = (await stream.result()).at(-1);
+			expect(assistant).toMatchObject({
+				role: "assistant",
+				stopReason,
+				errorMessage: "Synthetic provider failure",
+				content: [{ type: "toolCall", name: "read" }],
+			});
+		},
+	);
+
+	it.each([
+		["I'll read the file.", "I'll read the file.\n\nSwitch to standard mode."],
+		["I'll read the file.\n\nSwitch to standard mode.", "I'll read the file.\n\nSwitch to standard mode."],
+	])("appends unexpected-tool guidance once after provider text", async (providerText, expected) => {
+		const fallback = "Switch to standard mode.";
+		const stream = agentLoop(
+			[createUserMessage("Read a file")],
+			{ systemPrompt: "", messages: [], tools: [] },
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				unexpectedToolCallFallback: fallback,
+			},
+			undefined,
+			() => {
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = createAssistantMessage(
+						[
+							{ type: "text", text: providerText },
+							{ type: "toolCall", id: "tool-1", name: "read", arguments: {} },
+						],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				});
+				return mockStream;
+			},
+		);
+
+		for await (const _event of stream) {
+			// consume
+		}
+		const assistant = (await stream.result()).at(-1);
+		expect(assistant).toMatchObject({
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "text", text: expected }],
+		});
+		expect((assistant as AssistantMessage).content).not.toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "toolCall" })]),
+		);
+		expect(expected.split(fallback)).toHaveLength(2);
+	});
 });
 
 describe("agentLoopContinue with AgentMessage", () => {

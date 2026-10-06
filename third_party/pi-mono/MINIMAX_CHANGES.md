@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-10-06 — opt-in fallback for unexpected provider tool calls
+
+- Reason: a conversational host can intentionally advertise no tools, but a provider may still emit a structured tool call. The normal missing-tool result starts another model hop and can leave the host without a final assistant response.
+- Affected package: `packages/agent` (`@earendil-works/pi-agent-core`), agent options, loop config, and successful assistant-response finalization.
+- Change type: generic, upstreamable opt-in host seam. When `unexpectedToolCallFallback` is present, a successful response that contains tool calls removes those calls, preserves prior text, and appends the fallback exactly once before ending normally. Provider responses with `stopReason: "error"` or `"aborted"` remain untouched so retry and error reporting preserve the real failure. Omitting the option retains upstream behavior.
+- Upstream PR: not opened.
+- Validation: focused `packages/agent/test/agent-loop.test.ts` regressions cover text-plus-tool guidance, deduplication, and unchanged error/aborted responses; the distribution BYOK mock-provider test proves no unoffered tool executes and no second model request occurs. `pnpm test:release-tools` and `pnpm check:source` validate the vendored patch record and public inventory.
+
 ### 2026-10-01 — keep Anthropic classifier refusal details
 
 - Reason: Claude safety-classifier refusals arrive as HTTP 200 with `stop_reason: "refusal"` (see [Refusals and fallback](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback)). They were mapped to `error` and surfaced as `An unknown error occurred`, which dropped `stop_details.category` / `explanation`, hid the refusal from downstream classification, and let BYOK retry it as an unknown failure.
