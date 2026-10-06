@@ -9695,14 +9695,18 @@ describe("createTuiApp", () => {
   ])("renders the persisted mode after /resume of a $label Session", async ({ purpose, indicator }) => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
-    vi.mocked(runtime.listSessions).mockResolvedValue([
-      {
-        sessionId: "session-resumed-mode",
-        title: "Resumed mode",
-        workspaceDir: "/workspace",
-        ...(purpose ? { purpose } : {}),
-      },
-    ]);
+    const session = {
+      sessionId: "session-resumed-mode",
+      title: "Resumed mode",
+      workspaceDir: "/workspace",
+      ...(purpose ? { purpose } : {}),
+    };
+    vi.mocked(runtime.listSessions).mockResolvedValue([session]);
+    vi.mocked(runtime.listSessionPage).mockResolvedValue({
+      sessions: [session],
+      hasMore: false,
+    });
+    vi.mocked(runtime.getSession).mockResolvedValue(session);
     const app = createTuiApp({
       runtime,
       terminal,
