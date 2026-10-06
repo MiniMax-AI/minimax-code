@@ -1,4 +1,5 @@
 import type { TuiCustomStatusLineConfig } from '@mavis/config';
+import { getRuntimeLocaleLanguage } from '@mavis/shared/runtime-i18n';
 import { formatContextWindow } from '../../application/context-window.js';
 import type { Component } from '../rendering/component.js';
 import { stripAnsi, truncateToWidth, visibleWidth } from '../rendering/text.js';
@@ -165,11 +166,7 @@ function buildStatusSegment(
   switch (item) {
     case 'lightweight-mode':
       return createStatusSegment(
-        [
-          chalk.bold.hex(colors.signal)('Lightweight'),
-          chalk.bold.hex(colors.signal)('Light'),
-          chalk.bold.hex(colors.signal)('Lite'),
-        ],
+        lightweightModeLabels().map((label) => chalk.bold.hex(colors.signal)(label)),
         { shrinkPriority: 75, preserveWhenNarrow: true },
       );
     case 'build-mode':
@@ -392,6 +389,12 @@ function fitStatusSegments(segments: readonly StatusSegment[], width: number): s
   }
 
   return fitLine(render(), width);
+}
+
+function lightweightModeLabels(locale = Intl.DateTimeFormat().resolvedOptions().locale): string[] {
+  return getRuntimeLocaleLanguage(locale) === 'zh'
+    ? ['轻量模式', '轻量', '轻']
+    : ['Lightweight', 'Light', 'Lite'];
 }
 
 function renderSessionTitle(state: TuiShellState, maxWidth?: number): string {

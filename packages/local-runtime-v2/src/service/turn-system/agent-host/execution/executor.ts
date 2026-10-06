@@ -517,6 +517,9 @@ export class LocalRuntimeTurnExecutor<
       tools,
       contextUsagePromptRanges,
     } = providerContext;
+    const lightweightShouldStopAfterTurn: NonNullable<
+      LocalRuntimeTurnRunnerInput<TContext>['shouldStopAfterTurn']
+    > = ({ message }) => message.content.some((block) => block.type === 'toolCall');
     input.onContextUsagePromptRangesResolved?.(contextUsagePromptRanges);
     const userPromptPrefix = joinUserPrompt(
       input.assembly.userPromptPrefix,
@@ -606,8 +609,7 @@ export class LocalRuntimeTurnExecutor<
       caller,
       ...(lightweightMode
         ? {
-            shouldStopAfterTurn: ({ message }) =>
-              message.content.some((block) => block.type === 'toolCall'),
+            shouldStopAfterTurn: lightweightShouldStopAfterTurn,
           }
         : {}),
       ...(contextUsagePromptRanges !== undefined
