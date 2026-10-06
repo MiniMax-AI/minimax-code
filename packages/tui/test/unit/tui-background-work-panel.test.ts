@@ -384,6 +384,9 @@ describe('Tasks in the regular terminal viewport', () => {
         await terminal.flush();
         expect(terminal.getViewport().join('\n')).toContain('Tasks');
         expect(terminal.getViewport().join('\n')).toContain('task-row-00');
+        // The panel closes on a key (Esc); without input the history rebuild that
+        // removes the padding would wait for the next key (#426, L047).
+        (tui as unknown as { onUserInput(): void }).onUserInput();
         handle.close();
         tui.renderNow();
         await terminal.flush();
