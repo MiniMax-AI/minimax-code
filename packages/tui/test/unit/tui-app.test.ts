@@ -49,6 +49,7 @@ import type {
 import { VirtualTerminalScreen } from "../helpers/virtual-terminal.js";
 import { VirtualTerminal } from "../pi-084-upstream/virtual-terminal.js";
 import { TuiFailure } from "../../src/failure.js";
+import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
 
 const runtimeEvent = (event: RawTuiRuntimeEvent): TuiRuntimeEvent =>
   normalizeTuiRuntimeEvent(event);
@@ -9678,6 +9679,48 @@ describe("createTuiApp", () => {
     );
 
     await app.stop();
+  });
+
+  it.each([
+    {
+      label: "lightweight",
+      purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+      indicator: true,
+    },
+    {
+      label: "standard",
+      purpose: undefined,
+      indicator: false,
+    },
+  ])("renders the persisted mode after /resume of a $label Session", async ({ purpose, indicator }) => {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    vi.mocked(runtime.listSessions).mockResolvedValue([
+      {
+        sessionId: "session-resumed-mode",
+        title: "Resumed mode",
+        workspaceDir: "/workspace",
+        ...(purpose ? { purpose } : {}),
+      },
+    ]);
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+    });
+    try {
+      await app.ready;
+      await app.submit("/resume session-resumed-mode");
+      await vi.waitFor(() =>
+        expect(app.controller.snapshot().session?.sessionId).toBe("session-resumed-mode"),
+      );
+      const rendered = stripAnsi(app.tui.render(120).join("\n"));
+      if (indicator) expect(rendered).toContain("Lightweight");
+      else expect(rendered).not.toContain("Lightweight");
+    } finally {
+      await app.stop();
+    }
   });
 
   it("queries the current workspace first and reloads the global catalog on Ctrl+A", async () => {
