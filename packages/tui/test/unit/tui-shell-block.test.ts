@@ -100,6 +100,89 @@ describe('Shell transcript block', () => {
     },
   );
 
+  it('keeps run durations that later output follows in place across turns and history refreshes', () => {
+    // Removing a note that settled output follows would change rows already in
+    // native scrollback (#426); each such note stays after its own turn, once.
+    const transcript = new TranscriptStore();
+    const view = new TranscriptView(transcript);
+    const projection = new TuiTurnProjection({ transcript, now: () => 10, onChange: vi.fn() });
+    const messages: TuiMessage[] = [];
+    const runTurn = (turnId: string, seconds: number) => {
+      const prompt: TuiMessage = { id: `prompt:${turnId}`, role: 'user', content: `Prompt ${turnId}`, turnId };
+      const answer: TuiMessage = { id: `answer:${turnId}`, role: 'assistant', content: `Answer ${turnId}`, turnId };
+      projection.beginTurn(turnId, 10);
+      projection.applyStreamEvent(turnId, { type: 'message', message: prompt });
+      projection.applyStreamEvent(turnId, { type: 'message', message: answer });
+      projection.markTurn(turnId, 'succeeded', seconds * 1_000);
+      messages.push(prompt, answer);
+    };
+    const text = () => stripAnsi(view.render(80).join('\n'));
+
+    runTurn('t1', 4);
+    // A background task notice lands after the note before the next run starts.
+    transcript.upsert({ id: 'local:1', kind: 'final-summary', status: 'succeeded', content: 'Background task finished', ephemeral: true, createdAtMs: 11 });
+    runTurn('t2', 3);
+    runTurn('t3', 2);
+    const expectOrder = (rendered: string) => {
+      const order = ['Answer t1', 'Completed in 4s', 'Background task finished', 'Answer t2', 'Answer t3', 'Completed in 2s'];
+      const positions = order.map((label) => rendered.indexOf(label));
+      expect(positions.every((position) => position >= 0)).toBe(true);
+      expect([...positions].sort((left, right) => left - right)).toEqual(positions);
+      expect(rendered.match(/Completed in 4s/g)).toHaveLength(1);
+      expect(rendered.match(/Completed in 2s/g)).toHaveLength(1);
+      // t2's note was still the live tail when t3 started, so it was dismissed.
+      expect(rendered).not.toContain('Completed in 3s');
+    };
+    expectOrder(text());
+
+    // History cells use different ids from live ones; notes stay after their turn.
+    transcript.replaceDurableProjection(() => projection.hydrateHistory(messages));
+    expectOrder(text());
+  });
+
+  it('re-anchors a retained run duration after its turn when history ids and counts differ', () => {
+    const cell = (id: string, turnId: string, ephemeral = false) =>
+      createTranscriptCell({
+        id,
+        kind: id.startsWith('turn-duration') ? 'turn-duration' : 'assistant',
+        status: 'succeeded',
+        content: id,
+        turnId,
+        ...(ephemeral ? { ephemeral: true } : {}),
+        createdAtMs: 1,
+      });
+    const transcript = new TranscriptStore([
+      cell('live:a', 't1'),
+      cell('turn-duration:t1', 't1', true),
+      cell('live:b', 't2'),
+      cell('turn-duration:t2', 't2', true),
+    ]);
+    transcript.replaceDurableProjection(() => {
+      for (const [id, turnId] of [['history:a1', 't1'], ['history:a2', 't1'], ['history:a3', 't1'], ['history:b', 't2']]) {
+        transcript.upsert(cell(id as string, turnId as string));
+      }
+    });
+    expect(transcript.snapshot().map((entry) => entry.id)).toEqual([
+      'history:a1',
+      'history:a2',
+      'history:a3',
+      'turn-duration:t1',
+      'history:b',
+      'turn-duration:t2',
+    ]);
+  });
+
+  it('keeps a finished shell block that settled output already follows', () => {
+    const transcript = new TranscriptStore([
+      { ...shellCell(), id: 'shell:done', ephemeral: true },
+      createTranscriptCell({ id: 'answer', kind: 'assistant', status: 'succeeded', content: 'Answer', createdAtMs: 2 }),
+      { ...shellCell(), id: 'shell:tail', ephemeral: true },
+    ]);
+    const projection = new TuiTurnProjection({ transcript, now: () => 10, onChange: vi.fn() });
+    projection.beginTurn('next-turn', 10);
+    expect(transcript.snapshot().map((cell) => cell.id)).toEqual(['shell:done', 'answer']);
+  });
+
   it('preserves running shells, durable shells and unrelated temporary content', () => {
     const retained = [
       { ...shellCell(), id: 'running', status: 'running' as const, ephemeral: true },

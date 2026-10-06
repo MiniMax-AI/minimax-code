@@ -22,6 +22,8 @@ import { TuiInlinePanelHost } from '../../src/tui/shell/inline-panel.js';
 import { TuiPermissionModePicker } from '../../src/tui/features/interaction/permission-mode-picker.js';
 import { TranscriptView } from '../../src/tui/transcript/view.js';
 import { createTranscriptCell } from '../../src/tui/transcript/model.js';
+import { TranscriptStore } from '../../src/tui/transcript/store.js';
+import { TuiTurnProjection } from '../../src/tui/controller/projection/turn-projection.js';
 
 const passthrough = (value: string): string => value;
 const selectListTheme = {
@@ -1186,6 +1188,71 @@ describe('MCode Pi Engine local deltas', () => {
       await terminal.flush();
       await expectDeferredThenExact(terminal, tui, layout, before);
       expect(terminal.getScrollBuffer().some((line) => line.includes('Completed in 4s'))).toBe(false);
+    });
+
+    it.each([
+      ['a queued follow-up', true],
+      ['a goal continuation', false],
+    ] as const)('starts %s turn without input without changing native history', async (_name, withPrompt) => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const tui = new TuiMainScreen(terminal);
+      tui.start();
+      started.push(tui);
+      const store = new TranscriptStore();
+      const projection = new TuiTurnProjection({ transcript: store, now: () => 10, onChange: () => undefined });
+      const answer = (turnId: string, rows: number) => ({
+        type: 'message' as const,
+        message: {
+          id: `answer:${turnId}`,
+          role: 'assistant' as const,
+          content: Array.from({ length: rows }, (_, index) => `${turnId} answer ${index}`).join('\n\n'),
+          turnId,
+        },
+      });
+      store.upsert({ id: 'user:t1', kind: 'user', status: 'succeeded', content: 'first question', turnId: 't1', createdAtMs: 1 });
+      projection.beginTurn('t1', 1);
+      projection.applyStreamEvent('t1', answer('t1', 20));
+      projection.markTurn('t1', 'succeeded', 4_000);
+      // Settled output after the run-duration note, e.g. a background task notice.
+      store.upsert({ id: 'local:1', kind: 'final-summary', status: 'succeeded', content: 'Background task finished', ephemeral: true, createdAtMs: 2 });
+      const transcript = new TranscriptView(store, { appendOnly: () => true });
+      const parts = createMutableChatParts('conversation');
+      const layout = new TuiChatLayout(terminal, { ...parts, transcript });
+      tui.addChild(layout);
+      tui.renderNow();
+      await terminal.flush();
+      (tui as unknown as { lastUserInputAt: number }).lastUserInputAt = Number.NEGATIVE_INFINITY;
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+      const document = () =>
+        logicalDocument(layout, terminal).map((line) =>
+          line.replace(/^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/, '').trimEnd());
+      const expectHistoryUntouched = () => {
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+        expect(terminal.getScrollPosition().viewport).toBe(before.viewport);
+        expect((tui as unknown as { historyReplayDeferred: boolean }).historyReplayDeferred).toBe(false);
+        // No deferred repair is pending: native history is already exact.
+        expect(terminal.getScrollBuffer().map((line) => line.trimEnd())).toEqual(document());
+      };
+
+      // The next run starts with no key press.
+      if (withPrompt) {
+        store.upsert({ id: 'user:t2', kind: 'user', status: 'pending', content: 'queued follow-up', turnId: 't2', createdAtMs: 3 });
+      }
+      projection.beginTurn('t2', 3);
+      projection.applyStreamEvent('t2', answer('t2', 20));
+      tui.renderNow();
+      await terminal.flush();
+      expectHistoryUntouched();
+
+      projection.markTurn('t2', 'succeeded', 3_000);
+      tui.renderNow();
+      await terminal.flush();
+      expectHistoryUntouched();
+      const history = terminal.getScrollBuffer().join('\n');
+      expect(history.match(/Completed in 4s/g)).toHaveLength(1);
+      expect(history.match(/Completed in 3s/g)).toHaveLength(1);
     });
 
     it('logs the pid, the deferral and the changed row shape with PI_DEBUG_REDRAW', async () => {

@@ -1,6 +1,7 @@
 import type { TuiMessage, TuiStreamEvent } from '../../../runtime/port.js';
 import type {
   TranscriptAttachment,
+  TranscriptCell,
   TranscriptCellStatus,
   TranscriptUserPresentation,
 } from '../../transcript/model.js';
@@ -62,7 +63,10 @@ export class TuiTurnProjection {
     let changed = this.todoProjection.clearSettled();
     changed = this.removePreviousTerminalDuration(turnId) || changed;
     // One-time feedback survives history refreshes, so dismiss it when a new run starts.
-    for (const cell of this.transcript.snapshot()) {
+    const cells = this.transcript.snapshot();
+    const tailStart = dismissibleTailStart(cells);
+    cells.forEach((cell, index) => {
+      if (index < tailStart) return;
       // Runtime terminal errors survive history reconciliation, but belong only
       // to the failed run. Otherwise a successful retry can reproject them again.
       if (cell.kind === 'error' && cell.ephemeral && cell.turnId && cell.turnId !== turnId) {
@@ -75,18 +79,24 @@ export class TuiTurnProjection {
       ) {
         changed = this.transcript.remove(cell.id) || changed;
       }
-    }
+    });
     if (changed) this.onChange();
     this.liveProjection.beginTurn(turnId, timestamp);
   }
 
   removePreviousTerminalDuration(turnId?: string): boolean {
     let changed = false;
-    for (const cell of this.transcript.snapshot()) {
-      if (cell.kind === 'turn-duration' && (turnId === undefined || cell.turnId !== turnId)) {
+    const cells = this.transcript.snapshot();
+    const tailStart = dismissibleTailStart(cells);
+    cells.forEach((cell, index) => {
+      if (
+        index >= tailStart &&
+        cell.kind === 'turn-duration' &&
+        (turnId === undefined || cell.turnId !== turnId)
+      ) {
         changed = this.transcript.remove(cell.id) || changed;
       }
-    }
+    });
     return changed;
   }
 
@@ -249,11 +259,16 @@ export class TuiTurnProjection {
     // history. Its cell is `ephemeral`, and `replaceDurableProjection` retains
     // ephemeral cells across reprojection, so without pruning here every
     // finished turn would leave its own note behind and they would stack up
-    // ("Completed in 37s / 4m 02s / 8m 44s"). Drop older notes so only the
-    // most recent one survives.
-    for (const cell of this.transcript.snapshot()) {
-      if (cell.kind === 'turn-duration' && cell.id !== id) this.transcript.remove(cell.id);
-    }
+    // ("Completed in 37s / 4m 02s / 8m 44s"). Drop older notes that are still
+    // at the live tail; a note with settled output after it stays (see
+    // `dismissibleTailStart`).
+    const cells = this.transcript.snapshot();
+    const tailStart = dismissibleTailStart(cells);
+    cells.forEach((cell, index) => {
+      if (index >= tailStart && cell.kind === 'turn-duration' && cell.id !== id) {
+        this.transcript.remove(cell.id);
+      }
+    });
     this.transcript.upsert({
       id,
       kind: 'turn-duration',
@@ -302,6 +317,42 @@ export class TuiTurnProjection {
     this.todoProjection.clearForTurn(turnId);
     this.onChange();
   }
+}
+
+/**
+ * Index from which one-time feedback (a run-duration note, a finished
+ * ephemeral `!` shell block, a stale run error) may still be dismissed.
+ *
+ * Rows of settled cells are final, so in regular mode they can already sit in
+ * the terminal's native scrollback. Removing a feedback cell that has settled
+ * output after it would shift every later row and force the renderer to
+ * rebuild native history, which moves a scrolled-up reader to the top (#426).
+ * Feedback stays dismissible only while nothing settled follows it: just the
+ * next prompt, live cells, or other feedback. Once settled output follows, the
+ * cell is history and stays where it is.
+ */
+function dismissibleTailStart(cells: readonly TranscriptCell[]): number {
+  for (let index = cells.length - 1; index >= 0; index -= 1) {
+    const cell = cells[index];
+    if (cell && isSettledOutput(cell)) return index + 1;
+  }
+  return 0;
+}
+
+function isSettledOutput(cell: TranscriptCell): boolean {
+  if (cell.kind === 'user') return false;
+  if (cell.status === 'pending' || cell.status === 'running' || cell.status === 'blocked') {
+    return false;
+  }
+  return !isOneTimeFeedback(cell);
+}
+
+function isOneTimeFeedback(cell: TranscriptCell): boolean {
+  return (
+    cell.kind === 'turn-duration' ||
+    (cell.ephemeral === true && cell.kind === 'error' && Boolean(cell.turnId)) ||
+    (cell.ephemeral === true && cell.kind === 'shell')
+  );
 }
 
 function isPositiveFinite(value: number | undefined): value is number {

@@ -233,13 +233,28 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
       projectDurable();
     } finally {
       const projectedDurableIds = this.orderedIds.filter((id) => !this.cells.get(id)?.ephemeral);
+      let turnEnds: Map<string, number> | undefined;
+      const lastIndexOfTurn = (): Map<string, number> => {
+        if (turnEnds) return turnEnds;
+        turnEnds = new Map();
+        this.orderedIds.forEach((id, index) => {
+          const turnId = this.cells.get(id)?.turnId;
+          if (turnId) turnEnds?.set(turnId, index);
+        });
+        return turnEnds;
+      };
       const anchors = retained.map(
-        ({ previousDurableId, nextDurableId, durableBefore: durableCountBefore }) => {
+        ({ cell, previousDurableId, nextDurableId, durableBefore: durableCountBefore }) => {
           if (nextDurableId && this.cells.has(nextDurableId)) return nextDurableId;
           if (previousDurableId) {
             const previousIndex = this.indexById.get(previousDurableId);
             if (previousIndex !== undefined) return this.orderedIds[previousIndex + 1];
           }
+          // Live and history projections use different cell ids. A turn-scoped
+          // cell (a run-duration note, a terminal error) stays after its turn,
+          // so notes kept in history do not drift or stack up (#426).
+          const turnEnd = cell.turnId ? lastIndexOfTurn().get(cell.turnId) : undefined;
+          if (turnEnd !== undefined) return this.orderedIds[turnEnd + 1];
           return projectedDurableIds[durableCountBefore];
         },
       );

@@ -653,7 +653,13 @@ export class TuiChatController {
   }
 
   getTerminalDurationId(): string | undefined {
-    return this.transcript.snapshot().find((cell) => cell.kind === 'turn-duration')?.id;
+    // Older notes can stay in history once settled output follows them (#426);
+    // the terminal duration is the most recent one.
+    const cells = this.transcript.snapshot();
+    for (let index = cells.length - 1; index >= 0; index -= 1) {
+      if (cells[index]?.kind === 'turn-duration') return cells[index]?.id;
+    }
+    return undefined;
   }
 
   dismissTerminalDuration(id: string | undefined): void {
