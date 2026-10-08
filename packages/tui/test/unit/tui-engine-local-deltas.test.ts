@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -19,6 +22,8 @@ import { TuiInlinePanelHost } from '../../src/tui/shell/inline-panel.js';
 import { TuiPermissionModePicker } from '../../src/tui/features/interaction/permission-mode-picker.js';
 import { TranscriptView } from '../../src/tui/transcript/view.js';
 import { createTranscriptCell } from '../../src/tui/transcript/model.js';
+import { TranscriptStore } from '../../src/tui/transcript/store.js';
+import { TuiTurnProjection } from '../../src/tui/controller/projection/turn-projection.js';
 
 const passthrough = (value: string): string => value;
 const selectListTheme = {
@@ -432,8 +437,16 @@ describe('MCode Pi Engine local deltas', () => {
         tui.renderNow();
         await terminal.flush();
 
-        expect(terminal.getScrollBuffer()).toEqual(expected);
         expect(terminal.getViewport().join('\n')).not.toContain('Overlay contents');
+        if (historyRows >= terminal.rows) {
+          // #426: without recent input the rows revealed above the screen are only
+          // repainted in place; the next key reconstructs native history (L047).
+          if (cycle === 0) expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+          deliverUserKey(terminal, tui);
+          tui.renderNow();
+          await terminal.flush();
+        }
+        expect(terminal.getScrollBuffer()).toEqual(expected);
         if (historyRows < terminal.rows) expect(terminal.takeWrites()).not.toContain('\x1b[3J');
         // Hidden overlays remain registered; removing one must keep the restored frame.
         handle.hide();
@@ -569,6 +582,11 @@ describe('MCode Pi Engine local deltas', () => {
     component.lines[0] = 'Corrected answer';
     tui.renderNow();
     await terminal.flush();
+    // #426: output-driven history corrections wait for the next key (L047).
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    deliverUserKey(terminal, tui);
+    tui.renderNow();
+    await terminal.flush();
     expect(terminal.takeWrites()).toContain('\x1b[3J');
     expect(terminal.getScrollBuffer()).toEqual(['Corrected answer', ...answer.slice(1), 'composer', 'status']);
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 10 });
@@ -605,13 +623,22 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
 
+    // #426: without recent input the screen is repainted in place and native
+    // history keeps its stale rows until the next key (L047).
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(terminal.getViewport()).toEqual(['header', 'status', 'composer', '', '']);
+    expect(terminal.getScrollBuffer()).toContain('activity-1');
+
+    deliverUserKey(terminal, tui);
+    tui.renderNow();
+    await terminal.flush();
     const writes = terminal.takeWrites();
     expect(writes).toContain('\x1b[2J\x1b[H');
     expect(writes).toContain('\x1b[3J');
     expect(terminal.getScrollBuffer()).not.toContain('activity-1');
     expect(terminal.getViewport()).toEqual(['header', 'status', 'composer', '', '']);
     expect(terminal.getScrollBuffer().filter((line) => line === 'header')).toHaveLength(1);
-    expect(tui.fullRedraws).toBe(2);
+    expect(tui.fullRedraws).toBe(3);
   });
 
   it('does not replay scrolled answer rows after a narrow terminal frame shrinks', async () => {
@@ -738,6 +765,16 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
 
     const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
+    // #426: without recent input only the screen (and any growth) is written; the
+    // changed scrollback text is rebuilt after the next key (L047).
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    expect(terminal.getViewport()).toEqual(expected.slice(-terminal.rows));
+    expect(terminal.getScrollBuffer()[0]).toBe('Queued input 0');
+    // Rows from the previous viewport origin (82 - 24) on, including growth, are current.
+    expect(terminal.getScrollBuffer().slice(58)).toEqual(expected.slice(58));
+    deliverUserKey(terminal, tui);
+    tui.renderNow();
+    await terminal.flush();
     expect(terminal.takeWrites()).toContain('\x1b[3J');
     expect(terminal.getScrollBuffer()).toEqual(expected);
     expect(terminal.getViewport()).toEqual(expected.slice(-terminal.rows));
@@ -766,6 +803,15 @@ describe('MCode Pi Engine local deltas', () => {
     tui.renderNow();
     await terminal.flush();
 
+    // #426: without recent input the new document is painted at the top of the
+    // screen; the old rows stay in native history until the next key (L047).
+    expect(terminal.getViewport().filter(Boolean)).toEqual(['answer', 'composer']);
+    expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 1 });
+    expect(terminal.getScrollBuffer()).toContain('Old line 0');
+
+    deliverUserKey(terminal, tui);
+    tui.renderNow();
+    await terminal.flush();
     expect(terminal.getScrollBuffer().filter(Boolean)).toEqual(['answer', 'composer']);
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 1 });
   });
@@ -1009,6 +1055,238 @@ describe('MCode Pi Engine local deltas', () => {
         expected.map((line) => line.trimEnd()),
       );
     });
+
+    // #426 follow-up: every other reconstruction without recent input also repaints
+    // the screen in place and waits for the next key instead of ED 3 + replay.
+    const expectDeferredThenExact = async (
+      terminal: RecordingVirtualTerminal,
+      tui: TuiMainScreen,
+      layout: TuiChatLayout,
+      before: { viewport: number; bottom: number },
+    ) => {
+      // The engine strips OSC 133 zone sentinels before writing rows.
+      const document = () =>
+        logicalDocument(layout, terminal).map((line) =>
+          line.replace(/^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/, '').trimEnd());
+      expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+      expect(terminal.getScrollPosition().viewport).toBe(before.viewport);
+      // The screen below the reader is already current.
+      expect(terminal.getScrollBuffer().slice(-terminal.rows).map((line) => line.trimEnd()))
+        .toEqual(document().slice(-terminal.rows));
+
+      deliverUserKey(terminal, tui);
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.takeWrites()).toContain('\x1b[3J');
+      expect(terminal.getScrollBuffer().map((line) => line.trimEnd())).toEqual(document());
+      const after = terminal.getScrollPosition();
+      expect(after.viewport).toBe(after.bottom);
+    };
+
+    it('keeps a scrolled-up reader in place when a scrollback row changes without input', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, layout } = await renderShrinkingTasks(terminal);
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+
+      parts.transcript.lines[3] = 'History 3 (updated)';
+      tui.renderNow();
+      await terminal.flush();
+      // Native history keeps the old text until the deferred replay.
+      expect(terminal.getScrollBuffer().map((line) => line.trim())).toContain('History 3');
+      await expectDeferredThenExact(terminal, tui, layout, before);
+    });
+
+    it('keeps a scrolled-up reader in place when the document shrinks by more than a screen', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts, layout } = await renderShrinkingTasks(terminal);
+      parts.interaction.lines = Array.from({ length: 40 }, (_, index) => `Panel ${index}`);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+
+      parts.interaction.lines = [];
+      tui.renderNow();
+      await terminal.flush();
+      await expectDeferredThenExact(terminal, tui, layout, before);
+    });
+
+    it('keeps a scrolled-up reader in place when a tiny panel updates footer rows in scrollback', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 5);
+      const { tui, parts, layout } = await renderShrinkingTasks(terminal);
+      parts.tasks.lines = ['Task 0 running 10s', 'Task 1', 'Task 2', 'Task 3'];
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+
+      // A periodic footer refresh: the footer is taller than the screen.
+      parts.tasks.lines = ['Task 0 running 40s', 'Task 1', 'Task 2', 'Task 3'];
+      tui.renderNow();
+      await terminal.flush();
+      await expectDeferredThenExact(terminal, tui, layout, before);
+    });
+
+    it('keeps a scrolled-up reader in place at every turn end of a long session', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const { tui, parts } = await renderShrinkingTasks(terminal);
+      parts.tasks.lines = [];
+      deliverUserKey(terminal, tui);
+      tui.renderNow();
+      await terminal.flush();
+      (tui as unknown as { lastUserInputAt: number }).lastUserInputAt = Number.NEGATIVE_INFINITY;
+      for (let turn = 0; turn < 3; turn++) {
+        parts.followUp.lines = ['Queued follow-up'];
+        parts.transcript.lines.push(`Answer ${turn}`);
+        tui.renderNow();
+        await terminal.flush();
+        terminal.scrollLines(Number.MAX_SAFE_INTEGER);
+        terminal.scrollLines(-6);
+        const before = terminal.getScrollPosition();
+        terminal.takeWrites();
+        parts.followUp.lines = [];
+        tui.renderNow();
+        await terminal.flush();
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+        expect(terminal.getScrollPosition()).toEqual(before);
+      }
+    });
+
+    it('keeps a scrolled-up reader in place when a queued turn removes the previous run duration', async () => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const tui = new TuiMainScreen(terminal);
+      tui.start();
+      started.push(tui);
+      const cell = (fields: Partial<Parameters<typeof createTranscriptCell>[0]> & { id: string }) =>
+        createTranscriptCell({ kind: 'assistant', status: 'succeeded', content: '', createdAtMs: 1, ...fields });
+      let cells = [
+        cell({ id: 'user:t1', kind: 'user', content: 'first question', turnId: 't1' }),
+        cell({ id: 'a1', content: 'first answer', turnId: 't1' }),
+        // TurnProjection keeps only the latest run duration and removes older ones
+        // when the next turn begins, after this row has entered native history.
+        cell({ id: 'turn-duration:t1', kind: 'turn-duration', durationMs: 4_000, turnId: 't1', ephemeral: true }),
+        cell({ id: 'user:t2', kind: 'user', content: 'queued follow-up', turnId: 't2' }),
+        cell({ id: 'a2', content: Array.from({ length: 40 }, (_, index) => `second answer ${index}`).join('\n\n'), turnId: 't2' }),
+      ];
+      const transcript = new TranscriptView(() => cells, { appendOnly: () => true });
+      const parts = createMutableChatParts('conversation');
+      const layout = new TuiChatLayout(terminal, { ...parts, transcript });
+      tui.addChild(layout);
+      tui.renderNow();
+      await terminal.flush();
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+      expect(terminal.getScrollBuffer().some((line) => line.includes('Completed in 4s'))).toBe(true);
+
+      cells = cells.filter((entry) => entry.id !== 'turn-duration:t1');
+      tui.renderNow();
+      await terminal.flush();
+      await expectDeferredThenExact(terminal, tui, layout, before);
+      expect(terminal.getScrollBuffer().some((line) => line.includes('Completed in 4s'))).toBe(false);
+    });
+
+    it.each([
+      ['a queued follow-up', true],
+      ['a goal continuation', false],
+    ] as const)('starts %s turn without input without changing native history', async (_name, withPrompt) => {
+      const terminal = new RecordingVirtualTerminal(60, 16);
+      const tui = new TuiMainScreen(terminal);
+      tui.start();
+      started.push(tui);
+      const store = new TranscriptStore();
+      const projection = new TuiTurnProjection({ transcript: store, now: () => 10, onChange: () => undefined });
+      const answer = (turnId: string, rows: number) => ({
+        type: 'message' as const,
+        message: {
+          id: `answer:${turnId}`,
+          role: 'assistant' as const,
+          content: Array.from({ length: rows }, (_, index) => `${turnId} answer ${index}`).join('\n\n'),
+          turnId,
+        },
+      });
+      store.upsert({ id: 'user:t1', kind: 'user', status: 'succeeded', content: 'first question', turnId: 't1', createdAtMs: 1 });
+      projection.beginTurn('t1', 1);
+      projection.applyStreamEvent('t1', answer('t1', 20));
+      projection.markTurn('t1', 'succeeded', 4_000);
+      // Settled output after the run-duration note, e.g. a background task notice.
+      store.upsert({ id: 'local:1', kind: 'final-summary', status: 'succeeded', content: 'Background task finished', ephemeral: true, createdAtMs: 2 });
+      const transcript = new TranscriptView(store, { appendOnly: () => true });
+      const parts = createMutableChatParts('conversation');
+      const layout = new TuiChatLayout(terminal, { ...parts, transcript });
+      tui.addChild(layout);
+      tui.renderNow();
+      await terminal.flush();
+      (tui as unknown as { lastUserInputAt: number }).lastUserInputAt = Number.NEGATIVE_INFINITY;
+      terminal.scrollLines(-12);
+      const before = terminal.getScrollPosition();
+      terminal.takeWrites();
+      const document = () =>
+        logicalDocument(layout, terminal).map((line) =>
+          line.replace(/^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/, '').trimEnd());
+      const expectHistoryUntouched = () => {
+        expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+        expect(terminal.getScrollPosition().viewport).toBe(before.viewport);
+        expect((tui as unknown as { historyReplayDeferred: boolean }).historyReplayDeferred).toBe(false);
+        // No deferred repair is pending: native history is already exact.
+        expect(terminal.getScrollBuffer().map((line) => line.trimEnd())).toEqual(document());
+      };
+
+      // The next run starts with no key press.
+      if (withPrompt) {
+        store.upsert({ id: 'user:t2', kind: 'user', status: 'pending', content: 'queued follow-up', turnId: 't2', createdAtMs: 3 });
+      }
+      projection.beginTurn('t2', 3);
+      projection.applyStreamEvent('t2', answer('t2', 20));
+      tui.renderNow();
+      await terminal.flush();
+      expectHistoryUntouched();
+
+      projection.markTurn('t2', 'succeeded', 3_000);
+      tui.renderNow();
+      await terminal.flush();
+      expectHistoryUntouched();
+      const history = terminal.getScrollBuffer().join('\n');
+      expect(history.match(/Completed in 4s/g)).toHaveLength(1);
+      expect(history.match(/Completed in 3s/g)).toHaveLength(1);
+    });
+
+    it('logs the pid, the deferral and the changed row shape with PI_DEBUG_REDRAW', async () => {
+      const logDirectory = mkdtempSync(path.join(tmpdir(), 'mcode-redraw-'));
+      const previous = process.env.PI_DEBUG_REDRAW;
+      process.env.PI_DEBUG_REDRAW = '1';
+      try {
+        const terminal = new RecordingVirtualTerminal(60, 16);
+        const tui = new TuiMainScreen(terminal, undefined, logDirectory);
+        tui.start();
+        started.push(tui);
+        const parts = createMutableChatParts('conversation');
+        parts.transcript.lines = Array.from({ length: 40 }, (_, index) => `History ${index}`);
+        tui.addChild(new TuiChatLayout(terminal, parts));
+        tui.renderNow();
+        await terminal.flush();
+        parts.transcript.lines[3] = 'History 3 (updated)';
+        tui.renderNow();
+        await terminal.flush();
+        deliverUserKey(terminal, tui);
+        tui.renderNow();
+        await terminal.flush();
+
+        const log = readFileSync(path.join(logDirectory, 'pi-debug.log'), 'utf8');
+        expect(log).toContain(`[pid ${process.pid}] fullRender: first render`);
+        expect(log).toMatch(/fullRender: firstChanged < viewportTop \(3 < \d+\) .* deferred=yes row=3 old="\s*aaaaaaa 9" new="\s*aaaaaaa 9 \(aaaaaaa\)"/);
+        expect(log).toContain('fullRender: deferred history replay after user input');
+        expect(log).not.toContain('History');
+      } finally {
+        if (previous === undefined) delete process.env.PI_DEBUG_REDRAW;
+        else process.env.PI_DEBUG_REDRAW = previous;
+        rmSync(logDirectory, { recursive: true, force: true });
+      }
+    });
   });
 
   it('renders an urgent product interaction without resetting Main diff state', async () => {
@@ -1170,6 +1448,13 @@ describe('regular-mode retained document', () => {
     lines = [...lines.slice(5), 'row 30'];
     pending = reported;
     terminal.takeWrites();
+    tui.renderNow();
+    await terminal.flush();
+    // #426: the screen is right at once; without recent input the reconstruction
+    // that removes misaligned history waits for the next key (L047).
+    expect(terminal.getViewport().map((line) => line.trimEnd())).toEqual(lines.slice(-terminal.rows));
+    expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    deliverUserKey(terminal, tui);
     tui.renderNow();
     await terminal.flush();
     const history = terminal.getScrollBuffer().map((line) => line.trimEnd()).filter(Boolean);

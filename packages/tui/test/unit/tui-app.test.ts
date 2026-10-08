@@ -10714,6 +10714,10 @@ describe("createTuiApp", () => {
     await app.ready;
     await app.submit("/resume session-permission-render");
     await vi.waitFor(() => expect(app.interaction.isActive()).toBe(true));
+    // A user types `/resume`; model that input so the history rebuild for the
+    // welcome-to-conversation switch in this 8-row terminal runs now instead of
+    // being deferred to the permission key (#426, L047).
+    (app.tui as unknown as { onUserInput(): void }).onUserInput();
     app.tui.renderNow();
     terminal.writes.length = 0;
 

@@ -163,7 +163,7 @@
     },
     {
       "path": "tui-main-screen.ts",
-      "currentSha256": "b8f93a0b2e93f7295b3330d9af3d98a577d2c4a5d4023b1833c77d5226780ffb",
+      "currentSha256": "3be305eaf9113705e403a995fefe93aadc23256b57b2e38c163a15e1a4a1950b",
       "changeIds": [
         "L005",
         "L017",
@@ -179,8 +179,8 @@
         "L047"
       ],
       "upstreamCommit": "6c4f360264397c59801f6da2bdac13e3b1fcbe91",
-      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure. Defer history reconstruction after output-driven layout shrink until user input.",
-      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal still reconstructs the session to avoid stale or duplicate history. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored. Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output. A scrolled-up reader stays in place when a transient layout shrinks without user input; the reconstruction runs after the next key, a resize replay or at stop."
+      "reason": "Keep strict TypeScript fixes and stream full and differential renders through Pi's bounded terminal writer. 缩放期间仅重绘可见尾部 常规模式在差分比较前剥离行首 OSC 133 zone 标记。 内容收缩或历史内容变化触发回退重绘时仅更新可见区域。 Preserve ordered asynchronous terminal output under POSIX TTY backpressure. Defer history reconstruction without recent user input until the next key.",
+      "behaviorImpact": "Regular viewport redraws erase rows in place so hosts that save an erased screen to scrollback do not retain stale transcript or footer rows. Visible text-only shrink with unchanged historical text temporarily pads the active screen to preserve host scrolling and the input position; later output reuses this space. Historical text replacement or removal reconstructs the session to avoid stale or duplicate history; without recent user input the screen is repainted in place first and the reconstruction waits for the next key. Rebuilding clears pre-launch shell scrollback. Genuine resize retains delayed history replay; redundant same-size notifications are ignored. Slow terminal output does not block input; pending frames coalesce and terminal handoffs drain ordered output. A scrolled-up reader stays in place when a transient layout shrinks, historical text changes or the document shrinks without user input; the reconstruction runs after the next key, a resize replay or at stop."
     },
     {
       "path": "tui.ts",

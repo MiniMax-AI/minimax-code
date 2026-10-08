@@ -367,11 +367,13 @@ describe('TuiChatController', () => {
 
   it('dismisses only older turn-scoped ephemeral errors when a Runtime turn starts', () => {
     const transcript = new TranscriptStore();
+    // Settled cells come first: feedback is dismissed only while nothing settled
+    // follows it (#426).
     for (const cell of [
+      { id: 'historical-error', turnId: 'old-turn' },
+      { id: 'local-action-error', ephemeral: true },
       { id: 'old-terminal-error', turnId: 'old-turn', ephemeral: true },
       { id: 'current-terminal-error', turnId: 'current-turn', ephemeral: true },
-      { id: 'local-action-error', ephemeral: true },
-      { id: 'historical-error', turnId: 'old-turn' },
     ]) {
       transcript.upsert({
         ...cell,
@@ -390,10 +392,43 @@ describe('TuiChatController', () => {
     controller.beginRuntimeTurn('current-turn', 2);
 
     expect(transcript.snapshot().map((cell) => cell.id)).toEqual([
-      'current-terminal-error',
-      'local-action-error',
       'historical-error',
+      'local-action-error',
+      'current-terminal-error',
     ]);
+  });
+
+  it('keeps one-time feedback that settled output already follows when a Runtime turn starts', () => {
+    // Settled rows can already be in native terminal scrollback. Removing a cell
+    // above them would shift every later row and force a history rebuild that
+    // moves a scrolled-up reader to the top (#426), so the cell stays as history.
+    const transcript = new TranscriptStore();
+    for (const cell of [
+      { id: 'turn-duration:old-turn', kind: 'turn-duration', status: 'succeeded', durationMs: 4_000, turnId: 'old-turn', ephemeral: true },
+      { id: 'old-terminal-error', kind: 'error', status: 'failed', turnId: 'old-turn', ephemeral: true },
+      { id: 'shell:1', kind: 'shell', status: 'succeeded', ephemeral: true },
+      { id: 'notice', kind: 'warning', status: 'succeeded', ephemeral: true },
+      { id: 'turn-duration:trailing', kind: 'turn-duration', status: 'succeeded', durationMs: 2_000, turnId: 'trailing-turn', ephemeral: true },
+      { id: 'user:next-turn', kind: 'user', status: 'pending', turnId: 'next-turn' },
+    ] as const) {
+      transcript.upsert({ ...cell, content: cell.id, createdAtMs: 1 });
+    }
+    const controller = new ProductionTuiChatController({
+      runtime: {} as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+
+    controller.beginRuntimeTurn('next-turn', 2);
+
+    expect(transcript.snapshot().map((cell) => cell.id)).toEqual([
+      'turn-duration:old-turn',
+      'old-terminal-error',
+      'shell:1',
+      'notice',
+      'user:next-turn',
+    ]);
+    expect(controller.getTerminalDurationId()).toBe('turn-duration:old-turn');
   });
 
   it('keeps the previous duration while projecting a steer for the current turn', () => {

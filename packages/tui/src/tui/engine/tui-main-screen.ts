@@ -102,6 +102,16 @@ function extractKittyImageRows(line: string): number {
 	return parseKittyImageHeader(line)?.rows ?? 1;
 }
 
+/**
+ * Debug-log shape of a row (#426): letters become `a` and digits `9`, so the log
+ * shows which kind of row changed (rails, markers, separators) without its text.
+ */
+function redrawRowShape(line: string): string {
+	return JSON.stringify(
+		stripTerminalSequences(line).replace(/\p{L}/gu, "a").replace(/\p{N}/gu, "9").trimEnd().slice(0, 48),
+	);
+}
+
 function isTermuxSession(): boolean {
 	return Boolean(process.env.TERMUX_VERSION);
 }
@@ -430,17 +440,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Helper to redraw either the complete logical document or only the visible viewport.
 		// Viewport-only redraws preserve the terminal's native scrollback.
-		const fullRender = (clear: boolean, viewportOnly = false): void => {
+		// `tail` repaints the screen with the last rows of the document (as a resize
+		// preview does) while native scrollback keeps its rows until a deferred replay.
+		const fullRender = (clear: boolean, viewportOnly = false, tail = false): void => {
 			// Native scrollback cannot move backwards with a shrinking document. Keep the
 			// previous viewport origin so rows already scrolled out are not painted twice,
 			// and growth still writes every row before it scrolls out. Resize previews are
 			// temporary: they show the new tail until the pending full history replay.
-			if (viewportOnly && !this.historyReplayPending && newLines.length <= prevViewportTop) {
+			if (viewportOnly && !tail && !this.historyReplayPending && newLines.length <= prevViewportTop) {
 				// Nothing remains addressable on screen; rebuild with one consistent origin.
 				viewportOnly = false;
 			}
 			const start = viewportOnly
-				? this.historyReplayPending
+				? this.historyReplayPending || tail
 					? Math.max(0, newLines.length - height)
 					: prevViewportTop
 				: 0;
@@ -498,12 +510,47 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		};
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
-		const logRedraw = (reason: string): void => {
+		const logRedraw = (reason: string, detail = ""): void => {
 			if (!debugRedraw) return;
 			const logPath = path.join(this.logDirectory, "pi-debug.log");
-			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
+			// Several sessions may share one log file; the pid tells them apart.
+			const msg = `[${new Date().toISOString()}] [pid ${process.pid}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})${detail}\n`;
 			fs.mkdirSync(path.dirname(logPath), { recursive: true });
 			fs.appendFileSync(logPath, msg);
+		};
+		/** First row above the previous viewport whose text changed, or -1. */
+		const firstChangedHistoryRow = (from = 0): number => {
+			for (let i = from; i < prevViewportTop; i++) {
+				const oldLine = this.previousLines[i] ?? "";
+				const newLine = newLines[i] ?? "";
+				if (oldLine !== newLine && stripTerminalSequences(oldLine) !== stripTerminalSequences(newLine)) return i;
+			}
+			return -1;
+		};
+
+		// #426: a reconstruction (ED 3 + replay) moves a host that is scrolled up, such
+		// as xterm.js, to the top of the replayed history. Without recent user input the
+		// reader may be scrolled up, so repaint only the screen in place and defer the
+		// replay to the next key, a resize replay or stop (extends L047). Native scrollback
+		// keeps stale or duplicate rows until then. `tail` repaints the document's last
+		// rows when the document no longer reaches the previous viewport.
+		const reconstruct = (reason: string, tail: boolean, changedRow: number): void => {
+			const deferred = !followsBottom;
+			if (debugRedraw) {
+				const row = changedRow < 0
+					? ""
+					: ` row=${changedRow} old=${redrawRowShape(this.previousLines[changedRow] ?? "")} new=${redrawRowShape(newLines[changedRow] ?? "")}`;
+				logRedraw(reason, ` deferred=${deferred ? "yes" : "no"}${row}`);
+			}
+			if (!deferred) {
+				fullRender(true);
+				return;
+			}
+			this.deferHistoryReplay();
+			// A repaint from the previous viewport origin needs the document to still
+			// reach it (callers check the shrink-reveal case first). Otherwise
+			// `fullRender` would turn it into an immediate ED 3, so paint the tail.
+			fullRender(true, true, tail || newLines.length <= prevViewportTop);
 		};
 
 		if (this.historyReplayPending) {
@@ -550,9 +597,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// A shorter document can bring previously scrolled rows back into view.
 		// Rebuild the complete projection so the viewport is full and native history
 		// contains each row once; neither tail replay nor blank padding can do both.
+		// Without recent input the rebuild waits for the next key (#426, L047).
 		if (Math.max(0, newLines.length - height) < prevViewportTop) {
-			logRedraw("document shrink reveals scrolled rows");
-			fullRender(true);
+			reconstruct("document shrink reveals scrolled rows", true, debugRedraw ? firstChangedHistoryRow() : -1);
 			return;
 		}
 
@@ -656,15 +703,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// would splice stale rows onto the new document, even when its total height grew.
 		// Style-only changes can still repaint the viewport without replaying history.
 		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			for (let i = firstChanged; i < prevViewportTop; i++) {
-				const oldLine = this.previousLines[i] ?? "";
-				const newLine = newLines[i] ?? "";
-				if (oldLine !== newLine && stripTerminalSequences(oldLine) !== stripTerminalSequences(newLine)) {
-					fullRender(true);
-					return;
-				}
+			const reason = `firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`;
+			const changedRow = firstChangedHistoryRow(firstChanged);
+			if (changedRow >= 0) {
+				// The document still reaches the previous viewport here, so an in-place
+				// repaint from that origin also writes any growth into native scrollback.
+				reconstruct(reason, false, changedRow);
+				return;
 			}
+			logRedraw(reason, " style-only");
 			fullRender(true, true);
 			return;
 		}
