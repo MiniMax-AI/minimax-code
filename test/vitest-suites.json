@@ -33,6 +33,7 @@
       "packages/tui/test/unit/runtime-feedback-diagnostic-upload.test.ts",
       "packages/tui/test/unit/update-service.test.ts",
       "packages/tui/test/unit/update-application.test.ts",
+      "packages/tui/test/unit/update-runtime.test.ts",
       "packages/tui/test/unit/acp-agent.test.ts",
       "packages/mcode-tools-host/test/unit/lease-broker.test.ts",
       "packages/mcode-tools-host/test/unit/resource.test.ts",

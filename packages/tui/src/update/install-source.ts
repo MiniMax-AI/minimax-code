@@ -44,6 +44,12 @@ export interface McodeNpmPrefixInstall {
   readonly packageName: McodeNpmPackageName;
   readonly prefix: string;
   readonly registry: string;
+  /**
+   * Node executable pinned by the install receipt. `process.execPath` resolves
+   * Homebrew's stable bin/node symlink into a versioned Cellar path that
+   * `brew upgrade` removes, so updates reuse the recorded path when present.
+   */
+  readonly nodeExecutable?: string;
 }
 
 export type McodePackageManagerRunOptions = McodeUpdateOperationOptions;
@@ -587,6 +593,7 @@ function readNpmPrefixReceipt(
       distTag?: unknown;
       prefix?: unknown;
       npmExecutable?: unknown;
+      nodeExecutable?: unknown;
       layoutVersion?: unknown;
       releasesDirectory?: unknown;
       currentFile?: unknown;
@@ -639,11 +646,18 @@ function readNpmPrefixReceipt(
         return undefined;
       }
     }
+    const nodeExecutable =
+      typeof value.nodeExecutable === 'string' &&
+      platformPath.isAbsolute(value.nodeExecutable) &&
+      existsSync(value.nodeExecutable)
+        ? value.nodeExecutable
+        : undefined;
     return {
       executable: value.npmExecutable,
       packageName,
       prefix,
       registry: distribution.registry,
+      ...(nodeExecutable ? { nodeExecutable } : {}),
     };
   } catch {
     return undefined;
