@@ -67,6 +67,7 @@ import {
 import { schedulePendingMcodePrefixUpdate } from '../update/prefix-update.js';
 import { MCODE_TUI_RESULT_PATH_ENV } from './automation/result-writer.js';
 import { startTuiStartupStatus, type TuiStartupStatus } from './startup-status.js';
+import type { McodeContextMode } from '@mavis/protocol/local';
 
 const MINIMAX_CODE_EXIT_SLOGAN = 'Intelligence with everyone, bye~';
 export interface LaunchTuiOptions {
@@ -85,6 +86,7 @@ export interface LaunchTuiOptions {
   theme?: string;
   externalEditorCommand?: string;
   resumeDraftAfterLogin?: boolean;
+  contextMode?: McodeContextMode;
   lane?: string;
 }
 
@@ -107,6 +109,7 @@ interface RuntimeLifecycleModule {
       version: string;
       surface: 'tui';
       observability: TuiObservability;
+      contextMode?: McodeContextMode;
       lane?: string;
     },
     dependencies?: Pick<CreateTuiRuntimeDependencies, 'sharedAuthCore'>,
@@ -348,6 +351,7 @@ export async function launchTui(
           version: options.version,
           surface: 'tui',
           observability,
+          ...(options.contextMode ? { contextMode: options.contextMode } : {}),
           ...(bedrockLane ? { lane: bedrockLane } : {}),
         },
         { sharedAuthCore },

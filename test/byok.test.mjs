@@ -612,6 +612,154 @@ test(
 );
 
 test(
+  "lightweight mode stops safely when a provider emits an unoffered tool call",
+  { timeout: 45000 },
+  async (t) => {
+    const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-lightweight-tool-"));
+    const dataDir = path.join(fixtureDir, "data");
+    const workspaceDir = path.join(fixtureDir, "workspace");
+    const homeDir = path.join(fixtureDir, "home");
+    for (const dir of [dataDir, workspaceDir, homeDir]) mkdirSync(dir);
+    const networkAudit = path.join(fixtureDir, "network-audit.log");
+    const marker = path.join(workspaceDir, "must-not-exist.txt");
+    let streamRequests = 0;
+    const server = createServer(async (req, res) => {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw);
+      if (req.url?.endsWith("/responses/input_tokens")) {
+        res
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ input_tokens: 1 }));
+        return;
+      }
+      assert.equal(body.stream, true);
+      assert.equal(body.tools, undefined, "Lightweight requests must not offer tools");
+      streamRequests += 1;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (const chunk of [
+        {
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "unoffered-write",
+                    type: "function",
+                    function: {
+                      name: "write",
+                      arguments: JSON.stringify({
+                        path: marker,
+                        content: "must not be written",
+                      }),
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        },
+        {
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        },
+      ]) {
+        res.write(
+          `data: ${JSON.stringify({
+            id: "fixture",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "fixture",
+            ...chunk,
+          })}\n\n`,
+        );
+      }
+      res.end("data: [DONE]\n\n");
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(fixtureDir, { recursive: true, force: true });
+    });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    writeFileSync(
+      path.join(dataDir, "config.yaml"),
+      stringifyYaml({
+        defaultModel: "custom_provider:fixture/fixture",
+        custom_provider: {
+          fixture: {
+            name: "fixture",
+            kind: "custom",
+            enabled: true,
+            api: "openai-completions",
+            options: {
+              apiKey: "synthetic-key",
+              baseURL: `${origin}/v1`,
+              authMode: "api-key",
+            },
+            models: { fixture: { limit: { context: 32768, output: 4096 } } },
+          },
+        },
+      }),
+    );
+    const child = spawn(
+      process.execPath,
+      [
+        cli,
+        "exec",
+        "Edit a local file.",
+        "--mode",
+        "lightweight",
+        "--permission",
+        "off",
+        "--cwd",
+        workspaceDir,
+        "--timeout",
+        "30s",
+        "--max-steps",
+        "4",
+      ],
+      {
+        cwd: workspaceDir,
+        env: {
+          ...withoutProxyEnvironment(process.env),
+          HOME: homeDir,
+          XDG_CONFIG_HOME: path.join(homeDir, "config"),
+          XDG_DATA_HOME: path.join(homeDir, "data"),
+          MINIMAX_DATA_DIR: dataDir,
+          MAVIS_DATA_DIR: dataDir,
+          MCODE_TEST_ALLOWED_ORIGIN: origin,
+          MCODE_TEST_NETWORK_AUDIT: networkAudit,
+          MCODE_TEST_MANAGED_OFFLINE: "1",
+          NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, "close");
+    assert.equal(code, 0, `${stdout}\n${stderr}`);
+    assert.match(stdout, /tools, which are unavailable in lightweight mode/u);
+    assert.match(stdout, /mcode --mode standard/u);
+    assert.equal(streamRequests, 1, "The rejected tool call must not trigger another model step");
+    assert.equal(existsSync(marker), false, "An unoffered tool call must never execute");
+    assert.equal(existsSync(networkAudit), false, "No external requests are allowed");
+  },
+);
+
+test(
   "cancelling a running tool preserves its completed display message",
   { timeout: 45000, skip: process.platform === "win32" },
   cancellationTest("tool"),

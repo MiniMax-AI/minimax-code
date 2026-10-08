@@ -49,6 +49,7 @@ import type {
 import { VirtualTerminalScreen } from "../helpers/virtual-terminal.js";
 import { VirtualTerminal } from "../pi-084-upstream/virtual-terminal.js";
 import { TuiFailure } from "../../src/failure.js";
+import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
 
 const runtimeEvent = (event: RawTuiRuntimeEvent): TuiRuntimeEvent =>
   normalizeTuiRuntimeEvent(event);
@@ -9680,6 +9681,52 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it.each([
+    {
+      label: "lightweight",
+      purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+      indicator: true,
+    },
+    {
+      label: "standard",
+      purpose: undefined,
+      indicator: false,
+    },
+  ])("renders the persisted mode after /resume of a $label Session", async ({ purpose, indicator }) => {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    const session = {
+      sessionId: "session-resumed-mode",
+      title: "Resumed mode",
+      workspaceDir: "/workspace",
+      ...(purpose ? { purpose } : {}),
+    };
+    vi.mocked(runtime.listSessions).mockResolvedValue([session]);
+    vi.mocked(runtime.listSessionPage).mockResolvedValue({
+      sessions: [session],
+      hasMore: false,
+    });
+    vi.mocked(runtime.getSession).mockResolvedValue(session);
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: "0.1.0",
+      workspaceDir: "/workspace",
+    });
+    try {
+      await app.ready;
+      await app.submit("/resume session-resumed-mode");
+      await vi.waitFor(() =>
+        expect(app.controller.snapshot().session?.sessionId).toBe("session-resumed-mode"),
+      );
+      const rendered = stripAnsi(app.tui.render(120).join("\n"));
+      if (indicator) expect(rendered).toContain("Lightweight");
+      else expect(rendered).not.toContain("Lightweight");
+    } finally {
+      await app.stop();
+    }
+  });
+
   it("queries the current workspace first and reloads the global catalog on Ctrl+A", async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
@@ -15360,6 +15407,32 @@ describe("interactive model argument contract", () => {
     const { command, launch } = program();
     await command.parseAsync(["hello"], { from: "user" });
     expect(launch).toHaveBeenCalledWith({ initialPrompt: "hello" });
+  });
+
+  it("opts a new Session into lightweight mode without changing the standard contract", async () => {
+    const lightweight = program();
+    await lightweight.command.parseAsync(["hello", "--mode", "lightweight"], { from: "user" });
+    expect(lightweight.launch).toHaveBeenCalledWith({
+      initialPrompt: "hello",
+      contextMode: "lightweight",
+    });
+
+    const standard = program();
+    await standard.command.parseAsync(["hello", "--mode", "standard"], { from: "user" });
+    expect(standard.launch).toHaveBeenCalledWith({ initialPrompt: "hello" });
+  });
+
+  it("rejects lightweight mode for resumed or selected Sessions", async () => {
+    for (const args of [
+      ["--continue", "--mode", "lightweight"],
+      ["--session", "existing", "--mode", "lightweight"],
+    ]) {
+      const { command, launch } = program();
+      await expect(command.parseAsync(args, { from: "user" })).rejects.toThrow(
+        "requires a new Session",
+      );
+      expect(launch).not.toHaveBeenCalled();
+    }
   });
 
   it.each(["-m", "--model"])("scans startup environment after %s values", (flag) => {

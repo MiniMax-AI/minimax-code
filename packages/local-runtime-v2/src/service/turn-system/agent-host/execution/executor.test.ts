@@ -83,6 +83,12 @@ import {
 import { localPluginHookCoordinator } from "../assembly/local-turn-plugin-hooks.js";
 import { NativeLocalTurnExecutionPreparationSource } from "../assembly/local-turn-execution-preparation.js";
 import { LocalTurnInputPreparer } from "../assembly/local-turn-input-preparation.js";
+import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
+import {
+  LIGHTWEIGHT_SYSTEM_PROMPT,
+  LIGHTWEIGHT_TOOL_CALL_FALLBACK,
+  resolveProviderContextMode,
+} from "./prompt.js";
 
 interface LocalToolContext extends ToolExecutionContext {
   readonly permissionScope?: string;
@@ -1132,6 +1138,132 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
 });
 
 describe("LocalRuntimeTurnExecutor", () => {
+  it("keeps the standard provider context byte-for-byte and trims only explicit lightweight roots", async () => {
+    const tool = {
+      def: {
+        name: "fixture_tool",
+        description: "Fixture tool",
+        schema: { type: "object", properties: { value: { type: "string" } } },
+      },
+      impl: { execute: vi.fn() },
+    } as never;
+    const captures: LocalRuntimeTurnRunnerInput<LocalToolContext>[] = [];
+    const runner = new LocalRuntimeTurnExecutor(
+      options(async (runInput) => {
+        captures.push(runInput);
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+      }),
+    );
+    const base = executionInput({
+      assembly: { ...assembly(), tools: [tool] },
+    });
+    const standardFixture =
+      '{"systemPrompt":"extension system\\n\\nbase system","tools":[{"name":"fixture_tool","description":"Fixture tool","schema":{"type":"object","properties":{"value":{"type":"string"}}}}]}';
+
+    await runner.execute(base);
+    const standard = captures.at(-1)!;
+    expect(
+      JSON.stringify({
+        systemPrompt: standard.systemPrompt,
+        tools: standard.tools?.map(({ def }) => ({
+          name: def.name,
+          description: def.description,
+          schema: def.schema,
+        })),
+      }),
+    ).toBe(standardFixture);
+    expect(standard.unexpectedToolCallFallback).toBeUndefined();
+
+    await runner.execute(
+      executionInput({
+        assembly: { ...assembly(), tools: [tool] },
+        session: {
+          ...base.session,
+          purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+        },
+      }),
+    );
+    const lightweight = captures.at(-1)!;
+    expect(lightweight.systemPrompt).toBe(LIGHTWEIGHT_SYSTEM_PROMPT);
+    expect(lightweight.tools).toEqual([]);
+    expect(lightweight.contextUsagePromptRanges).toBeUndefined();
+    expect(lightweight.unexpectedToolCallFallback).toBe(LIGHTWEIGHT_TOOL_CALL_FALLBACK);
+  });
+
+  it("does not propagate lightweight mode to task or branch child Sessions", async () => {
+    const prompts: string[] = [];
+    const runner = new LocalRuntimeTurnExecutor(
+      options(async (runInput) => {
+        prompts.push(runInput.systemPrompt);
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+      }),
+    );
+    const base = executionInput();
+    for (const session of [
+      {
+        ...base.session,
+        purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+        sessionType: "branch" as const,
+        sessionKind: "task" as const,
+        parentSessionId: "parent",
+      },
+      {
+        ...base.session,
+        purpose: LIGHTWEIGHT_SESSION_PURPOSE,
+        sessionType: "branch" as const,
+        parentSessionId: "parent",
+      },
+    ]) {
+      await runner.execute(executionInput({ session }));
+    }
+    expect(prompts).toEqual([
+      "extension system\n\nbase system",
+      "extension system\n\nbase system",
+    ]);
+  });
+
+  it.each([
+    "code-review:context-mode:lightweight",
+    "context-mode:lightweight:im",
+    " context-mode:lightweight",
+  ])("keeps mixed purpose %j on the standard tool surface", async (purpose) => {
+    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
+    const tool = {
+      def: { name: "read", description: "Read", schema: { type: "object" } },
+      impl: { execute: vi.fn() },
+    } as never;
+    const runner = new LocalRuntimeTurnExecutor(
+      options(async (runInput) => {
+        captured = runInput;
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+      }),
+    );
+    const base = executionInput();
+    await runner.execute(
+      executionInput({
+        session: { ...base.session, purpose },
+        assembly: { ...assembly(), tools: [tool] },
+      }),
+    );
+    expect(captured?.tools?.map(({ def }) => def.name)).toEqual(["read"]);
+    expect(captured?.systemPrompt).toBe("extension system\n\nbase system");
+  });
+
+  it("keeps compaction on the standard provider context for a lightweight Session", () => {
+    const base = executionInput();
+    const context = {
+      systemPrompt: "full compaction system prompt",
+      tools: [{ name: "read" }],
+    };
+    expect(
+      resolveProviderContextMode(
+        { ...base.session, purpose: LIGHTWEIGHT_SESSION_PURPOSE },
+        context,
+        "compaction",
+      ),
+    ).toBe(context);
+  });
+
   it("projects runtime events before they reach the v2 commit pipeline", async () => {
     const delivered: string[] = [];
     const input = executionInput({

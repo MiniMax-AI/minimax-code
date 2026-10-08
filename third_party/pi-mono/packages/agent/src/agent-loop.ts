@@ -345,7 +345,7 @@ async function streamAssistantResponse(
 
 			case "done":
 			case "error": {
-				const finalMessage = await response.result();
+				const finalMessage = normalizeUnexpectedToolCall(await response.result(), config);
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
 				} else {
@@ -360,7 +360,7 @@ async function streamAssistantResponse(
 		}
 	}
 
-	const finalMessage = await response.result();
+	const finalMessage = normalizeUnexpectedToolCall(await response.result(), config);
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {
@@ -369,6 +369,37 @@ async function streamAssistantResponse(
 	}
 	await emit({ type: "message_end", message: finalMessage });
 	return finalMessage;
+}
+
+function normalizeUnexpectedToolCall(
+	message: AssistantMessage,
+	config: AgentLoopConfig,
+): AssistantMessage {
+	const fallback = config.unexpectedToolCallFallback?.trim();
+	if (
+		!fallback ||
+		message.stopReason === "error" ||
+		message.stopReason === "aborted" ||
+		!message.content.some((block) => block.type === "toolCall")
+	) {
+		return message;
+	}
+	const content = message.content.filter((block) => block.type !== "toolCall");
+	const existingFallback = content.some((block) => block.type === "text" && block.text.includes(fallback));
+	if (!existingFallback) {
+		const textIndex = content.findLastIndex((block) => block.type === "text");
+		const textBlock = content[textIndex];
+		if (textBlock?.type === "text" && textBlock.text.trim()) {
+			content[textIndex] = { ...textBlock, text: `${textBlock.text.trimEnd()}\n\n${fallback}` };
+		} else {
+			content.push({ type: "text", text: fallback });
+		}
+	}
+	return {
+		...message,
+		content,
+		stopReason: "stop",
+	};
 }
 
 /**

@@ -31,6 +31,8 @@ export interface TuiShellState {
   agentBackgroundCount?: number;
   homeDir?: string;
   sessionTitle?: string;
+  /** Visible only when the active Session carries the exact lightweight purpose marker. */
+  lightweightMode?: boolean;
   sessionRole?: 'root' | 'subagent';
   sessionAgentName?: string;
   parentSessionTitle?: string;

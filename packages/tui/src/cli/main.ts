@@ -109,6 +109,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         continueLatestSession,
         workspaceDir,
         tuiMode,
+        contextMode,
         lane,
       }) => {
         const launchTui = dependencies.launchTui ?? defaultLaunchTui;
@@ -121,6 +122,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
           ...(continueLatestSession ? { continueLatestSession: true } : {}),
           ...(workspaceDir ? { workspaceDir } : {}),
           ...(tuiMode ? { tuiMode } : {}),
+          ...(contextMode ? { contextMode } : {}),
           ...(lane ? { lane } : {}),
           ...(resumeDraftAfterLogin ? { resumeDraftAfterLogin: true } : {}),
         });

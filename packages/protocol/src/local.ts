@@ -52,6 +52,17 @@ export const SessionInteractionModeView = {
 export type SessionInteractionModeView =
   (typeof SessionInteractionModeView)[keyof typeof SessionInteractionModeView];
 
+export const MCODE_CONTEXT_MODES = ['standard', 'lightweight'] as const;
+export type McodeContextMode = (typeof MCODE_CONTEXT_MODES)[number];
+
+/**
+ * Immutable marker for an explicitly created lightweight root Session.
+ *
+ * Purpose is already persisted with Sessions and intentionally does not flow
+ * into child Sessions, which have their own task/side-session purpose.
+ */
+export const LIGHTWEIGHT_SESSION_PURPOSE = 'context-mode:lightweight';
+
 export const SessionKind = {
   Unknown: 0,
   Conversation: 1,

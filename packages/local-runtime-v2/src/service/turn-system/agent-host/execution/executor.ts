@@ -60,9 +60,12 @@ import type {
 import {
   joinPrompt,
   joinUserPrompt,
+  isLightweightRootSession,
+  LIGHTWEIGHT_TOOL_CALL_FALLBACK,
   readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
   renderAgentRuntimeReminders,
+  resolveProviderContextMode,
 } from './prompt.js';
 import {
   createAgentHostPluginHookTranscript,
@@ -365,6 +368,9 @@ export class LocalRuntimeTurnExecutor<
           input.request.provenance.sourceContext?.executionDiagnostics === true,
         ),
         caller: prepared.caller,
+        ...(prepared.unexpectedToolCallFallback
+          ? { unexpectedToolCallFallback: prepared.unexpectedToolCallFallback }
+          : {}),
         getSteeringMessages: async (context) => {
           for (;;) {
             // Subscribe before draining so an append racing the wait cannot be missed.
@@ -470,6 +476,7 @@ export class LocalRuntimeTurnExecutor<
         : { maxSerializedInputBytes: maxRequestBodyBytes }),
     };
     const baseSystemPrompt = readPreparedSystemPrompt(input.preparation.agentConfig);
+    const lightweightMode = isLightweightRootSession(input.session);
     const preparedExecution = await this.options.executionPreparation.prepare({
       execution: input,
       eventWriter,
@@ -484,7 +491,7 @@ export class LocalRuntimeTurnExecutor<
       (tool) =>
         tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
     );
-    const tools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
+    const standardTools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
     const toolContext = {
       ...toolResolution.context,
       ...(input.pluginHooks?.length
@@ -496,12 +503,24 @@ export class LocalRuntimeTurnExecutor<
       canConsumeBackgroundBashOutput,
     } as TContext;
     const caller = preparedExecution.caller;
-    const systemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
-    const contextUsagePromptRanges = readPreparedContextUsagePromptRanges(
+    const standardSystemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
+    const standardContextUsagePromptRanges = readPreparedContextUsagePromptRanges(
       input.preparation.agentConfig,
       input.assembly.systemPromptPrefix,
       baseSystemPrompt,
     );
+    const providerContext = resolveProviderContextMode(input.session, {
+      systemPrompt: standardSystemPrompt,
+      tools: standardTools,
+      ...(standardContextUsagePromptRanges === undefined
+        ? {}
+        : { contextUsagePromptRanges: standardContextUsagePromptRanges }),
+    });
+    const {
+      systemPrompt,
+      tools,
+      contextUsagePromptRanges,
+    } = providerContext;
     input.onContextUsagePromptRangesResolved?.(contextUsagePromptRanges);
     const userPromptPrefix = joinUserPrompt(
       input.assembly.userPromptPrefix,
@@ -589,6 +608,11 @@ export class LocalRuntimeTurnExecutor<
       toolContext,
       beforeLlmCallHooks,
       caller,
+      ...(lightweightMode
+        ? {
+            unexpectedToolCallFallback: LIGHTWEIGHT_TOOL_CALL_FALLBACK,
+          }
+        : {}),
       ...(contextUsagePromptRanges !== undefined
         ? {
             contextUsagePromptRanges,
@@ -780,6 +804,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly toolContext: TContext;
   readonly beforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
   readonly caller: RunTurnCaller;
+  readonly unexpectedToolCallFallback?: string;
   readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
   readonly contextUsageRequiresProviderAnchor?: boolean;
   readonly readTaskOutputTaskIds: Set<string>;

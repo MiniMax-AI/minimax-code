@@ -146,6 +146,25 @@ mcode "Find a failing test, fix the implementation, and run the relevant tests."
 | Headless | `mcode exec [prompt]` | Shell、CI、批处理与评测。 |
 | ACP | `mcode acp` | 支持 Agent Client Protocol 的编辑器与客户端。 |
 
+### 轻量对话
+
+对于简单对话或通用知识问答，可用 `--mode lightweight` 创建新会话：
+
+```bash
+mcode --mode lightweight "解释 DNS 缓存的工作原理。"
+mcode exec --mode lightweight "概述 CAP 定理。"
+```
+
+轻量模式只发送精简的对话系统提示词，不发送工具 schema，并从提供方上下文中省略工作区
+指令、Skills、memory 块、MCP schema 和完整环境块，因此不能检查或修改本地文件。需要编程或工具能力时，请使用
+`mcode --mode standard` 或 `mcode exec --mode standard` 创建新的标准会话；省略 `--mode`
+与标准模式完全一致。
+
+模式在根会话创建时固定，因此 `--mode lightweight` 不能与 `--session` 或 `--continue`
+同时使用。子代理/子会话不会继承轻量模式，`/compact` 仍使用标准压缩上下文，ACP 与桌面端
+会话也始终使用标准模式。重新打开轻量会话时会保留该模式，并在 TUI 状态栏显示
+`Lightweight`；从轻量模式启动的 TUI 打开标准会话时仍保持标准模式，且不显示该标记。
+
 ### 继续之前的工作
 
 ```bash
