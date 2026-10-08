@@ -29,6 +29,14 @@ export class TuiTurnOutputRate {
     const decodeDurationMs = event.message.usage?.decodeDurationMs;
     // Missing timing is not a zero-duration sample and must not use the full request duration.
     if (!nonnegativeFinite(outputTokens) || !nonnegativeFinite(decodeDurationMs)) return this.value;
+    if (
+      bufferedBurst(
+        outputTokens,
+        decodeDurationMs,
+        event.message.usage?.requestDurationMs,
+      )
+    )
+      return this.value;
     this.samples.set(event.message.id, { outputTokens, decodeDurationMs });
     let tokens = 0;
     let duration = 0;
@@ -58,6 +66,20 @@ export class TuiTurnOutputRate {
     this.samples.clear();
     this.value = undefined;
   }
+}
+
+/** Buffered upstream output arrives in one burst; its decode window says nothing about model speed. */
+const BURST_MIN_TOKENS_PER_SECOND = 1_000;
+const BURST_MAX_DECODE_SHARE = 0.1;
+
+function bufferedBurst(
+  tokens: number,
+  decodeMs: number,
+  requestMs: number | undefined,
+): boolean {
+  if (!nonnegativeFinite(requestMs) || decodeMs >= requestMs * BURST_MAX_DECODE_SHARE)
+    return false;
+  return tokens > (decodeMs / 1_000) * BURST_MIN_TOKENS_PER_SECOND;
 }
 
 function nonnegativeFinite(value: number | undefined): value is number {
