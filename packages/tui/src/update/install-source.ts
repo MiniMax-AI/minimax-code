@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import spawn from 'cross-spawn';
 import { parseMcodeVersion } from './release.js';
@@ -22,16 +22,10 @@ declare const __TUI_BUILD_ENV__: TuiBuildEnvironment | undefined;
 declare const __TUI_NPM_DIST_TAG__: McodeNpmDistTag | undefined;
 
 export type McodePackageManagerInstallSource =
-  | 'npm-global'
-  | 'npm-prefix'
-  | 'pnpm-global'
-  | 'yarn-global'
-  | 'bun-global';
+  'npm-global' | 'npm-prefix' | 'pnpm-global' | 'yarn-global' | 'bun-global';
 
 export type McodeInstallSource =
-  | 'managed-installer'
-  | McodePackageManagerInstallSource
-  | 'unsupported';
+  'managed-installer' | McodePackageManagerInstallSource | 'unsupported';
 
 export interface McodePackageManagerCommand {
   readonly executable: string;
@@ -360,8 +354,11 @@ function resolvePnpmNpmShim(npmExecutable: string): string | undefined {
     if (lines[0] !== '#!/bin/sh') return undefined;
     const commands = lines.map((line) => line.trim()).filter((line) => /^exec\s/u.test(line));
     if (commands.length === 0) return undefined;
-    const targets = commands.map((line) =>
-      /^exec (?:"\$basedir\/node"|node) "\$basedir\/(nodejs\/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/lib\/node_modules\/npm\/bin\/npm-cli\.js)" "\$@"$/u.exec(line)?.[1],
+    const targets = commands.map(
+      (line) =>
+        /^exec (?:"\$basedir\/node"|node) "\$basedir\/(nodejs\/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/lib\/node_modules\/npm\/bin\/npm-cli\.js)" "\$@"$/u.exec(
+          line,
+        )?.[1],
     );
     const target = targets[0];
     if (!target || targets.some((candidate) => candidate !== target)) return undefined;
@@ -647,10 +644,8 @@ function readNpmPrefixReceipt(
       }
     }
     const nodeExecutable =
-      typeof value.nodeExecutable === 'string' &&
-      platformPath.isAbsolute(value.nodeExecutable) &&
-      existsSync(value.nodeExecutable)
-        ? value.nodeExecutable
+      typeof value.nodeExecutable === 'string' && platformPath.isAbsolute(value.nodeExecutable)
+        ? canonicalReceiptNodeExecutable(value.nodeExecutable)
         : undefined;
     return {
       executable: value.npmExecutable,
@@ -659,6 +654,48 @@ function readNpmPrefixReceipt(
       registry: distribution.registry,
       ...(nodeExecutable ? { nodeExecutable } : {}),
     };
+  } catch {
+    return undefined;
+  }
+}
+
+// Homebrew deletes versioned Cellar kegs on `brew upgrade` while the
+// formula-managed opt/<formula> symlink keeps tracking the installed version,
+// and keeps the update PATH prefix scoped to the Node formula instead of all
+// of <brew>/bin. Receipts that recorded a Cellar keg (or the linked bin/node)
+// therefore heal to the stable opt path when both resolve to the same
+// executable; everything else keeps the recorded path unchanged.
+const HOMEBREW_CELLAR_NODE_PATH =
+  /^(?<prefix>.+)\/Cellar\/(?<formula>node(?:@\d+(?:\.\d+)*)?)\/[^/]+\/bin\/node$/u;
+const HOMEBREW_MANAGED_NODE_PATH =
+  /^(?<prefix>\/(?:opt\/homebrew|usr\/local|home\/linuxbrew\/.linuxbrew))\/(?:(?<formula>node(?:@\d+(?:\.\d+)*)?)\/bin\/node|bin\/node)$/u;
+
+function canonicalReceiptNodeExecutable(nodeExecutable: string): string | undefined {
+  const canonical = canonicalHomebrewNodeExecutable(nodeExecutable);
+  return usableNodeExecutable(canonical) ?? usableNodeExecutable(nodeExecutable);
+}
+
+function canonicalHomebrewNodeExecutable(nodeExecutable: string): string {
+  const cellar = HOMEBREW_CELLAR_NODE_PATH.exec(nodeExecutable);
+  const managed = HOMEBREW_MANAGED_NODE_PATH.exec(nodeExecutable);
+  const prefix = cellar?.groups?.prefix ?? managed?.groups?.prefix;
+  if (!prefix) return nodeExecutable;
+  const formula = cellar?.groups?.formula ?? managed?.groups?.formula ?? 'node';
+  const candidate = `${prefix}/opt/${formula}/bin/node`;
+  if (candidate === nodeExecutable) return nodeExecutable;
+  try {
+    if (realpathSync(candidate) === realpathSync(nodeExecutable)) return candidate;
+  } catch {
+    // Keep the recorded path when either side does not resolve.
+  }
+  return nodeExecutable;
+}
+
+function usableNodeExecutable(nodeExecutable: string): string | undefined {
+  try {
+    if (!statSync(nodeExecutable).isFile()) return undefined;
+    accessSync(nodeExecutable, constants.X_OK);
+    return nodeExecutable;
   } catch {
     return undefined;
   }
