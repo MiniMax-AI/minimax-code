@@ -30,6 +30,8 @@ import {
 export type TuiRunRuntime = TuiConversationPort &
   Partial<Pick<TuiInteractionPort, 'getPendingQuestionnaire'>>;
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 export interface TuiRunRequest {
   turnId: string;
   session: Promise<TuiSession>;
@@ -181,7 +183,7 @@ export class TuiRunCoordinator {
     const activeRun = createActiveRun(request.turnId);
     this.activeRun = activeRun;
     const startedAtMs = this.nowMs();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timeout: TimeoutChunks | undefined;
     let session: TuiSession | undefined;
     let accepted = false;
     let status: TuiTurnRunStatus = 'succeeded';
@@ -204,10 +206,12 @@ export class TuiRunCoordinator {
       let executionDeadlineAtMs: number | undefined;
       if (request.policy?.timeoutMs !== undefined) {
         executionDeadlineAtMs = this.nowMs() + request.policy.timeoutMs;
-        timeout = setTimeout(() => {
-          void this.stopActive(activeRun, 'timeout').catch(() => undefined);
-        }, request.policy.timeoutMs);
-        timeout.unref?.();
+        timeout = scheduleTimeoutChunks(
+          () => {
+            void this.stopActive(activeRun, 'timeout').catch(() => undefined);
+          },
+          request.policy.timeoutMs,
+        );
       }
 
       const source = this.sendWithQueueRecovery(
@@ -329,7 +333,7 @@ export class TuiRunCoordinator {
         failure = execError(error);
       }
     } finally {
-      if (timeout) clearTimeout(timeout);
+      timeout?.clear();
       if (this.activeRun === activeRun) this.activeRun = undefined;
     }
 
@@ -624,6 +628,37 @@ async function waitForSession(
 }
 
 type BoundedSettlement<T> = { settled: true; value: T } | { settled: false };
+
+interface TimeoutChunks {
+  clear(): void;
+}
+
+/** Node clamps setTimeout delays above 2^31 - 1 ms to 1 ms, so longer
+ * timeouts are scheduled as consecutive bounded chunks that preserve the
+ * requested total delay. */
+function scheduleTimeoutChunks(onExpired: () => void, delayMs: number): TimeoutChunks {
+  let remainingMs = delayMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cleared = false;
+  const scheduleNext = () => {
+    if (cleared) return;
+    if (remainingMs <= 0) {
+      onExpired();
+      return;
+    }
+    const chunkMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+    remainingMs -= chunkMs;
+    timer = setTimeout(scheduleNext, chunkMs);
+    timer.unref?.();
+  };
+  scheduleNext();
+  return {
+    clear() {
+      cleared = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
 
 async function settleWithin<T>(task: Promise<T>, timeoutMs: number): Promise<BoundedSettlement<T>> {
   if (timeoutMs <= 0) return { settled: false };
