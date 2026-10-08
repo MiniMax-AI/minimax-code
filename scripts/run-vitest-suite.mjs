@@ -16,6 +16,14 @@ const cli = path.resolve(path.dirname(manifestPath), require(manifestPath).bin.v
 // https://github.com/libuv/libuv/issues/5010. Keep real filesystem watching in
 // the tests, but create their temporary fixtures beneath the canonical path.
 const environment = { ...process.env };
+// Product copy follows the host locale, but tests assert a deliberate default
+// language and cover localized rendering through explicit locale inputs. Pin
+// every locale source before Vitest starts so both workers and subprocesses are
+// deterministic on developer machines and in CI.
+environment.LANG = "C";
+environment.LANGUAGE = "C";
+environment.LC_ALL = "C";
+environment.LC_MESSAGES = "C";
 if (process.platform === "win32") {
   environment.TEMP = environment.TMP = realpathSync.native(tmpdir());
 }

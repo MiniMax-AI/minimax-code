@@ -986,7 +986,7 @@ test('source inventory rejects unregistered, missing and duplicate first-party t
   assert.deepEqual(suiteInventoryViolations(files, { capability: [existing, omitted] }), []);
 });
 
-test('suite runner preserves gate arguments and canonicalizes Windows temporary paths', t => {
+test('suite runner pins its locale, preserves gate arguments and canonicalizes Windows temporary paths', t => {
   const root = mkdtempSync(path.join(tmpdir(), 'suite-runner-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const directory of ['scripts/lib', 'test', 'node_modules/vitest', 'temporary'])
@@ -995,14 +995,24 @@ test('suite runner preserves gate arguments and canonicalizes Windows temporary 
     copyFileSync(new URL(`../${file}`, import.meta.url), path.join(root, file));
   writeFileSync(path.join(root, 'test/vitest-suites.json'), JSON.stringify({ suites: { fixture: ['test/example.test.ts'] } }));
   writeFileSync(path.join(root, 'node_modules/vitest/package.json'), JSON.stringify({ bin: { vitest: 'cli.cjs' } }));
-  writeFileSync(path.join(root, 'node_modules/vitest/cli.cjs'), 'console.log(JSON.stringify({args:process.argv.slice(2),temp:process.env.TEMP,tmp:process.env.TMP,cwd:process.cwd()})); process.exit(17);');
+  writeFileSync(path.join(root, 'node_modules/vitest/cli.cjs'), 'console.log(JSON.stringify({args:process.argv.slice(2),temp:process.env.TEMP,tmp:process.env.TMP,cwd:process.cwd(),lang:process.env.LANG,language:process.env.LANGUAGE,lcAll:process.env.LC_ALL,lcMessages:process.env.LC_MESSAGES,locale:Intl.DateTimeFormat().resolvedOptions().locale})); process.exit(17);');
   const alias = path.join(root, 'temporary-alias');
   symlinkSync(path.join(root, 'temporary'), alias, process.platform === 'win32' ? 'junction' : 'dir');
   for (const platform of ['linux', 'darwin', 'win32']) {
     const preload = path.join(root, 'platform.cjs');
     writeFileSync(preload, `Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });`);
     const result = spawnSync(process.execPath, ['--require', preload, path.join(root, 'scripts/run-vitest-suite.mjs'), 'fixture'], {
-      encoding: 'utf8', env: { ...process.env, TEMP: alias, TMP: alias, TMPDIR: alias },
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LANG: 'zh_CN.UTF-8',
+        LANGUAGE: 'zh_CN:zh',
+        LC_ALL: 'zh_CN.UTF-8',
+        LC_MESSAGES: 'zh_CN.UTF-8',
+        TEMP: alias,
+        TMP: alias,
+        TMPDIR: alias,
+      },
     });
     assert.equal(result.status, 17, result.stderr);
     const child = JSON.parse(result.stdout);
@@ -1012,6 +1022,16 @@ test('suite runner preserves gate arguments and canonicalizes Windows temporary 
     const expected = platform === 'win32' ? realpathSync.native(alias) : alias;
     assert.equal(child.temp, expected);
     assert.equal(child.tmp, expected);
+    assert.deepEqual(
+      {
+        lang: child.lang,
+        language: child.language,
+        lcAll: child.lcAll,
+        lcMessages: child.lcMessages,
+        locale: child.locale,
+      },
+      { lang: 'C', language: 'C', lcAll: 'C', lcMessages: 'C', locale: 'en-US' },
+    );
   }
 });
 
