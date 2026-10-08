@@ -209,6 +209,29 @@ describe("TuiTurnOutputRate", () => {
     expect(rate.finalize()).toBeUndefined();
   });
 
+  it("drops a buffered burst at turn start instead of reporting an inflated rate", () => {
+    const rate = new TuiTurnOutputRate();
+    rate.beginTurn("turn-1");
+    const apply = (
+      id: string,
+      outputTokens: number,
+      decodeDurationMs: number,
+      requestDurationMs: number,
+    ) =>
+      rate.apply("turn-1", {
+        type: "message",
+        message: {
+          id,
+          role: "assistant",
+          usage: { outputTokens, decodeDurationMs, requestDurationMs },
+        },
+      });
+    expect(apply("burst", 107, 2, 2_221)).toBeUndefined();
+    expect(apply("instant-burst", 100, 0, 3_000)).toBeUndefined();
+    expect(apply("normal", 400, 2_000, 4_000)).toBe(200);
+    expect(apply("fast-provider", 1_500, 1_000, 1_200)).toBe(1_900 / 3);
+  });
+
   it("ignores late events from an older turn after reset", () => {
     const rate = new TuiTurnOutputRate();
     rate.beginTurn("turn-old");
