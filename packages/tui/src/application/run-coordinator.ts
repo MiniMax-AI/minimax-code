@@ -7,6 +7,7 @@ import type {
   TuiClientIntent,
   TuiSession,
   TuiPausedQueueSendIntent,
+  TuiInteractionPort,
 } from '../runtime/port.js';
 import type { TuiStreamEvent } from '../runtime/stream-events.js';
 import type {
@@ -21,8 +22,13 @@ import {
   sumResponseUsage,
   upsertResponseUsage,
 } from './response-usage.js';
+import {
+  hasQuestionnaireToolResult,
+  pendingQuestionnaireForTurn,
+} from './pending-questionnaire.js';
 
-export type TuiRunRuntime = TuiConversationPort;
+export type TuiRunRuntime = TuiConversationPort &
+  Partial<Pick<TuiInteractionPort, 'getPendingQuestionnaire'>>;
 
 export interface TuiRunRequest {
   turnId: string;
@@ -185,6 +191,7 @@ export class TuiRunCoordinator {
     let completedAssistantSteps = 0;
     const usageResponses: TuiTurnResponseUsage[] = [];
     let usageIncomplete = false;
+    let questionnaireRequested = false;
 
     try {
       session = await waitForSession(request.session, activeRun.controller.signal);
@@ -214,6 +221,7 @@ export class TuiRunCoordinator {
           const next = await source.next();
           if (next.done) break;
           const event = next.value;
+          questionnaireRequested ||= hasQuestionnaireToolResult(event, request.turnId);
           if (!accepted) {
             accepted = true;
             onAccepted?.();
@@ -284,6 +292,24 @@ export class TuiRunCoordinator {
           replacedAnswer: answer !== null,
         });
         answer = assistantDraft;
+      }
+      // ask_user terminates the requesting Turn. Its durable pending request,
+      // delivered on the global event bus, is a continuation rather than a result.
+      if (
+        status === 'succeeded' &&
+        !activeRun.controller.signal.aborted &&
+        (questionnaireRequested ||
+          (await pendingQuestionnaireForTurn(
+            this.runtime,
+            session.sessionId,
+            request.turnId,
+            session.agentName,
+            activeRun.controller.signal,
+          )))
+      ) {
+        status = 'awaiting-user-continuation';
+        answer = null;
+        failure = questionnaireContinuationError();
       }
       if (request.policy?.requireAnswer === true && status === 'succeeded' && answer === null) {
         status = 'failed';
@@ -448,13 +474,17 @@ function isAssistantTextDelta(
 function isQuestionnaireContinuation(event: TuiStreamEvent): boolean {
   return (
     event.type === 'generic' &&
-    (event.eventType.includes('questionnaire') ||
+    (event.eventType === 'questionnaire.ask' ||
       (event.eventType === 'runtime.action-required' && event.data.kind === 'questionnaire'))
   );
 }
 
 function continuationFromEvent(event: TuiStreamEvent): TuiTurnRunError | undefined {
   if (!isQuestionnaireContinuation(event)) return undefined;
+  return questionnaireContinuationError();
+}
+
+function questionnaireContinuationError(): TuiTurnRunError {
   return {
     category: 'runtime',
     code: 'QUESTIONNAIRE_REQUIRED',

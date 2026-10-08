@@ -35,6 +35,12 @@ interface ToolResultCompactionConfig {
   readonly keepRecentRounds?: number;
 }
 
+/** `customPrompt` replaces the main-Agent identity prompt; `appendSystemPrompt` follows it. */
+interface LocalRuntimeSystemPromptOverrides {
+  readonly customPrompt?: string;
+  readonly appendSystemPrompt?: string;
+}
+
 /** Product-facing options owned by the Runtime V2 process-local host. */
 interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOptions {
   /** Best-effort DB upgrade observations; never awaited by startup. */
@@ -50,6 +56,8 @@ interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOption
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */
   promptMode?: 'tui' | 'coding' | 'work';
+  /** Launch-scoped main-Agent prompt overrides; held in process memory and never persisted. */
+  systemPromptOverrides?: LocalRuntimeSystemPromptOverrides;
 }
 
 /** Runtime V2 host options after process-local compatibility wiring. */
@@ -66,6 +74,8 @@ interface CreateLocalRuntimeHostOptions extends V1CreateLocalRuntimeHostOptions 
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */
   promptMode?: 'tui' | 'coding' | 'work';
+  /** Launch-scoped main-Agent prompt overrides; held in process memory and never persisted. */
+  systemPromptOverrides?: LocalRuntimeSystemPromptOverrides;
 }
 
 /** Runtime V2 owner host with its process-local application facade. */

@@ -181,10 +181,19 @@ export class TuiInteractionFlow {
     }
     const questionnaire = this.questionnaire();
     if (!questionnaire?.request.id) return undefined;
+    const ownerSessionId =
+      questionnaire.sessionId ??
+      questionnaire.request.requester?.sessionId ??
+      this.options.controller.snapshot().session?.sessionId;
+    const ownerTurnId = questionnaire.request.requester?.runId;
     return {
       kind: questionnaire.request.mode === 'plan' ? 'plan' : 'questionnaire',
       requestId: questionnaire.request.id,
       submitting: this.isAgentSubmission(questionnaire.request.id),
+      // Ask/Plan ends the requesting turn before the user answers. Keep its
+      // durable identity instead of relying on an active controller turn.
+      ...(ownerSessionId ? { ownerSessionId } : {}),
+      ...(ownerTurnId ? { ownerTurnId } : {}),
     };
   }
 
@@ -261,6 +270,14 @@ export class TuiInteractionFlow {
       content: existing?.content ?? '',
       detail: existing?.detail,
       turnId: existing?.turnId ?? state.request.requester?.runId,
+      ...(state.request.requester?.runId
+        ? {
+            questionnaireRequester: {
+              sessionId: state.request.requester.sessionId,
+              turnId: state.request.requester.runId,
+            },
+          }
+        : {}),
       createdAtMs: existing?.createdAtMs ?? createdAt,
       updatedAtMs: now,
     });

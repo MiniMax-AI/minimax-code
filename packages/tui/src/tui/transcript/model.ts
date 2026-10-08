@@ -149,6 +149,8 @@ export interface TranscriptCell {
   updatedAtMs: number;
   ephemeral?: boolean;
   turnId?: string;
+  /** Requesting Turn, distinct from the Turn that consumes the user's reply. */
+  questionnaireRequester?: { readonly sessionId: string; readonly turnId: string };
   sourceMessageId?: string;
   title?: string;
   detail?: string;

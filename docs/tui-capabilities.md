@@ -188,8 +188,43 @@ Every collected diagnostic artifact, including prioritized session artifacts, is
 
 There is no raw-attachment upload option in this flow. Prompts, conversation text, tool arguments/results, command output, workspace excerpts, raw errors and unknown fields are excluded even if they contain no recognizable credential pattern. This intentionally reduces diagnostic detail: reproducing an exact response or inspecting an original stack is not possible from these uploads. Future raw attachments would require a separate, explicit review and consent surface describing their contents and scope.
 
-The regression tests use temporary synthetic files and intercepted HTTP only. They decrypt the final automatic-report request as a receiver would, and unzip the actual feedback PUT body after real session-report collection. They do not validate production ingestion of the new schemas, retention policies, live services, other telemetry paths or other platforms.
+The regression tests use temporary synthetic data and intercepted HTTP only. They decrypt the final automatic-report request as a receiver would, and unzip the actual feedback PUT body after real session-report collection. They do not validate production ingestion of the new schemas, retention policies, live services, other telemetry paths or other platforms.
 
+
+## Launch-scoped system prompt overrides
+
+The interactive TUI, `exec`, `exec review`, and `mcode acp` can replace or extend the main Agent identity prompt:
+
+```bash
+# Replace the identity section; runtime rules, project instructions, Environment, Memory, and Skills stay
+mcode --system-prompt-file ./identity.md
+
+# Append text after the identity section
+mcode exec --append-system-prompt "List the files you will change first." "Complete this task."
+```
+
+Use either `--system-prompt` or `--system-prompt-file`, and either `--append-system-prompt` or
+`--append-system-prompt-file`; replace and append can be combined. Each form is one slot, and the
+slot written closest to the subcommand wins: `mcode --system-prompt-file a.md exec --system-prompt "..."`
+uses the inline text and does not read `a.md`. The flags are also accepted before `exec`, `exec review`,
+or `acp`. Other subcommands, such as `login` or `init`, reject them instead of ignoring them.
+
+Files are read once at startup relative to the current directory; a missing, unreadable, or empty file
+fails the launch rather than running with an unpatched prompt. A restart after sign-in preserves the
+original flags, and the overrides are held in process memory only: they are never written to the
+Session or configuration. Task child Agents keep the packaged prompt, so an override affects the
+interactive surface it was launched for.
+
+
+## Ask/Plan answer requests
+
+When the model asks a question through the `ask_user` tool, that turn ends with a durable pending
+request instead of a final assistant message. The TUI now recognizes this state from the tool result
+and, when a fast reply arrived before the stream drained, from the pending request itself, so the turn
+settles as awaiting your answer. Previously the same turn fell through to a retryable
+"Runtime completed without a final assistant response" failure even though the question was already
+on screen. The settled duration and the `/retry` command follow this state rather than the previous
+failed-run path.
 
 ## Interactive startup model
 

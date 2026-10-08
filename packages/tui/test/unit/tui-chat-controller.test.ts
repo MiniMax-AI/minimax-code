@@ -12,6 +12,23 @@ import { TuiRunCoordinator, type TuiRunRuntime } from '../../src/application/run
 import { resolveTuiVisiblePresentation } from '../../src/tui/controller/projection/visible-presentation.js';
 import { TuiActivityLine } from '../../src/tui/shell/activity-line.js';
 import { isQuestionnaireTool } from '../../src/tui/controller/projection/turn-tool-projection.js';
+import type { TuiQuestionnaireRequest } from '../../src/runtime/port.js';
+import { TuiUserProjection } from '../../src/tui/controller/projection/turn-user-projection.js';
+
+function pendingQuestionnaire(
+  sessionId: string,
+  runId: string | undefined,
+  mode = 'questionnaire',
+): TuiQuestionnaireRequest {
+  return {
+    schemaVersion: 2,
+    id: `ask-${runId ?? 'unknown'}`,
+    mode,
+    requester: { sessionId, runId },
+    presentation: { replaceComposer: true, showProgress: true, allowBackNavigation: true },
+    steps: [],
+  };
+}
 
 class TuiChatController extends ProductionTuiChatController {
   constructor(options: CreateTuiChatControllerOptions) {
@@ -782,6 +799,159 @@ describe('TuiChatController', () => {
       turnId: 'turn-runtime-result',
       status: 'succeeded',
     });
+  });
+
+  it.each(['questionnaire', 'plan'])(
+    'keeps a durable %s waiting when only the global bus carries its request',
+    async (mode) => {
+      const sessionId = 'session-pending-question';
+      const turnId = 'turn-pending-question';
+      let pending = pendingQuestionnaire(sessionId, turnId, mode);
+      const writeAutomationResult = vi.fn();
+      const runtime = {
+        createSession: vi.fn(async () => ({ sessionId })),
+        getPendingQuestionnaire: vi.fn(async () => pending),
+        sendMessage: vi.fn(async function* (): AsyncGenerator<TuiStreamEvent> {
+          // Real ask_user stops the stream without an action-required frame.
+          yield { type: 'done' };
+        }),
+        abortSession: vi.fn(async () => true),
+      };
+      const controller = new TuiChatController({
+        runtime, transcript: new TranscriptStore(), workspaceDir: '/workspace',
+        createTurnId: () => turnId, writeAutomationResult,
+      });
+
+      await expect(controller.submit('Ask first')).resolves.toBe('blocked');
+      expect(runtime.getPendingQuestionnaire).toHaveBeenCalledWith(
+        'mavis', sessionId, expect.any(AbortSignal),
+      );
+      expect(writeAutomationResult).not.toHaveBeenCalled();
+      expect(controller.snapshot()).toMatchObject({
+        status: 'idle', activeTurnId: undefined, lastSettledTurn: undefined, error: undefined,
+      });
+      expect(runtime.abortSession).not.toHaveBeenCalled();
+
+      // The answer starts a Runtime-owned Turn which may itself ask again.
+      pending = pendingQuestionnaire(sessionId, 'turn-follow-up', mode);
+      controller.beginRuntimeTurn('turn-follow-up', 10);
+      controller.runtimeTurnSettlement.settleProjection('turn-follow-up', 'succeeded');
+      await controller.runtimeTurnSettlement.settle(sessionId, 'turn-follow-up', 'succeeded');
+      expect(writeAutomationResult).not.toHaveBeenCalled();
+      expect(controller.snapshot().lastSettledTurn).toBeUndefined();
+
+      // Once no owned questionnaire remains, only the final continuation is delivered.
+      controller.beginRuntimeTurn('turn-final', 20);
+      controller.applyRuntimeTurnEvent('turn-final', {
+        type: 'message',
+        message: { id: 'final', turnId: 'turn-final', role: 'assistant', content: 'ASK_OK' },
+      });
+      controller.runtimeTurnSettlement.settleProjection('turn-final', 'succeeded');
+      await controller.runtimeTurnSettlement.settle(sessionId, 'turn-final', 'succeeded');
+      expect(writeAutomationResult).toHaveBeenCalledOnce();
+      expect(writeAutomationResult).toHaveBeenCalledWith(expect.objectContaining({
+        turnId: 'turn-final', status: 'succeeded', answer: 'ASK_OK',
+      }));
+    },
+  );
+
+  it.each([
+    ['different session', pendingQuestionnaire('other-session', 'turn-empty')],
+    ['different turn', pendingQuestionnaire('session-empty', 'other-turn')],
+    ['unknown owner', pendingQuestionnaire('session-empty', undefined)],
+    ['no request', undefined],
+  ])('does not hide EMPTY_RESPONSE behind %s', async (_name, pending) => {
+    const writeAutomationResult = vi.fn();
+    const controller = new TuiChatController({
+      runtime: {
+        createSession: vi.fn(async () => ({ sessionId: 'session-empty' })),
+        getPendingQuestionnaire: vi.fn(async () => pending),
+        sendMessage: vi.fn(async function* (): AsyncGenerator<TuiStreamEvent> {
+          yield { type: 'done' };
+        }),
+        abortSession: vi.fn(async () => true),
+      },
+      transcript: new TranscriptStore(), workspaceDir: '/workspace',
+      createTurnId: () => 'turn-empty', writeAutomationResult,
+    });
+    await expect(controller.submit('Answer')).resolves.toBe('failed');
+    expect(writeAutomationResult).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error: expect.objectContaining({ code: 'EMPTY_RESPONSE' }),
+    }));
+  });
+
+  it('preserves a real Runtime failure even when its questionnaire is pending', async () => {
+    const writeAutomationResult = vi.fn();
+    const controller = new TuiChatController({
+      runtime: {
+        createSession: vi.fn(async () => ({ sessionId: 'session-failed' })),
+        getPendingQuestionnaire: vi.fn(async () => pendingQuestionnaire('session-failed', 'turn-failed')),
+        sendMessage: vi.fn(async function* (): AsyncGenerator<TuiStreamEvent> {
+          yield { type: 'error', message: 'Real upstream failure' };
+        }),
+        abortSession: vi.fn(async () => true),
+      },
+      transcript: new TranscriptStore(), workspaceDir: '/workspace',
+      createTurnId: () => 'turn-failed', writeAutomationResult,
+    });
+    await expect(controller.submit('Ask')).resolves.toBe('failed');
+    expect(writeAutomationResult).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'failed', error: expect.objectContaining({ message: 'Real upstream failure' }),
+    }));
+    await controller.runtimeTurnSettlement.settle('session-failed', 'turn-failed', 'failed');
+    expect(writeAutomationResult).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not publish an already answered Runtime questionnaire as an empty response', async () => {
+    const writeAutomationResult = vi.fn();
+    const transcript = new TranscriptStore();
+    const controller = new TuiChatController({
+      runtime: {
+        createSession: vi.fn(async () => ({ sessionId: 'session-fast-reply' })),
+        getPendingQuestionnaire: vi.fn(async () => undefined),
+      }, transcript, workspaceDir: '/workspace', writeAutomationResult,
+    });
+    await controller.ensureSession();
+    transcript.upsert({
+      id: 'question:ask-fast', kind: 'question', status: 'resolved',
+      turnId: 'turn-fast-reply', content: 'Answered', ephemeral: true,
+      questionnaireRequester: { sessionId: 'session-fast-reply', turnId: 'turn-fast-reply' },
+      createdAtMs: 10, updatedAtMs: 11,
+    });
+    await controller.runtimeTurnSettlement.settle('session-fast-reply', 'turn-fast-reply', 'succeeded');
+    expect(writeAutomationResult).not.toHaveBeenCalled();
+    expect(controller.snapshot().lastSettledTurn).toBeUndefined();
+  });
+
+  it.each([false, true])('publishes the reply Turn after questionnaire history hydration (known requester: %s)', async (knownRequester) => {
+    const writeAutomationResult = vi.fn();
+    const transcript = new TranscriptStore();
+    const controller = new TuiChatController({
+      runtime: {
+        createSession: vi.fn(async () => ({ sessionId: 'session-answer' })),
+        getPendingQuestionnaire: vi.fn(async () => undefined),
+      }, transcript, workspaceDir: '/workspace', writeAutomationResult,
+    });
+    await controller.ensureSession();
+    if (knownRequester) transcript.upsert({
+      id: 'question:ask-answer', kind: 'question', status: 'blocked',
+      turnId: 'turn-request', content: '',
+      questionnaireRequester: { sessionId: 'session-answer', turnId: 'turn-request' },
+      createdAtMs: 10, updatedAtMs: 10,
+    });
+    new TuiUserProjection(transcript).hydrate({
+      role: 'user',
+      content: '<questionnaire-response><requestId>ask-answer</requestId></questionnaire-response>\nQ: Choose?\nA: Red',
+    }, 'message-answer', 'turn-answer', 11);
+    transcript.upsert({
+      id: 'assistant:turn-answer', kind: 'assistant', status: 'succeeded',
+      turnId: 'turn-answer', content: 'INTERACTION_OK', createdAtMs: 12, updatedAtMs: 12,
+    });
+    await controller.runtimeTurnSettlement.settle('session-answer', 'turn-answer', 'succeeded');
+    expect(writeAutomationResult).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'succeeded', answer: 'INTERACTION_OK',
+    }));
+    expect(controller.snapshot().lastSettledTurn?.status).toBe('succeeded');
   });
 
   it('fails a Runtime-owned automation turn that has no final assistant answer', async () => {

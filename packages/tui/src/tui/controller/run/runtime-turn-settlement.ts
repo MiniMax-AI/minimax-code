@@ -5,6 +5,8 @@ import type { TuiChatSnapshot, TuiSettledTurn } from '../chat-controller-types.j
 import type { TuiTurnOutputRate } from '../projection/turn-output-rate.js';
 import type { TuiTurnProjection } from '../projection/turn-projection.js';
 import { createTuiSettledTurn, settleTuiRuntimeTurnProjection } from './turn-settlement.js';
+import { pendingQuestionnaireForTurn } from '../../../application/pending-questionnaire.js';
+import type { TuiInteractionPort } from '../../../runtime/port.js';
 
 export interface TuiRuntimeTurnSettlementOptions {
   readonly turnProjection: TuiTurnProjection;
@@ -13,6 +15,8 @@ export interface TuiRuntimeTurnSettlementOptions {
   readonly currentSessionId: () => string | undefined;
   readonly updateState: (patch: Partial<TuiChatSnapshot>) => void;
   readonly writeAutomationResult?: (result: ExecResultV1) => void | Promise<void>;
+  readonly runtime: Partial<Pick<TuiInteractionPort, 'getPendingQuestionnaire'>>;
+  readonly currentAgentName: () => string;
 }
 
 /** Publishes Runtime-owned outcomes after optional result delivery. */
@@ -21,6 +25,29 @@ export class TuiRuntimeTurnSettlement {
 
   enabled(): boolean {
     return Boolean(this.options.writeAutomationResult);
+  }
+
+  async requiresQuestionnaireContinuation(settledTurn: TuiSettledTurn): Promise<boolean> {
+    // A resolved receipt still identifies a Turn that asked rather than finished
+    // the task. The user's reply belongs to a different Runtime-owned Turn.
+    if (settledTurn.status !== 'succeeded') return false;
+    for (let index = this.options.transcript.length - 1; index >= 0; index -= 1) {
+      const cell = this.options.transcript.cellAt(index);
+      if (
+        cell?.kind === 'question' &&
+        cell.questionnaireRequester?.sessionId === settledTurn.sessionId &&
+        cell.questionnaireRequester.turnId === settledTurn.turnId
+      )
+        return true;
+    }
+    return Boolean(
+      await pendingQuestionnaireForTurn(
+        this.options.runtime,
+        settledTurn.sessionId,
+        settledTurn.turnId,
+        this.options.currentAgentName(),
+      ),
+    );
   }
 
   prepare(
@@ -51,6 +78,7 @@ export class TuiRuntimeTurnSettlement {
     durationMs?: number,
     error?: ExecResultError,
   ): Promise<void> {
+    if (await this.requiresQuestionnaireContinuation(settledTurn)) return;
     const writer = this.options.writeAutomationResult;
     if (!writer) {
       this.options.updateState({ lastSettledTurn: settledTurn });

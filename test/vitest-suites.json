@@ -83,6 +83,7 @@
       "packages/tui/test/unit/model-effort.test.ts",
       "packages/tui/test/unit/run-coordinator-usage.test.ts",
       "packages/tui/test/unit/run-coordinator.test.ts",
+      "packages/tui/test/unit/system-prompt-options.test.ts",
       "packages/tui/test/unit/tui-activity-line.test.ts",
       "packages/tui/test/unit/tui-chat-controller.test.ts",
       "packages/tui/test/unit/tui-duration.test.ts",

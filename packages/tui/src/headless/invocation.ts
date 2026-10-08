@@ -12,13 +12,18 @@ import {
 import { inferTuiNativeVideoMimeType } from '../application/video-mime.js';
 import { resolveWslPath } from '../host/wsl-path.js';
 import { TuiExecError } from './exit-policy.js';
+import {
+  resolveSystemPromptOverrides,
+  type RawSystemPromptOptions,
+  type SystemPromptOverrides,
+} from '../cli/system-prompt-options.js';
 import type { TuiExecFormat } from './output.js';
 import type { McodeContextMode } from '@mavis/protocol/local';
 
 export type TuiInputFormat = 'text' | 'json';
 export type TuiPermissionPolicy = 'smart' | 'full' | 'off';
 
-export interface RawTuiExecOptions {
+export interface RawTuiExecOptions extends RawSystemPromptOptions {
   /** Internal command identity set by `mcode exec review`. */
   review?: true;
   input?: string;
@@ -61,6 +66,7 @@ export interface ResolvedTuiExecInvocation {
   outputLastMessagePath?: string;
   reviewRequest?: { readonly scope: 'local_changes' };
   diagnosticsDir?: string;
+  systemPromptOverrides?: SystemPromptOverrides;
 }
 
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -134,6 +140,7 @@ export async function resolveTuiExecInvocation(
   }
   const permission: TuiPermissionPolicy = requestedPermission;
   const effort = readEffortOption(options);
+  const systemPromptOverrides = readSystemPromptOverrides(options);
   const workspaceDir = await resolveDirectory(options.cwd ?? process.cwd(), '--cwd');
   throwIfAborted(signal);
   const rawInput = options.input === '-' ? await readStdin() : (promptArgument ?? '');
@@ -201,6 +208,7 @@ export async function resolveTuiExecInvocation(
     ...(outputSchema === undefined ? {} : { outputSchema }),
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     ...(diagnosticsDir === undefined ? {} : { diagnosticsDir }),
+    ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }
 
@@ -225,6 +233,7 @@ async function resolveTuiExecReviewInvocation(
     );
   }
   const effort = readEffortOption(options);
+  const systemPromptOverrides = readSystemPromptOverrides(options);
   const workspaceDir = await resolveDirectory(options.cwd ?? process.cwd(), '--cwd');
   throwIfAborted(signal);
   const timeoutMs =
@@ -255,7 +264,16 @@ async function resolveTuiExecReviewInvocation(
     format,
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     reviewRequest: { scope: 'local_changes' },
+    ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
+}
+
+function readSystemPromptOverrides(options: RawTuiExecOptions): SystemPromptOverrides | undefined {
+  try {
+    return resolveSystemPromptOverrides(options);
+  } catch (error) {
+    throw invocationError(errorMessage(error), error);
+  }
 }
 
 async function resolveOutputSchema(

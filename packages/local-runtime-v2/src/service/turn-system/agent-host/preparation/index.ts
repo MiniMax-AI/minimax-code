@@ -7,6 +7,7 @@ export {
   type LocalPromptMemoryReader,
   type LocalPromptSkill,
   type LocalPromptSkillReader,
+  type SystemPromptOverrides,
 } from './config/local-agent-config-builder.js';
 export {
   ModelRouteAvailabilityError,
