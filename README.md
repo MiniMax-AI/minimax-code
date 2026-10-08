@@ -146,6 +146,28 @@ Use `mcode init .` to generate or update project guidance in `AGENTS.md`. Descri
 | Headless | `mcode exec [prompt]` | Shell scripts, CI, batch work, and evaluations. |
 | ACP | `mcode acp` | Editors and clients supporting Agent Client Protocol. |
 
+### Lightweight conversations
+
+For simple conversation or general knowledge questions, start a new Session with
+`--mode lightweight`:
+
+```bash
+mcode --mode lightweight "Explain how DNS caching works."
+mcode exec --mode lightweight "Summarize the CAP theorem."
+```
+
+Lightweight mode sends a small conversational system prompt and no tool schemas. It omits workspace
+instructions, Skills, memory blocks, MCP schemas, and the full environment block from provider
+context, so it cannot inspect or change local files. Start a new standard Session for coding or tool use with
+`mcode --mode standard` or `mcode exec --mode standard`; omitting `--mode` is identical to standard
+mode.
+
+The mode is fixed when a root Session is created. `--mode lightweight` therefore cannot be combined
+with `--session` or `--continue`. Child/sub-agent Sessions do not inherit it, `/compact` continues to
+use the standard compaction context, and ACP and desktop Sessions remain standard. Reopening a
+lightweight Session keeps its mode and shows `Lightweight` in the TUI status line; opening a standard
+Session from a lightweight launch remains standard and shows no indicator.
+
 ### Continue your work
 
 ```bash

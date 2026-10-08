@@ -56,7 +56,11 @@ import {
   createCompactionLifecycleMetadata,
   createManualCompactionChange,
 } from './compaction-history.js';
-import { joinPrompt, readPreparedSystemPrompt } from '../execution/prompt.js';
+import {
+  joinPrompt,
+  readPreparedSystemPrompt,
+  resolveProviderContextMode,
+} from '../execution/prompt.js';
 import { localPluginHookCoordinator } from '../assembly/local-turn-plugin-hooks.js';
 import {
   createAgentHostPluginHookTranscript,
@@ -507,6 +511,21 @@ export class AgentHostCompactionExecutor<
         sessionId: input.lease.sessionId,
         signal: input.lease.signal,
       });
+      const providerContext = resolveProviderContextMode(
+        session,
+        {
+          systemPrompt: joinPrompt(
+            assembly.systemPromptPrefix,
+            readPreparedSystemPrompt(preparation.agentConfig),
+          ),
+          tools: assembly.tools.map(({ def }) => ({
+            name: def.name,
+            description: def.description,
+            parameters: def.schema,
+          })),
+        },
+        'compaction',
+      );
       const compaction = captureContextCompactionResult(
         await compactionDependencies.manual.compactManual(
           createManualCompactionRequest({
@@ -516,15 +535,8 @@ export class AgentHostCompactionExecutor<
             thinkingLevel,
             streamFn,
             payloadTransform,
-            systemPrompt: joinPrompt(
-              assembly.systemPromptPrefix,
-              readPreparedSystemPrompt(preparation.agentConfig),
-            ),
-            tools: assembly.tools.map(({ def }) => ({
-              name: def.name,
-              description: def.description,
-              parameters: def.schema,
-            })),
+            systemPrompt: providerContext.systemPrompt,
+            tools: [...providerContext.tools],
           }),
           {
             onStarted: () =>

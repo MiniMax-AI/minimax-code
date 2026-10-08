@@ -264,6 +264,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	toolExecution?: ToolExecutionMode;
 
 	/**
+	 * Converts an unexpected provider tool call into a terminal text response.
+	 * Omit to preserve the normal missing-tool error/result loop.
+	 */
+	unexpectedToolCallFallback?: string;
+
+	/**
 	 * Called before a tool is executed, after arguments have been validated.
 	 *
 	 * Return `{ block: true }` to prevent execution. The loop emits an error tool result instead.

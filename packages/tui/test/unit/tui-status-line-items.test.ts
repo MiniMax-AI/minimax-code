@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { applyTuiRenderTheme, getTuiThemeSnapshot, tuiChalk, tuiColors } from '../../src/tui/theme/runtime.js';
 import { MINIMAX_CODE_DARK_THEME, MINIMAX_CODE_LIGHT_THEME } from '../../src/tui/theme/palettes.js';
@@ -71,6 +71,31 @@ describe('status line item parsing', () => {
 });
 
 describe('TuiStatusLine default items', () => {
+  it('adds a compact lightweight indicator without changing the standard footer', () => {
+    const standard = render(BASE_STATE);
+    expect(stripAnsi(standard)).toMatchInlineSnapshot(`
+      "
+      ~/repo │ ◇ Ship status line │ ⎇ feat/status-line │ Auto │ ✦ m2 · Thinking On"
+    `);
+    expect(render({ ...BASE_STATE, lightweightMode: false })).toBe(standard);
+
+    const lightweight = stripAnsi(render({ ...BASE_STATE, lightweightMode: true }));
+    expect(lightweight).toContain('Lightweight');
+    expect(lightweight).toContain(stripAnsi(standard).trim());
+    expect(stripAnsi(render({ ...BASE_STATE, lightweightMode: true }, 12))).toContain('Lite');
+  });
+
+  it('localizes the lightweight indicator for a Chinese runtime locale', () => {
+    const locale = vi
+      .spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions')
+      .mockReturnValue({ locale: 'zh-CN' } as Intl.ResolvedDateTimeFormatOptions);
+    try {
+      expect(stripAnsi(render({ ...BASE_STATE, lightweightMode: true }))).toContain('轻量模式');
+    } finally {
+      locale.mockRestore();
+    }
+  });
+
   it('keeps build-mode and cache diagnostics out of the default order', () => {
     expect(TUI_STATUS_LINE_DEFAULT_ITEMS).not.toContain('build-mode');
     expect(TUI_STATUS_LINE_DEFAULT_ITEMS).toContain('context-remaining');

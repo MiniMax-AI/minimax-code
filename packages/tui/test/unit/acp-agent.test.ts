@@ -1124,7 +1124,7 @@ describe('MiniMax Code ACP agent', () => {
     );
   });
 
-  it('negotiates truthful capabilities and runs a prompt through the local Runtime', async () => {
+  it('keeps ACP Session creation in standard mode and runs a prompt through the local Runtime', async () => {
     const { runtime, createSession, sendMessage } = createRuntime([
       {
         type: 'delta',

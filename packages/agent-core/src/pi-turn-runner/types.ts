@@ -202,6 +202,8 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   shouldStopAfterSteering?: () => boolean | Promise<boolean>;
   /** Gracefully ends after the current assistant/tool step and before any follow-up poll. */
   shouldStopAfterTurn?: () => boolean | Promise<boolean>;
+  /** Text returned when a provider emits a tool call the host intentionally did not expose. */
+  unexpectedToolCallFallback?: string;
   /**
    * Atomically seals external continuation acceptance once steering is empty.
    * `false` means work won the close race and the runner must poll once more.
