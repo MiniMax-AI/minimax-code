@@ -3,6 +3,7 @@ import type { Readable, Writable } from 'node:stream';
 
 import { serveTuiAcpStdio } from '../acp/stdio.js';
 import { prepareTuiDataDir } from '../runtime/data-dir.js';
+import type { SystemPromptOverrides } from './system-prompt-options.js';
 import type {
   CreatedTuiRuntime,
   createTuiRuntime,
@@ -36,6 +37,7 @@ export async function runTuiAcpCommand(
   version: string,
   dependencies: RunTuiAcpCommandDependencies = {},
   lane?: string,
+  systemPromptOverrides?: SystemPromptOverrides,
 ): Promise<void> {
   const processRef = dependencies.processRef ?? process;
   const controller = new AbortController();
@@ -63,6 +65,7 @@ export async function runTuiAcpCommand(
       version,
       surface: 'acp',
       ...(lane ? { lane } : {}),
+      ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
     });
     await (dependencies.serve ?? serveTuiAcpStdio)({
       runtime: runtime.adapter,

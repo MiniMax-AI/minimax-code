@@ -23,6 +23,10 @@ const ROOT_OPTIONS_WITH_REQUIRED_VALUES = new Set([
   '--tui-mode',
   '-m',
   '--model',
+  '--system-prompt',
+  '--system-prompt-file',
+  '--append-system-prompt',
+  '--append-system-prompt-file',
 ]);
 const STARTUP_ENVIRONMENT_ALIASES: Readonly<Record<string, TuiBuildEnvironment>> = Object.freeze({
   test: 'test',

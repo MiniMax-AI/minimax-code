@@ -14,6 +14,7 @@ import {
   createLocalStaticPromptReader,
   type GlobalInstructions,
   type ProductionAgentProductCapabilities,
+  type SystemPromptOverrides,
 } from '../../service/turn-system/index.js';
 
 export interface CreateRuntimeAgentProductOptions {
@@ -29,6 +30,7 @@ export interface CreateRuntimeAgentProductOptions {
   readonly capabilityProfile: 'cli' | undefined;
   readonly miniappAvailable: boolean;
   readonly implicitCustomProviderThinking: boolean;
+  readonly systemPromptOverrides?: SystemPromptOverrides;
   readonly agentReferenceProjection: NonNullable<
     ProductionAgentProductCapabilities['inputPreparation']['agentReferenceProjection']
   >;
@@ -53,6 +55,7 @@ export function createRuntimeAgentProduct(
     capabilityProfile,
     miniappAvailable,
     implicitCustomProviderThinking,
+    systemPromptOverrides,
     agentReferenceProjection,
     inspector,
     promptSnapshots,
@@ -167,6 +170,7 @@ export function createRuntimeAgentProduct(
         tuiProductPolicy: runtimeOwnerKind === 'tui',
         ...(promptSnapshots ? { promptSnapshots } : {}),
         ...(implicitCustomProviderThinking ? { implicitCustomProviderThinking: true } : {}),
+        systemPromptOverrides,
         profile: createV2AgentProfileSource(
           agentService,
           modelConfig.read,

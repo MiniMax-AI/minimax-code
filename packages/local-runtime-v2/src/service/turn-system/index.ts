@@ -117,6 +117,7 @@ export type {
   LocalAgentProfileSource,
 } from './agent-host/preparation/contracts.js';
 export { resolveAgentPromptSurface } from './agent-host/preparation/agent-prompt-surface.js';
+export type { SystemPromptOverrides } from './agent-host/preparation/index.js';
 export {
   configureLocalPluginHookEnabledResolver,
   configureLocalPluginHookObservability,

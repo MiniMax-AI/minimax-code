@@ -11,6 +11,7 @@ import type { McodePluginCliRequest } from '../plugin/contract.js';
 import { tuiErrorDiagnostic } from '../user-facing-failure.js';
 import { configureTuiNetworkProxy } from './network-proxy.js';
 import { consumeLoginRestartHandoff } from '../tui/login-restart-handoff.js';
+import type { SystemPromptOverrides } from './system-prompt-options.js';
 import type { McodeTelemetryCliAction } from './telemetry-command.js';
 
 const OUTPUT_DRAIN_TIMEOUT_MS = 250;
@@ -50,7 +51,11 @@ export interface RunTuiCliDependencies {
     options: RawTuiExecOptions,
     version: string,
   ) => Promise<void>;
-  readonly runAcp?: (version: string, lane?: string) => Promise<void>;
+  readonly runAcp?: (
+    version: string,
+    lane?: string,
+    systemPromptOverrides?: SystemPromptOverrides,
+  ) => Promise<void>;
   readonly runLogin?: (
     region?: MavisRegion,
     openBrowser?: boolean,
@@ -111,6 +116,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         tuiMode,
         contextMode,
         lane,
+        systemPromptOverrides,
       }) => {
         const launchTui = dependencies.launchTui ?? defaultLaunchTui;
         await launchTui({
@@ -124,6 +130,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
           ...(tuiMode ? { tuiMode } : {}),
           ...(contextMode ? { contextMode } : {}),
           ...(lane ? { lane } : {}),
+          ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
           ...(resumeDraftAfterLogin ? { resumeDraftAfterLogin: true } : {}),
         });
         completedCommandExitMode = 'force';
@@ -137,9 +144,11 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         );
         completedCommandExitMode = 'natural';
       },
-      runAcp: async (lane) => {
+      runAcp: async (lane, systemPromptOverrides) => {
         const runAcp = dependencies.runAcp ?? defaultRunAcp;
-        await runAcp(MINIMAX_CODE_VERSION, lane);
+        await (systemPromptOverrides
+          ? runAcp(MINIMAX_CODE_VERSION, lane, systemPromptOverrides)
+          : runAcp(MINIMAX_CODE_VERSION, lane));
         completedCommandExitMode = 'natural';
       },
       runLogin: async (region, openBrowser, lane) => {
@@ -262,9 +271,15 @@ async function defaultRunExec(
   await runTuiExecCommand(prompt, options, version);
 }
 
-async function defaultRunAcp(version: string, lane?: string): Promise<void> {
+async function defaultRunAcp(
+  version: string,
+  lane?: string,
+  systemPromptOverrides?: SystemPromptOverrides,
+): Promise<void> {
   const { runTuiAcpCommand } = await import('./run-acp-command.js');
-  await runTuiAcpCommand(version, {}, lane);
+  await (systemPromptOverrides
+    ? runTuiAcpCommand(version, {}, lane, systemPromptOverrides)
+    : runTuiAcpCommand(version, {}, lane));
 }
 
 async function defaultRunLogin(
