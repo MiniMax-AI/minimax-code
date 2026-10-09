@@ -3397,6 +3397,7 @@
     "packages/tui/test/unit/tui/transcript/presentation/literal-text.test.ts",
     "packages/tui/test/unit/tui/widgets/editor/editor-behavior.test.ts",
     "packages/tui/test/unit/update-application.test.ts",
+    "packages/tui/test/unit/update-runtime.test.ts",
     "packages/tui/test/unit/update-service.test.ts",
     "packages/tui/test/unit/wsl-attachment-paths.test.ts",
     "pnpm-lock.yaml",

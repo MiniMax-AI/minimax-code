@@ -160,9 +160,13 @@ export class McodeUpdateApplication {
     this.platform = platform;
     this.environment = environment;
     this.entryFile = options.entryFile ?? process.argv[1];
-    this.runtimeExecutable = options.runtimeExecutable ?? process.execPath;
     this.prefixInstall =
       options.prefixInstall ?? resolveMcodeNpmPrefixInstall(this.entryFile, platform);
+    // Keep updates on the Node executable recorded in the install receipt. On
+    // macOS process.execPath resolves Homebrew's stable bin/node symlink into a
+    // versioned Cellar path that `brew upgrade` removes.
+    this.runtimeExecutable =
+      options.runtimeExecutable ?? this.prefixInstall?.nodeExecutable ?? process.execPath;
     const packageManagerEnvironment = this.prefixInstall
       ? createMcodeNpmRuntimeEnvironment(environment, this.runtimeExecutable, platform)
       : environment;
