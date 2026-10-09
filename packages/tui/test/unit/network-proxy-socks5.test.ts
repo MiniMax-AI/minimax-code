@@ -53,6 +53,22 @@ const targetRequests: string[] = [];
 const openDispatchers: Dispatcher[] = [];
 const openFixtures: SocksFixture[] = [];
 
+/** Some CI containers disable IPv6; the IPv6 proxy case is skipped there. */
+async function canListenOnIpv6Loopback(): Promise<boolean> {
+  const probe = createNetServer();
+  try {
+    probe.listen(0, '::1');
+    await once(probe, 'listening');
+    probe.close();
+    await once(probe, 'close');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const HAS_IPV6_LOOPBACK = await canListenOnIpv6Loopback();
+
 function createReader(socket: Socket) {
   let buffered = Buffer.alloc(0);
   let pending: { length: number; resolve: (value: Buffer) => void } | undefined;
@@ -84,10 +100,10 @@ function createReader(socket: Socket) {
 }
 
 /** Minimal RFC 1928 server: CONNECT only, with optional RFC 1929 authentication. */
-async function startSocksServer(credentials?: {
-  username: string;
-  password: string;
-}): Promise<SocksFixture> {
+async function startSocksServer(
+  credentials?: { username: string; password: string },
+  listenHost = '127.0.0.1',
+): Promise<SocksFixture> {
   const connects: SocksConnectRecord[] = [];
   const connections = { count: 0 };
   const sockets = new Set<Socket>();
@@ -152,7 +168,7 @@ async function startSocksServer(credentials?: {
     upstream.pipe(client);
   }
 
-  server.listen(0, '127.0.0.1');
+  server.listen(0, listenHost);
   await once(server, 'listening');
   const fixture: SocksFixture = {
     port: (server.address() as AddressInfo).port,
@@ -343,4 +359,81 @@ describe('SOCKS5 proxy dispatch', () => {
       ]);
     },
   );
+
+  it.skipIf(!HAS_IPV6_LOOPBACK)(
+    'connects to a SOCKS5 proxy at an IPv6 literal address',
+    async () => {
+      const socks = await startSocksServer({ username: 'mcode', password: 'p@ss' }, '::1');
+      const dispatcher = track(
+        createTuiNetworkDispatcher({ ALL_PROXY: `socks5://mcode:p%40ss@[::1]:${socks.port}` }),
+      );
+
+      const response = await fetch('http://ipv6-proxy.socks.invalid/', { dispatcher });
+
+      expect(await response.text()).toBe('hello from ipv6-proxy.socks.invalid');
+      expect(socks.connects).toEqual([
+        {
+          addressType: ATYP_DOMAIN_NAME,
+          host: 'ipv6-proxy.socks.invalid',
+          port: 80,
+          username: 'mcode',
+        },
+      ]);
+    },
+  );
+
+  it('treats an empty password as no SOCKS5 credentials', async () => {
+    const socks = await startSocksServer();
+    const dispatcher = track(
+      createTuiNetworkDispatcher({ ALL_PROXY: `socks5://mcode:@127.0.0.1:${socks.port}` }),
+    );
+
+    const response = await fetch('http://empty-password.socks.invalid/', { dispatcher });
+
+    expect(await response.text()).toBe('hello from empty-password.socks.invalid');
+    expect(socks.connects).toEqual([
+      { addressType: ATYP_DOMAIN_NAME, host: 'empty-password.socks.invalid', port: 80 },
+    ]);
+  });
+
+  it('starts without a proxy when ALL_PROXY has malformed credentials', () => {
+    const warnings: string[] = [];
+    let installed = false;
+
+    const configuration = configureTuiNetworkProxy({
+      environment: { ALL_PROXY: 'socks5://user:50%off@127.0.0.1:1080' },
+      setGlobalDispatcher: () => {
+        installed = true;
+      },
+      installFetch: () => undefined,
+      writeWarning: (message) => warnings.push(message),
+    });
+
+    expect(configuration).toEqual({ mode: 'direct' });
+    expect(installed).toBe(false);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('ALL_PROXY=socks5://***:***@127.0.0.1:1080');
+    expect(warnings[0]).not.toContain('50%off');
+  });
+
+  it('keeps explicit proxies at startup when ALL_PROXY has malformed credentials', async () => {
+    const socks = await startSocksServer();
+    let installed: Dispatcher | undefined;
+
+    configureTuiNetworkProxy({
+      environment: {
+        ALL_PROXY: 'socks5://user:50%off@127.0.0.1:1080',
+        HTTP_PROXY: `socks5://127.0.0.1:${socks.port}`,
+      },
+      setGlobalDispatcher: (dispatcher) => {
+        installed = track(dispatcher);
+      },
+      installFetch: () => undefined,
+      writeWarning: () => undefined,
+    });
+
+    if (!installed) throw new Error('Expected a global dispatcher');
+    const response = await fetch('http://explicit.socks.invalid/', { dispatcher: installed });
+    expect(await response.text()).toBe('hello from explicit.socks.invalid');
+  });
 });

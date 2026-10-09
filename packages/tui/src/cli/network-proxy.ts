@@ -1,5 +1,5 @@
 import * as undici from 'undici';
-import { Agent, Dispatcher, ProxyAgent, Socks5ProxyAgent } from 'undici';
+import { Agent, buildConnector, Dispatcher, ProxyAgent, Socks5ProxyAgent } from 'undici';
 
 const LOOPBACK_NO_PROXY_ENTRIES = ['localhost', '127.0.0.1', '::1'] as const;
 const HTTP_PROXY_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
@@ -11,6 +11,8 @@ const SUPPORTED_PROXY_SCHEMES = 'http://, https://, socks5://, or socks5h://';
 const SOCKS5_EXPERIMENTAL_WARNING_MESSAGE =
   'SOCKS5 proxy support is experimental and subject to change';
 const SOCKS5_EXPERIMENTAL_WARNING_TYPE = 'ExperimentalWarning';
+// Matches undici's default SOCKS5 connect timeout, which a custom connector replaces.
+const SOCKS5_PROXY_CONNECT_TIMEOUT_MS = 5_000;
 const IGNORED_ALL_PROXY_ADVICE =
   "Set HTTPS_PROXY and HTTP_PROXY to your proxy app's http:// port, or set ALL_PROXY to a socks5:// or socks5h:// URL.";
 
@@ -21,7 +23,17 @@ interface ProxyValue {
 
 type ProxyValueClassification =
   | { readonly kind: 'http' | 'socks5' }
-  | { readonly kind: 'unsupported'; readonly protocol?: string; readonly redacted?: string };
+  | {
+      readonly kind: 'unsupported';
+      readonly reason: 'invalid-url' | 'protocol' | 'credentials';
+      readonly protocol?: string;
+      readonly redacted?: string;
+    };
+
+interface ProxyCredentials {
+  readonly username: string;
+  readonly password: string;
+}
 
 export type TuiProxyConfiguration =
   | { readonly mode: 'direct' }
@@ -184,13 +196,40 @@ function classifyProxyValue(value: string): ProxyValueClassification {
   try {
     url = new URL(value);
   } catch {
-    return { kind: 'unsupported' };
+    return { kind: 'unsupported', reason: 'invalid-url' };
   }
   // Values such as `localhost:7890` parse with `localhost:` as the scheme.
-  if (!url.hostname) return { kind: 'unsupported' };
-  if (HTTP_PROXY_PROTOCOLS.has(url.protocol)) return { kind: 'http' };
-  if (SOCKS5_PROXY_PROTOCOLS.has(url.protocol)) return { kind: 'socks5' };
-  return { kind: 'unsupported', protocol: url.protocol, redacted: redactProxyUrl(value) };
+  if (!url.hostname) return { kind: 'unsupported', reason: 'invalid-url' };
+  const kind = HTTP_PROXY_PROTOCOLS.has(url.protocol)
+    ? 'http'
+    : SOCKS5_PROXY_PROTOCOLS.has(url.protocol)
+      ? 'socks5'
+      : undefined;
+  if (!kind) {
+    return {
+      kind: 'unsupported',
+      reason: 'protocol',
+      protocol: url.protocol,
+      redacted: redactProxyUrl(value),
+    };
+  }
+  // Both undici proxy agents percent-decode URL credentials while being
+  // constructed; a stray `%` would otherwise throw URIError at startup.
+  if (!decodeProxyCredentials(url)) {
+    return { kind: 'unsupported', reason: 'credentials', redacted: redactProxyUrl(value) };
+  }
+  return { kind };
+}
+
+function decodeProxyCredentials(url: URL): ProxyCredentials | undefined {
+  try {
+    return {
+      username: decodeURIComponent(url.username),
+      password: decodeURIComponent(url.password),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -215,6 +254,11 @@ function validateProxyValue(proxy: ProxyValue | undefined): void {
   if (!proxy) return;
   const classification = classifyProxyValue(proxy.value);
   if (classification.kind !== 'unsupported') return;
+  if (classification.reason === 'credentials') {
+    throw new Error(
+      `${describeProxySetting(proxy.name, classification)} has a user name or password that is not valid percent-encoding. Encode reserved characters, for example % as %25.`,
+    );
+  }
   throw new Error(`${proxy.name} must be an ${SUPPORTED_PROXY_SCHEMES} URL.`);
 }
 
@@ -225,7 +269,13 @@ function describeProxySetting(
   return classification.redacted ? `${name}=${classification.redacted}` : name;
 }
 
-function describeUnsupportedReason(classification: { readonly protocol?: string }): string {
+function describeUnsupportedReason(classification: {
+  readonly reason: 'invalid-url' | 'protocol' | 'credentials';
+  readonly protocol?: string;
+}): string {
+  if (classification.reason === 'credentials') {
+    return 'its user name or password is not valid percent-encoding (encode % as %25)';
+  }
   if (!classification.protocol) return 'it is not a valid proxy URL';
   return `${classification.protocol}// proxies are not supported (use ${SUPPORTED_PROXY_SCHEMES})`;
 }
@@ -248,12 +298,7 @@ function installUndiciFetch(): void {
 
 function createTuiProxyAgent(uri: string): Dispatcher {
   const url = new URL(uri);
-  if (SOCKS5_PROXY_PROTOCOLS.has(url.protocol)) {
-    // Socks5ProxyAgent rejects `socks5h:`; switching the scheme keeps the
-    // credentials, host, and port. The agent reads credentials from the URL.
-    if (url.protocol === 'socks5h:') url.protocol = 'socks5:';
-    return withoutSocks5ExperimentalWarning(() => new Socks5ProxyAgent(url));
-  }
+  if (SOCKS5_PROXY_PROTOCOLS.has(url.protocol)) return createTuiSocks5ProxyAgent(url);
   // Preserve HTTP/1.1 on both TLS hops and CONNECT for plain HTTP targets.
   return new ProxyAgent({
     uri,
@@ -261,6 +306,45 @@ function createTuiProxyAgent(uri: string): Dispatcher {
     proxyTls: { allowH2: false },
     proxyTunnel: true,
   });
+}
+
+function createTuiSocks5ProxyAgent(url: URL): Dispatcher {
+  const credentials = decodeProxyCredentials(url);
+  if (!credentials) throw new Error('Proxy user name or password is not valid percent-encoding.');
+  // Pass decoded credentials as options and drop them from the URL so undici
+  // never decodes them again. An empty password stays unset, as with undici.
+  const proxyUrl = new URL(url.href);
+  proxyUrl.username = '';
+  proxyUrl.password = '';
+  // Socks5ProxyAgent rejects `socks5h:` although it already resolves names remotely.
+  if (proxyUrl.protocol === 'socks5h:') proxyUrl.protocol = 'socks5:';
+  const options: Socks5ProxyAgent.Options = {
+    connectTimeout: SOCKS5_PROXY_CONNECT_TIMEOUT_MS,
+    connect: withUnbracketedProxyHost(buildConnector({ timeout: SOCKS5_PROXY_CONNECT_TIMEOUT_MS })),
+    ...(credentials.username ? { username: credentials.username } : {}),
+    ...(credentials.password ? { password: credentials.password } : {}),
+  };
+  return withoutSocks5ExperimentalWarning(() => new Socks5ProxyAgent(proxyUrl, options));
+}
+
+/**
+ * Socks5ProxyAgent dials `URL.hostname`, which keeps the brackets of an IPv6
+ * literal (`[::1]`) and makes the socket connect fail with ENOTFOUND.
+ */
+function withUnbracketedProxyHost(connector: buildConnector.connector): buildConnector.connector {
+  return (options, callback) =>
+    connector(
+      {
+        ...options,
+        hostname: stripIpv6Brackets(options.hostname),
+        ...(options.host === undefined ? {} : { host: stripIpv6Brackets(options.host) }),
+      },
+      callback,
+    );
+}
+
+function stripIpv6Brackets(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
 class TuiProxyDispatcher extends Dispatcher {

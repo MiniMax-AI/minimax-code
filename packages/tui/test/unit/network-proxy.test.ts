@@ -206,6 +206,43 @@ describe('proxy URL protocol classification', () => {
   });
 
   it.each([
+    ['ALL_PROXY', 'socks5://user:50%off@127.0.0.1:1080', 'socks5://***:***@127.0.0.1:1080'],
+    ['all_proxy', ' http://user:50%off@127.0.0.1:7890 ', 'http://***:***@127.0.0.1:7890'],
+    ['ALL_PROXY', 'socks5h://bad%zzname:pw@127.0.0.1:1080', 'socks5h://***:***@127.0.0.1:1080'],
+  ])('ignores %s=%j with malformed credentials and one warning', (name, value, redacted) => {
+    const { configuration, warnings } = resolveWithWarnings({ [name]: value });
+
+    expect(configuration).toEqual({ mode: 'direct' });
+    expect(warnings).toEqual([
+      `Warning: ignoring ${name}=${redacted} because its user name or password is not valid percent-encoding (encode % as %25); it will not be used. Set HTTPS_PROXY and HTTP_PROXY to your proxy app's http:// port, or set ALL_PROXY to a socks5:// or socks5h:// URL.`,
+    ]);
+  });
+
+  it.each([
+    ['HTTPS_PROXY', 'socks5://user:50%off@127.0.0.1:1080', 'socks5://***:***@127.0.0.1:1080'],
+    ['https_proxy', 'http://user:50%off@127.0.0.1:7890', 'http://***:***@127.0.0.1:7890'],
+    ['HTTP_PROXY', 'socks5h://bad%zzname@127.0.0.1:1080', 'socks5h://***@127.0.0.1:1080'],
+  ])('rejects explicit %s=%j with malformed credentials', (name, value, redacted) => {
+    let message = '';
+    try {
+      resolveTuiProxyConfiguration({ [name]: value });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(
+      `${name}=${redacted} has a user name or password that is not valid percent-encoding. Encode reserved characters, for example % as %25.`,
+    );
+    expect(message).not.toContain('50%off');
+    expect(message).not.toContain('bad%zz');
+  });
+
+  it('accepts correctly percent-encoded credentials', () => {
+    expect(
+      resolveTuiProxyConfiguration({ ALL_PROXY: 'socks5://us%40er:50%25off@127.0.0.1:1080' }),
+    ).toMatchObject({ mode: 'proxy' });
+  });
+
+  it.each([
     ['socks5://alice:s3cr3t@127.0.0.1:1080', 'socks5://***:***@127.0.0.1:1080'],
     ['socks5://alice@127.0.0.1:1080', 'socks5://***@127.0.0.1:1080'],
     ['socks5h://alice:s3cr3t@127.0.0.1:1080', 'socks5h://***:***@127.0.0.1:1080'],
