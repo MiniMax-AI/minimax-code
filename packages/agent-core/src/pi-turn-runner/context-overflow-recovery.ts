@@ -80,7 +80,13 @@ export function withContextOverflowRecovery(
       return replay(stream, buffered, iterator);
     }
     state.attempted = true;
-    const messages = await state.recover(options?.signal);
+    let messages: Message[] | undefined;
+    try {
+      messages = await state.recover(options?.signal);
+    } catch {
+      // A failing recovery must not mask the provider rejection it tried to fix.
+      return replay(stream, buffered, iterator);
+    }
     if (!messages || options?.signal?.aborted) return replay(stream, buffered, iterator);
     try {
       void Promise.resolve(iterator.return?.()).catch(() => undefined);

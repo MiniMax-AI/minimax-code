@@ -7,6 +7,10 @@ import type {
   Context,
   Model,
 } from "@earendil-works/pi-ai";
+import {
+  newContextOverflowRecoveryState,
+  withContextOverflowRecovery,
+} from "../../../src/pi-turn-runner/context-overflow-recovery.js";
 import { PiTurnRunner } from "../../../src/pi-turn-runner/pi-turn-runner.js";
 import type {
   PiBeforeLlmCallHook,
@@ -263,5 +267,26 @@ describe("context overflow recovery", () => {
   it("keeps the previous single-failure behaviour when no recovery hook is installed", async () => {
     const result = await runTurn({ responses: [() => errorStream(OVERSIZED)] });
     expect(result.contexts).toHaveLength(1);
+  });
+});
+
+describe("withContextOverflowRecovery", () => {
+  it("surfaces the original rejection when recovery itself throws", async () => {
+    const calls: number[] = [];
+    const inner = (async () => {
+      calls.push(1);
+      return errorStream(OVERSIZED);
+    }) as unknown as StreamFn;
+    const state = newContextOverflowRecoveryState();
+    state.recover = async () => {
+      throw new Error("compaction exploded");
+    };
+    const wrapped = withContextOverflowRecovery(inner, state);
+    const out = await wrapped(fakeModel(), { messages: [] } as unknown as Context, {});
+    const types: string[] = [];
+    for await (const event of out) types.push(event.type);
+    expect(types).toContain("error");
+    expect(calls).toHaveLength(1);
+    expect(state.attempted).toBe(true);
   });
 });
