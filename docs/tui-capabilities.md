@@ -18,6 +18,18 @@ observed generation window, not server hardware throughput.
 
 ## Terminal titles and notifications
 
+The interactive TUI also reports [OSC 7501 program status](https://www.superlogical.com/rex/docs/build/program-status)
+with `app=mcode`: idle, working, done, error, or blocked on permission, a question,
+or login. It reuses the current session's runtime status, including queue handoffs,
+compaction and retries. Cancellation and suspension report idle; resume reapplies
+the current status. Completed and failed results remain reported when the TUI exits.
+Reports contain only fixed status metadata and are sent on changes, without a
+heartbeat or capability query, as permitted by protocol revision 0.3. Supporting
+terminals decide how to display them; other terminals should ignore the sequence.
+Multiplexers must support or pass through OSC 7501 for the outer terminal to see it.
+Redirected output, headless exec and ACP do not emit these reports. Existing title
+and notification settings remain independent of program status.
+
 Terminal titles show the current state, session name and MCode, for example
 `Needs approval | Fix login | MCode`. Renaming or switching a session updates the
 title. Unnamed sessions use the project name and a short session ID. Titles are

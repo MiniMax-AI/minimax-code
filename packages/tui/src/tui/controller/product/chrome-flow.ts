@@ -28,6 +28,8 @@ import {
 } from '../../commands/catalog.js';
 import { resolveTuiComposerInputIntent } from '../../commands/input-intent.js';
 import { formatTuiTerminalTitle } from '../../platform/terminal-title.js';
+import type { TuiProgramStatus } from '../../platform/terminal-program-status.js';
+import { tuiAccountNeedsLoginPrompt } from '../../../application/login-gate.js';
 
 type PresentationSink<K extends keyof TuiVisiblePresentation> = {
   setState(state: TuiVisiblePresentation[K]): void;
@@ -52,6 +54,7 @@ export class TuiChromeFlow {
       readonly isStarted: () => boolean;
       readonly isStopped: () => boolean;
       readonly setTerminalTitle: (title: string | undefined) => void;
+      readonly setProgramStatus: (status: TuiProgramStatus) => void;
       readonly terminalTitle?: readonly string[] | null;
       readonly connection: () => Pick<TuiState['connection'], 'phase' | 'generation' | 'lastError'>;
       /** Multi-Session state kernel, including the background parent Turn. */
@@ -219,6 +222,11 @@ export class TuiChromeFlow {
       ...(backgroundTasks !== undefined ? { backgroundTasks } : {}),
     });
     if (this.options.isStarted()) {
+      this.options.setProgramStatus(
+        snapshot.account && tuiAccountNeedsLoginPrompt(snapshot.account)
+          ? 'auth'
+          : automationStatus.status,
+      );
       this.options.setTerminalTitle(
         formatTuiTerminalTitle(
           {

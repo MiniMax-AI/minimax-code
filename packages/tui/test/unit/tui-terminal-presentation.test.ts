@@ -7,6 +7,10 @@ import {
   TuiTerminalNotifications,
 } from '../../src/tui/platform/terminal-notifications.js';
 import { formatTuiTerminalTitle, TuiTerminalTitle } from '../../src/tui/platform/terminal-title.js';
+import {
+  TuiTerminalProgramStatus,
+  type TuiProgramStatus,
+} from '../../src/tui/platform/terminal-program-status.js';
 
 const capabilities = (
   env: NodeJS.ProcessEnv = {},
@@ -86,6 +90,89 @@ describe('terminal title ownership', () => {
     title.update('Ready');
     title.update('Ready');
     expect(terminal.setTitle).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('OSC 7501 program status', () => {
+  it.each([
+    ['ready', 'state=idle'],
+    ['run', 'state=working'],
+    ['perm', 'state=blocked:kind=permission'],
+    ['plan', 'state=blocked:kind=permission'],
+    ['ask', 'state=blocked:kind=question'],
+    ['auth', 'state=blocked:kind=auth'],
+    ['done', 'state=done'],
+    ['fail', 'state=error'],
+    ['error', 'state=error'],
+    ['cancel', 'state=idle'],
+  ] as const)('reports %s using fixed protocol metadata', (state, body) => {
+    const terminal = { write: vi.fn() };
+    const status = new TuiTerminalProgramStatus(terminal, true);
+    status.setActive(true);
+    status.update(state);
+    status.update(state);
+    expect(terminal.write.mock.calls).toEqual([[`\u001b]7501;${body}:app=mcode\u001b\\`]]);
+  });
+
+  it('releases a suspended TUI, ignores late updates and reapplies status on resume', () => {
+    const terminal = { write: vi.fn() };
+    const status = new TuiTerminalProgramStatus(terminal, true);
+    status.update('run');
+    expect(terminal.write).not.toHaveBeenCalled();
+    status.setActive(true);
+    status.update('perm');
+    status.update('plan');
+    status.setActive(false);
+    status.update('ask');
+    status.setActive(true);
+    status.update('ask');
+    status.dispose();
+    status.setActive(true);
+    status.update('run');
+    expect(terminal.write.mock.calls.flat()).toEqual([
+      '\u001b]7501;state=blocked:kind=permission:app=mcode\u001b\\',
+      '\u001b]7501;state=idle:app=mcode\u001b\\',
+      '\u001b]7501;state=blocked:kind=question:app=mcode\u001b\\',
+      '\u001b]7501;state=idle:app=mcode\u001b\\',
+    ]);
+  });
+
+  it.each(['done', 'fail', 'error'] as const)('preserves %s on exit', (state) => {
+    const terminal = { write: vi.fn() };
+    const status = new TuiTerminalProgramStatus(terminal, true);
+    status.setActive(true);
+    status.update(state);
+    status.dispose();
+    status.dispose();
+    status.update('ready');
+    expect(terminal.write).toHaveBeenCalledTimes(1);
+  });
+
+  it('never writes to a non-TTY or clears a record it did not write', () => {
+    const terminal = { write: vi.fn() };
+    for (const isTTY of [false, true]) {
+      const status = new TuiTerminalProgramStatus(terminal, isTTY);
+      status.setActive(true);
+      if (!isTTY) status.update('run');
+      status.setActive(false);
+      status.dispose();
+    }
+    expect(terminal.write).not.toHaveBeenCalled();
+  });
+
+  it('ignores unknown states and retries failed writes without interrupting the caller', () => {
+    const terminal = {
+      write: vi.fn().mockImplementationOnce(() => {
+        throw new Error('closed');
+      }),
+    };
+    const status = new TuiTerminalProgramStatus(terminal, true);
+    status.setActive(true);
+    status.update('unknown' as TuiProgramStatus);
+    expect(() => status.update('run')).not.toThrow();
+    status.update('run');
+    status.update('run');
+    expect(terminal.write).toHaveBeenCalledTimes(2);
   });
 });
 

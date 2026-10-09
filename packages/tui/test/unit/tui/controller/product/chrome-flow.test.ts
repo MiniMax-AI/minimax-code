@@ -38,6 +38,7 @@ describe("TuiChromeFlow agent status sequence", () => {
       isStarted: () => true,
       isStopped: () => false,
       setTerminalTitle: vi.fn(),
+      setProgramStatus: vi.fn(),
       connection: () => ({ phase: "live", generation: 1 }),
       liveRunId: () => undefined,
       runProjection: () => ({
@@ -101,6 +102,7 @@ describe("TuiChromeFlow agent status sequence", () => {
       isStarted: () => true,
       isStopped: () => false,
       setTerminalTitle: vi.fn(),
+      setProgramStatus: vi.fn(),
       connection: () => ({ phase: "live", generation: 1 }),
       liveRunId: () => undefined,
       runProjection: () => ({
@@ -158,6 +160,7 @@ describe("TuiChromeFlow agent status sequence", () => {
       isStarted: () => true,
       isStopped: () => false,
       setTerminalTitle: vi.fn(),
+      setProgramStatus: vi.fn(),
       connection: () => ({ phase: "live", generation: 1 }),
       liveRunId: () => undefined,
       runProjection: () => ({
@@ -215,6 +218,7 @@ describe("TuiChromeFlow agent status sequence", () => {
     let backgroundTasks = 0;
     const shells: TuiShellState[] = [];
     const setTerminalTitle = vi.fn();
+    const setProgramStatus = vi.fn();
     const shellSink = {
       setState: (state: TuiShellState) => shells.push(state),
     };
@@ -225,6 +229,7 @@ describe("TuiChromeFlow agent status sequence", () => {
       isStarted: () => true,
       isStopped: () => false,
       setTerminalTitle,
+      setProgramStatus,
       connection: () => ({ phase: "live", generation: 1 }),
       liveRunId: (snapshot) => snapshot.activeTurnId,
       runProjection: () => ({
@@ -294,6 +299,7 @@ describe("TuiChromeFlow agent status sequence", () => {
     };
     flow.update(interactingSnapshot);
     expect(setTerminalTitle).toHaveBeenLastCalledWith("Needs approval | workspace (session-) | MCode");
+    expect(setProgramStatus).toHaveBeenLastCalledWith("perm");
     expect(shells.at(-1)).toMatchObject({
       agentSeq: "4",
       agentStatus: "perm",
@@ -304,6 +310,7 @@ describe("TuiChromeFlow agent status sequence", () => {
     flow.update(interactingSnapshot);
     flow.update(interactingSnapshot);
     expect(setTerminalTitle).toHaveBeenLastCalledWith("Working | workspace (session-) | MCode");
+    expect(setProgramStatus).toHaveBeenLastCalledWith("run");
     expect(shells.at(-1)).toMatchObject({
       agentSeq: "5",
       agentStatus: "run",
@@ -372,5 +379,36 @@ describe("TuiChromeFlow agent status sequence", () => {
     });
     expect(shells.at(-1)).toMatchObject({ agentStatus: "ready" });
     expect(shells.at(-1)?.agentRunId).toBeUndefined();
+    expect(setProgramStatus).toHaveBeenLastCalledWith("ready");
+
+    flow.update({
+      ...snapshot("session-3"),
+      account: { status: "needs-login", authMode: "managed-login" } as TuiChatSnapshot["account"],
+    });
+    expect(setProgramStatus).toHaveBeenLastCalledWith("auth");
+    const authenticated = {
+      ...snapshot("session-3"),
+      account: {
+        status: "ready",
+        authMode: "managed-login",
+        managedTokenPresent: true,
+      } as TuiChatSnapshot["account"],
+    };
+    flow.update(authenticated);
+    expect(setProgramStatus).toHaveBeenLastCalledWith("ready");
+    flow.update({ ...authenticated, status: "running", activeTurnId: "after-login" });
+    expect(setProgramStatus).toHaveBeenLastCalledWith("run");
+    flow.update({
+      ...authenticated,
+      lastSettledTurn: { sessionId: "session-3", turnId: "after-login", status: "succeeded" },
+    });
+    expect(setProgramStatus).toHaveBeenLastCalledWith("done");
+    flow.update(authenticated);
+    expect(setProgramStatus).toHaveBeenLastCalledWith("done");
+
+    flow.update({ ...snapshot("fatal-session"), status: "error", errorRetryable: false });
+    expect(setProgramStatus).toHaveBeenLastCalledWith("error");
+    flow.update(snapshot("fatal-session"));
+    expect(setProgramStatus).toHaveBeenLastCalledWith("error");
   });
 });

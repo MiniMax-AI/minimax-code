@@ -2786,6 +2786,10 @@ describe("createTuiApp", () => {
     expect(conversation).toContain("Hello from the Agent");
     expect(terminal.started).toBe(true);
     expect(terminal.title).toBe("Done | workspace (session-) | MCode");
+    const programReports = () =>
+      terminal.writes.filter((value) => value.startsWith("\u001b]7501;"));
+    expect(programReports()).toContain("\u001b]7501;state=working:app=mcode\u001b\\");
+    expect(programReports().at(-1)).toBe("\u001b]7501;state=done:app=mcode\u001b\\");
     expect(runtime.createSession).toHaveBeenCalledWith({
       workspaceDir: "/workspace",
     });
@@ -2801,6 +2805,7 @@ describe("createTuiApp", () => {
 
     await app.stop();
     expect(terminal.stopped).toBe(true);
+    expect(programReports().at(-1)).toBe("\u001b]7501;state=done:app=mcode\u001b\\");
   });
 
   it("syncs the generated Session title to the terminal without duplicate writes", async () => {
@@ -2865,12 +2870,18 @@ describe("createTuiApp", () => {
     await app.submit("/rename Renamed session");
     expect(terminal.title).toBe("Renamed session");
 
+    const programReports = () =>
+      terminal.writes.filter((value) => value.startsWith("\u001b]7501;"));
     await app.suspend();
     expect(terminal.title).toBe("");
+    expect(programReports().at(-1)).toBe("\u001b]7501;state=idle:app=mcode\u001b\\");
+    const reportCount = programReports().length;
     await app.controller.renameCurrentSession("Renamed while suspended");
+    expect(programReports()).toHaveLength(reportCount);
     expect(terminal.title).toBe("");
     await app.resume();
     expect(terminal.title).toBe("Renamed while suspended");
+    expect(programReports().at(-1)).toBe("\u001b]7501;state=done:app=mcode\u001b\\");
 
     await app.stop();
     expect(terminal.title).toBe("");

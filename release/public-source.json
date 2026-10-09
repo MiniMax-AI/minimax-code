@@ -3201,6 +3201,7 @@
     "packages/tui/src/tui/platform/terminal-capabilities.ts",
     "packages/tui/src/tui/platform/terminal-clipboard.ts",
     "packages/tui/src/tui/platform/terminal-notifications.ts",
+    "packages/tui/src/tui/platform/terminal-program-status.ts",
     "packages/tui/src/tui/platform/terminal-title.ts",
     "packages/tui/src/tui/product-features.ts",
     "packages/tui/src/tui/renderer/index.ts",

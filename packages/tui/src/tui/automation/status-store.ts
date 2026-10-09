@@ -82,8 +82,8 @@ export class TuiAutomationStatusStore {
       acceptedSettledTurn?.status === 'failed' || acceptedSettledTurn?.status === 'blocked';
     if (
       facts.interaction?.kind === 'invalid' ||
-      (facts.snapshot.account && tuiAccountNeedsLoginPrompt(facts.snapshot.account)) ||
       (facts.snapshot.status === 'error' &&
+        !(facts.snapshot.account && tuiAccountNeedsLoginPrompt(facts.snapshot.account)) &&
         facts.snapshot.errorRetryable === false &&
         !activeTurnId &&
         !this.pendingTurnId &&
@@ -135,7 +135,11 @@ export class TuiAutomationStatusStore {
       return { status: 'run', ...session, ...counts };
     }
 
-    if (this.stickyFatalError) {
+    // Login is recoverable within the same Session; derive it from current account facts.
+    if (
+      this.stickyFatalError ||
+      (facts.snapshot.account && tuiAccountNeedsLoginPrompt(facts.snapshot.account))
+    ) {
       return { status: 'error', ...session, ...counts };
     }
 
