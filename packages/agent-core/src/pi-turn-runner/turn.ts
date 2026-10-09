@@ -19,11 +19,6 @@ import type {
   PiStepEndHookInput,
   PiToolExecutionStartHook,
 } from './hooks.js';
-import {
-  newContextOverflowRecoveryState,
-  withContextOverflowRecovery,
-  type ContextOverflowRecoveryState,
-} from './context-overflow-recovery.js';
 import { composeStreamFn } from './llm.js';
 import { withLLMRetry, type LLMCallScope, type LLMCallSettledEvent } from './llm-retry.js';
 import type { TurnMetricsRecorder } from './metrics.js';
@@ -91,7 +86,6 @@ export interface LlmCaptureAgentEventSource {
 
 export interface turnHooks {
   beforeLLM: readonly PiBeforeLlmCallHook[];
-  contextOverflowRecovery: readonly PiBeforeLlmCallHook[];
   onLLMPrepared: readonly PiOnLlmCallPreparedHook[];
   afterLLM: readonly PiAfterLlmCallHook[];
   beforeTool: readonly PiBeforeToolCallHook[];
@@ -126,8 +120,6 @@ export interface turnState<TCtx extends ToolExecutionContext = ToolExecutionCont
   syntheticResponse: { pending?: { readonly text: string; readonly reason: string } };
   /** Assistant responses rejected after message_end but still referenced by Pi's loop context. */
   rejectedAssistantMessages: Set<AgentMessage>;
-  /** One-shot compact-and-resend after a main-agent 413 / context overflow. */
-  contextOverflowRecovery: ContextOverflowRecoveryState;
   nextEventId(kind: string): string;
   nextRuntimeSeq(): number;
 }
@@ -138,7 +130,6 @@ export function newTurn<TCtx extends ToolExecutionContext>(
 ): turnState<TCtx> {
   const resolved = input.llm;
   const composedStreamFn = composeStreamFn(resolved);
-  const contextOverflowRecovery = newContextOverflowRecoveryState();
   const retryStream = (scope: LLMCallScope): StreamFn => {
     const metricsStreamFn = deps.metrics
       ? deps.metrics.wrapStreamFn(composedStreamFn, { recordTerminalFailure: false })
@@ -160,17 +151,11 @@ export function newTurn<TCtx extends ToolExecutionContext>(
         return callerOnCallSettled?.(event);
       },
     });
-    // Overflow recovery sits inside the logical-call observers so a recovered
-    // request settles as one successful logical call.
-    const recoveringStreamFn =
-      scope === 'agent'
-        ? withContextOverflowRecovery(retryingStreamFn, contextOverflowRecovery)
-        : retryingStreamFn;
     // One recorder spans the whole logical call. Physical retries overwrite its
     // in-memory candidate; only the final successful settlement can persist.
     const capturedStreamFn = deps.llmCapture
-      ? deps.llmCapture.wrapLogicalStreamFn(recoveringStreamFn, { scope })
-      : recoveringStreamFn;
+      ? deps.llmCapture.wrapLogicalStreamFn(retryingStreamFn, { scope })
+      : retryingStreamFn;
     return deps.metrics
       ? deps.metrics.wrapLogicalStreamFn(capturedStreamFn, {
           // Auto-compaction is an auxiliary degradation: local context lifecycle
@@ -184,10 +169,9 @@ export function newTurn<TCtx extends ToolExecutionContext>(
   const mainStreamFn =
     input.llmRetry || deps.llmCapture
       ? retryStream('agent')
-      : withContextOverflowRecovery(
-          deps.metrics ? deps.metrics.wrapStreamFn(composedStreamFn) : composedStreamFn,
-          contextOverflowRecovery,
-        );
+      : deps.metrics
+        ? deps.metrics.wrapStreamFn(composedStreamFn)
+        : composedStreamFn;
   const auxiliaryStreamFn = input.llmRetry ? retryStream('compaction') : undefined;
   const syntheticResponse: turnState['syntheticResponse'] = {};
   let eventSeq = 0;
@@ -239,7 +223,6 @@ export function newTurn<TCtx extends ToolExecutionContext>(
   );
   const hooks: turnHooks = {
     beforeLLM: input.hooks?.beforeLlmCallHook ?? [],
-    contextOverflowRecovery: input.hooks?.contextOverflowRecoveryHook ?? [],
     onLLMPrepared: input.hooks?.onLlmCallPreparedHook ?? [],
     afterLLM: input.hooks?.afterLlmCallHook ?? [],
     beforeTool: input.hooks?.beforeToolCallHook ?? [],
@@ -282,7 +265,6 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     blockedToolCalls: [],
     syntheticResponse,
     rejectedAssistantMessages: new Set(),
-    contextOverflowRecovery,
     nextEventId,
     nextRuntimeSeq,
   };

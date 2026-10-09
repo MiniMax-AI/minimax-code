@@ -5,7 +5,6 @@ import { resolveLLMStreamTimeouts, withLLMStreamTimeouts } from './llm-stream-ti
 import type {
   PiAfterLlmReplacementCommit,
   PiBeforeLlmCallAppendMessage,
-  PiBeforeLlmCallHook,
   PiBeforeLlmCallReplaceMetadata,
 } from './hooks.js';
 import type { LLMModelConfig } from './types.js';
@@ -42,24 +41,40 @@ export function composeStreamFn(resolved: LLMModelConfig): StreamFn {
 }
 
 export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory): void {
-  const recoveryHooks = turn.hooks.contextOverflowRecovery;
-  if (
-    turn.hooks.beforeLLM.length === 0 &&
-    turn.hooks.afterLLM.length === 0 &&
-    recoveryHooks.length === 0
-  ) {
-    return;
-  }
+  if (turn.hooks.beforeLLM.length === 0 && turn.hooks.afterLLM.length === 0) return;
 
   let checkpointCallCount = 0;
-  // Pi's live loop context of the latest main-agent request; overflow recovery
-  // compacts exactly this context and keeps the loop in sync through it.
-  let lastRequest: { messages: AgentMessage[]; phase: 'initial' | 'iteration' } | undefined;
+  agent.transformContext = async (messages, signal) => {
+    const rejectedMessages = messages.filter((message) =>
+      turn.rejectedAssistantMessages.has(message),
+    );
+    if (rejectedMessages.length > 0) {
+      messages.splice(
+        0,
+        messages.length,
+        ...messages.filter((message) => !turn.rejectedAssistantMessages.has(message)),
+      );
+      for (const message of rejectedMessages) turn.rejectedAssistantMessages.delete(message);
+    }
 
-  const applyCheckpoint = async (
-    messages: AgentMessage[],
-    checkpoint: Exclude<BeforeLLMResult, { type: 'abort' } | { type: 'respond' }>,
-  ): Promise<AgentMessage[]> => {
+    if (turn.hooks.beforeLLM.length === 0) return messages;
+    const phase = checkpointCallCount === 0 ? 'initial' : 'iteration';
+    checkpointCallCount += 1;
+    const checkpoint = await runBeforeLLM(turn, messages, phase, signal);
+    if (checkpoint.type === 'abort') {
+      turn.metrics.tryRecordTerminalFailure({
+        errorSource: 'before_llm_hook',
+        errorKind: 'hook_error',
+      });
+      throw new Error(`before_llm_checkpoint_aborted: ${checkpoint.reason}`);
+    }
+    if (checkpoint.type === 'respond') {
+      turn.syntheticResponse.pending = {
+        text: checkpoint.text,
+        reason: checkpoint.reason,
+      };
+      return messages;
+    }
     if (checkpoint.type === 'requestOnly') {
       return checkpoint.messages;
     }
@@ -115,89 +130,13 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
     }
     return checkpoint.messages;
   };
-
-  agent.transformContext = async (messages, signal) => {
-    const rejectedMessages = messages.filter((message) =>
-      turn.rejectedAssistantMessages.has(message),
-    );
-    if (rejectedMessages.length > 0) {
-      messages.splice(
-        0,
-        messages.length,
-        ...messages.filter((message) => !turn.rejectedAssistantMessages.has(message)),
-      );
-      for (const message of rejectedMessages) turn.rejectedAssistantMessages.delete(message);
-    }
-
-    const phase = checkpointCallCount === 0 ? 'initial' : 'iteration';
-    lastRequest = { messages, phase };
-    if (turn.hooks.beforeLLM.length === 0) return messages;
-    checkpointCallCount += 1;
-    const checkpoint = await runBeforeLLM(turn, messages, phase, signal, turn.hooks.beforeLLM);
-    if (checkpoint.type === 'abort') {
-      turn.metrics.tryRecordTerminalFailure({
-        errorSource: 'before_llm_hook',
-        errorKind: 'hook_error',
-      });
-      throw new Error(`before_llm_checkpoint_aborted: ${checkpoint.reason}`);
-    }
-    if (checkpoint.type === 'respond') {
-      turn.syntheticResponse.pending = {
-        text: checkpoint.text,
-        reason: checkpoint.reason,
-      };
-      return messages;
-    }
-    return applyCheckpoint(messages, checkpoint);
-  };
-
-  if (recoveryHooks.length === 0) return;
-  turn.contextOverflowRecovery.recover = async (signal) => {
-    const request = lastRequest;
-    if (!request) return undefined;
-    const logContext = {
-      session_id: turn.input.sessionId,
-      turn_id: turn.input.turnId,
-      phase: request.phase,
-      provider: turn.llm.model.provider,
-    };
-    const checkpoint = await runBeforeLLM(
-      turn,
-      request.messages,
-      request.phase,
-      signal,
-      recoveryHooks,
-      'context_overflow_recovery',
-    );
-    if (
-      checkpoint.type === 'abort' ||
-      checkpoint.type === 'respond' ||
-      checkpoint.type === 'unchanged'
-    ) {
-      turn.logger.warn(
-        { ...logContext, outcome: checkpoint.type },
-        '[pi-turn-runner] context overflow recovery left the request unchanged; surfacing the provider rejection',
-      );
-      return undefined;
-    }
-    const messages = await applyCheckpoint(request.messages, checkpoint);
-    turn.logger.info(
-      { ...logContext, outcome: checkpoint.type, message_count: messages.length },
-      '[pi-turn-runner] context overflow recovery compacted the request; resending once',
-    );
-    return await agent.convertToLlm(messages);
-  };
 }
-
-type BeforeLLMResult = Awaited<ReturnType<typeof runBeforeLLM>>;
 
 async function runBeforeLLM(
   turn: turnState,
   messages: AgentMessage[],
   phase: 'initial' | 'iteration',
-  signal: AbortSignal | undefined,
-  hooks: readonly PiBeforeLlmCallHook[],
-  trigger?: 'context_overflow_recovery',
+  signal?: AbortSignal,
 ): Promise<
   | { type: 'unchanged'; messages: AgentMessage[] }
   | { type: 'requestOnly'; messages: AgentMessage[] }
@@ -233,14 +172,13 @@ async function runBeforeLLM(
         afterCommit?: PiAfterLlmReplacementCommit;
       }
     | undefined;
-  for (const hook of hooks) {
+  for (const hook of turn.hooks.beforeLLM) {
     let decision: Awaited<ReturnType<typeof hook>>;
     try {
       decision = await hook({
         sessionId: turn.input.sessionId,
         turnId: turn.input.turnId,
         phase,
-        ...(trigger ? { trigger } : {}),
         messages: [...currentMessages],
         canonicalMessages: [...canonicalMessages],
         model: turn.llm.model,

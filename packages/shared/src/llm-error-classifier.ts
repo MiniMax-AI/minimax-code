@@ -279,10 +279,10 @@ export function isLLMDeterministicRequestRejection(normalized: NormalizedLLMErro
  * The request is too big to be accepted as sent: an HTTP 413, a byte-limit
  * rejection (`request_too_large`, the local pre-send body check) or a context
  * window overflow. Resending the same request fails again, so it must not be
- * retried; the only recovery is to make the request smaller (compaction).
+ * retried.
  * Anything that also looks transient (timeout, network, 408/429/5xx) is excluded.
  */
-export function isLLMRequestOversized(normalized: NormalizedLLMError): boolean {
+function isLLMRequestOversized(normalized: NormalizedLLMError): boolean {
   const { facts } = normalized;
   if (facts.explicitAbort || facts.timeout || facts.signals.has('network')) return false;
   if (facts.signals.has('tpm_rate_limit')) return false;

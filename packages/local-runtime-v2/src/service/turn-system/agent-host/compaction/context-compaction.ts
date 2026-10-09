@@ -238,9 +238,6 @@ function automaticContextCompactionInput(
     tools: input.tools,
     thinkingLevel: input.thinkingLevel,
     signal: input.signal,
-    ...(input.trigger === 'context_overflow_recovery'
-      ? { force: 'context_overflow_recovery' as const }
-      : {}),
   };
 }
 
