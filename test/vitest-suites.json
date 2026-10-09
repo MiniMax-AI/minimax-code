@@ -117,6 +117,7 @@
       "packages/tui/test/unit/runtime-error-presentation-rejection.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-payload-transform.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/executor.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/execution/reminder/session-identity-reminder.test.ts",
       "packages/local-runtime-v2/src/services.test.ts",
       "packages/local-runtime-v2/src/application/session/session-title-policy.test.ts",
       "packages/local-runtime-v2/test/unit/agent/builtin/catalog.test.ts",

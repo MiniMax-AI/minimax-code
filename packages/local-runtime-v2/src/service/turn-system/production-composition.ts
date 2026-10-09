@@ -84,6 +84,7 @@ import type { MessagesFileApiPatcherLogger } from './agent-host/assembly/message
 import { isProductionRuntimeErrorRetryable } from './runtime-error-retry-policy.js';
 import { createTodoCadenceReminderHook } from './execution/reminder/todo-cadence-reminder.js';
 import { createBackgroundCadenceReminder } from './execution/reminder/background-cadence-reminder.js';
+import { createSessionIdentityReminderHook } from './execution/reminder/session-identity-reminder.js';
 import { fitsReminderInFinalRequest } from './execution/reminder/reminder-admission.js';
 import { readSessionAgentExecutionSnapshot } from './agent-host/preparation/session-agent-execution-snapshot.js';
 import { McpToolResultHistoryExternalizer } from './agent-host/execution/mcp-tool-result-history-externalizer.js';
@@ -444,6 +445,7 @@ export async function createLocalAgentHost<
       activatePluginHookSessionOwnership: options.pluginHookSessionOwnership.activate,
       afterCompactionBeforeLlmCallHooks: [
         createAutomaticContextRequestFilterHook(),
+        createSessionIdentityReminderHook(contextUsageAnchor),
         createTodoCadenceReminderHook(contextUsageAnchor),
       ],
       onSteeringConsumed: options.onSteeringConsumed,
