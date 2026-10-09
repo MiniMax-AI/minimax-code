@@ -206,6 +206,13 @@ export type AutomaticContextCompactionInput = Readonly<
     | 'signal'
   > & {
     readonly maxSerializedInputBytes?: number;
+    /**
+     * The provider rejected the previous request as too large (HTTP 413 or a
+     * context-window overflow). Compaction starts regardless of the local
+     * estimate, and the result must be meaningfully smaller than the request
+     * the provider just rejected, because that estimate evidently said it fit.
+     */
+    readonly force?: 'context_overflow_recovery';
   }
 >;
 

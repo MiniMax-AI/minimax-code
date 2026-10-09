@@ -875,6 +875,14 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
       ...(input.assembly.hooks.beforeLlmCallHook ?? []),
       ...hostBeforeLlmCallHooks,
     ],
+    // After a 413 / context overflow the runner compacts once (forced) and
+    // resends once; only the automatic compaction hook may shrink the context.
+    contextOverflowRecoveryHook: [
+      ...(input.assembly.hooks.contextOverflowRecoveryHook ?? []),
+      ...(input.contextCompactionHook
+        ? [withPluginAutomaticCompactionLifecycle(input.contextCompactionHook, input)]
+        : []),
+    ],
     onHistoryChangedHook: [
       async (change) => {
         await input.onHistoryChanged(change);

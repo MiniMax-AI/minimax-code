@@ -12,6 +12,7 @@ import {
   classifyLLMRequestRejectionMessage,
   isLLMDeterministicRequestRejection,
   isLLMImageLimitMessage,
+  isLLMRequestOversized,
   normalizeLLMError,
 } from "@mavis/shared/llm-error-classifier";
 import {
@@ -605,6 +606,36 @@ describe("withLLMRetry", () => {
     expect(error?.type === "error" ? error.error.errorMessage : undefined).toBe(message);
   });
 
+  // A request that is too large (HTTP 413, request_too_large, the local
+  // pre-send body check, or a context-window overflow) is rejected again on
+  // every resend; the BYOK retry-all budget used to send it six times.
+  it.each([
+    ["minimax_api", "413 Request Entity Too Large"],
+    ["minimax_api", '413 {"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}'],
+    ["custom_provider:work", "413 Payload Too Large"],
+    ["custom_provider:work", "413 status code (no body)"],
+    ["minimax_api", "Request body too large: 70000000 bytes exceeds client limit 67108864 bytes."],
+    ["minimax_api", "400 invalid params, context window exceeds limit (2013)"],
+    ["custom_provider:work", '400 {"error":{"message":"prompt is too long: 600000 tokens > 512000 maximum"}}'],
+    ["minimax", "413 Request Entity Too Large"],
+    ["minimax", "Request body too large: 70000000 bytes exceeds client limit 67108864 bytes."],
+  ])("sends an oversized request from %s only once: %s", async (provider, message) => {
+    let attempts = 0;
+    const sleep = vi.fn(async () => {});
+    const inner = (async () => {
+      attempts += 1;
+      return errorStream(message);
+    }) as StreamFn;
+    const wrapped = withLLMRetry(inner, retryOptions({ sleep }));
+
+    const events = await collectEvents(await wrapped(fakeModel(provider), CONTEXT, {}));
+
+    expect(attempts).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" ? error.error.errorMessage : undefined).toBe(message);
+  });
+
   it.each([
     "[Error] 400 Bad Request",
     "503 Service Unavailable: too many images queued, try again",
@@ -1180,5 +1211,43 @@ describe("deterministic request rejection classification", () => {
     expect(rejection("invalid_request_error", 500)).toBe(false);
     expect(rejection("401 invalid api key")).toBe(false);
     expect(classifyLLMRequestRejectionMessage("invalid_request_error without a status")).toBeUndefined();
+  });
+
+  it("treats HTTP 413, byte-limit and context-overflow rejections as oversized", () => {
+    const oversized = (errorMessage: string, statusCode?: number) =>
+      isLLMRequestOversized(normalizeLLMError({ errorMessage, statusCode }));
+    expect(oversized("413 Request Entity Too Large")).toBe(true);
+    expect(oversized("anything", 413)).toBe(true);
+    expect(oversized('{"type":"error","error":{"type":"request_too_large","message":"too big"}}')).toBe(true);
+    expect(oversized("Request body too large: 9 bytes exceeds client limit 8 bytes.")).toBe(true);
+    expect(oversized("400 invalid params, context window exceeds limit (2013)")).toBe(true);
+    expect(oversized("prompt is too long: 213462 tokens > 200000 maximum")).toBe(true);
+    expect(rejection("413 Payload Too Large")).toBe(true);
+  });
+
+  it("does not treat transient or unrelated errors as oversized", () => {
+    const oversized = (errorMessage: string, statusCode?: number) =>
+      isLLMRequestOversized(normalizeLLMError({ errorMessage, statusCode }));
+    // The bare MiniMax 2013 code is a generic invalid-params code.
+    expect(oversized("400 invalid params (2013)")).toBe(false);
+    expect(oversized("400 Bad Request")).toBe(false);
+    expect(oversized("prompt is too long", 503)).toBe(false);
+    expect(oversized("429 rate limited: request too large for TPM")).toBe(false);
+    expect(oversized("Request body too large: timeout while uploading")).toBe(false);
+    expect(oversized("401 invalid api key")).toBe(false);
+  });
+
+  it("classifies the BYOK-attributed form of an oversized request", () => {
+    const byok = (detail: string) =>
+      `BYOK upstream error: ${JSON.stringify({
+        errorCode: LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
+        message: `BYOK provider custom_provider:fixture upstream error: ${detail}`,
+        errorSource: "byok_upstream",
+        errorDetail: detail,
+        errorProviderId: "custom_provider:fixture",
+      })}`;
+    expect(rejection(byok("413 Payload Too Large"))).toBe(true);
+    expect(rejection(byok("400 invalid params, context window exceeds limit (2013)"))).toBe(true);
+    expect(rejection(byok("503 Service Unavailable"))).toBe(false);
   });
 });

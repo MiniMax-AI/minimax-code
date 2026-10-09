@@ -111,6 +111,7 @@
       "packages/tui/test/unit/tui/features/composer/attachments.test.ts",
       "packages/tui/test/unit/tui/features/settings/status-line-picker.test.ts",
       "packages/tui/test/unit/tui/widgets/editor/editor-behavior.test.ts",
+      "packages/agent-core/test/unit/pi-turn-runner/context-overflow-recovery.test.ts",
       "packages/agent-core/test/unit/pi-turn-runner/llm-retry.test.ts",
       "packages/agent-core/test/unit/pi-turn-runner/llm-stream-timeout.test.ts",
       "packages/agent-core/test/unit/pi-turn-runner/request-image-limit.test.ts",
