@@ -516,7 +516,19 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
     expect(active.status).toBe("active");
   });
 
-  it.each(["active", "complete"] as const)(
+  it("does not expose update_goal for a complete Goal", async () => {
+    const { integration } = makeIntegration({
+      store: makeStore({ getBySession: async () => goal({ status: "complete" }) }),
+    });
+
+    const names = (await integration.runtimeToolsFor(false, "sess_int")).map(
+      (tool) => tool.def.name,
+    );
+
+    expect(names).toEqual(["get_goal"]);
+  });
+
+  it.each(["active"] as const)(
     "rejects an unbound proposal without ending the user Turn or changing the %s Goal",
     async (status) => {
       const currentGoal = goal({ status });

@@ -342,12 +342,24 @@ export class GoalLifecycle {
 
   async runtimeToolsFor(
     disabled: boolean,
-    _sessionId: string,
+    sessionId: string,
   ): Promise<RuntimeTool<TSchema, ToolExecutionContext>[]> {
     if (!this.deps.runtime.isEnabled() || disabled) return [];
-    return buildThreadGoalRuntimeTools(this.deps.store(), false, this.deps.signalCollector, {
-      updateTokenBudget: (context, input) => this.updateTokenBudget(context, input),
-    });
+    // Goals are created by the user (`/goal` / REST), never by the model, so
+    // a session without a goal record has nothing for the model to read or
+    // update. Skip the ~800-token tool schemas in that case.
+    const goal = await this.deps.store().getBySession(sessionId);
+    if (!goal) return [];
+    const tools = buildThreadGoalRuntimeTools(
+      this.deps.store(),
+      false,
+      this.deps.signalCollector,
+      { updateTokenBudget: (context, input) => this.updateTokenBudget(context, input) },
+    );
+    // A completed goal can still be inspected but no longer updated.
+    return goal.status === 'complete'
+      ? tools.filter((tool) => tool.def.name === 'get_goal')
+      : tools;
   }
 
   tallyTurnUsage(messages: PiAgentMessage[]): number {

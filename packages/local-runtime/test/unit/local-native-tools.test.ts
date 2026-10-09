@@ -319,6 +319,36 @@ describe('local native turn tools', () => {
     expect(appendMemory).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['no auth context (API-key / custom-provider path)', undefined, false],
+    ['an auth context without an access token', { userName: 'u' }, false],
+    ['a blank access token', { accessToken: '   ' }, false],
+    ['a MiniMax account access token', { accessToken: 'account-token' }, true],
+  ])('only offers website_deploy (and its skills) with %s', async (_label, authContext, expected) => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'local-native-website-deploy-'));
+    try {
+      const builtinCapabilities = resolveAgentCapabilities({});
+      const { nativeTools } = await buildLocalTurnToolSources({
+        toolsDisabled: false,
+        workspaceRoot: process.cwd(),
+        agentName: 'mavis',
+        dataDir,
+        sessionId: 'website-deploy-gate',
+        mcpService: new LocalMcpService(() => dataDir),
+        threadGoal: { runtimeToolsFor: () => [] } as never,
+        emitBusEvent: () => {},
+        builtinCapabilities,
+        ...(authContext ? { authContext } : {}),
+        taskAdapter: {} as never,
+        taskControlAdapter: {} as never,
+        mavisAgentAdapter: {} as never,
+      });
+      expect(nativeTools.map((tool) => tool.def.name).includes('website_deploy')).toBe(expected);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it('filters configurable built-in tools and only the delegation entry point', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'local-native-capability-tools-'));
     try {

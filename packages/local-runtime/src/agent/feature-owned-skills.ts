@@ -13,6 +13,13 @@ export function resolveFeatureAwareBuiltinSkillNames(
   gates: {
     cuModeActive: boolean;
     resumeCodexAvailable?: boolean;
+    /**
+     * Whether the `website_deploy` tool is wired for this Turn. It publishes
+     * through the managed MiniMax account gateway, so `false` (no account
+     * session) also drops the Skills that only make sense with that tool.
+     * Left undefined, the capability config alone decides.
+     */
+    websiteDeployAvailable?: boolean;
     miniappAvailable?: boolean;
     canonicalRole?: string;
     builtinAgent?: boolean;
@@ -43,6 +50,10 @@ export function resolveFeatureAwareBuiltinSkillNames(
   if (gates.cuModeActive && !canonicalBuiltinReadonly) selected.add(CU_DESKTOP_SKILL_NAME);
   if (gates.resumeCodexAvailable === true && isAgentBuiltinToolEnabled(capabilities, 'bash')) {
     selected.add('resume-codex');
+  }
+  if (gates.websiteDeployAvailable === false) {
+    selected.delete('deploy-website');
+    selected.delete('edit-deployed-website');
   }
   for (const skillName of gates.disabledSkillNames ?? []) selected.delete(skillName);
   return [...selected];
@@ -95,4 +106,11 @@ function hasTools(
   toolNames: Parameters<typeof isAgentBuiltinToolEnabled>[1][],
 ): boolean {
   return toolNames.every((toolName) => isAgentBuiltinToolEnabled(capabilities, toolName));
+}
+
+/** True when the host holds a MiniMax account session that can call the managed gateway. */
+export function hasManagedAccountSession(
+  authContext: { accessToken?: string } | undefined,
+): boolean {
+  return Boolean(authContext?.accessToken?.trim());
 }

@@ -27,7 +27,10 @@ import {
   type AgentBuiltinSkillId,
   type ResolvedAgentCapabilities,
 } from "@mavis/config";
-import { resolveFeatureAwareBuiltinSkillNames } from "../agent/feature-owned-skills.js";
+import {
+  hasManagedAccountSession,
+  resolveFeatureAwareBuiltinSkillNames,
+} from "../agent/feature-owned-skills.js";
 import type { ModuleMetricsReporter } from "../common/metrics.js";
 import { CU_DESKTOP_SKILL_NAME } from "../cu/gate.js";
 import type { LocalMemoryFacade } from "../memory/local-memory-facade.js";
@@ -124,6 +127,7 @@ export function buildLocalNativeRuntimeTools(input: {
     ...(input.miniappAvailable === true ? { miniappAvailable: true } : {}),
     disabledSkillNames: input.disabledBuiltinSkillNames,
     resumeCodexAvailable: input.resumeCodexAvailable === true,
+    websiteDeployAvailable: hasManagedAccountSession(input.authContext),
   });
   const nativeTools = [
     ...buildLocalToolRegistry({
@@ -228,12 +232,19 @@ export function buildLocalNativeRuntimeTools(input: {
       mavisCronAdapter: input.mavisCronAdapter,
       mavisMcpAdapter: input.mavisMcpAdapter,
       mavisSessionAdapter: input.mavisSessionAdapter,
-      websiteDeployAdapter: new LocalWebsiteDeployClient({
-        ...(input.authContext ? { authContext: input.authContext } : {}),
-        ...(input.dataDir ? { dataDir: input.dataDir } : {}),
-        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-        routingContextGetter: input.routingContextGetter,
-      }),
+      // website_deploy publishes through the managed MiniMax account gateway,
+      // so it is only useful (and only worth its ~860-token schema plus the
+      // dependent skills) when an account access token is present.
+      ...(hasManagedAccountSession(input.authContext)
+        ? {
+            websiteDeployAdapter: new LocalWebsiteDeployClient({
+              authContext: input.authContext,
+              ...(input.dataDir ? { dataDir: input.dataDir } : {}),
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+              routingContextGetter: input.routingContextGetter,
+            }),
+          }
+        : {}),
       codeReviewAdapter: input.codeReviewAdapter,
     }).values(),
   ];

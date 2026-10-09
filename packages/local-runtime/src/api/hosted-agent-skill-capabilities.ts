@@ -1,6 +1,9 @@
 import type { ResolvedAgentCapabilities } from '@mavis/config';
 
-import { resolveFeatureAwareBuiltinSkillNames } from '../agent/feature-owned-skills.js';
+import {
+  hasManagedAccountSession,
+  resolveFeatureAwareBuiltinSkillNames,
+} from '../agent/feature-owned-skills.js';
 import type { LocalRuntimeSkillScope, LocalSkillCatalogScope } from '../skills/skill-service.js';
 import { applyHostedCapabilityRestrictions } from './hosted-agent-capability-restrictions.js';
 import { resolveHostedCuModeActive } from './hosted-agent-turn-runtime-facts.js';
@@ -90,6 +93,7 @@ function resolveHostedSkillScope(
       builtinAgent: scope.agentPolicy.builtinAgent,
       disabledSkillNames: restrictions.disabledBuiltinSkillNames,
       resumeCodexAvailable: restrictions.resumeCodexAvailable === true,
+      websiteDeployAvailable: hasManagedAccountSession(host.authContextGetter?.()),
     }),
     cuModeActive,
   };
