@@ -1,12 +1,27 @@
 import * as undici from 'undici';
-import { Agent, Dispatcher, ProxyAgent } from 'undici';
+import { Agent, Dispatcher, ProxyAgent, Socks5ProxyAgent } from 'undici';
 
 const LOOPBACK_NO_PROXY_ENTRIES = ['localhost', '127.0.0.1', '::1'] as const;
+const HTTP_PROXY_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
+// undici's Socks5ProxyAgent accepts `socks5:` and its alias `socks:`. It always sends
+// host names to the proxy for resolution, which is what `socks5h:` requests, so that
+// scheme is accepted too and rewritten before the agent is constructed.
+const SOCKS5_PROXY_PROTOCOLS: ReadonlySet<string> = new Set(['socks5:', 'socks5h:', 'socks:']);
+const SUPPORTED_PROXY_SCHEMES = 'http://, https://, socks5://, or socks5h://';
+const SOCKS5_EXPERIMENTAL_WARNING_MESSAGE =
+  'SOCKS5 proxy support is experimental and subject to change';
+const SOCKS5_EXPERIMENTAL_WARNING_TYPE = 'ExperimentalWarning';
+const IGNORED_ALL_PROXY_ADVICE =
+  "Set HTTPS_PROXY and HTTP_PROXY to your proxy app's http:// port, or set ALL_PROXY to a socks5:// or socks5h:// URL.";
 
 interface ProxyValue {
   readonly name: string;
   readonly value: string;
 }
+
+type ProxyValueClassification =
+  | { readonly kind: 'http' | 'socks5' }
+  | { readonly kind: 'unsupported'; readonly protocol?: string; readonly redacted?: string };
 
 export type TuiProxyConfiguration =
   | { readonly mode: 'direct' }
@@ -17,6 +32,11 @@ export type TuiProxyConfiguration =
       readonly noProxy: string;
     };
 
+export interface ResolveTuiProxyConfigurationOptions {
+  /** Receives one line per ignored proxy setting. Omit to discard warnings. */
+  readonly writeWarning?: (message: string) => void;
+}
+
 export interface ConfigureTuiNetworkProxyOptions {
   readonly environment?: NodeJS.ProcessEnv;
   readonly createProxyDispatcher?: (options: {
@@ -26,12 +46,22 @@ export interface ConfigureTuiNetworkProxyOptions {
   }) => Dispatcher;
   readonly setGlobalDispatcher?: (dispatcher: Dispatcher) => void;
   readonly installFetch?: () => void;
+  /** Defaults to writing a line to process.stderr. */
+  readonly writeWarning?: (message: string) => void;
+}
+
+interface EmitWarningTarget {
+  emitWarning: typeof process.emitWarning;
 }
 
 export function resolveTuiProxyConfiguration(
   environment: NodeJS.ProcessEnv = process.env,
+  options: ResolveTuiProxyConfigurationOptions = {},
 ): TuiProxyConfiguration {
-  const allProxy = firstProxyValue(environment, 'ALL_PROXY', 'all_proxy');
+  const allProxy = usableAllProxyValue(
+    firstProxyValue(environment, 'ALL_PROXY', 'all_proxy'),
+    options.writeWarning,
+  );
   const httpProxy = firstProxyValue(environment, 'HTTP_PROXY', 'http_proxy') ?? allProxy;
   const httpsProxy =
     firstProxyValue(environment, 'HTTPS_PROXY', 'https_proxy') ?? allProxy ?? httpProxy;
@@ -51,7 +81,9 @@ export function resolveTuiProxyConfiguration(
 export function configureTuiNetworkProxy(
   options: ConfigureTuiNetworkProxyOptions = {},
 ): TuiProxyConfiguration {
-  const configuration = resolveTuiProxyConfiguration(options.environment);
+  const configuration = resolveTuiProxyConfiguration(options.environment, {
+    writeWarning: options.writeWarning ?? writeStderrWarning,
+  });
   if (configuration.mode === 'direct') return configuration;
 
   const createProxyDispatcher =
@@ -69,10 +101,71 @@ export function configureTuiNetworkProxy(
 export function createTuiNetworkDispatcher(
   environment: NodeJS.ProcessEnv = process.env,
 ): Dispatcher {
+  // Ignored ALL_PROXY values were already reported once at CLI startup by
+  // configureTuiNetworkProxy; repeating the warning here would interleave with the TUI.
   const configuration = resolveTuiProxyConfiguration(environment);
   return configuration.mode === 'proxy'
     ? new TuiProxyDispatcher(configuration)
     : new Agent({ allowH2: false });
+}
+
+/**
+ * Masks the user name and password of a proxy URL so it can appear in
+ * diagnostics. Returns undefined when the value is not a parseable URL with a host,
+ * because an unparseable value cannot be redacted reliably.
+ */
+export function redactProxyUrl(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (!url.host) return undefined;
+  const credentials = url.username || url.password ? `${url.password ? '***:***' : '***'}@` : '';
+  return `${url.protocol}//${credentials}${url.host}`;
+}
+
+/**
+ * Runs `create` while dropping only undici's one-time SOCKS5 experimental
+ * warning. Every other warning, including other ExperimentalWarnings, is
+ * forwarded unchanged, and the original emitter is restored afterwards.
+ */
+export function withoutSocks5ExperimentalWarning<T>(
+  create: () => T,
+  target: EmitWarningTarget = process,
+): T {
+  const original = target.emitWarning;
+  const filtered = function emitWarning(this: unknown, ...args: unknown[]): void {
+    if (isSocks5ExperimentalWarning(args)) return;
+    Reflect.apply(original, this, args);
+  };
+  target.emitWarning = filtered as typeof process.emitWarning;
+  try {
+    return create();
+  } finally {
+    target.emitWarning = original;
+  }
+}
+
+function isSocks5ExperimentalWarning(args: readonly unknown[]): boolean {
+  const [warning, typeOrOptions] = args;
+  const message =
+    typeof warning === 'string' ? warning : warning instanceof Error ? warning.message : undefined;
+  if (message !== SOCKS5_EXPERIMENTAL_WARNING_MESSAGE) return false;
+  const type =
+    typeof typeOrOptions === 'string'
+      ? typeOrOptions
+      : typeof typeOrOptions === 'object' && typeOrOptions !== null
+        ? (typeOrOptions as { type?: unknown }).type
+        : warning instanceof Error
+          ? warning.name
+          : undefined;
+  return type === SOCKS5_EXPERIMENTAL_WARNING_TYPE;
+}
+
+function writeStderrWarning(message: string): void {
+  process.stderr.write(`${message}\n`);
 }
 
 function firstProxyValue(
@@ -86,17 +179,55 @@ function firstProxyValue(
   return undefined;
 }
 
-function validateProxyValue(proxy: ProxyValue | undefined): void {
-  if (!proxy) return;
+function classifyProxyValue(value: string): ProxyValueClassification {
   let url: URL;
   try {
-    url = new URL(proxy.value);
+    url = new URL(value);
   } catch {
-    throw new Error(`${proxy.name} must be an http:// or https:// URL.`);
+    return { kind: 'unsupported' };
   }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname) {
-    throw new Error(`${proxy.name} must be an http:// or https:// URL.`);
-  }
+  // Values such as `localhost:7890` parse with `localhost:` as the scheme.
+  if (!url.hostname) return { kind: 'unsupported' };
+  if (HTTP_PROXY_PROTOCOLS.has(url.protocol)) return { kind: 'http' };
+  if (SOCKS5_PROXY_PROTOCOLS.has(url.protocol)) return { kind: 'socks5' };
+  return { kind: 'unsupported', protocol: url.protocol, redacted: redactProxyUrl(value) };
+}
+
+/**
+ * ALL_PROXY is only a fallback, and SOCKS tools commonly export it next to an
+ * explicit HTTP(S)_PROXY. A value this client cannot use must not prevent
+ * startup, so it is reported and skipped instead of rejected.
+ */
+function usableAllProxyValue(
+  proxy: ProxyValue | undefined,
+  writeWarning: ((message: string) => void) | undefined,
+): ProxyValue | undefined {
+  if (!proxy) return undefined;
+  const classification = classifyProxyValue(proxy.value);
+  if (classification.kind !== 'unsupported') return proxy;
+  writeWarning?.(
+    `Warning: ignoring ${describeProxySetting(proxy.name, classification)} because ${describeUnsupportedReason(classification)}; it will not be used. ${IGNORED_ALL_PROXY_ADVICE}`,
+  );
+  return undefined;
+}
+
+function validateProxyValue(proxy: ProxyValue | undefined): void {
+  if (!proxy) return;
+  const classification = classifyProxyValue(proxy.value);
+  if (classification.kind !== 'unsupported') return;
+  throw new Error(`${proxy.name} must be an ${SUPPORTED_PROXY_SCHEMES} URL.`);
+}
+
+function describeProxySetting(
+  name: string,
+  classification: { readonly redacted?: string },
+): string {
+  return classification.redacted ? `${name}=${classification.redacted}` : name;
+}
+
+function describeUnsupportedReason(classification: { readonly protocol?: string }): string {
+  if (!classification.protocol) return 'it is not a valid proxy URL';
+  return `${classification.protocol}// proxies are not supported (use ${SUPPORTED_PROXY_SCHEMES})`;
 }
 
 function withLoopbackNoProxy(existing: string | undefined): string {
@@ -115,7 +246,14 @@ function installUndiciFetch(): void {
   (undici as typeof undici & { install?: () => void }).install?.();
 }
 
-function createTuiProxyAgent(uri: string): ProxyAgent {
+function createTuiProxyAgent(uri: string): Dispatcher {
+  const url = new URL(uri);
+  if (SOCKS5_PROXY_PROTOCOLS.has(url.protocol)) {
+    // Socks5ProxyAgent rejects `socks5h:`; switching the scheme keeps the
+    // credentials, host, and port. The agent reads credentials from the URL.
+    if (url.protocol === 'socks5h:') url.protocol = 'socks5:';
+    return withoutSocks5ExperimentalWarning(() => new Socks5ProxyAgent(url));
+  }
   // Preserve HTTP/1.1 on both TLS hops and CONNECT for plain HTTP targets.
   return new ProxyAgent({
     uri,
