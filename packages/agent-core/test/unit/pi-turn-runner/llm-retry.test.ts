@@ -12,7 +12,6 @@ import {
   classifyLLMRequestRejectionMessage,
   isLLMDeterministicRequestRejection,
   isLLMImageLimitMessage,
-  isLLMRequestOversized,
   normalizeLLMError,
 } from "@mavis/shared/llm-error-classifier";
 import {
@@ -1213,9 +1212,8 @@ describe("deterministic request rejection classification", () => {
     expect(classifyLLMRequestRejectionMessage("invalid_request_error without a status")).toBeUndefined();
   });
 
-  it("treats HTTP 413, byte-limit and context-overflow rejections as oversized", () => {
-    const oversized = (errorMessage: string, statusCode?: number) =>
-      isLLMRequestOversized(normalizeLLMError({ errorMessage, statusCode }));
+  it("treats HTTP 413, byte-limit and context-overflow rejections as deterministic", () => {
+    const oversized = rejection;
     expect(oversized("413 Request Entity Too Large")).toBe(true);
     expect(oversized("anything", 413)).toBe(true);
     expect(oversized('{"type":"error","error":{"type":"request_too_large","message":"too big"}}')).toBe(true);
@@ -1225,9 +1223,8 @@ describe("deterministic request rejection classification", () => {
     expect(rejection("413 Payload Too Large")).toBe(true);
   });
 
-  it("does not treat transient or unrelated errors as oversized", () => {
-    const oversized = (errorMessage: string, statusCode?: number) =>
-      isLLMRequestOversized(normalizeLLMError({ errorMessage, statusCode }));
+  it("does not treat transient or unrelated size-like errors as deterministic", () => {
+    const oversized = rejection;
     // The bare MiniMax 2013 code is a generic invalid-params code.
     expect(oversized("400 invalid params (2013)")).toBe(false);
     expect(oversized("400 Bad Request")).toBe(false);
