@@ -45,6 +45,7 @@ export class NativeLocalTurnExecutionPreparationSource<
       ...(input.execution.desktopCapabilities
         ? { desktopCapabilities: input.execution.desktopCapabilities }
         : {}),
+      history: (input.execution.runnerHistory ?? input.execution.history)?.messages ?? [],
     });
     const browserAssets = [...(prepared.browserAssets ?? [])];
     const context = createToolContext(

@@ -289,6 +289,8 @@ export function createHostedAgentCapabilities(
         readonly promptText: string;
         readonly turnId: string;
         readonly deferTelemetry?: boolean;
+        /** Model-visible context already carries this session's ID. */
+        readonly sessionIdInContext?: boolean;
         readonly model?: {
           readonly providerID: string;
           readonly modelID: string;
@@ -305,6 +307,7 @@ export function createHostedAgentCapabilities(
             writeEnabled: input.session.memoryPolicy?.writeEnabled !== false,
           }),
           environmentInSystemPrompt: true,
+          ...(input.sessionIdInContext ? { sessionIdInContext: true } : {}),
         };
         const reminderMessage = host.localDataCollector.toMessage(
           input.promptText,

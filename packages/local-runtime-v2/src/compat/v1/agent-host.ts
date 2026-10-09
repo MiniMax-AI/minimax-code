@@ -195,6 +195,7 @@ export function createV1AgentHostProductCapabilities(
             promptText: input.promptText,
             turnId: input.turnId,
             deferTelemetry: true,
+            ...(input.sessionIdInContext ? { sessionIdInContext: true } : {}),
             ...(model ? { model } : {}),
           });
         },

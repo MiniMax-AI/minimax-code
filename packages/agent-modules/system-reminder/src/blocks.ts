@@ -217,7 +217,9 @@ export function buildSlimAgentContextBlock(env: AgentEnv): string {
     lines.push(`  agentName: ${env.agentName}`);
   }
   lines.push(`  SESSION ROLE: ${sessionRole}`);
-  lines.push(`  YOUR SESSION ID: ${env.sessionId}`);
+  if (!env.sessionIdInContext) {
+    lines.push(`  YOUR SESSION ID: ${env.sessionId}`);
+  }
   if (env.parentSessionId) {
     lines.push(`  PARENT SESSION: ${env.parentSessionId}`);
     lines.push(buildParentResultDeliveryLine(env, isCloud));
