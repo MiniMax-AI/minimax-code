@@ -1320,6 +1320,7 @@
     "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/host-capability/skill-disclosure.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-execution-preparation.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-input-preparation.ts",
+    "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-payload-transform.test.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-payload-transform.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.ts",
