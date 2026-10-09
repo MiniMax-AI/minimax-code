@@ -342,6 +342,7 @@ function toolCatalogBuildOptions(
     ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),
     ...(input.modelCapabilities ? { modelCapabilities: input.modelCapabilities } : {}),
     ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
+    ...(input.withheldToolNames ? { withheldToolNames: input.withheldToolNames } : {}),
     ...(options.config ? { config: options.config } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.emitDiagnostic ? { emitDiagnostic: options.emitDiagnostic } : {}),

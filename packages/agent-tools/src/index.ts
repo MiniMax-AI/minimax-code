@@ -38,6 +38,7 @@ export {
   filterCanonicalBuiltinMcpEntries,
   filterCanonicalNativeToolCeiling,
   isCanonicalBuiltinTurn,
+  isReadOnlyCanonicalBlockedToolName,
 } from "./desktop/canonical-tool-policy.js";
 
 export { getLocalBashEnvironment } from "./desktop/local-pi-tools.js";

@@ -108,6 +108,8 @@ export interface BuildLocalTurnToolCatalogInput {
     readonly name: string;
   }[];
   readonly userText?: string;
+  /** Tool names this Turn must not receive from any source (native, MCP, plugin). */
+  readonly withheldToolNames?: readonly string[];
 }
 
 /** The already-gated inventory shared by Turn assembly and Task capture. */
@@ -130,8 +132,12 @@ export function filterLocalTurnCapabilityInventory(input: {
   readonly agentProfile?: LocalTurnAgentProfileFacts;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
+  readonly withheldToolNames?: readonly string[];
 }): FilteredLocalTurnCapabilityInventory {
-  const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
+  const excludedNames = new Set([
+    ...getSuppressedToolNamesForModelCapabilities(input.modelCapabilities),
+    ...(input.withheldToolNames ?? []),
+  ]);
   const profile = input.agentProfile;
   const selector = createLocalAgentCapabilitySelector(profile?.configSelection);
   const hasBrowserHostAlias = Boolean(

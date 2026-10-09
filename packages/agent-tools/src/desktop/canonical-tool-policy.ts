@@ -20,6 +20,15 @@ const READ_ONLY_CANONICAL_BLOCKED_TOOL_NAMES = new Set([
   'request_feature_enable',
 ]);
 
+/**
+ * Whether the canonical read-only ceiling (Explore/Verifier) removes this tool.
+ * Exposed so a runtime guard can treat a call that still arrives as a violation
+ * without keeping its own copy of the list.
+ */
+export function isReadOnlyCanonicalBlockedToolName(name: string): boolean {
+  return READ_ONLY_CANONICAL_BLOCKED_TOOL_NAMES.has(name) || isComputerUseRuntimeToolName(name);
+}
+
 /** Computer-use tools share the desktop_* namespace across native and MCP paths. */
 export function isComputerUseRuntimeToolName(name: string): boolean {
   return name.startsWith('desktop_');

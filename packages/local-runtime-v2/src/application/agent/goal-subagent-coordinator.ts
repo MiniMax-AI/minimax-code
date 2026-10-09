@@ -1,6 +1,7 @@
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import { GOAL_VERIFIER_READONLY_PROFILE } from '@mavis/config';
+import { GOAL_VERIFIER_OFFLINE_TOOL_NAMES, GOAL_VERIFIER_READONLY_PROFILE } from '@mavis/config';
 import type { PiBeforeToolCallHook } from '@mavis/agent-core/pi-turn-runner';
+import { isReadOnlyCanonicalBlockedToolName } from '@mavis/agent-tools';
 import type { AgentExtension } from '@mavis/agent-runtime';
 import type { VerificationHostContext } from '@mavis/goal';
 
@@ -8,13 +9,33 @@ import { summarizeCommittedPiGoalUsage } from '../../service/session-system/inde
 import { renderGoalVerifierReminder } from './goal-verifier-reminder.js';
 
 /**
- * The only tools the builtin `verifier` role holds that a Goal verifier child
- * must not have. Everything else it could reach — write, edit, todowrite, the
- * whole `task*` family, memory, computer use — is already gone by the time a
- * call reaches this guard: the role asset grants five tools and the canonical
- * read-only ceiling subtracts the rest.
+ * The network tools the builtin `verifier` role holds that a Goal verifier
+ * child must not use. The child's tool catalog already withholds them; this set
+ * is the fallback for a call that still arrives, for example a name the model
+ * remembers from its role prompt.
+ *
+ * A refused network call is a recoverable model mistake: the child still holds
+ * `read`, `grep`, `glob` and `bash` and can reach the same evidence locally.
+ * Everything else outside the role's read-only ceiling — write, edit,
+ * todowrite, delegation, memory, computer use — is a hard violation instead
+ * and stops the run on its first call.
  */
-const GOAL_VERIFIER_DENIED_TOOLS = new Set(['web_fetch', 'web_search']);
+const GOAL_VERIFIER_OFFLINE_TOOLS: ReadonlySet<string> = new Set(GOAL_VERIFIER_OFFLINE_TOOL_NAMES);
+
+/**
+ * Consecutive child turns that may reach for a network tool before the run is
+ * stopped as a capability violation. Counting turns rather than calls keeps
+ * several parallel calls from one model response to a single mistake; a child
+ * that is refused and then tries again on its very next turn is looping.
+ */
+const MAX_CONSECUTIVE_OFFLINE_TOOL_TURNS = 2;
+
+/**
+ * Child turns in total that may reach for a network tool. Bounds a child that
+ * alternates refused network calls with local work, independently of the
+ * optional host turn cap.
+ */
+const MAX_OFFLINE_TOOL_TURNS = 3;
 
 /** Structurally mirrors the v1 delegation runner's registry contract. */
 export interface GoalVerifierChildRunIssue {
@@ -39,6 +60,12 @@ export interface GoalVerifierChildRunState {
   childTurns: number;
   tokens: number;
   usageIncomplete: boolean;
+  /** Child turn in which a network tool call was last refused. */
+  lastOfflineToolTurn?: number;
+  /** Consecutive child turns, ending at `lastOfflineToolTurn`, that called a network tool. */
+  consecutiveOfflineToolTurns: number;
+  /** Child turns in total that called a network tool. */
+  offlineToolTurns: number;
   issue?: GoalVerifierChildRunIssue;
 }
 
@@ -47,7 +74,7 @@ export interface GoalVerifierChildRunState {
  *
  * The child runs on the ordinary delegation path under the builtin `verifier`
  * role, so this holds no authority: a Turn that claims a run id gains a
- * reminder, a two-tool denylist, and a hard turn/token ceiling — all of them
+ * reminder, a narrow tool guard, and a hard turn/token ceiling — all of them
  * restrictions. There is nothing here worth forging.
  *
  * The ceiling still has to live somewhere: `pi-turn-runner` has no generic
@@ -69,6 +96,8 @@ export class GoalVerifierChildCoordinator {
       childTurns: 0,
       tokens: 0,
       usageIncomplete: false,
+      consecutiveOfflineToolTurns: 0,
+      offlineToolTurns: 0,
     });
   }
 
@@ -159,12 +188,49 @@ export class GoalVerifierChildCoordinator {
       };
     }
     const toolName = toolContext.toolCall.name;
-    if (!GOAL_VERIFIER_DENIED_TOOLS.has(toolName)) return undefined;
+    if (GOAL_VERIFIER_OFFLINE_TOOLS.has(toolName)) return this.refuseOfflineTool(state, toolName);
+    if (!isReadOnlyCanonicalBlockedToolName(toolName)) return undefined;
     const reason = `GOAL_VERIFIER_CAPABILITY_VIOLATION: readonly Goal verification blocked tool "${toolName}".`;
     // Latched, not aborted here: the blocked result goes back to the model and
     // the next `beforeLlm` stops the run on the latched issue.
     this.latchIssue(state, { code: 'capability_violation', message: reason });
     return { block: true, reason };
+  }
+
+  /**
+   * Refuses a network tool call and tells the child how to continue offline.
+   *
+   * Only a child that keeps reaching for the network after being refused is a
+   * capability violation; every call made in one model response shares that
+   * response's turn, so parallel calls count once.
+   */
+  private refuseOfflineTool(
+    state: GoalVerifierChildRunState,
+    toolName: string,
+  ): { readonly block: true; readonly reason: string } {
+    const turn = state.childTurns;
+    if (state.lastOfflineToolTurn !== turn) {
+      state.consecutiveOfflineToolTurns =
+        state.lastOfflineToolTurn === turn - 1 ? state.consecutiveOfflineToolTurns + 1 : 1;
+      state.offlineToolTurns += 1;
+      state.lastOfflineToolTurn = turn;
+    }
+    if (
+      state.consecutiveOfflineToolTurns >= MAX_CONSECUTIVE_OFFLINE_TOOL_TURNS ||
+      state.offlineToolTurns >= MAX_OFFLINE_TOOL_TURNS
+    ) {
+      const reason = `GOAL_VERIFIER_CAPABILITY_VIOLATION: readonly Goal verification kept calling network tool "${toolName}" after it was refused.`;
+      this.latchIssue(state, { code: 'capability_violation', message: reason });
+      return { block: true, reason };
+    }
+    return {
+      block: true,
+      reason:
+        `"${toolName}" is unavailable: Goal verification runs offline. ` +
+        'Verify the objective from local evidence instead: read the files, search the tree, ' +
+        'and inspect the repository with git. If the evidence you need is not available ' +
+        'locally, judge the objective PARTIAL. Do not call web_fetch or web_search again.',
+    };
   }
 
   private latchIssue(state: GoalVerifierChildRunState, issue: GoalVerifierChildRunIssue): void {

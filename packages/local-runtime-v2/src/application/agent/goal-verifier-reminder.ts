@@ -39,6 +39,12 @@ not change Git state: no \`git add\`, \`stash\`, \`checkout\`, \`restore\`,
 the working tree, or refs. Inspecting with \`git status\`, \`git diff\`, and
 \`git log\` is expected and safe.
 
+This run is also offline: \`web_fetch\` and \`web_search\` are not available,
+and any call to them is rejected. Verify the objective from local evidence —
+read the files, search the tree, and inspect the repository with git. If the
+evidence you need does not exist locally, that is an evidence gap: return
+PARTIAL rather than reaching for the network.
+
 Include exactly one verdict statement in your reply, using one of these tokens:
 
 VERDICT: PASS

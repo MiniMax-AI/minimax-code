@@ -6,6 +6,12 @@ export type GoalVerificationEvidenceMode = (typeof GOAL_VERIFICATION_EVIDENCE_MO
 export const GOAL_EVALUATOR_MODEL_POLICIES = ['same-route-small-fast'] as const;
 export const GOAL_VERIFIER_READONLY_PROFILE = 'goal-verifier-readonly';
 export const GOAL_SUBAGENT_PROFILES = [GOAL_VERIFIER_READONLY_PROFILE] as const;
+/**
+ * Network tools a Goal verifier child never receives. Verification adjudicates
+ * the workspace from local evidence, so these are withheld from the child's tool
+ * catalog, and the child's runtime guard refuses any call that still arrives.
+ */
+export const GOAL_VERIFIER_OFFLINE_TOOL_NAMES: readonly string[] = ['web_fetch', 'web_search'];
 
 export interface GoalConfig {
   /** Optional objective length cap. Absent means unlimited. */

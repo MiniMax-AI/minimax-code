@@ -1,7 +1,11 @@
 import type { RuntimeTool } from '@mavis/agent-core/tools';
 import type { ModelContextAssemblyCtx } from '@mavis/agent-runtime';
 import type { IModelCapabilities } from '@mavis/protocol';
-import type { ResolvedAgentCapabilities } from '@mavis/config';
+import {
+  GOAL_VERIFIER_OFFLINE_TOOL_NAMES,
+  GOAL_VERIFIER_READONLY_PROFILE,
+  type ResolvedAgentCapabilities,
+} from '@mavis/config';
 import type { LocalTurnAgentProfileFacts } from './local-turn-tool-catalog.js';
 import type { AgentHostTurnCapabilityView } from './turn-capability-lifecycle.js';
 
@@ -33,6 +37,8 @@ export interface LocalTurnToolCatalogBuildInput {
   readonly userText?: string;
   readonly agentProfile?: LocalTurnAgentProfileFacts;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
+  /** Tool names this Turn must not receive from any source. */
+  readonly withheldToolNames?: readonly string[];
 }
 
 export function createLocalTurnToolCatalogInput(
@@ -42,6 +48,7 @@ export function createLocalTurnToolCatalogInput(
   const modelCapabilities = readModelCapabilities(context.model);
   const builtinCapabilities = readBuiltinCapabilities(context.agentConfig);
   const agentProfile = readAgentProfile(context.agentConfig);
+  const withheldToolNames = readWithheldToolNames(context.turnIntent);
   return {
     sessionId: context.sessionId,
     turnId: context.turnId,
@@ -56,7 +63,23 @@ export function createLocalTurnToolCatalogInput(
     ...(modelCapabilities ? { modelCapabilities } : {}),
     ...(agentProfile ? { agentProfile } : {}),
     ...(desktopCapabilities ? { desktopCapabilities } : {}),
+    ...(withheldToolNames ? { withheldToolNames } : {}),
   };
+}
+
+/**
+ * The Goal verifier child is an ordinary `verifier` delegation, and that role
+ * holds `web_fetch` and `web_search`. Goal verification runs offline, so the
+ * child's Turn is assembled without them rather than offered tools that its
+ * runtime guard would then refuse.
+ */
+function readWithheldToolNames(
+  intent: ModelContextAssemblyCtx['turnIntent'],
+): readonly string[] | undefined {
+  return intent?.kind === 'goal-verifier' &&
+    intent.attributes?.profile === GOAL_VERIFIER_READONLY_PROFILE
+    ? GOAL_VERIFIER_OFFLINE_TOOL_NAMES
+    : undefined;
 }
 
 function readEffectivePluginSkills(
