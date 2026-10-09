@@ -237,6 +237,34 @@ describe('TuiRunCoordinator', () => {
     );
   });
 
+  it('fires timeouts above the Node timer limit only at the requested deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const timeoutRuntime = createRuntime(async function* pendingTimeout(_req, signal) {
+        yield* [];
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      });
+      // 200 ms beyond Node's 32-bit timer limit; a plain setTimeout would
+      // clamp this to 1 ms and cancel the run almost immediately.
+      const timed = new TuiRunCoordinator(timeoutRuntime, { nowMs: () => 1_000 }).execute({
+        ...request('turn-timeout-overflow'),
+        policy: { timeoutMs: 2_147_483_847 },
+      });
+      expect(timeoutRuntime.abortSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_147_483_647);
+      expect(timeoutRuntime.abortSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(200);
+      await expect(timed).resolves.toMatchObject({ status: 'timeout' });
+      expect(timeoutRuntime.abortSession).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'timeout' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports a Runtime questionnaire as awaiting continuation without aborting it', async () => {
     const runtime = createRuntime(async function* () {
       yield {

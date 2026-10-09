@@ -395,6 +395,8 @@ describe('headless invocation', () => {
     ['30s', 30_000],
     ['2m', 120_000],
     ['1H', 3_600_000],
+    ['600h', 2_160_000_000],
+    ['2147483648ms', 2_147_483_648],
   ] as const)('parses timeout %s as %i milliseconds', async (timeout, timeoutMs) => {
     const cwd = await workspace();
     await expect(
