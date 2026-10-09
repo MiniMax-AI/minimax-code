@@ -64,6 +64,7 @@ import type {
   AgentHostFileChangeObservation,
   LocalTurnExecutionInput,
 } from "../runner/contracts.js";
+import { createExecutionBudgetReminder } from "../runner/execution-budget-reminder.js";
 import type { AgentEventDelivery } from "../events/contracts.js";
 import type { CanonicalHistoryStore } from "../history/contracts.js";
 import { copyCanonicalHistoryForPiCompatibility } from "../history/canonical-history-validation.js";
@@ -4281,13 +4282,130 @@ describe("LocalRuntimeTurnExecutor input and tool safety", () => {
   });
 });
 
+describe("LocalRuntimeTurnExecutor session id reminder context", () => {
+  const withSessionId = (sessionId: string) =>
+    `<system-reminder>\n<agent-context>\n  YOUR SESSION ID: ${sessionId}\n</agent-context>\n</system-reminder>\n\nhi`;
+  it.each([
+    ["first turn (empty history)", () => [], false],
+    [
+      "an earlier user message still shows the id",
+      (sessionId: string) => [
+        { role: "user", content: withSessionId(sessionId), timestamp: 1 },
+        { role: "user", content: "later turn", timestamp: 2 },
+      ],
+      true,
+    ],
+    [
+      "text-part user content shows the id",
+      (sessionId: string) => [
+        {
+          role: "user",
+          content: [{ type: "text", text: withSessionId(sessionId) }],
+          timestamp: 1,
+        },
+      ],
+      true,
+    ],
+    [
+      "compaction summarized the id away",
+      (sessionId: string) => [
+        { role: "user", content: withSessionId(sessionId), timestamp: 1 },
+        { role: "compactionSummary", summary: "earlier work" },
+        { role: "user", content: "kept turn", timestamp: 2 },
+      ],
+      false,
+    ],
+    [
+      "a legacy compaction marker hides earlier ids",
+      (sessionId: string) => [
+        { role: "user", content: withSessionId(sessionId), timestamp: 1 },
+        {
+          role: "user",
+          content: "summary",
+          archonCompaction: { schemaVersion: 1, summary: "s" },
+          timestamp: 2,
+        },
+      ],
+      false,
+    ],
+    [
+      "a kept message after compaction shows the id",
+      (sessionId: string) => [
+        { role: "compactionSummary", summary: "earlier work" },
+        { role: "user", content: withSessionId(sessionId), timestamp: 2 },
+      ],
+      true,
+    ],
+  ] as const)(
+    "tells the system reminder whether the session id is in context: %s",
+    async (_label, history, expected) => {
+      const buildSystem = vi.fn(async () => ({ content: "" }));
+      const base = executionInput();
+      const sessionId = base.session.sessionId;
+      await new LocalRuntimeTurnExecutor({
+        ...options(async (runInput) => {
+          await runInput.eventWriter.pushRuntime(
+            terminalEvent(RuntimeEventStatus.COMPLETED),
+          );
+        }),
+        executionPreparation: new NativeLocalTurnExecutionPreparationSource(
+          new LocalTurnInputPreparer({
+            reminders: {
+              buildBackground: vi.fn(async () => ({
+                tasks: [],
+                undeliveredTotal: 0,
+                terminalTotal: 0,
+              })),
+              buildSystem,
+              confirmBackgroundTaskReads: vi.fn(async () => []),
+            },
+          }),
+          { beforeToolCall: vi.fn(async () => undefined) } as never,
+        ),
+      }).execute(
+        executionInput({
+          history: { revision: "r1", messages: history(sessionId) as never },
+        }),
+      );
+      expect(buildSystem).toHaveBeenCalledOnce();
+      const call = (buildSystem.mock.calls[0] as unknown[])[0] as {
+        sessionIdInContext?: boolean;
+      };
+      if (expected) expect(call.sessionIdInContext).toBe(true);
+      else expect(call).not.toHaveProperty("sessionIdInContext");
+    },
+  );
+});
+
 describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
   it.each([
-    { durationMs: 600_000, nearDeadlineMs: 60_000 },
-    { durationMs: 120_000, nearDeadlineMs: 30_000 },
-  ])(
-    "reminds a budgeted run ($durationMs ms) without changing history or the system prompt",
-    async ({ durationMs, nearDeadlineMs }) => {
+    {
+      durationMs: 600_000,
+      // [elapsed ms since start, expected reminder text or undefined]
+      steps: [
+        [0, "about 10 minutes of 10 minutes total. Model generation"],
+        [1_000, undefined],
+        [299_999, undefined],
+        [300_000, "about 5 minutes of 10 minutes total.</system-reminder>"],
+        [400_000, undefined],
+        [450_000, "about 2 minutes of 10 minutes total.</system-reminder>"],
+        [479_999, undefined],
+        [480_000, "about 120 seconds of 10 minutes total."],
+        [485_000, "about 110 seconds of 10 minutes total."],
+        [595_000, "under 10 seconds of 10 minutes total."],
+      ],
+    },
+    {
+      durationMs: 120_000,
+      steps: [
+        [0, "about 120 seconds of 120 seconds total. Model generation"],
+        [1, "about 110 seconds of 120 seconds total.</system-reminder>"],
+        [90_000, "about 30 seconds of 120 seconds total."],
+      ],
+    },
+  ] as const)(
+    "reminds a budgeted run ($durationMs ms) only at thresholds without changing history or the system prompt",
+    async ({ durationMs, steps }) => {
       let nowMs = 1_000;
       const executorOptions = options(async (runInput) => {
         const messages = [
@@ -4305,53 +4423,30 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
           model: runInput.llm.model,
           thinkingLevel: "off" as const,
         };
-        const initial = await hook?.(hookInput);
-        expect(initial).toMatchObject({
-          type: "replaceRequestMessages",
-          reason: "execution-budget-context",
-          messages: [
-            messages[0],
-            {
-              role: "user",
-              content: expect.stringContaining(`${durationMs / 1_000} seconds`),
-            },
-          ],
-        });
-        nowMs = 1_000 + durationMs - nearDeadlineMs - 1;
-        expect(
-          await hook?.({ ...hookInput, phase: "iteration" }),
-        ).toMatchObject({
-          type: "replaceRequestMessages",
-          messages: [
-            messages[0],
-            { content: expect.stringContaining("Execution time remaining") },
-          ],
-        });
-        nowMs += 1;
-        expect(
-          await hook?.({ ...hookInput, phase: "iteration" }),
-        ).toMatchObject({
-          type: "replaceRequestMessages",
-          messages: [
-            messages[0],
-            {
-              role: "user",
-              content: expect.stringContaining(
-                `${nearDeadlineMs / 1_000} seconds`,
-              ),
-            },
-          ],
-        });
-        nowMs += 1;
-        expect(
-          await hook?.({ ...hookInput, phase: "iteration" }),
-        ).toMatchObject({
-          type: "replaceRequestMessages",
-          messages: [
-            messages[0],
-            { content: expect.stringContaining("Execution time remaining") },
-          ],
-        });
+        for (const [elapsedMs, expected] of steps) {
+          nowMs = 1_000 + elapsedMs;
+          const decision = await hook?.({
+            ...hookInput,
+            phase: elapsedMs === 0 ? "initial" : "iteration",
+          });
+          if (expected === undefined) {
+            expect(decision).toBeUndefined();
+            continue;
+          }
+          expect(decision).toMatchObject({
+            type: "replaceRequestMessages",
+            reason: "execution-budget-context",
+            messages: [
+              messages[0],
+              {
+                role: "user",
+                content: expect.stringContaining(
+                  `<system-reminder>Execution time remaining: ${expected}`,
+                ),
+              },
+            ],
+          });
+        }
         nowMs = 1_000 + durationMs;
         expect(
           await hook?.({ ...hookInput, phase: "iteration" }),
@@ -4381,6 +4476,61 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
       expect(input.onHistoryChanged).not.toHaveBeenCalled();
     },
   );
+
+  it("retries a threshold reminder that admission rejected", async () => {
+    let nowMs = 1_000;
+    let admit = false;
+    const hook = createExecutionBudgetReminder(
+      1_000 + 1_800_000,
+      () => nowMs,
+      () => admit,
+    )!;
+    const messages = [{ role: "user" as const, content: "hello", timestamp: 1 }];
+    const hookInput = {
+      sessionId: "session-1",
+      turnId: "turn-1",
+      phase: "initial" as const,
+      messages,
+      canonicalMessages: messages,
+      model: {} as never,
+      thinkingLevel: "off" as const,
+    };
+    expect(await hook(hookInput)).toBeUndefined();
+    admit = true;
+    nowMs = 2_000;
+    expect(await hook(hookInput)).toMatchObject({
+      messages: [
+        messages[0],
+        {
+          content:
+            "<system-reminder>Execution time remaining: about 29 minutes of 30 minutes total. Model generation, tools, and waiting all count against it.</system-reminder>",
+        },
+      ],
+    });
+    nowMs = 1_000 + 1_800_000 - 899_000;
+    expect(await hook(hookInput)).toMatchObject({
+      messages: [
+        messages[0],
+        {
+          content:
+            "<system-reminder>Execution time remaining: about 14 minutes of 30 minutes total.</system-reminder>",
+        },
+      ],
+    });
+    // Jumping straight past 25% and 10% emits once for the deepest threshold.
+    nowMs = 1_000 + 1_800_000 - 179_000;
+    expect(await hook(hookInput)).toMatchObject({
+      messages: [
+        messages[0],
+        {
+          content:
+            "<system-reminder>Execution time remaining: about 2 minutes of 30 minutes total.</system-reminder>",
+        },
+      ],
+    });
+    nowMs += 1_000;
+    expect(await hook(hookInput)).toBeUndefined();
+  });
 
   it("samples budget context while preserving existing request observers", async () => {
     let nowMs = 1_000;
@@ -4416,14 +4566,18 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
         expect.objectContaining({ remaining_ms: 600_000 }),
         "execution budget context sampled",
       );
+      // 99 seconds later no threshold is crossed, so no tokens are spent.
       nowMs = 100_000;
+      expect(
+        await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input),
+      ).toBeUndefined();
+      expect(logger.info).toHaveBeenCalledOnce();
+      nowMs = 301_000;
       const next = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input);
       if (next?.type !== "replaceRequestMessages")
         throw new Error("Expected time context");
       expect(next.messages.at(-1)).toMatchObject({
-        content: expect.stringContaining(
-          "previous model request was prepared: 99 seconds",
-        ),
+        content: expect.stringContaining("about 5 minutes of 10 minutes total."),
       });
       await runInput.eventWriter.pushRuntime(
         terminalEvent(RuntimeEventStatus.COMPLETED),
@@ -4676,7 +4830,7 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
       ).toHaveLength(keepsRequestContext ? 1 : 0);
       if (keepsRequestContext) {
         expect(requestContext).toContain(
-          "Execution time remaining at request preparation: 120 seconds.",
+          "Execution time remaining: about 120 seconds of 120 seconds total.",
         );
       }
       expect(canAppend).toHaveBeenCalledOnce();

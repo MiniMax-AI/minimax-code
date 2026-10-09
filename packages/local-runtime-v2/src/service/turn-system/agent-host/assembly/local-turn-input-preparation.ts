@@ -86,6 +86,12 @@ export interface LocalTurnReminderFacts {
     readonly promptText: string;
     readonly turnId: string;
     readonly desktopCapabilities?: AgentHostTurnCapabilityView;
+    /**
+     * True when a user message in the model-visible history since the latest
+     * compaction already contains this session's ID, so per-turn reminders may
+     * omit it. False on the first turn and after a compaction dropped it.
+     */
+    readonly sessionIdInContext?: boolean;
   }) => Promise<{
     readonly content: string;
     readonly diagnostic?: unknown;
@@ -135,6 +141,8 @@ export interface LocalTurnInputPreparationRequest {
   readonly immediateSendBatch?: AgentHostExecutionRequest['immediateSendBatch'];
   readonly provenance: AgentHostTurnProvenance;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
+  /** Provider-facing history before this turn's user message. */
+  readonly history?: readonly unknown[];
 }
 
 export interface PreparedLocalTurnInput {
@@ -203,6 +211,9 @@ export class LocalTurnInputPreparer {
       promptText,
       turnId: input.lease.turnId,
       ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),
+      ...(input.history && historyCarriesSessionId(input.history, input.session.sessionId)
+        ? { sessionIdInContext: true }
+        : {}),
     });
     const system = validateSystemReminder(systemValue);
     const systemBlock = optionalReminderBlock('system', system.content);
@@ -542,6 +553,42 @@ function isImageAttachment(attachment: AgentHostInputAttachment): boolean {
   return [attachment.fileName, attachment.filePath].some((value) =>
     SUPPORTED_NATIVE_IMAGE_PATH.test(value ?? ''),
   );
+}
+
+/**
+ * Whether a user message after the latest compaction summary (or anywhere when
+ * the session was never compacted) already shows the model this session's ID.
+ * Durable user messages carry the turn's `<system-reminder>`, so the first
+ * turn's full agent-context keeps the ID visible until compaction drops it.
+ */
+export function historyCarriesSessionId(messages: readonly unknown[], sessionId: string): boolean {
+  if (!sessionId) return false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isRecord(message)) continue;
+    // Native summaries and legacy (archon) compaction markers both start a
+    // fresh model-visible context; anything before them was summarized away.
+    if (message.role === 'compactionSummary' || Object.hasOwn(message, 'archonCompaction')) {
+      return false;
+    }
+    if (message.role !== 'user') continue;
+    if (userMessageText(message.content).includes(sessionId)) return true;
+  }
+  return false;
+}
+
+function userMessageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part: unknown) =>
+      isRecord(part) && part.type === 'text' && typeof part.text === 'string' ? part.text : '',
+    )
+    .join('\n');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function validateBackgroundReminder(

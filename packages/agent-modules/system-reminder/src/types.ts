@@ -134,6 +134,13 @@ export interface AgentEnv {
   userConfiguredName?: string | undefined;
   agentRole: string;
   sessionId: string;
+  /**
+   * Host-verified fact that the model-visible context already carries
+   * `YOUR SESSION ID` (e.g. an earlier user message since the latest
+   * compaction). When true, the slim per-turn block omits the line to save
+   * tokens. Absent/false keeps the line (cloud and legacy callers).
+   */
+  sessionIdInContext?: boolean | undefined;
   /** Session type — 0=Branch, 1=Root (formerly Main). */
   sessionType?: number | undefined;
   /** Parent session ID — set when this is a child session. */

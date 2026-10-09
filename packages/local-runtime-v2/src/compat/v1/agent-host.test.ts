@@ -132,6 +132,22 @@ describe("createV1AgentHostProductCapabilities", () => {
       turnId: "turn-1",
       deferTelemetry: true,
     });
+    await product.inputPreparation.reminders.buildSystem({
+      session: { sessionId: "session-1" },
+      agent: { agentName: "mavis", resourceAgentName: "main" },
+      agentConfig: {},
+      promptText: "again",
+      turnId: "turn-2",
+      sessionIdInContext: true,
+    } as never);
+    expect(hosted.reminders.buildSystem).toHaveBeenLastCalledWith({
+      session: { sessionId: "session-1" },
+      resourceAgentName: "main",
+      promptText: "again",
+      turnId: "turn-2",
+      deferTelemetry: true,
+      sessionIdInContext: true,
+    });
     expect(product.executor.fileChanges.begin).toBe(hosted.fileChanges.begin);
     expect(product.runner.contextUsage).toBe(hosted.contextUsage);
     expect(product.runner.logger).toBe(hosted.runnerLogger);

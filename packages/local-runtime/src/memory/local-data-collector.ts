@@ -52,6 +52,8 @@ export type LocalAgentFactsReader = {
 
 export type LocalReminderSessionInfo = SessionInfo & {
   environmentInSystemPrompt?: boolean;
+  /** See `AgentEnv.sessionIdInContext`. */
+  sessionIdInContext?: boolean;
   parentSessionId?: string | null;
   rootSessionId?: string;
   isDefaultWorkspace?: boolean;
@@ -221,6 +223,7 @@ export class LocalDataCollector {
         agentName,
         agentRole,
         sessionId: session.sessionId,
+        ...(session.sessionIdInContext ? { sessionIdInContext: true } : {}),
         sessionType,
         parentSessionId: session.parentSessionId ?? undefined,
         taskResultDelivery: session.taskResultDelivery,
