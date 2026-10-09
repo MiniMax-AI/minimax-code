@@ -6,7 +6,9 @@ const MINIMAX_M3_FILE_API_CAPABILITIES: ModelCapabilitiesConfig = {
   files_api_upload_endpoint: "/v1/files/upload",
   max_image_bytes_inline: 10_485_760,
   max_video_bytes_inline: 52_428_800,
-  max_request_body_bytes: 67_108_864,
+  // Serialized request JSON bytes; the strictest delivery channel (Bedrock)
+  // rejects bodies around 16-18 MB. The API-key path raises this for itself.
+  max_request_body_bytes: 16_777_216,
   max_attachments_count: 4,
 };
 

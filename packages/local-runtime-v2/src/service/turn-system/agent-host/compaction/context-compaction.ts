@@ -76,6 +76,23 @@ export class ContextCompactionAttemptFactory {
   }
 }
 
+/**
+ * Share of the client request-body limit at which automatic compaction starts.
+ * The trigger measures an estimate of the provider request while the hard
+ * check runs on the final serialized body, so compaction starts with headroom
+ * instead of only after the request would already be rejected.
+ */
+export const AUTOMATIC_COMPACTION_BODY_TRIGGER_RATIO = 0.9;
+
+export function automaticCompactionByteTrigger(
+  maxRequestBodyBytes: number | undefined,
+): number | undefined {
+  if (maxRequestBodyBytes === undefined || !Number.isFinite(maxRequestBodyBytes)) {
+    return maxRequestBodyBytes;
+  }
+  return Math.max(1, Math.floor(maxRequestBodyBytes * AUTOMATIC_COMPACTION_BODY_TRIGGER_RATIO));
+}
+
 export function createAutomaticContextCompactionHook(
   dependencies: AgentHostCompactionHookDependencies,
   context: AgentEventContext,

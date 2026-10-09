@@ -64,7 +64,7 @@ import {
 import { hasOpenPlatformThinkingVariants } from './openplatform-thinking.js';
 import { withByokErrorAttribution } from './byok-error-attribution.js';
 import { withLocalDynamicMaxTokens } from './dynamic-max-tokens.js';
-import { normalizeLocalMultimodalLimitCapabilities } from './file-api-capabilities.js';
+import { resolveMaxRequestBodyBytes } from './file-api-capabilities.js';
 import { resolveLocalFileApiGatewayAuth } from './file-api-gateway-auth.js';
 
 const FALLBACK_MODEL_LIMITS = {
@@ -204,9 +204,10 @@ export class LocalModelResolver implements LocalModelResolverLike {
     const maxTokens = positive(input.modelRef.max_tokens) || input.maxTokens;
     const thinking = resolveThinking(input, this.options.implicitCustomProviderThinking === true);
     const baseUrl = normalizeResolvedBaseUrl(input.api, input.baseUrl);
-    const maxRequestBodyBytes = Number(
-      normalizeLocalMultimodalLimitCapabilities(input.modelRef.capabilities).max_request_body_bytes,
-    );
+    const maxRequestBodyBytes = resolveMaxRequestBodyBytes({
+      providerSource: parseProviderId(input.runtimeProvider ?? input.provider)?.source,
+      capabilities: input.modelRef.capabilities,
+    });
     const model = buildResolvedModel({ input, contextWindow, maxTokens, baseUrl, thinking });
     const streamFn = resolveModelStream(input, this.options.streamFn);
     const fileApiGatewayAuth = input.managedProvider

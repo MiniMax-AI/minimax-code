@@ -10,6 +10,7 @@ import type {
 } from './contracts.js';
 import {
   ContextCompactionResultValidationError,
+  automaticCompactionByteTrigger,
   captureContextCompactionResult,
   createCompactionTokenUsageAccumulator,
   createCompactionReplaceMetadata,
@@ -167,6 +168,15 @@ function hookInput(overrides: Partial<PiBeforeLlmCallHookInput> = {}): PiBeforeL
     ...overrides,
   };
 }
+
+describe('automatic compaction byte trigger', () => {
+  it('starts automatic compaction at 90% of the client request-body limit', () => {
+    expect(automaticCompactionByteTrigger(16_777_216)).toBe(15_099_494);
+    expect(automaticCompactionByteTrigger(29_360_128)).toBe(26_424_115);
+    expect(automaticCompactionByteTrigger(1)).toBe(1);
+    expect(automaticCompactionByteTrigger(undefined)).toBeUndefined();
+  });
+});
 
 describe('automatic ContextCompactor trigger probe', () => {
   it('returns unchanged history without taking a semantic snapshot', async () => {

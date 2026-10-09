@@ -457,8 +457,99 @@ describe('LocalModelResolver request-body byte authority', () => {
     );
 
     expect(resolved.map((model) => model.maxRequestBodyBytes)).toEqual([
-      128, 256, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864,
+      128, 256, 16_777_216, 16_777_216, 16_777_216, 16_777_216, 16_777_216, 16_777_216, 16_777_216,
     ]);
+  });
+});
+
+describe('LocalModelResolver request-body budget per delivery channel', () => {
+  const catalogModel = {
+    reasoning: true,
+    limit: { context: 512_000, output: 128_000 },
+    capabilities: { max_request_body_bytes: 16_777_216 },
+  };
+
+  it('uses the strict catalog budget for the managed MiniMax path', async () => {
+    const resolver = new LocalModelResolver({
+      providerConfig: {
+        minimax: {
+          options: { apiKey: 'managed-key', baseURL: 'https://managed.example/messages-api' },
+          models: { 'MiniMax-M3': catalogModel },
+        },
+      },
+    });
+    const resolved = await resolver.resolveModel({
+      sessionId: 'session-managed-budget',
+      turnId: 'turn-managed-budget',
+      agentConfig: {
+        ...AGENT_CONFIG,
+        model: {
+          provider: 'minimax',
+          model_id: 'MiniMax-M3',
+          capabilities: { max_request_body_bytes: 16_777_216 },
+        },
+      },
+    });
+    expect(resolved.model.provider).toBe('minimax');
+    expect(resolved.maxRequestBodyBytes).toBe(16_777_216);
+  });
+
+  it.each([
+    ['minimax_api', undefined],
+    ['minimax', 'minimax_api_key'],
+  ])('uses the direct-channel budget for the MiniMax API key path (%s)', async (provider, source) => {
+    const resolver = new LocalModelResolver({
+      providerConfig: { minimax: { models: { 'MiniMax-M3': catalogModel } } },
+      byokConfigGetter: () => ({
+        ...(source ? { minimaxModelSource: source } : {}),
+        minimax_api: { apiKey: 'minimax-user-key', baseURL: 'https://byok.example/messages-api' },
+      }),
+    });
+    const resolved = await resolver.resolveModel({
+      sessionId: `session-api-budget-${provider}`,
+      turnId: `turn-api-budget-${provider}`,
+      agentConfig: {
+        ...AGENT_CONFIG,
+        model: {
+          provider,
+          model_id: 'MiniMax-M3',
+          capabilities: { max_request_body_bytes: 16_777_216 },
+        },
+      },
+    });
+    expect(resolved.model.provider).toBe('minimax_api');
+    expect(resolved.maxRequestBodyBytes).toBe(28 * 1024 * 1024);
+  });
+
+  it('keeps a custom provider configurable, defaulting to 16 MiB', async () => {
+    const resolver = new LocalModelResolver({
+      byokConfigGetter: () => ({
+        custom_provider: {
+          work: {
+            api: 'openai-completions',
+            options: { apiKey: 'custom-user-key', baseURL: 'https://custom.example/v1/' },
+            models: { model: { limit: { context: 96_000, output: 12_000 } } },
+          },
+        },
+      }),
+    });
+    const resolve = (capabilities?: Record<string, unknown>) =>
+      resolver.resolveModel({
+        sessionId: 'session-custom-budget',
+        turnId: 'turn-custom-budget',
+        agentConfig: {
+          ...AGENT_CONFIG,
+          model: {
+            provider: 'custom_provider:work',
+            model_id: 'model',
+            ...(capabilities ? { capabilities } : {}),
+          },
+        },
+      });
+    expect((await resolve()).maxRequestBodyBytes).toBe(16_777_216);
+    expect(
+      (await resolve({ max_request_body_bytes: 100 * 1024 * 1024 })).maxRequestBodyBytes,
+    ).toBe(100 * 1024 * 1024);
   });
 });
 

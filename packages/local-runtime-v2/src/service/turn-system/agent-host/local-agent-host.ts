@@ -23,6 +23,7 @@ import {
 } from './compaction/agent-host-compaction-executor.js';
 import {
   ContextCompactionAttemptFactory,
+  automaticCompactionByteTrigger,
   createAutomaticContextCompactionHook,
 } from './compaction/context-compaction.js';
 import {
@@ -595,7 +596,9 @@ export class LocalAgentHost<
       context,
       input.lease.leaseId,
       {
-        maxSerializedInputBytes: preflight.preparation.llm.maxRequestBodyBytes,
+        maxSerializedInputBytes: automaticCompactionByteTrigger(
+          preflight.preparation.llm.maxRequestBodyBytes,
+        ),
         attempts: this.compactionAttempts,
         logger: this.dependencies.logger,
         ...(pluginHooks.length
