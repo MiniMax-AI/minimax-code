@@ -668,7 +668,7 @@ function readNpmPrefixReceipt(
 const HOMEBREW_CELLAR_NODE_PATH =
   /^(?<prefix>.+)\/Cellar\/(?<formula>node(?:@\d+(?:\.\d+)*)?)\/[^/]+\/bin\/node$/u;
 const HOMEBREW_MANAGED_NODE_PATH =
-  /^(?<prefix>\/(?:opt\/homebrew|usr\/local|home\/linuxbrew\/.linuxbrew))\/(?:(?<formula>node(?:@\d+(?:\.\d+)*)?)\/bin\/node|bin\/node)$/u;
+  /^(?<prefix>\/(?:opt\/homebrew|usr\/local|home\/linuxbrew\/\.linuxbrew))\/(?:opt\/(?<formula>node(?:@\d+(?:\.\d+)*)?)\/bin\/node|bin\/node)$/u;
 
 function canonicalReceiptNodeExecutable(nodeExecutable: string): string | undefined {
   const canonical = canonicalHomebrewNodeExecutable(nodeExecutable);

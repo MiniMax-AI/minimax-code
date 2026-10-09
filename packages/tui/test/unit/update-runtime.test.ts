@@ -332,6 +332,17 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'modul
     const legacyInstall = resolveMcodeNpmPrefixInstall(legacyEntry);
     expect(legacyInstall).toBeDefined();
     expect(legacyInstall?.nodeExecutable).toBeUndefined();
+
+    const brewRoot = path.join(root, 'homebrew');
+    const kegNode = path.join(brewRoot, 'Cellar', 'node', '26.7.0', 'bin', 'node');
+    placeNodeBinaryAt(kegNode);
+    const optLink = path.join(brewRoot, 'opt', 'node');
+    mkdirSync(path.dirname(optLink), { recursive: true });
+    symlinkSync(path.join(brewRoot, 'Cellar', 'node', '26.7.0'), optLink);
+    writeReceipt({ nodeExecutable: path.join(optLink, 'bin', 'node') });
+    expect(resolveMcodeNpmPrefixInstall(versionedEntry)?.nodeExecutable).toBe(
+      path.join(optLink, 'bin', 'node'),
+    );
   });
 });
 
