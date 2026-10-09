@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocalModelCache } from '../catalog/model-cache.js';
+import { byokModelTestStatus } from '../catalog/config-fingerprint.js';
 import type {
   LocalByokConfigDraft,
   LocalRuntimeConfig,
@@ -166,34 +167,45 @@ describe('LocalModelProviderService context', () => {
     });
   });
 
-  it('uses shared request rules for tests and records the result in the model cache', async () => {
-    const harness = createHarness();
-    const provider = await harness.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com/v1/responses',
-      apiKey: CUSTOM_KEY,
-      apiFormat: 'openai-responses',
-      headers: { Authorization: 'Api-Key custom', 'X-Tenant': 'tenant-a' },
-      models: [{ modelId: 'gpt-5' }],
-    });
+  it.each(['', '?tenant=a&tenant=b&encoded=%2F#local'])(
+    'uses shared request rules and cache fingerprints for saved URLs: %s',
+    async (suffix) => {
+      const harness = createHarness();
+      const provider = await harness.service.createUserProvider({
+        name: 'Work',
+        baseUrl: `https://api.example.com/v1/responses${suffix}`,
+        apiKey: CUSTOM_KEY,
+        apiFormat: 'openai-responses',
+        headers: { Authorization: 'Api-Key custom', 'X-Tenant': 'tenant-a' },
+        models: [{ modelId: 'gpt-5' }],
+      });
 
-    await expect(harness.service.testModel(provider.providerId, 'gpt-5')).resolves.toMatchObject({
-      ok: true,
-      status: { state: 'available', lastTestedAt: 1_750_000_000_000 },
-    });
-    expect(harness.testCalls).toHaveLength(1);
-    expect(harness.testCalls[0]?.target).toMatchObject({
-      api: 'openai-responses',
-      baseUrl: 'https://api.example.com/v1',
-      apiKey: CUSTOM_KEY,
-      modelId: 'gpt-5',
-      headers: { Authorization: 'Api-Key custom', 'X-Tenant': 'tenant-a' },
-    });
-    expect(harness.cache.load().model_status['custom_provider:work/gpt-5']).toMatchObject({
-      state: 'available',
-      last_tested_at: 1_750_000_000_000,
-    });
-  });
+      await expect(
+        harness.service.testModel(provider.providerId, 'gpt-5'),
+      ).resolves.toMatchObject({
+        ok: true,
+        status: { state: 'available', lastTestedAt: 1_750_000_000_000 },
+      });
+      expect(harness.testCalls).toHaveLength(1);
+      expect(harness.testCalls[0]?.target).toMatchObject({
+        api: 'openai-responses',
+        baseUrl: `https://api.example.com/v1${suffix}`,
+        apiKey: CUSTOM_KEY,
+        modelId: 'gpt-5',
+        headers: { Authorization: 'Api-Key custom', 'X-Tenant': 'tenant-a' },
+      });
+      expect(harness.config.custom_provider?.work?.options?.baseURL).toBe(
+        `https://api.example.com/v1/responses${suffix}`,
+      );
+      expect(
+        byokModelTestStatus(harness.config, harness.cache.load(), provider.providerId, 'gpt-5'),
+      ).toMatchObject({ state: 'available' });
+      expect(harness.cache.load().model_status['custom_provider:work/gpt-5']).toMatchObject({
+        state: 'available',
+        last_tested_at: 1_750_000_000_000,
+      });
+    },
+  );
 
   it('keeps a failed connectivity result as diagnostic state rather than a selection gate', async () => {
     const harness = createHarness();
