@@ -26,6 +26,12 @@ export interface PiBeforeLlmCallHookInput {
   sessionId: string;
   turnId: string;
   phase: PiBeforeLlmCallPhase;
+  /**
+   * Set only when the runner re-runs `contextOverflowRecoveryHook` after the
+   * provider rejected the request as too large (HTTP 413 / context overflow).
+   * Compaction hooks must compact regardless of their own size estimate.
+   */
+  trigger?: 'context_overflow_recovery';
   /** Current provider request view after request-only hook transforms. */
   messages: AgentMessage[];
   /** Current durable history, updated only by canonical replacements. */
@@ -251,6 +257,15 @@ export type PiOnTurnEndHook = PiOnStepEndHook;
 
 export interface PiTurnHooks {
   beforeLlmCallHook?: readonly PiBeforeLlmCallHook[];
+  /**
+   * Hooks that may shrink the context after the provider rejected a main-agent
+   * request as too large (HTTP 413, `request_too_large`, the local request-body
+   * check, or a context-window overflow) before producing any output. The
+   * runner runs them once per turn with `trigger: 'context_overflow_recovery'`
+   * and, when they replace the context, resends the request once. Only
+   * compaction belongs here: reminder or append hooks would run twice.
+   */
+  contextOverflowRecoveryHook?: readonly PiBeforeLlmCallHook[];
   /** Best-effort observers of actual logical main-agent provider calls. */
   onLlmCallPreparedHook?: readonly PiOnLlmCallPreparedHook[];
   afterLlmCallHook?: readonly PiAfterLlmCallHook[];

@@ -116,7 +116,9 @@ function prepareAutomaticCompaction(
     sessionId: input.sessionId,
     messages: input.messages,
   });
+  const forced = input.force === 'context_overflow_recovery';
   const normalTriggerMatched =
+    forced ||
     footprint.inputTokens > automaticTriggerAt ||
     (input.maxSerializedInputBytes !== undefined &&
       footprint.serializedBytes > input.maxSerializedInputBytes);
@@ -128,6 +130,31 @@ function prepareAutomaticCompaction(
     normalTriggerMatched,
     shouldStart: toolResultCompactionPlan !== undefined || normalTriggerMatched,
     providerInputLimit,
+    forcedLimits: forced ? overflowRecoveryLimits(footprint, input.maxSerializedInputBytes) : {},
+  };
+}
+
+/**
+ * Share of the rejected request a forced overflow-recovery compaction may keep.
+ * The provider rejected a request the local estimate admitted, so admitting a
+ * candidate against the configured limits alone could resend the same size.
+ */
+const OVERFLOW_RECOVERY_RETAINED_SHARE = 0.5;
+
+function overflowRecoveryLimits(
+  footprint: { readonly inputTokens: number; readonly serializedBytes: number },
+  maxSerializedInputBytes: number | undefined,
+): { readonly providerInputLimit?: number; readonly maxSerializedInputBytes?: number } {
+  const tokens = Math.floor(footprint.inputTokens * OVERFLOW_RECOVERY_RETAINED_SHARE);
+  const bytes = Math.floor(footprint.serializedBytes * OVERFLOW_RECOVERY_RETAINED_SHARE);
+  return {
+    ...(tokens > 0 ? { providerInputLimit: tokens } : {}),
+    ...(bytes > 0
+      ? {
+          maxSerializedInputBytes:
+            maxSerializedInputBytes === undefined ? bytes : Math.min(bytes, maxSerializedInputBytes),
+        }
+      : {}),
   };
 }
 
@@ -144,7 +171,7 @@ async function runAutomaticPolicy(options: {
   const { input, hooks, preparation } = options;
   return compactContext({
     history: input.messages,
-    limits: automaticLimits(input, preparation.providerInputLimit),
+    limits: automaticLimits(input, preparation.providerInputLimit, preparation.forcedLimits),
     measurePair: async (pair) => preparation.measurer.measurePair(pair),
     ...(options.toolResultCompactionCandidate
       ? { toolResultCompactionCandidate: options.toolResultCompactionCandidate }
@@ -165,12 +192,16 @@ async function runAutomaticPolicy(options: {
 function automaticLimits(
   input: AutomaticContextCompactionInput,
   providerInputLimit: number,
+  forcedLimits: ReturnType<typeof overflowRecoveryLimits>,
 ): CompactContextInput['limits'] {
+  const maxSerializedInputBytes =
+    forcedLimits.maxSerializedInputBytes ?? input.maxSerializedInputBytes;
   return {
-    providerInputLimit,
-    ...(input.maxSerializedInputBytes === undefined
-      ? {}
-      : { maxSerializedInputBytes: input.maxSerializedInputBytes }),
+    providerInputLimit: Math.min(
+      providerInputLimit,
+      forcedLimits.providerInputLimit ?? providerInputLimit,
+    ),
+    ...(maxSerializedInputBytes === undefined ? {} : { maxSerializedInputBytes }),
   };
 }
 
