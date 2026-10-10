@@ -795,7 +795,7 @@ describe("Codex OAuth profile credentials", () => {
       fetch: fetchImpl,
     });
     expect(fetchImpl).toHaveBeenCalledWith(
-      expect.stringContaining("/codex/models?"),
+      "https://chatgpt.com/backend-api/codex/models?client_version=0.162.0",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer fresh",
