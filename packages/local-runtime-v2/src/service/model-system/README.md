@@ -63,7 +63,7 @@ Official OpenCode Go HTTPS endpoints under `https://opencode.ai/zen/go` receive 
 
 登录完成后，`CodexOAuthManager` 从当前 profile 的 `codex-auth.json` 获取凭据，复用
 `AuthStorage` 的刷新机制和宿主 `fetch`，请求
-`https://chatgpt.com/backend-api/codex/models?client_version=0.153.0`。
+`https://chatgpt.com/backend-api/codex/models?client_version=0.162.0`。
 `connectivity/codex-model-discovery.ts` 负责这个独立的 Codex 协议。兼容版本来自已验证的
 Codex 客户端协议，与 MiniMax Code 产品版本独立；模型 ID 和思考等级由响应提供。OAuth 解析复用可配置思考协议，将远端等级原样映射到请求；
 `ultra` 等新增等级不依赖 Pi 的静态等级枚举。
