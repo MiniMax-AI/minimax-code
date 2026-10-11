@@ -1,15 +1,16 @@
 import path from 'node:path';
 import type { Terminal } from '../engine/public.js';
-import type { TuiAgentStatus } from '../shell/status-protocol.js';
+import type { TuiProgramStatus } from './terminal-program-status.js';
 import { sanitizeTerminalLabel } from '../rendering/terminal-text.js';
 
 const DEFAULT_ITEMS = ['status', 'session-name', 'app-name'] as const;
-const STATUS_LABELS: Record<TuiAgentStatus, string> = {
+const STATUS_LABELS: Record<TuiProgramStatus, string> = {
   ready: 'Ready',
   run: 'Working',
   perm: 'Needs approval',
   plan: 'Needs approval',
   ask: 'Needs input',
+  auth: 'Needs login',
   done: 'Done',
   fail: 'Failed',
   cancel: 'Stopped',
@@ -32,7 +33,7 @@ export function formatTuiTerminalTitle(
     readonly title?: string;
     readonly sessionId?: string;
     readonly workspace: string;
-    readonly status: TuiAgentStatus;
+    readonly status: TuiProgramStatus;
   },
   items: readonly string[] | null = DEFAULT_ITEMS,
 ): string | undefined {

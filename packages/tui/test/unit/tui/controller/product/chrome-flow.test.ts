@@ -386,6 +386,10 @@ describe("TuiChromeFlow agent status sequence", () => {
       account: { status: "needs-login", authMode: "managed-login" } as TuiChatSnapshot["account"],
     });
     expect(setProgramStatus).toHaveBeenLastCalledWith("auth");
+    // The machine line keeps its fatal-error contract; human-facing outputs say why.
+    expect(shells.at(-1)).toMatchObject({ agentStatus: "error" });
+    expect(shells.at(-1)?.agentRunId).toBeUndefined();
+    expect(setTerminalTitle).toHaveBeenLastCalledWith("Needs login | workspace (session-) | MCode");
     const authenticated = {
       ...snapshot("session-3"),
       account: {
@@ -396,6 +400,8 @@ describe("TuiChromeFlow agent status sequence", () => {
     };
     flow.update(authenticated);
     expect(setProgramStatus).toHaveBeenLastCalledWith("ready");
+    expect(shells.at(-1)).toMatchObject({ agentStatus: "ready" });
+    expect(setTerminalTitle).toHaveBeenLastCalledWith("Ready | workspace (session-) | MCode");
     flow.update({ ...authenticated, status: "running", activeTurnId: "after-login" });
     expect(setProgramStatus).toHaveBeenLastCalledWith("run");
     flow.update({
@@ -410,5 +416,12 @@ describe("TuiChromeFlow agent status sequence", () => {
     expect(setProgramStatus).toHaveBeenLastCalledWith("error");
     flow.update(snapshot("fatal-session"));
     expect(setProgramStatus).toHaveBeenLastCalledWith("error");
+    // A fatal error is not downgraded to a recoverable login wait.
+    flow.update({
+      ...snapshot("fatal-session"),
+      account: { status: "needs-login", authMode: "managed-login" } as TuiChatSnapshot["account"],
+    });
+    expect(setProgramStatus).toHaveBeenLastCalledWith("error");
+    expect(setTerminalTitle).toHaveBeenLastCalledWith("Error | workspace (fatal-se) | MCode");
   });
 });

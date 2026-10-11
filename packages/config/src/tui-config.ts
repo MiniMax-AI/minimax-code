@@ -43,6 +43,8 @@ export interface TuiConfig {
   };
   /** Show contextual Tips in the idle composer header. Defaults to true. */
   showTips?: boolean;
+  /** Report OSC 7501 program status to the terminal. Defaults to true. */
+  programStatus?: boolean;
   /**
    * Status line items, in display order.
    *
@@ -112,6 +114,7 @@ export function parseTuiConfig(raw: Record<string, unknown>): TuiConfig {
           }
         : {}),
     ...(typeof tui.showTips === 'boolean' ? { showTips: tui.showTips } : {}),
+    ...(typeof tui.programStatus === 'boolean' ? { programStatus: tui.programStatus } : {}),
     ...(notifications ? { notifications } : {}),
     ...(statusLine ? { statusLine } : {}),
     ...(customStatusLine ? { customStatusLine } : {}),

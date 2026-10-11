@@ -21,17 +21,20 @@ observed generation window, not server hardware throughput.
 The interactive TUI also reports [OSC 7501 program status](https://www.superlogical.com/rex/docs/build/program-status)
 with `app=mcode`: idle, working, done, error, or blocked on permission, a question,
 or login. It reuses the current session's runtime status, including queue handoffs,
-compaction and retries. Cancellation and suspension report idle; resume reapplies
-the current status. Completed and failed results remain reported when the TUI exits.
-Reports contain only fixed status metadata and are sent on changes, without a
-heartbeat or capability query, as permitted by protocol revision 0.3. Supporting
-terminals decide how to display them; other terminals should ignore the sequence.
-Multiplexers must support or pass through OSC 7501 for the outer terminal to see it.
-Redirected output, headless exec and ACP do not emit these reports. Existing title
-and notification settings remain independent of program status.
+compaction and retries, and does not depend on status line items. Cancellation and
+suspension report idle; resume reapplies the current status. Completed and failed
+results remain reported when the TUI exits. Reports contain only `state`, `kind` and
+`app`, and are sent on changes, without a heartbeat or capability query, as
+permitted by protocol revision 0.4. Supporting terminals decide how to display
+them; other terminals should ignore the sequence. The protocol treats each
+multiplexer pane as its own terminal, so MCode does not wrap reports for tmux
+passthrough; the multiplexer must implement OSC 7501 for its panes. Redirected
+output, headless exec and ACP do not emit these reports. Set
+`tui.programStatus: false` to disable them. Existing title and notification
+settings remain independent of program status.
 
 Terminal titles show the current state, session name and MCode, for example
-`Needs approval | Fix login | MCode`. Renaming or switching a session updates the
+`Needs approval | Fix login | MCode`, or `Needs login` while sign-in is required. Renaming or switching a session updates the
 title. Unnamed sessions use the project name and a short session ID. Titles are
 cleared when MCode exits or suspends and reapplied when it resumes.
 
@@ -40,6 +43,7 @@ Configure these presentation settings in the MCode data directory's `config.yaml
 ```yaml
 tui:
   terminalTitle: [status, session-name, app-name]
+  programStatus: true
   notifications:
     when: unfocused
     method: auto

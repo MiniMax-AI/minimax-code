@@ -8,6 +8,7 @@ export interface TuiPresentationConfig {
   readonly showTips?: boolean;
   readonly statusLineItems?: readonly string[];
   readonly notifications?: TuiNotificationSettings;
+  readonly programStatus?: boolean;
   readonly customStatusLine?: TuiCustomStatusLineConfig;
 }
 
@@ -32,6 +33,7 @@ export async function readTuiPresentationConfig(dataDir: string): Promise<TuiPre
       ...(typeof tui?.showTips === 'boolean' ? { showTips: tui.showTips } : {}),
       ...(Array.isArray(tui?.statusLine) ? { statusLineItems: tui.statusLine } : {}),
       ...(tui?.notifications ? { notifications: tui.notifications } : {}),
+      ...(typeof tui?.programStatus === 'boolean' ? { programStatus: tui.programStatus } : {}),
       // Config already validated the shape; a block without a command was dropped there.
       ...(tui?.customStatusLine?.command ? { customStatusLine: tui.customStatusLine } : {}),
     };

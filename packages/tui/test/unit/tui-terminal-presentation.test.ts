@@ -35,6 +35,9 @@ describe('terminal title ownership', () => {
     expect(formatTuiTerminalTitle({ ...input, title: 'New session' })).toBe(
       'Needs approval | workspace (session-) | MCode',
     );
+    expect(formatTuiTerminalTitle({ ...input, status: 'auth' })).toBe(
+      'Needs login | 修复 登录 | MCode',
+    );
     const long = formatTuiTerminalTitle({ ...input, title: '😀'.repeat(300) })!;
     expect(Array.from(long)).toHaveLength(240);
     expect(long).not.toContain('\ufffd');
@@ -112,6 +115,13 @@ describe('OSC 7501 program status', () => {
     status.update(state);
     status.update(state);
     expect(terminal.write.mock.calls).toEqual([[`\u001b]7501;${body}:app=mcode\u001b\\`]]);
+    // Only fixed metadata leaves the TUI: no id, msg, title or progress pairs.
+    const sequence = terminal.write.mock.calls[0]![0] as string;
+    const keys = sequence
+      .slice('\u001b]7501;'.length, -'\u001b\\'.length)
+      .split(':')
+      .map((pair) => pair.split('=')[0]);
+    expect(keys.every((key) => ['state', 'kind', 'app'].includes(key!))).toBe(true);
   });
 
   it('releases a suspended TUI, ignores late updates and reapplies status on resume', () => {

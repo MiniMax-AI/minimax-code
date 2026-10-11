@@ -43,6 +43,17 @@ describe('terminal presentation configuration', () => {
       });
     },
   );
+
+  it.each([
+    ['false', false],
+    ['true', true],
+    ['off', undefined],
+  ] as const)('reads programStatus %s through the config loader', async (raw, expected) => {
+    const dataDir = await temporaryDataDir();
+    await writeFile(join(dataDir, 'config.yaml'), `tui:\n  programStatus: ${raw}\n`, 'utf8');
+    const settings = await readTuiPresentationConfig(dataDir);
+    expect(settings.programStatus).toBe(expected);
+  });
 });
 
 describe('TUI mode settings', () => {

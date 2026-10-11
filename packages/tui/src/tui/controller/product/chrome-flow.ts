@@ -29,7 +29,6 @@ import {
 import { resolveTuiComposerInputIntent } from '../../commands/input-intent.js';
 import { formatTuiTerminalTitle } from '../../platform/terminal-title.js';
 import type { TuiProgramStatus } from '../../platform/terminal-program-status.js';
-import { tuiAccountNeedsLoginPrompt } from '../../../application/login-gate.js';
 
 type PresentationSink<K extends keyof TuiVisiblePresentation> = {
   setState(state: TuiVisiblePresentation[K]): void;
@@ -222,18 +221,19 @@ export class TuiChromeFlow {
       ...(backgroundTasks !== undefined ? { backgroundTasks } : {}),
     });
     if (this.options.isStarted()) {
-      this.options.setProgramStatus(
-        snapshot.account && tuiAccountNeedsLoginPrompt(snapshot.account)
-          ? 'auth'
-          : automationStatus.status,
-      );
+      // Title and program status present the same projection; only login gets
+      // a more specific human-facing state than the machine `[V]` error.
+      const programStatus: TuiProgramStatus = automationStatus.loginRequired
+        ? 'auth'
+        : automationStatus.status;
+      this.options.setProgramStatus(programStatus);
       this.options.setTerminalTitle(
         formatTuiTerminalTitle(
           {
             title: snapshot.session?.title,
             sessionId: snapshot.session?.sessionId,
             workspace: this.options.workspace,
-            status: automationStatus.status,
+            status: programStatus,
           },
           this.options.terminalTitle,
         ),

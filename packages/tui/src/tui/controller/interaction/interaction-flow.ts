@@ -47,7 +47,6 @@ import {
   TuiPlanEntryPanel,
   type TuiPlanEntryAction,
 } from '../../features/interaction/plan-entry-panel.js';
-import { parseTuiStatusLineItems } from '../../shell/status-line-items.js';
 
 type AppendLocalCell = (content: string, kind?: 'final-summary' | 'warning' | 'error') => void;
 
@@ -81,14 +80,12 @@ export interface TuiInteractionFlowOptions {
   readonly notify?: (kind: TuiTerminalNotificationKind, key: string) => void;
   readonly permissionSessionScope?: (activeSessionId: string) => ReadonlySet<string>;
   readonly permissionOwnerTurnId?: (ownerSessionId: string) => string | undefined;
-  readonly agentStatusLineItems?: readonly string[];
   readonly stopTurn: () => void;
 }
 
 export class TuiInteractionFlow {
   private readonly defaultAgentName: string;
   private readonly continuation: QuestionnaireContinuation;
-  private readonly agentStatusEnabled: boolean;
   private readonly questionnaireDismissals = new Set<string>();
   private panel: Component | undefined;
   private planViewRevision = 0;
@@ -97,10 +94,6 @@ export class TuiInteractionFlow {
 
   constructor(private readonly options: TuiInteractionFlowOptions) {
     this.defaultAgentName = options.defaultAgentName ?? MINIMAX_CODE_DEFAULT_AGENT_NAME;
-    this.agentStatusEnabled = Boolean(
-      options.agentStatusLineItems &&
-      parseTuiStatusLineItems(options.agentStatusLineItems).includes('build-mode'),
-    );
     this.continuation = new QuestionnaireContinuation({
       runtime: options.runtime,
       controller: options.controller,
@@ -156,9 +149,11 @@ export class TuiInteractionFlow {
     return false;
   }
 
-  /** Structured interaction state for the machine status line. */
+  /**
+   * Structured interaction state shared by the machine status line, terminal
+   * title and program status. Display settings must not change these facts.
+   */
   agentReadback(): TuiAgentInteractionReadback | undefined {
-    if (!this.agentStatusEnabled) return undefined;
     const permission = this.permission();
     if (permission) {
       if (!hasPermissionRequestId(permission)) return { kind: 'invalid' };
@@ -1301,7 +1296,6 @@ export class TuiInteractionFlow {
   }
 
   private withAgentSubmission<T>(requestId: string, action: () => Promise<T>): Promise<T> {
-    if (!this.agentStatusEnabled) return action();
     const sessionId = this.options.stateStore.snapshot().activeSessionId;
     this.submittingRequestId = requestId;
     this.submittingSessionId = sessionId;

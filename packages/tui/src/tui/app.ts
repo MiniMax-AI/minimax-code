@@ -275,7 +275,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       );
     },
     ...delegationFlow.permissionResolvers(liveRunId),
-    agentStatusLineItems: options.statusLineItems,
     stopTurn: () => {
       void abortLiveTurn();
     },

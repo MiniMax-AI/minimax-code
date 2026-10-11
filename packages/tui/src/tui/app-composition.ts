@@ -175,7 +175,10 @@ export function createTuiApplicationRenderer(options: CreateTuiAppOptions) {
     { settings: options.notifications, capabilities },
   );
   const terminalTitle = new TuiTerminalTitle(terminal, capabilities.isTTY);
-  const terminalProgramStatus = new TuiTerminalProgramStatus(terminal, capabilities.isTTY);
+  const terminalProgramStatus = new TuiTerminalProgramStatus(
+    terminal,
+    capabilities.isTTY && options.programStatus !== false,
+  );
   themeController = new TuiThemeController({
     ui: tui,
     colorLevel: capabilities.colorLevel,

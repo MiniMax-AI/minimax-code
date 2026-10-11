@@ -23,6 +23,12 @@ export interface TuiAutomationStatusFacts {
 export interface TuiAutomationStatusSnapshot {
   readonly seq: string;
   readonly status: TuiAgentStatus;
+  /**
+   * `error` caused by a missing login rather than a fatal failure. The `[V]`
+   * line still reports `error`; human-facing outputs can say that login is
+   * needed. Derived from current account facts, so it clears after login.
+   */
+  readonly loginRequired?: true;
   readonly sessionId?: string;
   readonly turnId?: string;
   readonly requestId?: string;
@@ -135,12 +141,13 @@ export class TuiAutomationStatusStore {
       return { status: 'run', ...session, ...counts };
     }
 
-    // Login is recoverable within the same Session; derive it from current account facts.
-    if (
-      this.stickyFatalError ||
-      (facts.snapshot.account && tuiAccountNeedsLoginPrompt(facts.snapshot.account))
-    ) {
+    if (this.stickyFatalError) {
       return { status: 'error', ...session, ...counts };
+    }
+
+    // Login is recoverable within the same Session; derive it from current account facts.
+    if (facts.snapshot.account && tuiAccountNeedsLoginPrompt(facts.snapshot.account)) {
+      return { status: 'error', loginRequired: true, ...session, ...counts };
     }
 
     if (facts.snapshot.status === 'error') {
