@@ -1,6 +1,6 @@
 # TUI capability coverage
 
-The current capability target is **TUI 0.4.12**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
+The current capability target is **TUI 0.6.3**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
 ## Output speed
 
@@ -77,7 +77,7 @@ terminal-tab indicator, not a guarantee of a desktop notification. See the
 Inside tmux, OSC notifications require passthrough and support from the outer
 terminal; use `method: bel` for a bell fallback.
 
-The evidence column summarizes the historical TUI 0.3.11 restoration record from 2026-09-11. It does not claim fresh TUI 0.4.12 live-service acceptance. Use [current verification status](verification.md#current-source-verification-status) for checks run against the updated source and explicit NOT RUN boundaries.
+The evidence column summarizes the historical TUI 0.3.11 restoration record from 2026-09-11. It does not claim fresh TUI 0.6.3 live-service acceptance. Use [current verification status](verification.md#current-source-verification-status) for checks run against the updated source and explicit NOT RUN boundaries.
 
 | Capability | Implementation | Evidence |
 | --- | --- | --- |
@@ -190,7 +190,7 @@ Website deployment tools and routes follow the original tool set. Successful dep
 
 ## Release boundary
 
-Production client paths are restored without internal registries or test-service addresses as build dependencies. Real account behavior, quota, billing, model quality, media generation, and deployment require separate acceptance. Mocks, protocol fixtures, successful builds, and the source import do not replace that evidence. Public npm `latest` was 0.4.12 on 2026-09-18; that metadata observation does not validate the installed package or deploy a backend. See [verification records](verification.md) and the historical [release audit](release-audit.md) for recorded acceptance results.
+Production client paths are restored without internal registries or test-service addresses as build dependencies. Real account behavior, quota, billing, model quality, media generation, and deployment require separate acceptance. Mocks, protocol fixtures, successful builds, and the source import do not replace that evidence. Public npm `latest` was 0.6.9 on 2026-10-13; that metadata observation does not validate the installed package or deploy a backend. See [verification records](verification.md) and the historical [release audit](release-audit.md) for recorded acceptance results.
 
 ## Diagnostic upload privacy
 
