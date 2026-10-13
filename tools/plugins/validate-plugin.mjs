@@ -14,7 +14,6 @@
 import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
-import YAML from "yaml";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -359,6 +358,30 @@ function parseJsonObject(text, location) {
   return value;
 }
 
+// The frontmatter subset a Skill needs is a flat mapping of scalar values.
+// Parsing it here keeps this validator free of runtime dependencies, because
+// check:source also runs it inside the exported source snapshot, which has no
+// node_modules. A full YAML parser is not required to enforce the V1 contract,
+// and using one would make the public validator unusable in that context.
+function parseFrontmatter(text) {
+  const result = {};
+  for (const line of text.split(/\r?\n/u)) {
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    const match = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/u.exec(line);
+    if (!match) continue;
+    const key = match[1];
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+    )
+      value = value.slice(1, -1);
+    if (Object.hasOwn(result, key)) return { error: `duplicate frontmatter key "${key}"` };
+    result[key] = value;
+  }
+  return { result };
+}
+
 function validateSkill(skillPath, location) {
   if (!existsSync(skillPath)) {
     fail("SKILL_MISSING", `${location}: ${skillPath} does not exist`);
@@ -373,17 +396,12 @@ function validateSkill(skillPath, location) {
     fail("SKILL_FRONTMATTER", `${location}: frontmatter block is not closed`);
     return;
   }
-  let frontmatter;
-  try {
-    frontmatter = YAML.parse(match[1], { uniqueKeys: true });
-  } catch (error) {
-    fail("SKILL_YAML", `${location}: ${error.message}`);
+  const parsed = parseFrontmatter(match[1]);
+  if (parsed.error) {
+    fail("SKILL_YAML", `${location}: ${parsed.error}`);
     return;
   }
-  if (!frontmatter || typeof frontmatter !== "object" || Array.isArray(frontmatter)) {
-    fail("SKILL_YAML", `${location}: frontmatter must be a mapping`);
-    return;
-  }
+  const frontmatter = parsed.result;
   if (typeof frontmatter.name !== "string" || frontmatter.name.trim() === "")
     fail("SKILL_NAME", `${location}: frontmatter "name" is required`);
   if (typeof frontmatter.description !== "string" || frontmatter.description.trim() === "")
