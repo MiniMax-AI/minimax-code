@@ -109,6 +109,15 @@ for (const entry of native.files) {
   if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256)
     violations.push(`${entry.path}: native helper integrity mismatch`);
 }
+
+// The public Plugin contract is validated by the same code path an external
+// author runs. Keeping it inside check:source stops the published schemas and
+// the public validator from drifting apart.
+const { validatePluginContract } = await import(
+  new URL("../tools/plugins/validate-plugin.mjs", import.meta.url).href
+);
+for (const problem of validatePluginContract(root))
+  violations.push(`plugin contract: ${problem}`);
 if (violations.length)
   throw new Error(`Public source check failed:\n${violations.join("\n")}`);
 if (process.argv.includes("--write")) {

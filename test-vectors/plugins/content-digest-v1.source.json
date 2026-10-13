@@ -1,0 +1,414 @@
+{
+  "contractVersion": 1,
+  "cases": [
+    {
+      "name": "empty-tree",
+      "entries": [],
+      "expect": {
+        "valid": true
+      }
+    },
+    {
+      "name": "minimal-package",
+      "entries": [
+        {
+          "path": ".minimax-plugin/plugin.json",
+          "kind": "file",
+          "contentUtf8": "{\"schemaVersion\":1,\"name\":\"demo\"}\n"
+        },
+        {
+          "path": "skills/research/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "---\nname: research\ndescription: Research a topic\n---\n\nUse the available tools.\n"
+        }
+      ],
+      "expect": {
+        "valid": true
+      }
+    },
+    {
+      "name": "source-order-ignored",
+      "entries": [
+        {
+          "path": "skills/research/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "---\nname: research\ndescription: Research a topic\n---\n\nUse the available tools.\n"
+        },
+        {
+          "path": ".minimax-plugin/plugin.json",
+          "kind": "file",
+          "contentUtf8": "{\"schemaVersion\":1,\"name\":\"demo\"}\n"
+        }
+      ],
+      "expect": {
+        "valid": true,
+        "equivalentTo": "minimal-package"
+      }
+    },
+    {
+      "name": "metadata-ignored",
+      "entries": [
+        {
+          "path": ".minimax-plugin/plugin.json",
+          "kind": "file",
+          "contentUtf8": "{\"schemaVersion\":1,\"name\":\"demo\"}\n",
+          "mode": 493,
+          "mtimeMs": 1893456000000
+        },
+        {
+          "path": "skills/research/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "---\nname: research\ndescription: Research a topic\n---\n\nUse the available tools.\n",
+          "mode": 384,
+          "mtimeMs": 0
+        }
+      ],
+      "expect": {
+        "valid": true,
+        "equivalentTo": "minimal-package"
+      }
+    },
+    {
+      "name": "empty-directories-ignored",
+      "entries": [
+        {
+          "path": "empty",
+          "kind": "directory"
+        },
+        {
+          "path": "assets/unused",
+          "kind": "directory"
+        },
+        {
+          "path": ".minimax-plugin/plugin.json",
+          "kind": "file",
+          "contentUtf8": "{\"schemaVersion\":1,\"name\":\"demo\"}\n"
+        },
+        {
+          "path": "skills/research/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "---\nname: research\ndescription: Research a topic\n---\n\nUse the available tools.\n"
+        }
+      ],
+      "expect": {
+        "valid": true,
+        "equivalentTo": "minimal-package"
+      }
+    },
+    {
+      "name": "utf8-content-and-empty-file",
+      "entries": [
+        {
+          "path": "EMPTY",
+          "kind": "file",
+          "contentBase64": ""
+        },
+        {
+          "path": "skills/writer/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "---\nname: writer\ndescription: 中文写作\n---\n\n你好，MiniMax。\n"
+        }
+      ],
+      "expect": {
+        "valid": true
+      }
+    },
+    {
+      "name": "content-change",
+      "entries": [
+        {
+          "path": ".minimax-plugin/plugin.json",
+          "kind": "file",
+          "contentUtf8": "{\"schemaVersion\":1,\"name\":\"demo-2\"}\n"
+        },
+        {
+          "path": "skills/research/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "---\nname: research\ndescription: Research a topic\n---\n\nUse the available tools.\n"
+        }
+      ],
+      "expect": {
+        "valid": true,
+        "notEquivalentTo": "minimal-package"
+      }
+    },
+    {
+      "name": "absolute-path",
+      "entries": [
+        {
+          "path": "/etc/passwd",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "ABSOLUTE_PATH"
+      }
+    },
+    {
+      "name": "path-traversal",
+      "entries": [
+        {
+          "path": "../escape",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "PATH_TRAVERSAL"
+      }
+    },
+    {
+      "name": "empty-segment",
+      "entries": [
+        {
+          "path": "skills//SKILL.md",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "PATH_TRAVERSAL"
+      }
+    },
+    {
+      "name": "backslash-path",
+      "entries": [
+        {
+          "path": "skills\\demo\\SKILL.md",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "BACKSLASH_PATH"
+      }
+    },
+    {
+      "name": "unicode-path",
+      "entries": [
+        {
+          "path": "skills/研究/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "NON_PORTABLE_PATH"
+      }
+    },
+    {
+      "name": "case-collision",
+      "entries": [
+        {
+          "path": "README.md",
+          "kind": "file",
+          "contentUtf8": "one"
+        },
+        {
+          "path": "readme.md",
+          "kind": "file",
+          "contentUtf8": "two"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "CASE_COLLISION"
+      }
+    },
+    {
+      "name": "parent-segment-case-collision",
+      "entries": [
+        {
+          "path": "Skills/alpha/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "one"
+        },
+        {
+          "path": "skills/beta/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "two"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "CASE_COLLISION"
+      }
+    },
+    {
+      "name": "duplicate-path",
+      "entries": [
+        {
+          "path": "README.md",
+          "kind": "file",
+          "contentUtf8": "one"
+        },
+        {
+          "path": "README.md",
+          "kind": "file",
+          "contentUtf8": "two"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "DUPLICATE_PATH"
+      }
+    },
+    {
+      "name": "windows-reserved-path",
+      "entries": [
+        {
+          "path": "assets/CON.txt",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "WINDOWS_RESERVED_PATH"
+      }
+    },
+    {
+      "name": "windows-trailing-dot",
+      "entries": [
+        {
+          "path": "assets/icon.",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "NON_PORTABLE_PATH"
+      }
+    },
+    {
+      "name": "segment-too-long",
+      "entries": [
+        {
+          "path": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "SEGMENT_TOO_LONG"
+      }
+    },
+    {
+      "name": "file-parent-conflict",
+      "entries": [
+        {
+          "path": "skills",
+          "kind": "file",
+          "contentUtf8": "no"
+        },
+        {
+          "path": "skills/demo/SKILL.md",
+          "kind": "file",
+          "contentUtf8": "no"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "PATH_TYPE_CONFLICT"
+      }
+    },
+    {
+      "name": "symlink-entry",
+      "entries": [
+        {
+          "path": "skills/demo/SKILL.md",
+          "kind": "symlink",
+          "target": "../../outside"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "SYMLINK_NOT_ALLOWED"
+      }
+    },
+    {
+      "name": "special-entry",
+      "entries": [
+        {
+          "path": "runtime.sock",
+          "kind": "socket"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "SPECIAL_ENTRY_NOT_ALLOWED"
+      }
+    },
+    {
+      "name": "compressed-entry",
+      "entries": [
+        {
+          "path": "README.md",
+          "kind": "file",
+          "contentUtf8": "no",
+          "compression": "deflate"
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "UNSUPPORTED_COMPRESSION"
+      }
+    },
+    {
+      "name": "single-file-size-limit",
+      "entries": [
+        {
+          "path": "large.bin",
+          "kind": "file",
+          "declaredSize": 16777217
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "FILE_TOO_LARGE"
+      }
+    },
+    {
+      "name": "total-size-bomb-limit",
+      "entries": [
+        {
+          "path": "part-1.bin",
+          "kind": "file",
+          "declaredSize": 16777216
+        },
+        {
+          "path": "part-2.bin",
+          "kind": "file",
+          "declaredSize": 16777216
+        },
+        {
+          "path": "part-3.bin",
+          "kind": "file",
+          "declaredSize": 16777216
+        },
+        {
+          "path": "part-4.bin",
+          "kind": "file",
+          "declaredSize": 16777216
+        },
+        {
+          "path": "overflow.bin",
+          "kind": "file",
+          "declaredSize": 1
+        }
+      ],
+      "expect": {
+        "valid": false,
+        "error": "TOTAL_SIZE_LIMIT"
+      }
+    }
+  ]
+}

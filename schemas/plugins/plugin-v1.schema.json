@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:minimax:plugin:manifest:v1",
+  "title": "MiniMax Official Plugin Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "name",
+    "version",
+    "description",
+    "author",
+    "icon",
+    "category",
+    "exampleQueries",
+    "apps",
+    "mcpServers",
+    "skills"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\\s\\S])"
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?![\\s\\S])"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "icon": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.(?:png|jpe?g|webp)(?![\\s\\S])"
+    },
+    "darkIcon": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.(?:png|jpe?g|webp)(?![\\s\\S])"
+    },
+    "category": {
+      "enum": [
+        "Office",
+        "Studio",
+        "Design & Sites",
+        "Code",
+        "Business",
+        "Sales",
+        "Productivity",
+        "Science & Healthcare",
+        "Education",
+        "Other"
+      ]
+    },
+    "exampleQueries": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": ".*\\S.*"
+      }
+    },
+    "apps": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.app\\.json(?![\\s\\S])"
+      }
+    },
+    "mcpServers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.mcp\\.json(?![\\s\\S])"
+      }
+    },
+    "skills": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^skills/[A-Za-z0-9._-]+/SKILL\\.md(?![\\s\\S])"
+      }
+    },
+    "hostBindings": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^bindings/[A-Za-z0-9._-]+\\.binding\\.json(?![\\s\\S])"
+      }
+    },
+    "hooks": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 512,
+        "pattern": "^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.json(?![\\s\\S])"
+      }
+    }
+  },
+  "anyOf": [
+    {
+      "properties": {
+        "apps": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "mcpServers": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "skills": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "hooks"
+      ],
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "minItems": 1
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+{
+  "contractVersion": 1,
+  "contentDigestFormat": "sha256-tree-v1:<64 lowercase hex>",
+  "archiveSha256Format": "<64 lowercase hex>",
+  "limits": {
+    "maxArchiveBytes": 67108864,
+    "maxArchiveEntries": 2048,
+    "maxFiles": 1024,
+    "maxFileBytes": 16777216,
+    "maxTotalBytes": 67108864,
+    "maxPathBytes": 512,
+    "maxSegmentBytes": 128,
+    "maxPathSegments": 16
+  },
+  "cases": [
+    {
+      "name": "empty-tree",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:d8b0346ae446d3f6cf6f8d2a54b1d34c89f8c33673a9b5ee15d4b7c72670a970",
+      "archiveSha256": "8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85",
+      "archiveSize": 22,
+      "fileCount": 0,
+      "totalBytes": 0
+    },
+    {
+      "name": "minimal-package",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:dab0bcb0a9e70187275c43b990c7ce589f371192686f280683a0fe2ed8fc8e1d",
+      "archiveSha256": "16791cae7b93e9ab9668237ee21ade0355ddd970b0f82c912ff4e520c792c97d",
+      "archiveSize": 389,
+      "fileCount": 2,
+      "totalBytes": 113
+    },
+    {
+      "name": "source-order-ignored",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:dab0bcb0a9e70187275c43b990c7ce589f371192686f280683a0fe2ed8fc8e1d",
+      "archiveSha256": "16791cae7b93e9ab9668237ee21ade0355ddd970b0f82c912ff4e520c792c97d",
+      "archiveSize": 389,
+      "fileCount": 2,
+      "totalBytes": 113
+    },
+    {
+      "name": "metadata-ignored",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:dab0bcb0a9e70187275c43b990c7ce589f371192686f280683a0fe2ed8fc8e1d",
+      "archiveSha256": "16791cae7b93e9ab9668237ee21ade0355ddd970b0f82c912ff4e520c792c97d",
+      "archiveSize": 389,
+      "fileCount": 2,
+      "totalBytes": 113
+    },
+    {
+      "name": "empty-directories-ignored",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:dab0bcb0a9e70187275c43b990c7ce589f371192686f280683a0fe2ed8fc8e1d",
+      "archiveSha256": "16791cae7b93e9ab9668237ee21ade0355ddd970b0f82c912ff4e520c792c97d",
+      "archiveSize": 389,
+      "fileCount": 2,
+      "totalBytes": 113
+    },
+    {
+      "name": "utf8-content-and-empty-file",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:02c90863f6e854b49f5cc768d922497cd3dd7df5b2c066ca6313c82894300b0f",
+      "archiveSha256": "dceb48e00e8a26d027fd7c6b3ab8d95def8b1170cf5accfc7ab831ae565206e0",
+      "archiveSize": 296,
+      "fileCount": 2,
+      "totalBytes": 68
+    },
+    {
+      "name": "content-change",
+      "valid": true,
+      "contentDigest": "sha256-tree-v1:a05dc718177bdde3f03581eae68aa8e711a8b79e6406ecb46bb5242b976dc779",
+      "archiveSha256": "460e7cf13cd5916940cae7d8d2627a371268e1d3389fd7a8588f4a06f1405efb",
+      "archiveSize": 391,
+      "fileCount": 2,
+      "totalBytes": 115
+    },
+    {
+      "name": "absolute-path",
+      "valid": false,
+      "error": "ABSOLUTE_PATH"
+    },
+    {
+      "name": "path-traversal",
+      "valid": false,
+      "error": "PATH_TRAVERSAL"
+    },
+    {
+      "name": "empty-segment",
+      "valid": false,
+      "error": "PATH_TRAVERSAL"
+    },
+    {
+      "name": "backslash-path",
+      "valid": false,
+      "error": "BACKSLASH_PATH"
+    },
+    {
+      "name": "unicode-path",
+      "valid": false,
+      "error": "NON_PORTABLE_PATH"
+    },
+    {
+      "name": "case-collision",
+      "valid": false,
+      "error": "CASE_COLLISION"
+    },
+    {
+      "name": "parent-segment-case-collision",
+      "valid": false,
+      "error": "CASE_COLLISION"
+    },
+    {
+      "name": "duplicate-path",
+      "valid": false,
+      "error": "DUPLICATE_PATH"
+    },
+    {
+      "name": "windows-reserved-path",
+      "valid": false,
+      "error": "WINDOWS_RESERVED_PATH"
+    },
+    {
+      "name": "windows-trailing-dot",
+      "valid": false,
+      "error": "NON_PORTABLE_PATH"
+    },
+    {
+      "name": "segment-too-long",
+      "valid": false,
+      "error": "SEGMENT_TOO_LONG"
+    },
+    {
+      "name": "file-parent-conflict",
+      "valid": false,
+      "error": "PATH_TYPE_CONFLICT"
+    },
+    {
+      "name": "symlink-entry",
+      "valid": false,
+      "error": "SYMLINK_NOT_ALLOWED"
+    },
+    {
+      "name": "special-entry",
+      "valid": false,
+      "error": "SPECIAL_ENTRY_NOT_ALLOWED"
+    },
+    {
+      "name": "compressed-entry",
+      "valid": false,
+      "error": "UNSUPPORTED_COMPRESSION"
+    },
+    {
+      "name": "single-file-size-limit",
+      "valid": false,
+      "error": "FILE_TOO_LARGE"
+    },
+    {
+      "name": "total-size-bomb-limit",
+      "valid": false,
+      "error": "TOTAL_SIZE_LIMIT"
+    }
+  ]
+}

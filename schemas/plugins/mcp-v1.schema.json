@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:minimax:plugin:mcp:v1",
+  "title": "MiniMax Plugin MCP Servers V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mcpServers"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "mcpServers": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\\s\\S])",
+        "maxLength": 80
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/server"
+      }
+    }
+  },
+  "$defs": {
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[A-Za-z0-9_.-]+(?![\\s\\S])"
+        },
+        "description": {
+          "$ref": "#/$defs/description"
+        },
+        "inputSchema": {
+          "type": "object"
+        }
+      }
+    },
+    "server": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "command"
+          ],
+          "properties": {
+            "type": {
+              "const": "stdio"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "$ref": "#/$defs/stringMap"
+            },
+            "description": {
+              "$ref": "#/$defs/description"
+            },
+            "timeout": {
+              "$ref": "#/$defs/timeout"
+            },
+            "tools": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/tool"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "streamable-http",
+                "sse"
+              ]
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "minLength": 1,
+              "pattern": "^https?://"
+            },
+            "headers": {
+              "$ref": "#/$defs/stringMap"
+            },
+            "description": {
+              "$ref": "#/$defs/description"
+            },
+            "timeout": {
+              "$ref": "#/$defs/timeout"
+            },
+            "tools": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/tool"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
