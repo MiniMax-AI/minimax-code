@@ -1,6 +1,6 @@
 # Private release audit
 
-This audit describes the historical TUI 0.3.11 baseline. The current source target is TUI 0.4.12; see [source status](open-source-status.md) and [current verification status](verification.md#current-source-verification-status). The earlier pass results are not current-release acceptance. The repository boundary is documented in [Publication scope](publication-authorization.md).
+This audit describes the historical TUI 0.3.11 baseline. The current source target is TUI 0.6.3; see [source status](open-source-status.md) and [current verification status](verification.md#current-source-verification-status). The earlier pass results are not current-release acceptance. The repository boundary is documented in [Publication scope](publication-authorization.md).
 
 Date: 2026-09-11. Scope: standalone TUI 0.3.11 source, retained capabilities, dependency provenance, Git history, and local build artifacts. Review and CI were requested before publication. GitHub was private at the time; no release or npm package was published by this audit.
 

@@ -1,19 +1,19 @@
 # Source status
 
-The current source target is **TUI 0.4.12**. This repository contains the terminal TUI, headless CLI, ACP implementation, and the public distribution tooling around them.
+The current source target is **TUI 0.6.3**. This repository contains the terminal TUI, headless CLI, ACP implementation, and the public distribution tooling around them.
 
 ## Version and evidence baseline
 
 | Concern | Current value | Source of truth |
 | --- | --- | --- |
-| TUI capability version | 0.4.12 | `packages/tui/package.json` |
-| Root workspace version | 0.4.12, aligned with the TUI | Root `package.json` |
-| Published npm observation | `@minimax-ai/code@0.4.12`; npm `latest` was 0.4.12 on 2026-09-18 | Public npm registry |
+| TUI capability version | 0.6.3 | `packages/tui/package.json` |
+| Root workspace version | 0.6.3, aligned with the TUI | Root `package.json` |
+| Published npm observation | `@minimax-ai/code@0.6.9`; npm `latest` was 0.6.9 on 2026-10-13 | Public npm registry |
 | Shared-source baseline | `9b9885e42a3cf1a3df1cfa52a46e4fdb034cfcee` | `release/extraction.json` |
 | Embedded mcode-tools | 0.0.4, extracted from public `@minimax-ai/code@0.3.11` | `scripts/lib/mcode-tools-artifact.mjs` |
 | Historical live-service acceptance and demo | TUI 0.3.11, recorded 2026-09-11 | `docs/verification.md`, `docs/release-audit.md`, `docs/demo.md` |
 
-The product, TUI, and root workspace use the same 0.4.12 version. The embedded tool has its own version. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication. Matching version strings do not prove that this source tree reproduces the published npm tarball.
+The product, TUI, and root workspace use the same 0.6.3 version. The embedded tool has its own version. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication. Matching version strings do not prove that this source tree reproduces the published npm tarball.
 
 ## Source boundary
 
