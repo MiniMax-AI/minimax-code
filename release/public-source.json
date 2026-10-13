@@ -62,6 +62,7 @@
     "docs/maintainers.md",
     "docs/open-source-status.md",
     "docs/performance-ci.md",
+    "docs/plugins/README.md",
     "docs/plugins/host-bindings.md",
     "docs/plugins/package-format-v1.md",
     "docs/plugins/showcases.md",

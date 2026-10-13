@@ -24,6 +24,7 @@
     "test:sandbox": "node scripts/run-vitest-suite.mjs sandbox",
     "test:status-contract": "node scripts/run-vitest-suite.mjs status-contract",
     "check:source": "node scripts/source-inventory.mjs",
+    "check:plugin": "node tools/plugins/validate-plugin.mjs",
     "test:capabilities": "node scripts/run-vitest-suite.mjs capability",
     "test:windows": "node scripts/run-vitest-suite.mjs windows",
     "test:artifact": "node --test test/public-artifact.test.mjs",
