@@ -20,6 +20,7 @@ import {
   type ResolvedAgentCapabilities,
   type RunawayGuardOverride,
 } from '@mavis/config';
+import { isValidCompactionTriggerSetting } from '@mavis/context-manager';
 import type { AppDb } from '../../infra/db/client.js';
 
 import type { ContentSafetyService } from '../content-safety/index.js';
@@ -468,6 +469,7 @@ export async function createLocalAgentHost<
         logger: options.product.runner.logger,
         toolResultArchiver,
         promptSnapshots: options.product.promptSnapshots,
+        getCompactionTriggerAt: createCompactionTriggerAtGetter(options),
       }),
       control: options.turnControl,
       lifecycle: options.sessions.agentProjection.compactionLifecycle,
@@ -597,6 +599,7 @@ function createContextCompactors(input: {
   readonly logger: ConstructorParameters<typeof AutomaticContextCompactor>[2];
   readonly toolResultArchiver: ToolResultArchiver;
   readonly promptSnapshots: ConstructorParameters<typeof LocalContextCompactor>[2];
+  readonly getCompactionTriggerAt: () => number | undefined;
 }) {
   return {
     automatic: new AutomaticContextCompactor(
@@ -606,10 +609,34 @@ function createContextCompactors(input: {
       {
         toolResultArchiver: input.toolResultArchiver,
         promptSnapshots: input.promptSnapshots,
+        getCompactionTriggerAt: input.getCompactionTriggerAt,
       },
     ),
     manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots),
   };
+}
+
+/**
+ * Reads `contextManagement.compactionTriggerAt` per call. An invalid value is
+ * reported once when the host is composed and then ignored by the budget.
+ */
+function createCompactionTriggerAtGetter<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): () => number | undefined {
+  const read = () =>
+    options.product.preparation.configBuilder.config().contextManagement?.compactionTriggerAt;
+  try {
+    const initial = read();
+    if (initial !== undefined && !isValidCompactionTriggerSetting(initial)) {
+      options.product.runner.logger?.warn?.(
+        { event: 'context_compaction_trigger_config_ignored', value: initial },
+        '[local-runtime-v2] contextManagement.compactionTriggerAt must be a ratio in (0, 1] or an integer token count above 1; using the built-in trigger',
+      );
+    }
+  } catch {
+    // The compactor treats an unreadable config as unset.
+  }
+  return read;
 }
 
 function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSnapshot>(

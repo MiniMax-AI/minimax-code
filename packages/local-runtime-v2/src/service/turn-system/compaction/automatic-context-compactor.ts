@@ -33,11 +33,14 @@ import type { SubagentCheckpointStateSource } from './contracts.js';
 interface AutomaticContextCompactorDependencies {
   readonly toolResultArchiver?: ToolResultArchiver;
   readonly promptSnapshots?: PromptSnapshotSource;
+  /** User `contextManagement.compactionTriggerAt`; read per call. */
+  readonly getCompactionTriggerAt?: () => number | undefined;
 }
 
 export class AutomaticContextCompactor implements AutomaticContextCompactorPort {
   private readonly toolResultArchiver?: ToolResultArchiver;
   private readonly promptSnapshots?: PromptSnapshotSource;
+  private readonly getCompactionTriggerAt?: () => number | undefined;
 
   constructor(
     private readonly usageAnchor: ContextUsageAnchorState | undefined,
@@ -47,13 +50,18 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
   ) {
     this.toolResultArchiver = dependencies.toolResultArchiver;
     this.promptSnapshots = dependencies.promptSnapshots;
+    this.getCompactionTriggerAt = dependencies.getCompactionTriggerAt;
   }
 
   probeBeforeLlm(input: AutomaticContextCompactionInput): AutomaticContextCompactionProbe {
     input.signal?.throwIfAborted();
     return {
-      shouldStart: prepareAutomaticCompaction(input, this.usageAnchor, this.toolResultArchiver)
-        .shouldStart,
+      shouldStart: prepareAutomaticCompaction(
+        input,
+        this.usageAnchor,
+        this.toolResultArchiver,
+        this.readCompactionTriggerAt(),
+      ).shouldStart,
     };
   }
 
@@ -66,6 +74,7 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
       input,
       this.usageAnchor,
       this.toolResultArchiver,
+      this.readCompactionTriggerAt(),
     );
     if (!preparation.shouldStart) {
       return { status: 'unchanged', reason: 'nothing-to-compact' };
@@ -99,18 +108,29 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
     this.usageAnchor?.invalidate(input.sessionId);
     return completedAutomaticCompaction(input.messages, decision);
   }
+
+  /** A failing config read degrades to the built-in trigger. */
+  private readCompactionTriggerAt(): number | undefined {
+    try {
+      return this.getCompactionTriggerAt?.();
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 function prepareAutomaticCompaction(
   input: AutomaticContextCompactionInput,
   usageAnchor: ContextUsageAnchorState | undefined,
   archiver: ToolResultArchiver | undefined,
+  compactionTriggerAt: number | undefined,
 ) {
   const measurer = createAutomaticFootprintMeasurer(input, usageAnchor);
   const footprint = measurer.measure(input.messages);
   const { providerInputLimit, automaticTriggerAt } = resolveCompactionTokenBudget({
     contextWindow: input.model.contextWindow,
     configuredMaxOutputTokens: input.maxTokens ?? input.model.maxTokens,
+    compactionTriggerAt,
   });
   const toolResultCompactionPlan = archiver?.plan({
     sessionId: input.sessionId,

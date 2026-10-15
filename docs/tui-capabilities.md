@@ -110,6 +110,31 @@ Override the bounds in milliseconds with `MCODE_LLM_FIRST_EVENT_TIMEOUT_MS` and
 also set `firstEventTimeoutMs` and `streamIdleTimeoutMs` per model. The timeout error names
 the setting that fired. The 20-minute overall request limit still applies.
 
+## Automatic context compaction trigger
+
+Automatic compaction starts before a model request whose context exceeds the
+built-in trigger. That trigger reserves the configured output limit (capped at a
+quarter of the window) and then takes 95% of the remainder, so it lands between
+about 70% and 95% of the context window depending on the model. Large tool
+results and the serialized request size can also start compaction on their own;
+tool-result reduction is configured separately under `toolResultCompaction`.
+
+To compact earlier, for example to keep requests smaller, set an upper bound in
+the data directory's `config.yaml`:
+
+```yaml
+contextManagement:
+  compactionTriggerAt: 0.8 # ratio of the context window, or e.g. 300000 tokens
+```
+
+A value in `(0, 1]` is a ratio of the current model's context window; an integer
+above 1 is an absolute token count. The effective trigger is the lower of this
+value and the built-in trigger, so the setting can start compaction earlier but
+never later, and has no lower bound: a value below what remains after compaction
+compacts before every request. Other values, such as `1.5`, are ignored with a
+warning in the runtime log. Automatic compaction cannot be disabled; `/compact`
+remains available at any time. Apply changes by restarting MCode.
+
 ## Local Bash execution
 
 When the current turn includes native `task_output`, foreground Bash waits up to

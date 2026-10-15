@@ -134,6 +134,8 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
   readonly runawayGuard?: Config['runawayGuard'];
   /** ToolResult compaction values resolved from config.yaml. */
   readonly toolResultCompaction?: Config['toolResultCompaction'];
+  /** Context management values resolved from config.yaml. */
+  readonly contextManagement?: Partial<Config['contextManagement']>;
   /**
    * Widened past `Config['agents']`: the v2 Agent cutover also threads
    * already-resolved capabilities through this read model, and `default` is
