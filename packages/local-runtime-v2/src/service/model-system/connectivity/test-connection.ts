@@ -1,11 +1,15 @@
 // Minimal-completion connection tester for BYOK providers. Sends a single
-// non-streaming ping with the model's configured output limit and normalizes
+// ping with the model's configured output limit (Google uses Pi streaming) and normalizes
 // the outcome to `unauthorized` / `timeout` / `network` / `http_<status>` /
 // `provider_error` / `invalid_response`. Structured upstream failures retain
 // their reason after removing configured secrets and common credential shapes.
 
+import { completeSimple, type ThinkingLevel } from '@earendil-works/pi-ai';
+import { withOpenCodeGoHeaders } from '@mavis/shared';
+
 import { buildProviderHeaders, providerCompletionUrl } from './provider-request.js';
 import {
+  isThinkingEffortDisabled,
   resolveMiniMaxM3ThinkingProtocol,
   resolveModelThinkingProtocol,
 } from '../resolution/model-ref.js';
@@ -26,12 +30,12 @@ const MAX_UPSTREAM_ERROR_CHARS = 1_200;
 
 export class ModelConnectionTester {
   private readonly fetchImpl: typeof fetch;
-  private readonly timeoutMs: number;
+  private readonly timeoutMs: number | undefined;
   private readonly inFlight = new Map<string, Promise<ModelConnectionTestResult>>();
 
   constructor(options: ModelConnectionTesterOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs;
   }
 
   // One in-flight test per dedup key (provider or provider/model): concurrent
@@ -56,10 +60,13 @@ export class ModelConnectionTester {
   }
 
   private async runTest(target: ModelConnectionTestTarget): Promise<ModelConnectionTestResult> {
-    const { url, init } = buildTestRequest(target);
+    const timeoutMs =
+      this.timeoutMs ?? (target.api === 'google-generative-ai' ? 30_000 : DEFAULT_TIMEOUT_MS);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      if (target.api === 'google-generative-ai') return await testGoogle(target, controller.signal);
+      const { url, init } = buildTestRequest(target);
       const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
       if (response.ok) return await validateSuccessResponse(response, target.api, target);
       if (response.status === 401 || response.status === 403) {
@@ -80,7 +87,7 @@ export class ModelConnectionTester {
         return {
           ok: false,
           errorCode: 'timeout',
-          errorMessage: `Request timed out after ${this.timeoutMs}ms`,
+          errorMessage: `Request timed out after ${timeoutMs}ms`,
         };
       }
       return { ok: false, errorCode: 'network', errorMessage: 'Network error' };
@@ -88,6 +95,55 @@ export class ModelConnectionTester {
       clearTimeout(timer);
     }
   }
+}
+
+async function testGoogle(
+  target: ModelConnectionTestTarget,
+  signal: AbortSignal,
+): Promise<ModelConnectionTestResult> {
+  const reasoning = isThinkingEffortDisabled(target.effort)
+    ? undefined
+    : (target.effort as ThinkingLevel | undefined);
+  const result = await completeSimple(
+    {
+      id: target.modelId,
+      name: target.modelId,
+      provider: 'google',
+      api: 'google-generative-ai',
+      baseUrl: target.baseUrl,
+      reasoning: Boolean(reasoning),
+      input: ['text'],
+      contextWindow: 200_000,
+      maxTokens: resolveTestOutputLimit(target),
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+    { messages: [{ role: 'user', content: 'ping', timestamp: Date.now() }] },
+    {
+      apiKey: target.apiKey,
+      maxTokens: resolveTestOutputLimit(target),
+      signal,
+      reasoning,
+      headers: withOpenCodeGoHeaders(target.baseUrl, target.headers),
+    },
+  );
+  signal.throwIfAborted();
+  if (result.stopReason === 'error' || result.stopReason === 'aborted') {
+    return {
+      ok: false,
+      errorCode: 'provider_error',
+      errorMessage: redactConnectionTestError(
+        result.errorMessage ?? 'Model provider error',
+        target,
+      ),
+    };
+  }
+  return result.content.length > 0
+    ? { ok: true }
+    : {
+        ok: false,
+        errorCode: 'invalid_response',
+        errorMessage: 'Invalid response from model provider',
+      };
 }
 
 async function readUpstreamErrorReason(

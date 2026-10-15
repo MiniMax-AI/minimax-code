@@ -4,6 +4,7 @@ export const MCODE_PROVIDER_API_FORMATS = [
   'anthropic-messages',
   'openai-completions',
   'openai-responses',
+  'google-generative-ai',
 ] as const;
 export type McodeProviderApiFormat = (typeof MCODE_PROVIDER_API_FORMATS)[number];
 

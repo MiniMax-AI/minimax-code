@@ -28,6 +28,7 @@ export const MODEL_PROVIDER_APIS = [
   'anthropic-messages',
   'openai-completions',
   'openai-responses',
+  'google-generative-ai',
 ] as const;
 export type ModelProviderApi = (typeof MODEL_PROVIDER_APIS)[number];
 

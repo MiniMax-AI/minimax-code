@@ -1243,7 +1243,7 @@ describe('Codex OAuth discovered models', () => {
 });
 
 describe('OpenCode Go conversation identity', () => {
-  it.each(['openai-completions', 'openai-responses', 'anthropic-messages'] as const)(
+  it.each(['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai'] as const)(
     'keeps session identity across turns for renamed %s providers',
     async (api) => {
       const resolver = new LocalModelResolver({
@@ -1253,7 +1253,7 @@ describe('OpenCode Go conversation identity', () => {
               api,
               options: {
                 apiKey: 'offline-test-key',
-                baseURL: 'https://opencode.ai/zen/go/v1',
+                baseURL: 'https://opencode.ai/inference/go/v1',
                 headers: { 'USER-AGENT': 'generic-sdk' },
               },
               models: { 'test-model': { headers: { 'X-OpenCode-Session': 'static-id' } } },
@@ -1653,5 +1653,61 @@ describe('LocalModelResolver request image ceiling (#425)', () => {
     expect(
       await resolveWith({ capabilities: { support_image: true } }, 'https://gateway.example/api.mistral.ai/v1'),
     ).toBeUndefined();
+  });
+});
+
+describe('Google custom providers', () => {
+  it('preserves the Google API and delegates thinking parameters to Pi', async () => {
+    const config: LocalModelConfig = {
+      reasoning: true,
+      thinking: { effortOptions: ['low', 'high'] },
+    };
+    const resolver = new LocalModelResolver({
+      byokConfigGetter: () => ({
+        custom_provider: {
+          google: {
+            api: 'google-generative-ai',
+            options: {
+              apiKey: 'offline-key',
+              baseURL: 'https://example.com/v1beta/',
+            },
+            models: { 'gemini-3-pro-preview': config },
+          },
+        },
+      }),
+    });
+    const resolved = await resolver.resolveModel({
+      sessionId: 'google-session',
+      turnId: 'google-turn',
+      agentConfig: {
+        ...AGENT_CONFIG,
+        model: modelRefForModel('custom_provider:google', 'gemini-3-pro-preview', config, {
+          thinking: { effort: 'high' },
+        }),
+      },
+    });
+    expect(resolved.model.api).toBe('google-generative-ai');
+    expect(resolved.model.baseUrl).toBe('https://example.com/v1beta');
+    expect(resolved.model.thinkingLevelMap).toBeUndefined();
+    expect(resolved.thinkingLevel).toBe('high');
+    let payload: unknown;
+    await streamSimple(
+      resolved.model,
+      {
+        messages: [{ role: 'user', content: 'ping', timestamp: 0 }],
+      },
+      {
+        apiKey: 'offline-key',
+        reasoning: resolved.thinkingLevel,
+        onPayload: (value) => {
+          payload = value;
+          throw new Error('stop before network');
+        },
+      },
+    ).result();
+    expect(payload).toMatchObject({
+      config: { thinkingConfig: { thinkingLevel: 'HIGH' } },
+    });
+    expect(payload).not.toHaveProperty('reasoning');
   });
 });

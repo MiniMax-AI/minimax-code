@@ -450,6 +450,8 @@ export function resolveModelThinkingProtocol(
   value: unknown,
   modelId?: unknown,
 ): ModelThinkingProtocolConfig | undefined {
+  // Pi owns Google's model-specific thinking parameters.
+  if (api === 'google-generative-ai') return undefined;
   const effort = normalizeModelThinkingEffort(value);
   if (!effort) return undefined;
 

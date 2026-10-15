@@ -26,7 +26,9 @@ function isOpenCodeGoUrl(value: string | undefined): boolean {
     return (
       url.protocol === 'https:' &&
       url.hostname === 'opencode.ai' &&
-      (url.pathname === '/zen/go' || url.pathname.startsWith('/zen/go/'))
+      ['/zen/go', '/inference/go'].some(
+        (path) => url.pathname === path || url.pathname.startsWith(`${path}/`),
+      )
     );
   } catch {
     return false;

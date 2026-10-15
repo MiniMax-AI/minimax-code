@@ -785,3 +785,106 @@ describe('OpenCode Go connection identity', () => {
     expect(headers[0]?.get('x-opencode-session')).not.toBe(headers[1]?.get('x-opencode-session'));
   });
 });
+
+describe('Google connection tests through Pi', () => {
+  const target = {
+    api: 'google-generative-ai' as const,
+    apiKey: API_KEY,
+    baseUrl: 'https://opencode.ai/inference/go/v1',
+    modelId: 'gemini-4-argon-contributor',
+    outputLimit: 1024,
+  };
+
+  it.each([undefined, 'off', 'high'])('uses Pi with effort %s and the configured output limit', async (effort) => {
+    let request: Request | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (input, init) => {
+        request = new Request(input, init);
+        return new Response(
+          `data: ${JSON.stringify({
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'pong' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      }),
+    );
+    try {
+      expect(await new ModelConnectionTester().test('google', { ...target, effort })).toEqual({
+        ok: true,
+      });
+      expect(request?.url).toBe(
+        `${target.baseUrl}/models/${target.modelId}:streamGenerateContent?alt=sse`,
+      );
+      expect(request?.headers.get('x-goog-api-key')).toBe(API_KEY);
+      expect(request?.headers.get('x-opencode-session')).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(request?.headers.get('user-agent')).toContain('MiniMaxCode');
+      const body = await request?.json();
+      expect(body).toMatchObject({
+        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+        generationConfig: { maxOutputTokens: 1024 },
+      });
+      if (effort === 'high') {
+        expect(body.generationConfig.thinkingConfig).toMatchObject({ includeThoughts: true });
+      } else {
+        expect(body.generationConfig).not.toHaveProperty('thinkingConfig');
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('redacts provider errors returned by Pi', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 401,
+                message: `Invalid key ${API_KEY}`,
+                status: 'UNAUTHENTICATED',
+              },
+            }),
+            { status: 401, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    try {
+      const result = await new ModelConnectionTester().test('google-error', target);
+      expect(result).toMatchObject({ ok: false, errorCode: 'provider_error' });
+      expect(result.errorMessage).toContain('Invalid key');
+      expect(result.errorMessage).not.toContain(API_KEY);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('honors the caller timeout while Pi is waiting for Google', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(
+        (input, init) =>
+          new Promise((_resolve, reject) => {
+            const signal = new Request(input, init).signal;
+            signal.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          }),
+      ),
+    );
+    try {
+      expect(
+        await new ModelConnectionTester({ timeoutMs: 50 }).test('google-timeout', target),
+      ).toMatchObject({ ok: false, errorCode: 'timeout' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
