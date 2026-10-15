@@ -988,6 +988,52 @@ describe('AutomaticContextCompactor request boundaries', () => {
     ).rejects.toThrow(/streamFn/i);
   });
 
+  it('lowers the trigger from the configured compactionTriggerAt only', () => {
+    const messages: AgentMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'small context' }], timestamp: 1 },
+    ];
+    const model: Model<'anthropic-messages'> = {
+      id: 'model-1',
+      name: 'Model 1',
+      api: 'anthropic-messages',
+      provider: 'test',
+      baseUrl: 'https://example.invalid',
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+    };
+    const rawTokens = createLocalContextFootprintMeasurer({ model }).measure(messages).inputTokens;
+    const input = {
+      sessionId: 'session-1',
+      phase: 'initial' as const,
+      messages,
+      model,
+      thinkingLevel: 'off' as const,
+    };
+    const probe = (getCompactionTriggerAt?: () => number | undefined) =>
+      automaticCompactor(undefined, undefined, undefined, {
+        ...(getCompactionTriggerAt ? { getCompactionTriggerAt } : {}),
+      }).probeBeforeLlm(input).shouldStart;
+
+    expect(probe()).toBe(false);
+    // Absolute token count: strict greater-than, like the built-in trigger.
+    expect(probe(() => rawTokens)).toBe(false);
+    expect(probe(() => rawTokens - 1)).toBe(true);
+    // Window ratio.
+    expect(probe(() => (rawTokens - 1) / 200_000)).toBe(true);
+    // Above the built-in line, invalid, or unreadable: built-in trigger stays.
+    expect(probe(() => 0.99)).toBe(false);
+    expect(probe(() => 1.5)).toBe(false);
+    expect(probe(() => undefined)).toBe(false);
+    expect(
+      probe(() => {
+        throw new Error('config unavailable');
+      }),
+    ).toBe(false);
+  });
+
   it('uses the requested Messages API maxTokens at the trigger boundary', async () => {
     const messages: AgentMessage[] = [
       { role: 'user', content: [{ type: 'text', text: 'small context' }], timestamp: 1 },

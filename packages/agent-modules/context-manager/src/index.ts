@@ -1,6 +1,11 @@
 export { ContextManager } from './manager.js';
 export { computeCompactionTriggerAt, DEFAULT_CONTEXT_MANAGER_SETTINGS } from './settings.js';
-export { resolveCompactionTokenBudget, resolveDynamicMaxTokens } from './provider-budget.js';
+export {
+  isValidCompactionTriggerSetting,
+  resolveCompactionTokenBudget,
+  resolveConfiguredCompactionTrigger,
+  resolveDynamicMaxTokens,
+} from './provider-budget.js';
 export {
   BpeTokenEstimator,
   createDefaultContextTokenEstimator,
