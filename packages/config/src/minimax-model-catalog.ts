@@ -29,8 +29,8 @@ export const MINIMAX_MODELS: Record<string, ModelConfig> = {
     },
     capabilities: MINIMAX_M3_FILE_API_CAPABILITIES,
   },
-  "MiniMax-M3.1-Flash-Preview": {
-    name: "M3.1-Flash-Preview",
+  "MiniMax-M3.1-Flash": {
+    name: "M3.1-Flash",
     attachment: true,
     reasoning: true,
     tool_call: true,

@@ -137,7 +137,7 @@ describe('resolveAgentModelSelection', () => {
         ...config.provider,
         minimax: {
           models: {
-            'MiniMax-M3.1-Flash-Preview': { limit: { context: 512_000, output: 128_000 } },
+            'MiniMax-M3.1-Flash': { limit: { context: 512_000, output: 128_000 } },
             'MiniMax-M3': { limit: { context: 512_000, output: 128_000 } },
           },
         },
@@ -147,7 +147,7 @@ describe('resolveAgentModelSelection', () => {
       resolveEffectiveAgentModelSelection({ config: legacyConfig, sources: [] }),
     ).toMatchObject({
       providerId: 'minimax',
-      modelId: 'MiniMax-M3.1-Flash-Preview',
+      modelId: 'MiniMax-M3.1-Flash',
       contextWindow: 512_000,
     });
     expect(legacyConfig.defaultModel).toBe('custom_provider:minimax-legacy/retired');
@@ -215,7 +215,7 @@ function registerContextTierSelectionTests(): void {
   );
 
   it.each([
-    ['minimax', 'MiniMax-M3.1-Flash-Preview', [2_000_000, 128_000], 2_000_000],
+    ['minimax', 'MiniMax-M3.1-Flash', [2_000_000, 128_000], 2_000_000],
     ['minimax_api', 'future-model', [2_000_000, 128_000], 2_000_000],
     ['minimax_api', 'MiniMax-M3', [128_000, 256_000], 256_000],
     ['minimax_api', 'MiniMax-M3', undefined, 128_000],

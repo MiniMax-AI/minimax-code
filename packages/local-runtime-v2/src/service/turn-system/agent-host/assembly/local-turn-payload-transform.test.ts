@@ -8,7 +8,7 @@ import { buildLocalRequestPayloadTransform } from './local-turn-payload-transfor
 
 // Mirrors the bundled MiniMax catalog entries that matter for thinking.
 const M31_FLASH = {
-  name: 'M3.1-Flash-Preview',
+  name: 'M3.1-Flash',
   reasoning: true,
   tool_call: true,
   modalities: { input: ['text', 'image'], output: ['text'] },
@@ -99,7 +99,7 @@ describe('API-key MiniMax thinking effort', () => {
     async (effort) => {
       const body = await captureWireBody({
         provider: 'minimax_api',
-        modelId: 'MiniMax-M3.1-Flash-Preview',
+        modelId: 'MiniMax-M3.1-Flash',
         modelConfig: M31_FLASH,
         effort,
       });
@@ -111,7 +111,7 @@ describe('API-key MiniMax thinking effort', () => {
   it('keeps --effort when a MiniMax model is routed through the API key source', async () => {
     const body = await captureWireBody({
       provider: 'minimax',
-      modelId: 'MiniMax-M3.1-Flash-Preview',
+      modelId: 'MiniMax-M3.1-Flash',
       modelConfig: M31_FLASH,
       effort: 'high',
       minimaxModelSource: 'minimax_api_key',
@@ -122,7 +122,7 @@ describe('API-key MiniMax thinking effort', () => {
   it('sends no effort when none was selected (default)', async () => {
     const body = await captureWireBody({
       provider: 'minimax_api',
-      modelId: 'MiniMax-M3.1-Flash-Preview',
+      modelId: 'MiniMax-M3.1-Flash',
       modelConfig: M31_FLASH,
     });
     expect(body.thinking).toEqual({ type: 'adaptive' });

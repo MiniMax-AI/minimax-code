@@ -10,7 +10,7 @@ import {
 } from "../src/config.js";
 import { resolveModelAvailability } from "../src/model-availability.js";
 
-const modelId = "MiniMax-M3.1-Flash-Preview";
+const modelId = "MiniMax-M3.1-Flash";
 let dataDir: string;
 
 beforeEach(() => {
@@ -31,11 +31,11 @@ afterEach(() => {
 });
 
 describe("built-in model fallback", () => {
-  it("seeds M3.1 Flash Preview before a remote snapshot exists and preserves it on reload", () => {
+  it("seeds M3.1 Flash before a remote snapshot exists and preserves it on reload", () => {
     const config = getConfig();
     const model = config.provider.minimax?.models?.[modelId];
     expect(model).toMatchObject({
-      name: "M3.1-Flash-Preview",
+      name: "M3.1-Flash",
       attachment: true,
       reasoning: true,
       tool_call: true,
@@ -58,7 +58,7 @@ describe("built-in model fallback", () => {
         max_attachments_count: 4,
       },
     });
-    expect(config.defaultModel).toBe("minimax/MiniMax-M3.1-Flash-Preview");
+    expect(config.defaultModel).toBe("minimax/MiniMax-M3.1-Flash");
     resetConfig();
     expect(getConfig().provider.minimax?.models?.[modelId]).toEqual(model);
   });
