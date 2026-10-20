@@ -7,7 +7,207 @@ This changelog covers important changes that directly affect MCode TUI users. It
 
 Internal refactors, test-only changes, and changes limited to other product surfaces are excluded.
 
-## 0.5.5 · 2026-09-25
+## 0.6.5 · 2026-10-09
+
+### Fixed
+
+- The output-speed readout no longer spikes at the start of a turn. Output buffered upstream and
+  released in one burst is now excluded, so a burst arriving within the first tenth of the request
+  no longer reports a rate far above what the model actually produced.
+
+## 0.6.4 · 2026-10-08
+
+### Fixed
+
+- While you are scrolled back through a long conversation, output that changes or removes text
+  already in terminal scrollback no longer moves the viewport to the top of the session. Without
+  recent input, the screen repaints in place and the full history rebuild waits for your next
+  keystroke; readers following the latest output stay at the bottom.
+- Settled one-time feedback, such as the previous run's duration note, finished `!` shell blocks,
+  and earlier run errors, now stays in the transcript once later output follows it instead of being
+  removed from the middle of the conversation, so later rows no longer shift.
+- `cron once --after` accepts `w` (weeks), alone or combined with other units such as `1w2d`.
+
+## 0.6.3 · 2026-10-08
+
+### Added
+
+- Customize the main Agent's system prompt at startup with `--system-prompt` or
+  `--system-prompt-file`, or extend it with `--append-system-prompt` or
+  `--append-system-prompt-file`. Available in the interactive TUI, `exec`, `exec review`, and ACP.
+- Replacement and appended prompts can be combined. They apply only to the current process, preserve
+  runtime rules and project instructions, and do not affect Task child Agents. A missing or empty
+  prompt file stops the launch instead of running without it.
+- Start a new Session in lightweight conversation mode with `--mode lightweight`. It sends a small
+  conversational system prompt and no tool schemas, and omits workspace instructions, Skills, memory
+  blocks, and MCP schemas, so it cannot inspect or change local files. The mode is fixed when a root
+  Session is created and cannot be combined with `--session` or `--continue`; child Agents,
+  `/compact`, and ACP stay on the standard context. Reopening a lightweight Session keeps its mode
+  and shows `Lightweight` in the status line.
+- Each model request attempt now has a first-response bound and a stream idle bound, both 300
+  seconds by default. A request that passes a bound is aborted and reported as a retryable timeout,
+  so the normal model-request retry runs instead of the turn waiting on a provider that never
+  answers. Override the bounds with `MCODE_LLM_FIRST_EVENT_TIMEOUT_MS` and
+  `MCODE_LLM_STREAM_IDLE_TIMEOUT_MS`, where `0` disables a bound.
+
+### Improved
+
+- A single model request carries at most 20 images by default. Older images in the request are
+  replaced with a text note while the stored history keeps every image, and a provider that allows
+  fewer images per request can set `max_images_per_request` on the model (`api.mistral.ai` defaults
+  to 8). When compaction is rejected for too many images, it retries with attachments replaced by
+  text.
+- Deterministic provider rejections, such as an image limit or an HTTP 400 `invalid_request_error`,
+  are now reported immediately with the upstream reason instead of being retried, and suggest
+  `/compact` or `/new` instead of `/retry`.
+
+### Fixed
+
+- While you are scrolled back, output that shrinks the layout, such as a task list collapsing when a
+  reply ends, no longer moves the viewport to the top of the session. The released rows are padded
+  and the history rebuild waits for your next keystroke.
+- After the agent asks you a question, the turn now waits for your answer instead of ending as a
+  retryable empty-response failure.
+- `/retry` during a running response now says to stop the running turn first, instead of reporting
+  that there is no failed response to retry.
+- Clearing or pausing a Goal while a response is still running now says that the current response
+  keeps running and to press Esc to interrupt it, instead of implying the turn already stopped.
+
+## 0.6.2 · 2026-10-02
+
+### Fixed
+
+- In a `/btw` side session, pressing Esc on an empty Composer no longer suggests editing the latest
+  message; `/edit` is unavailable there.
+- Switching between a side session and the main conversation no longer resets the main run's
+  Running/Loading timer to zero.
+
+## 0.6.1 · 2026-10-01
+
+### Added
+
+- `/doctor` and `/feedback` now work inside a `/btw` side session, so you can diagnose or report a
+  failed side response without leaving it.
+
+## 0.6.0 · 2026-10-01
+
+### Added
+
+- `/retry` now works inside a `/btw` side session. When a side-session model request fails and can
+  be retried, run `/retry` there to resend the side session's last message without switching back to
+  the main conversation.
+
+### Improved
+
+- The official default model is now `MiniMax-M3.1-Flash-Preview` when no model has been selected.
+- When a Goal is marked complete, the agent now ends with one final reply that summarizes what was
+  done and where the deliverables are, instead of stopping right after the status update.
+- Safety refusals from the model provider are no longer retried, including on BYOK. The original
+  error is shown and identified as a refusal from the model provider.
+- TLS record verification errors during a model request now trigger the automatic retry like other
+  transient network failures.
+
+### Fixed
+
+- In regular mode, the screen no longer jumps back to the opening logo and replays the whole
+  conversation while a run is in progress. Rows that can still change stay on screen above the
+  footer until they are final.
+- The `tok/s` speed is no longer inflated when the provider hides thinking text; generation time now
+  starts when thinking starts.
+- Fixed repeated failures after context compaction during an automatic continuation.
+- Context compaction through OpenAI-compatible Chat Completions providers no longer sends an empty
+  `tools` list, which some backends rejected with HTTP 400.
+
+## 0.5.10 · 2026-09-30
+
+### Fixed
+
+- Your own messages now appear exactly as typed in the conversation, pending instructions, and the
+  transcript viewer. Text such as `__pycache__`, `*`, and a leading `>` is no longer reformatted as
+  Markdown, and trailing blank lines no longer add empty rows.
+- The TUI no longer stays stuck showing a run as in progress after Runtime has already finished it.
+  Enter now sends a new message instead of steering the finished run, and queued messages are no
+  longer held back.
+
+## 0.5.9 · 2026-09-30
+
+### Added
+
+- The build-mode status line now reports `background=N`, the number of active background tasks in
+  the current root session. Bash still owned by its foreground tool call is not counted, and the
+  count holds at `1` after a turn settles until a fresh task list arrives, so a command that has
+  just moved to the background is not reported as `0`.
+- `worktreeRefreshBeforeCreate` in `config.yaml`, on by default, fetches the selected upstream
+  before a new worktree is created.
+- The OpenAI Codex OAuth entry in model settings is enabled by default; set `beta.codexOAuth: false`
+  to hide it.
+
+### Improved
+
+- BYOK requests now apply byte limits to large media and accumulated history context, reducing
+  failures caused by oversized requests.
+- Long conversations load their file list and history navigation with less data, making browsing
+  them faster.
+- The MiniMax API-key route now uses the same official model catalog as the signed-in route.
+
+### Fixed
+
+- Stopping a conversation with Esc also cancels the background Bash commands and subagents it owns,
+  and their completion notices no longer restart the conversation. Their results stay available to
+  the next turn. Switching sessions and `/clear` continue to leave background work running.
+- Editing and rewinding a message now works after an interrupt that left only a background reminder
+  behind.
+- Terminal errors from a failed run are cleared when the next run starts, so a successful retry no
+  longer shows the earlier error again.
+- The thinking toggle for M3 models is sent as a thinking setting instead of a generic reasoning
+  effort.
+
+## 0.5.8 · 2026-09-28
+
+### Added
+
+- Added M3.1-Flash-Preview to the built-in fallback model catalog.
+
+### Improved
+
+- Plugin Hook messages appear in the active conversation and restored history, making Hook results
+  visible without adding them to model context.
+
+### Fixed
+
+- Restoring a session with `--session` or `--continue` clears terminal scrollback left by the
+  previous process before replaying history, avoiding duplicate content. Normal startup preserves
+  shell history.
+- Improved output queuing on slow terminals and waits for pending output before exiting, suspending,
+  or opening an external editor.
+
+## 0.5.6 · 2026-09-28
+
+### Added
+
+- Custom provider setup can import models from `/models` with the API key entered during setup.
+  Search and select a model, then save the imported models after a successful connection test; retry
+  discovery or enter a model ID manually when needed.
+
+### Fixed
+
+- Token speed now uses actual provider output tokens and the generation window, excluding the wait
+  for the first token and tool execution. Streaming text estimates are no longer shown; confirmed
+  speed remains visible while waiting for subsequent requests or tools.
+- History reloads preserve generation timing. Older messages without timing are excluded from speed
+  statistics, and speeds below 10 token/s retain one decimal place.
+- Bash tool descriptions are displayed as plain text instead of receiving shell command syntax
+  highlighting; actual commands retain syntax highlighting.
+
+## 0.5.5 · 2026-09-27
+
+### Added
+
+- Terminal titles show the current state, session name, and MCode, for example
+  `Needs approval | Fix login | MCode`, and follow session renames and switches. Notifications for
+  completed turns, failures, permission requests, and questions identify the session and suppress
+  duplicates; completion waits for the session's queue to finish. Configure them with
+  `tui.terminalTitle` and `tui.notifications` in `config.yaml`.
 
 ### Improved
 
@@ -15,10 +215,164 @@ Internal refactors, test-only changes, and changes limited to other product surf
   total timeout. Explicit background tasks also default to one hour when no timeout is specified.
   Foreground calls may return a task ID after 60 seconds without resetting the command timer.
 - Reduced the dependencies loaded at startup to keep the startup bundle smaller.
-
 - Improved automatic context compaction reliability: large-context models reserve room for replies
   and start compacting earlier, and adaptive-thinking models at high reasoning effort no longer fail
   repeatedly when reasoning consumes the output budget.
+- Update downloads follow the same proxy settings as the TUI.
+- Memory tool results shown to the model are limited to 16 KiB, with a preview of the beginning and
+  end and guidance for reading more.
+- Long sessions repeat less work when indexing and replaying history.
+
+## 0.5.4 · 2026-09-24
+
+### Added
+
+- Press `Ctrl+S` in `/model` to add or remove a favorite. Favorites appear in a separate group at
+  the top, retain their insertion order, and persist across sessions.
+
+### Fixed
+
+- Scrolling back through chat remains detached from the latest output when the viewport grows or
+  content and the footer shrink.
+
+## 0.5.3 · 2026-09-24
+
+### Added
+
+- Type `@` to select an installed Plugin. Its source identity is preserved when sending, queueing,
+  restoring drafts, and editing history, so plugins with the same name cannot replace one another.
+
+### Improved
+
+- Bash tools describe the selected shell and the current turn's background capabilities. Managed
+  foreground commands wait up to 60 seconds before returning a task ID, with one command deadline
+  covering foreground and background execution.
+- Large Bash results preserve the beginning and end of the output, report process outcomes and
+  output persistence separately, and keep task receipts bounded.
+- `/theme` uses the left and right arrow keys to select light, automatic, or dark appearance. Custom
+  theme watching reconciles once at startup to catch edits that could otherwise be missed.
+- Workspace Skill directories (`.agents/skills`, `.claude/skills`, and `.minimax/skills`) support
+  symbolic links to other locations and watch linked directories for additions and changes.
+
+### Fixed
+
+- Pressing `Esc` before the model has produced an answer or used a tool restores the submitted
+  message to the composer, preserving attachments and text entered while stopping.
+- Closing autocomplete, history search, settings, or multiline input restores the released chat area
+  correctly. Reading earlier messages keeps your position while output arrives, and sending a
+  message resumes following the latest output.
+- Editing or rewinding history clears todos from discarded turns and stale duration indicators.
+  Entering the complete `/rewind` command while editing still runs the local command.
+- Large-file edit previews now bound diff size and computation time. Omitted previews show a clear
+  notice instead of incorrectly reporting no changes.
+- Goal tool calls outside a bound Goal turn return a recoverable error without ending the user turn.
+- Windows managed updates validate the installed package through its Node entry point, including
+  installation paths containing spaces and shell metacharacters.
+
+## 0.5.2 · 2026-09-22
+
+### Added
+
+- `/theme` opens a theme panel with live preview. Pick from the built-in `minimax`, `midnight`,
+  `graphite`, and `aurora` themes, or write your own theme file under `tui/themes/*.json`. Each
+  theme provides both a dark and a light palette, and the appearance follows your terminal's
+  background until you lock it to light or dark.
+- Custom theme files support partial overrides, color aliases, syntax palettes, and hot reload, so
+  editing a theme you are already using takes effect without restarting MCode.
+- The theme choice is stored in `tui/tui-settings.json` alongside `tuiMode` and can also be set as
+  `<theme-id>/light` or `<theme-id>/dark` to pin one appearance. An unrecognized value falls back to
+  the default theme instead of blocking startup.
+
+### Improved
+
+- Long conversations stay responsive by reusing verified history and loading less at runtime.
+- A failed optional Provider preset sync no longer blocks startup as long as the existing
+  configuration stays intact.
+
+### Fixed
+
+- Fixed the transcript jumping back to the start of a conversation when a long turn ended after you
+  had scrolled up. Previously visible content now stays in place and the composer remains at the
+  bottom.
+- Fixed style-only redraws leaving a stale composer, status bar, or duplicated body text behind in
+  Apple Terminal. Visible-region repaints now erase in place instead of scrolling old lines into the
+  terminal's native scrollback.
+- Fixed failed commands being reported as successful when Bash ran through the Windows PowerShell
+  wrapper; the native exit code is now preserved.
+- Attachment paths are resolved automatically in WSL, so Windows drive letters, UNC paths, and
+  `file://` URLs can be attached directly.
+- Rewriting private configuration files on Windows no longer interrupts startup.
+- Session history writes that wait on a busy store are retried, and stopping a turn while a write
+  waits keeps the turn's stopped state.
+
+## 0.5.1 · 2026-09-21
+
+### Improved
+
+- Reduced repeated history processing and token estimation in long conversations.
+- Provider setup now displays the Base URL and supports editing it with `ctrl+e` before testing.
+  Failed connection tests clearly indicate that changes were not saved. The Z.AI and Zhipu presets
+  label their Coding Plan and API endpoints separately.
+
+### Fixed
+
+- Fixed `/btw` side conversations failing to open while tools are running.
+- Fixed multiline text pasted by terminals without bracketed-paste framing being submitted line by
+  line.
+- Kept the input method candidate window anchored to the composer during redraws, including on
+  Windows terminals, and prevented stale history rows after content changes.
+- Local sessions using custom providers or API keys no longer require a managed login for title
+  handling, and the welcome screen no longer asks you to sign in when the selected custom provider
+  does not need a MiniMax account.
+- Token estimates for Z.AI and Zhipu Coding Plan endpoints no longer fall back to a local
+  approximation after a failed token-count request.
+- Memory edits containing `$&`, `$$`, or similar sequences are inserted literally.
+
+## 0.5.0 · 2026-09-20
+
+### Added
+
+- Interactive sessions support `mcode -m <provider/model>` to select a model for that session.
+- Provider setup supports explicit context and output limits, image input capability
+  (`--support-image`), and testing before saving with `--use`.
+- ACP clients can discover enabled Skills for the attached session's Agent and workspace alongside
+  native slash commands.
+- Fullscreen Transcript supports clicking and dragging the scrollbar. An optional `context-meter`
+  status line item shows remaining context capacity.
+- Each GitHub Release includes a versioned npm installation archive, `minimax-code-X.Y.Z.tar.gz`,
+  with a `.sha256` checksum.
+
+### Improved
+
+- Reduced repeated history processing and token estimation during long conversations.
+- Provider presets import their explicit reasoning effort options.
+- Source builds now use `~/.minimax` as the default data directory, the same as the published npm
+  CLI. Data in the earlier `~/.minimax-code` default is not moved; set `MINIMAX_DATA_DIR` to keep
+  using it.
+- Automatic metrics and diagnostics uploads are off by default and require their own consent; global
+  opt-outs are honored.
+
+### Fixed
+
+- Preserved terminal scrollback during redraws and kept collapsed thinking summaries and the
+  composer visible when content shrinks.
+- Settings updates now reject malformed configuration files without overwriting their contents.
+- Invalid attachment markup is removed from assistant messages even when no valid attachment
+  remains, and path-based attachments no longer show duplicate placeholders.
+- Thinking-enabled custom connections to Mistral, SiliconFlow, DashScope, and Kimi Coding send the
+  system prompt with a role those endpoints accept.
+- Resource files of built-in and active-Agent Skills can be read in every permission mode.
+- Content review failures are reported as such instead of as connectivity problems.
+- Context usage is recalculated after compaction instead of showing the pre-compaction value.
+- Bash deny and ask rules also match commands prefixed by transparent wrappers such as `nohup` or
+  `timeout`.
+- Terminal control sequences in model output are sanitized before display, and reading MCode's
+  private runtime data requires approval.
+- Configuration files that can hold credentials are restricted to owner access.
+- `replace_all` edits keep literal `$` sequences.
+- Session diffs report renamed files under their destination path and keep Unicode paths.
+- A blank `NO_PROXY` falls back to `no_proxy`, and updates work when npm is provided through a pnpm
+  shell shim.
 
 ## 0.4.12 · 2026-09-18
 
