@@ -1,0 +1,30 @@
+{
+  "name": "@minimax-ai/code-acp",
+  "version": "0.0.0-dev",
+  "description": "Agent Client Protocol (ACP) launcher for MiniMax Code. Runs `mcode` from @minimax-ai/code so `npx @minimax-ai/code-acp acp` works. Version is stamped at release to match @minimax-ai/code.",
+  "type": "module",
+  "bin": {
+    "code-acp": "acp.js"
+  },
+  "files": [
+    "acp.js",
+    "README.md"
+  ],
+  "dependencies": {
+    "@minimax-ai/code": "0.0.0-dev"
+  },
+  "engines": {
+    "node": ">=22.19 <23 || >=24 <27"
+  },
+  "license": "MIT",
+  "homepage": "https://agent.minimax.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MiniMax-AI/minimax-code.git"
+  },
+  "keywords": [
+    "minimax",
+    "acp",
+    "agent-client-protocol"
+  ]
+}

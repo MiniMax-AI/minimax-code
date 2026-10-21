@@ -144,3 +144,45 @@ jobs:
           GH_REPO: ${{ github.repository }}
           MCODE_RELEASE_DIRECTORY: ${{ runner.temp }}/package
           MCODE_RELEASE_REPORTS: ${{ runner.temp }}/reports
+  # Publishes the single-bin ACP launcher (@minimax-ai/code-acp) in lockstep
+  # with @minimax-ai/code, which the ACP registry runs via `npx ... acp`.
+  # Opt-in: set repo variable MCODE_ACP_PUBLISH=true and secret NPM_TOKEN.
+  publish-acp:
+    needs: [build, publish]
+    if: github.event_name == 'push' && vars.MCODE_ACP_PUBLISH == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Wait for @minimax-ai/code at this version on npm
+        shell: bash
+        run: |
+          for _ in $(seq 1 80); do
+            npm view "@minimax-ai/code@$VERSION" version >/dev/null 2>&1 && exit 0
+            sleep 20
+          done
+          echo "@minimax-ai/code@$VERSION not on npm after waiting" >&2; exit 1
+      - name: Stamp and publish @minimax-ai/code-acp
+        working-directory: packages/code-acp
+        shell: bash
+        run: |
+          if npm view "@minimax-ai/code-acp@$VERSION" version >/dev/null 2>&1; then
+            echo "already published"; exit 0
+          fi
+          npm pkg set version="$VERSION" "dependencies.@minimax-ai/code=$VERSION"
+          tag=latest; [[ "$VERSION" == *-* ]] && tag=next
+          npm publish --access public --provenance --tag "$tag"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
