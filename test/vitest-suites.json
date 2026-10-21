@@ -6,6 +6,7 @@
     ],
     "capability": [
       "packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts",
+      "packages/local-runtime/test/unit/seed-builtin-shared-dir.test.ts",
       "packages/local-runtime/test/unit/skill-directory-symlinks.test.ts",
       "packages/agent-core/test/unit/bash-subprocess-env.test.ts",
       "packages/agent-modules/permission/test/unit/permission/bash-policy-regressions.test.ts",
