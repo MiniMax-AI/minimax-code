@@ -119,6 +119,8 @@
       "packages/tui/test/unit/runtime-error-presentation-rejection.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-payload-transform.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/executor.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/execution-budget-reminder.test.ts",
+      "packages/local-runtime-v2/test/integration/execution-budget-cache-prefix.integration.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/execution/reminder/session-identity-reminder.test.ts",
       "packages/local-runtime-v2/src/services.test.ts",
       "packages/local-runtime-v2/src/application/session/session-title-policy.test.ts",

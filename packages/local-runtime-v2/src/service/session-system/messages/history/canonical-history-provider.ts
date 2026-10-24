@@ -98,6 +98,8 @@ interface SessionCanonicalHistoryCompactionChangeBase extends Omit<
   readonly summary: string;
   /** Source identity for a structurally preserved real-user tail. */
   readonly currentUserSourceIndex?: number;
+  /** Hidden markers placed directly before that tail; absent means 1. */
+  readonly placedMarkerCount?: number;
 }
 
 export type SessionCanonicalHistoryCompactionChange = SessionCanonicalHistoryCompactionChangeBase &
@@ -747,24 +749,32 @@ function readCurrentUserTail(
   if (!Number.isSafeInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= active.length) {
     throw new TypeError('Canonical current-user tail source lineage is invalid.');
   }
-  if (change.messages.length < 2) {
+  const markerCount = change.placedMarkerCount ?? 1;
+  if (!Number.isSafeInteger(markerCount) || markerCount < 1) {
+    throw new TypeError('Canonical current-user tail marker count is invalid.');
+  }
+  const tailLength = markerCount + 1;
+  if (change.messages.length < tailLength) {
     throw new TypeError('Canonical current-user tail is incomplete.');
   }
-  const marker = change.messages.at(-2);
+  const baseLength = change.messages.length - tailLength;
+  const markers = change.messages.slice(baseLength, -1);
   const userMessage = change.messages.at(-1);
   const source = requireExternalCurrentUserSource(active[sourceIndex]);
-  const normalizedMarker = requireHiddenTypedCustom(marker);
+  const normalizedMarkers = markers.map(requireHiddenTypedCustom);
   const normalizedUser = requireExactCurrentUserMessage(userMessage, source);
   return {
-    baseMessages: change.messages.slice(0, -2),
+    baseMessages: change.messages.slice(0, baseLength),
     user: source,
     envelopes: [
-      envelope({
-        change,
-        message: normalizedMarker,
-        turnId: `${change.turnId}:compaction`,
-        index: change.messages.length - 2,
-      }),
+      ...normalizedMarkers.map((message, offset) =>
+        envelope({
+          change,
+          message,
+          turnId: `${change.turnId}:compaction`,
+          index: baseLength + offset,
+        }),
+      ),
       { ...withoutHistoryArtifact(source), message: normalizedUser },
     ],
   };

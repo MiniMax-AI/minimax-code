@@ -1040,15 +1040,21 @@ function cancellationTest(cancellation) {
       file.endsWith("messages.jsonl"),
     );
     assert.equal(histories.length, 1);
-    const roles = readFileSync(path.join(sessionsDir, histories[0]), "utf8")
+    const messages = readFileSync(path.join(sessionsDir, histories[0]), "utf8")
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line).message?.role);
+      .map((line) => JSON.parse(line).message);
+    // `--timeout` adds the hidden execution budget reminder to history before
+    // the first provider request, so it survives the cancellation as well.
     assert.deepEqual(
-      roles,
-      cancellation === "tool" ? ["user", "assistant", "toolResult"] : ["user"],
+      messages.map((message) => message?.role),
+      cancellation === "tool"
+        ? ["user", "custom", "assistant", "toolResult"]
+        : ["user", "custom"],
       "Abort reconciliation must preserve executed tools without retaining cancelled text output",
     );
+    assert.equal(messages[1].customType, "execution_budget_reminder");
+    assert.equal(messages[1].display, false);
   };
 }

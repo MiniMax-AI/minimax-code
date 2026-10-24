@@ -1,25 +1,47 @@
-import type { PiBeforeLlmCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
+import type {
+  PiBeforeLlmCallAppendMessage,
+  PiBeforeLlmCallHook,
+  PiBeforeLlmCallHookInput,
+  PiTurnRunnerLogger,
+} from '@mavis/agent-core/pi-turn-runner';
 import type { ExecutionBudgetReminderAdmission } from '../execution/contracts.js';
+
+const EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE = 'execution_budget_reminder';
+
+type HistoryMessage = PiBeforeLlmCallHookInput['canonicalMessages'][number];
 
 /** Remaining-budget fractions that each emit one reminder when first crossed. */
 const BUDGET_FRACTION_THRESHOLDS = [0.5, 0.25, 0.1] as const;
-/** Inside this window every request carries a (coarse) reminder. */
+/** Inside this window a reminder is emitted whenever its coarse text changes. */
 const FINAL_WINDOW_MS = 120_000;
 const FINAL_WINDOW_LEVEL = BUDGET_FRACTION_THRESHOLDS.length + 1;
 
+interface ExecutionBudgetReminderDetails {
+  /** Deadline the reminder was sampled for; separates the budgets of different Turns. */
+  readonly deadlineAtMs: number;
+  readonly level: number;
+}
+
+interface PreviousReminder {
+  readonly level: number;
+  readonly content: string;
+}
+
 /**
- * Request-only context; the caller's existing cancellation timer remains
- * authoritative. `replaceRequestMessages` keeps the marker out of durable
- * history, so it must be registered before any hook that returns
- * `appendMessage` — `runBeforeLLM` ends the pipeline on a successful append.
+ * Hidden durable context; the caller's existing cancellation timer remains
+ * authoritative. Each reminder is appended to canonical history, so every
+ * later provider request keeps it in place and the prompt-cache prefix stays
+ * append-only.
  *
  * To avoid spending tokens on every model request, the reminder is emitted
- * only on the first request (announces the budget), when the remaining budget
- * first drops to ≤50%, ≤25% and ≤10% of the total, and on every request inside
- * the final two minutes. The total budget is measured from hook creation
- * (turn preparation), since requests carry no start time. Precision is whole
- * minutes outside the final window and 10-second steps inside it, so the text
- * does not churn between otherwise identical requests.
+ * on the first request (announces the budget), when the remaining budget first
+ * drops to ≤50%, ≤25% and ≤10% of the total, and inside the final two minutes
+ * whenever its text changes. Progress is read back from the latest reminder of
+ * the same deadline in canonical history, so a repeated request does not
+ * duplicate it and a compaction that summarized it away announces the budget
+ * again. The total budget is measured from hook creation (turn preparation),
+ * since requests carry no start time. Precision is whole minutes outside the
+ * final window and 10-second steps inside it.
  */
 export function createExecutionBudgetReminder(
   executionDeadlineAtMs: number | undefined,
@@ -29,7 +51,6 @@ export function createExecutionBudgetReminder(
 ): PiBeforeLlmCallHook | undefined {
   if (executionDeadlineAtMs === undefined || !canAppend) return undefined;
   const totalMs = Math.max(0, executionDeadlineAtMs - nowMs());
-  let emittedLevel: number | undefined;
   return (input) => {
     try {
       if (input.signal?.aborted) return undefined;
@@ -37,15 +58,18 @@ export function createExecutionBudgetReminder(
       const remainingMs = executionDeadlineAtMs - now;
       if (remainingMs <= 0) return undefined;
       const level = budgetLevel(remainingMs, totalMs);
-      const first = emittedLevel === undefined;
-      if (!first && level !== FINAL_WINDOW_LEVEL && level <= emittedLevel!) return undefined;
-      const marker = {
-        role: 'user' as const,
-        content: formatBudgetReminder(remainingMs, totalMs, first),
+      const previous = latestReminder(input.canonicalMessages, executionDeadlineAtMs);
+      const content = formatBudgetReminder(remainingMs, totalMs, previous === undefined);
+      if (previous && !isReminderDue(previous, level, content)) return undefined;
+      const marker: PiBeforeLlmCallAppendMessage = {
+        role: 'custom',
+        customType: EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+        content,
+        display: false,
+        details: { deadlineAtMs: executionDeadlineAtMs, level },
         timestamp: now,
       };
       if (!canAppend(input, marker)) return undefined;
-      emittedLevel = level;
       try {
         logger?.info?.(
           {
@@ -62,14 +86,51 @@ export function createExecutionBudgetReminder(
         // Diagnostics must not affect the request context.
       }
       return {
-        type: 'replaceRequestMessages',
-        reason: 'execution-budget-context',
-        messages: [...input.messages, marker],
+        type: 'appendMessage',
+        reason: EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+        message: marker,
       };
     } catch {
       return undefined;
     }
   };
+}
+
+function isReminderDue(previous: PreviousReminder, level: number, content: string): boolean {
+  return level === FINAL_WINDOW_LEVEL ? content !== previous.content : level > previous.level;
+}
+
+/** Latest reminder for this deadline; reminders of other budgets are ignored. */
+function latestReminder(
+  messages: readonly HistoryMessage[],
+  deadlineAtMs: number,
+): PreviousReminder | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const reminder = readReminder(messages[index]);
+    if (reminder?.details.deadlineAtMs === deadlineAtMs) {
+      return { level: reminder.details.level, content: reminder.content };
+    }
+  }
+  return undefined;
+}
+
+function readReminder(
+  message: HistoryMessage | undefined,
+): { readonly content: string; readonly details: ExecutionBudgetReminderDetails } | undefined {
+  if (
+    message?.role !== 'custom' ||
+    message.customType !== EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE ||
+    typeof message.content !== 'string'
+  ) {
+    return undefined;
+  }
+  const details: unknown = message.details;
+  if (typeof details !== 'object' || details === null) return undefined;
+  const deadlineAtMs = Reflect.get(details, 'deadlineAtMs');
+  const level = Reflect.get(details, 'level');
+  return typeof deadlineAtMs === 'number' && typeof level === 'number'
+    ? { content: message.content, details: { deadlineAtMs, level } }
+    : undefined;
 }
 
 /** 0 = above 50%; 1..3 = crossed 50/25/10%; FINAL_WINDOW_LEVEL = final two minutes. */
@@ -82,13 +143,14 @@ function budgetLevel(remainingMs: number, totalMs: number): number {
   return level;
 }
 
+function formatRemainingBudget(remainingMs: number): string {
+  if (remainingMs > FINAL_WINDOW_MS) return `about ${Math.floor(remainingMs / 60_000)} minutes`;
+  if (remainingMs >= 10_000) return `about ${Math.floor(remainingMs / 10_000) * 10} seconds`;
+  return 'under 10 seconds';
+}
+
 function formatBudgetReminder(remainingMs: number, totalMs: number, first: boolean): string {
-  const remaining =
-    remainingMs > FINAL_WINDOW_MS
-      ? `about ${Math.floor(remainingMs / 60_000)} minutes`
-      : remainingMs >= 10_000
-        ? `about ${Math.floor(remainingMs / 10_000) * 10} seconds`
-        : 'under 10 seconds';
+  const remaining = formatRemainingBudget(remainingMs);
   const total =
     totalMs > FINAL_WINDOW_MS
       ? `${Math.round(totalMs / 60_000)} minutes`
