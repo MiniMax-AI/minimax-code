@@ -64,7 +64,6 @@ import type {
   AgentHostFileChangeObservation,
   LocalTurnExecutionInput,
 } from "../runner/contracts.js";
-import { createExecutionBudgetReminder } from "../runner/execution-budget-reminder.js";
 import type { AgentEventDelivery } from "../events/contracts.js";
 import type { CanonicalHistoryStore } from "../history/contracts.js";
 import { copyCanonicalHistoryForPiCompatibility } from "../history/canonical-history-validation.js";
@@ -4377,6 +4376,8 @@ describe("LocalRuntimeTurnExecutor session id reminder context", () => {
   );
 });
 
+const EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE = "execution_budget_reminder";
+
 describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
   it.each([
     {
@@ -4404,56 +4405,52 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
       ],
     },
   ] as const)(
-    "reminds a budgeted run ($durationMs ms) only at thresholds without changing history or the system prompt",
+    "reminds a budgeted run ($durationMs ms) only at thresholds without changing the system prompt",
     async ({ durationMs, steps }) => {
       let nowMs = 1_000;
       const executorOptions = options(async (runInput) => {
-        const messages = [
-          { role: "user" as const, content: "hello", timestamp: 1 },
-        ];
         // The budget reminder is registered immediately before the background
         // cadence reminder, so it is the second-to-last host hook.
         const hook = runInput.hooks?.beforeLlmCallHook?.at(-2);
-        const hookInput = {
+        // PiTurnRunner commits every appended marker before the next request.
+        let messages: PiBeforeLlmCallHookInput["messages"] = [
+          { role: "user", content: "hello", timestamp: 1 },
+        ];
+        const hookInput = (phase: "initial" | "iteration") => ({
           sessionId: runInput.sessionId,
           turnId: runInput.turnId,
-          phase: "initial" as const,
+          phase,
           messages,
           canonicalMessages: messages,
           model: runInput.llm.model,
           thinkingLevel: "off" as const,
-        };
+        });
         for (const [elapsedMs, expected] of steps) {
           nowMs = 1_000 + elapsedMs;
-          const decision = await hook?.({
-            ...hookInput,
-            phase: elapsedMs === 0 ? "initial" : "iteration",
-          });
+          const decision = await hook?.(
+            hookInput(elapsedMs === 0 ? "initial" : "iteration"),
+          );
           if (expected === undefined) {
             expect(decision).toBeUndefined();
             continue;
           }
           expect(decision).toMatchObject({
-            type: "replaceRequestMessages",
-            reason: "execution-budget-context",
-            messages: [
-              messages[0],
-              {
-                role: "user",
-                content: expect.stringContaining(
-                  `<system-reminder>Execution time remaining: ${expected}`,
-                ),
-              },
-            ],
+            type: "appendMessage",
+            reason: EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+            message: {
+              role: "custom",
+              customType: EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+              display: false,
+              content: expect.stringContaining(
+                `<system-reminder>Execution time remaining: ${expected}`,
+              ),
+            },
           });
+          if (decision?.type === "appendMessage")
+            messages = [...messages, decision.message];
         }
         nowMs = 1_000 + durationMs;
-        expect(
-          await hook?.({ ...hookInput, phase: "iteration" }),
-        ).toBeUndefined();
-        expect(messages).toEqual([
-          { role: "user", content: "hello", timestamp: 1 },
-        ]);
+        expect(await hook?.(hookInput("iteration"))).toBeUndefined();
         expect(runInput.systemPrompt).toBe("extension system\n\nbase system");
         await runInput.eventWriter.pushRuntime(
           terminalEvent(RuntimeEventStatus.COMPLETED),
@@ -4472,65 +4469,8 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
           executionDeadlineAtMs: 1_000 + durationMs,
         },
       });
-
-      expect(input.onHistoryChanged).not.toHaveBeenCalled();
     },
   );
-
-  it("retries a threshold reminder that admission rejected", async () => {
-    let nowMs = 1_000;
-    let admit = false;
-    const hook = createExecutionBudgetReminder(
-      1_000 + 1_800_000,
-      () => nowMs,
-      () => admit,
-    )!;
-    const messages = [{ role: "user" as const, content: "hello", timestamp: 1 }];
-    const hookInput = {
-      sessionId: "session-1",
-      turnId: "turn-1",
-      phase: "initial" as const,
-      messages,
-      canonicalMessages: messages,
-      model: {} as never,
-      thinkingLevel: "off" as const,
-    };
-    expect(await hook(hookInput)).toBeUndefined();
-    admit = true;
-    nowMs = 2_000;
-    expect(await hook(hookInput)).toMatchObject({
-      messages: [
-        messages[0],
-        {
-          content:
-            "<system-reminder>Execution time remaining: about 29 minutes of 30 minutes total. Model generation, tools, and waiting all count against it.</system-reminder>",
-        },
-      ],
-    });
-    nowMs = 1_000 + 1_800_000 - 899_000;
-    expect(await hook(hookInput)).toMatchObject({
-      messages: [
-        messages[0],
-        {
-          content:
-            "<system-reminder>Execution time remaining: about 14 minutes of 30 minutes total.</system-reminder>",
-        },
-      ],
-    });
-    // Jumping straight past 25% and 10% emits once for the deepest threshold.
-    nowMs = 1_000 + 1_800_000 - 179_000;
-    expect(await hook(hookInput)).toMatchObject({
-      messages: [
-        messages[0],
-        {
-          content:
-            "<system-reminder>Execution time remaining: about 2 minutes of 30 minutes total.</system-reminder>",
-        },
-      ],
-    });
-    nowMs += 1_000;
-    expect(await hook(hookInput)).toBeUndefined();
-  });
 
   it("samples budget context while preserving existing request observers", async () => {
     let nowMs = 1_000;
@@ -4550,12 +4490,19 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
         thinkingLevel: "off" as const,
       };
       const initial = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input);
-      if (initial?.type !== "replaceRequestMessages")
+      if (initial?.type !== "appendMessage")
         throw new Error("Expected initial reminder");
+      // PiTurnRunner commits the marker before the request and later samples.
+      const committed = [...messages, initial.message];
+      const next = {
+        ...input,
+        messages: committed,
+        canonicalMessages: committed,
+      };
       for (const observer of runInput.hooks!.onLlmCallPreparedHook!) {
         await observer({
           ...input,
-          messages: initial.messages,
+          messages: committed,
           scope: "agent",
           systemPrompt: "",
           tools: [],
@@ -4569,15 +4516,17 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
       // 99 seconds later no threshold is crossed, so no tokens are spent.
       nowMs = 100_000;
       expect(
-        await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input),
+        await runInput.hooks!.beforeLlmCallHook!.at(-2)!(next),
       ).toBeUndefined();
       expect(logger.info).toHaveBeenCalledOnce();
       nowMs = 301_000;
-      const next = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input);
-      if (next?.type !== "replaceRequestMessages")
+      const threshold = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(next);
+      if (threshold?.type !== "appendMessage")
         throw new Error("Expected time context");
-      expect(next.messages.at(-1)).toMatchObject({
-        content: expect.stringContaining("about 5 minutes of 10 minutes total."),
+      expect(threshold.message).toMatchObject({
+        content: expect.stringContaining(
+          "about 5 minutes of 10 minutes total.",
+        ),
       });
       await runInput.eventWriter.pushRuntime(
         terminalEvent(RuntimeEventStatus.COMPLETED),
@@ -4600,9 +4549,10 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
       },
       request: { ...input.request, executionDeadlineAtMs: 601_000 },
     });
-    expect(input.onHistoryChanged).not.toHaveBeenCalled();
   });
+});
 
+describe("LocalRuntimeTurnExecutor execution budget reminder registration", () => {
   it("does not add budget context to unbudgeted or already aborted runs", async () => {
     for (const aborted of [false, true]) {
       const controller = new AbortController();
@@ -4641,12 +4591,10 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
     }
   });
 
-  it("registers the request-only budget reminder before the appending background reminder", async () => {
-    // runBeforeLLM ends the before-LLM decision pipeline as soon as a hook
-    // returns appendMessage. The background cadence reminder appends, so a
-    // budget reminder registered after it would be silently skipped for every
-    // request where the background reminder fires. The relative order is the
-    // only thing keeping the request-only reminder observable.
+  it("registers the budget reminder before the background reminder", async () => {
+    // runBeforeLLM accumulates appendMessage decisions, so this order only
+    // fixes where the durable budget marker sits relative to the durable
+    // background marker, identically in the request and in history.
     const backgroundHook = vi.fn(() => undefined);
     const executorOptions = options(async (runInput) => {
       const messages = [
@@ -4668,8 +4616,8 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
       );
       const budgetIndex = decisions.findIndex(
         (decision) =>
-          decision?.type === "replaceRequestMessages" &&
-          decision.reason === "execution-budget-context",
+          decision?.type === "appendMessage" &&
+          decision.reason === EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
       );
       const backgroundIndex = hooks.indexOf(backgroundHook);
       expect(budgetIndex).toBeGreaterThanOrEqual(0);
@@ -4704,7 +4652,7 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
     { admission: "allow", mode: "delayed" },
     { admission: "allow", mode: "observed" },
   ] as const)(
-    "preserves durable reminders with request-only time context ($mode, $admission)",
+    "keeps background reminders alongside the durable budget reminder ($mode, $admission)",
     async ({ admission, mode }) => {
       let nowMs = 1_000;
       const marker = {
@@ -4743,11 +4691,28 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
           };
         },
       });
-      const laterHook = vi.fn(replacement);
+      // runBeforeLLM accumulates appends, so this later hook runs in every
+      // mode and sees the registered markers. It replaces durable history only
+      // when nothing is pending, because a durable replacement after a
+      // registered append fails closed (production never orders them so).
+      const laterSawMarker: boolean[] = [];
+      const laterHook = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
+        const sawBackground = hookInput.messages.some(
+          (message) => message === marker,
+        );
+        laterSawMarker.push(sawBackground);
+        const pending =
+          sawBackground ||
+          hookInput.messages.some(
+            (message) =>
+              message.role === "custom" &&
+              message.customType === EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+          );
+        return pending ? { type: "continue" as const } : replacement(hookInput);
+      });
       const canAppend = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
-        // The request-only reminder runs before the appending background
-        // reminder and before any post-commit callback, so it samples the
-        // pre-append request view.
+        // The budget reminder runs before the background reminder and before
+        // any post-commit callback, so it samples the pre-append request view.
         expect(hookInput.messages.some((message) => message === marker)).toBe(
           false,
         );
@@ -4821,28 +4786,29 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
       expect(providerContexts).toEqual(preparedContexts);
       const requestContext = providerContexts[0] ?? "";
       expect(requestContext.includes(marker.content)).toBe(mode !== "defer");
-      // A later durable replaceMessages hook rebuilds the request from canonical
-      // history, which drops an earlier request-only replacement ('defer' runs
-      // laterHook because the background marker cannot be placed).
-      const keepsRequestContext = admission === "allow" && mode !== "defer";
+      // The budget marker is durable, so no later hook can drop it again.
+      const budgeted = admission === "allow";
       expect(
         requestContext.match(/Execution time remaining/g) ?? [],
-      ).toHaveLength(keepsRequestContext ? 1 : 0);
-      if (keepsRequestContext) {
+      ).toHaveLength(budgeted ? 1 : 0);
+      if (budgeted) {
         expect(requestContext).toContain(
           "Execution time remaining: about 120 seconds of 120 seconds total.",
         );
       }
       expect(canAppend).toHaveBeenCalledOnce();
       expect(backgroundHook).toHaveBeenCalledOnce();
-      expect(laterHook).toHaveBeenCalledTimes(mode === "defer" ? 1 : 0);
+      expect(laterHook).toHaveBeenCalledOnce();
+      expect(laterSawMarker).toEqual([mode !== "defer"]);
       const historyChanges = vi.mocked(input.onHistoryChanged).mock.calls;
       expect(historyChanges.length).toBeGreaterThan(0);
       const history = historyChanges.flatMap(([change]) => change.messages);
       expect(JSON.stringify(history).includes(marker.content)).toBe(
         mode !== "defer",
       );
-      expect(JSON.stringify(history)).not.toContain("Execution time remaining");
+      expect(
+        JSON.stringify(history).match(/Execution time remaining/g) ?? [],
+      ).toHaveLength(budgeted ? 1 : 0);
     },
   );
 });

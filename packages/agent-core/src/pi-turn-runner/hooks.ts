@@ -77,6 +77,13 @@ export interface PiBeforeLlmCallReplaceMetadata {
   replacementSourceIndexes?: number[];
   /** Reserved lineage for a placement-owned exact current-user tail. */
   currentUserSourceIndex?: number;
+  /**
+   * Reserved count of hidden markers placed immediately before the
+   * placement-owned current-user tail. Maintained by the runner alongside
+   * `currentUserSourceIndex`; hooks must not set it. Absent means 1 when
+   * `currentUserSourceIndex` is present, keeping older persisted metadata valid.
+   */
+  placedMarkerCount?: number;
 }
 
 export type PiBeforeLlmCallAppendMessage = Omit<CustomMessage, 'content' | 'display'> & {
@@ -109,7 +116,11 @@ export type PiBeforeLlmCallHookDecision =
   | {
       /**
        * Durably appends one hidden typed context message before the Provider request.
-       * A successful append ends the before-LLM decision pipeline.
+       * Appends accumulate: later hooks still run and receive the registered
+       * markers in `messages` and `canonicalMessages`. All markers are committed
+       * once after the pipeline (placed markers inside the durable replacement,
+       * tail markers in registration order with one history flush). A durable
+       * `replaceMessages` after a registered append aborts the request.
        */
       type: 'appendMessage';
       message: PiBeforeLlmCallAppendMessage;

@@ -78,16 +78,10 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
     if (checkpoint.type === 'requestOnly') {
       return checkpoint.messages;
     }
-    if (checkpoint.type !== 'replace' && checkpoint.type !== 'append') return messages;
+    if (checkpoint.type !== 'commit') return messages;
 
-    const replacement =
-      checkpoint.type === 'replace'
-        ? {
-            messages: checkpoint.durableMessages,
-            metadata: checkpoint.metadata,
-            ...(checkpoint.afterCommit ? { afterCommit: checkpoint.afterCommit } : {}),
-          }
-        : checkpoint.durableReplacement;
+    let requestMessages = checkpoint.messages;
+    const replacement = checkpoint.durableReplacement;
     if (replacement) {
       // Pi passes the provider-bound context array into transformContext, but
       // Agent.state.messages is the transcript later event reducers read. A
@@ -108,18 +102,29 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
         if (invalidAppendReason) {
           throw new Error(`after_commit append message invalid: ${invalidAppendReason}`);
         }
-        const appendMessage = checkpoint.type === 'append' ? checkpoint.messages.at(-1) : undefined;
-        checkpoint.messages = appendMessage
-          ? [...checkpoint.messages.slice(0, -1), postCommitMessage, appendMessage]
-          : [...checkpoint.messages, postCommitMessage];
+        // The post-commit message belongs to the durable replacement, so it
+        // precedes every tail marker registered by later hooks, both in the
+        // request and in history. A request-only filter may have dropped the
+        // tail markers from the request; then the message simply goes last.
+        const tailMarkers = new Set<AgentMessage>(checkpoint.tailMessages);
+        const firstTailIndex = requestMessages.findIndex((message) => tailMarkers.has(message));
+        requestMessages =
+          firstTailIndex < 0
+            ? [...requestMessages, postCommitMessage]
+            : [
+                ...requestMessages.slice(0, firstTailIndex),
+                postCommitMessage,
+                ...requestMessages.slice(firstTailIndex),
+              ];
         messages.push(postCommitMessage);
         agent.state.messages = [...agent.state.messages, postCommitMessage];
         await history.flushTail();
       }
     }
 
-    if (checkpoint.type === 'replace') return checkpoint.messages;
-
+    if (checkpoint.tailMessages.length === 0) return requestMessages;
+    // Every tail marker is committed in registration order with a single
+    // delivery ack; any failure keeps the provider call fail-closed.
     messages.push(...checkpoint.tailMessages);
     agent.state.messages = [...agent.state.messages, ...checkpoint.tailMessages];
     try {
@@ -128,7 +133,7 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(`before_llm_append_persistence_failed: ${message}`);
     }
-    return checkpoint.messages;
+    return requestMessages;
   };
 }
 
@@ -141,37 +146,35 @@ async function runBeforeLLM(
   | { type: 'unchanged'; messages: AgentMessage[] }
   | { type: 'requestOnly'; messages: AgentMessage[] }
   | {
-      type: 'replace';
+      /**
+       * Durable work to commit before the provider call: at most one durable
+       * replacement (already carrying placed markers) followed by every tail
+       * marker in hook registration order. `messages` is the final request view.
+       */
+      type: 'commit';
       messages: AgentMessage[];
-      durableMessages: AgentMessage[];
-      metadata: PiBeforeLlmCallReplaceMetadata;
-      afterCommit?: PiAfterLlmReplacementCommit;
-    }
-  | {
-      type: 'append';
-      messages: AgentMessage[];
-      message: PiBeforeLlmCallAppendMessage;
-      tailMessages: AgentMessage[];
-      durableReplacement?: {
-        messages: AgentMessage[];
-        metadata: PiBeforeLlmCallReplaceMetadata;
-        afterCommit?: PiAfterLlmReplacementCommit;
-      };
+      tailMessages: PiBeforeLlmCallAppendMessage[];
+      durableReplacement?: DurableReplacement;
     }
   | { type: 'respond'; text: string; reason: string }
   | { type: 'abort'; reason: string }
 > {
   const initialCurrentUser = captureInitialCurrentUser(messages, phase);
+  // Two views flow through the pipeline:
+  // - `currentMessages` is the Provider request view. Request-only hooks may
+  //   rewrite it; every registered append marker is inserted here at once so
+  //   later hooks (e.g. final-request budget admission) see the real request.
+  // - `canonicalMessages` is the canonical history as it will look after this
+  //   checkpoint commits: the durable replacement base (already carrying placed
+  //   markers) followed by every pending tail marker in registration order.
   let currentMessages = [...messages];
   let canonicalMessages = [...messages];
   let requestMessagesReplaced = false;
-  let durableReplacement:
-    | {
-        messages: AgentMessage[];
-        metadata: PiBeforeLlmCallReplaceMetadata;
-        afterCommit?: PiAfterLlmReplacementCommit;
-      }
-    | undefined;
+  let durableReplacement: DurableReplacement | undefined;
+  // Successful appends no longer end the pipeline; tail markers accumulate here
+  // and are committed with one history flush after every hook has run.
+  const pendingTailMessages: PiBeforeLlmCallAppendMessage[] = [];
+  let pendingAppendCount = 0;
   for (const hook of turn.hooks.beforeLLM) {
     let decision: Awaited<ReturnType<typeof hook>>;
     try {
@@ -309,11 +312,14 @@ async function runBeforeLLM(
         };
       }
       if (decision.placement === 'before-current-user') {
+        // Pending tail markers stay at the request tail after the real user, the
+        // same position they take in canonical history once committed.
+        const pendingTails = new Set<AgentMessage>(pendingTailMessages);
         const placement = placeBeforeCurrentUser({
           phase,
           initialMessages: messages,
           initialCurrentUser,
-          currentMessages,
+          currentMessages: currentMessages.filter((message) => !pendingTails.has(message)),
           durableReplacement,
           marker: decision.message,
         });
@@ -331,24 +337,48 @@ async function runBeforeLLM(
         }
         if (placement.type === 'defer') continue;
         if (placement.type === 'placed') {
-          return {
-            type: 'append',
-            messages: placement.messages,
-            message: decision.message,
-            tailMessages: [],
-            durableReplacement: placement.durableReplacement,
+          currentMessages = [
+            ...placement.messages,
+            ...currentMessages.filter((message) => pendingTails.has(message)),
+          ];
+          durableReplacement = {
+            ...placement.durableReplacement,
+            ...(durableReplacement?.afterCommit
+              ? { afterCommit: durableReplacement.afterCommit }
+              : {}),
           };
+          canonicalMessages = [...durableReplacement.messages, ...pendingTailMessages];
+          pendingAppendCount += 1;
+          logAppendRegistered(turn, phase, decision.reason, 'before-current-user');
+          continue;
         }
         // 'tail': a continuation has no current user to precede, so the ordinary
         // tail append already keeps real user input last.
       }
-      return {
-        type: 'append',
-        messages: [...currentMessages, decision.message],
-        message: decision.message,
-        tailMessages: [decision.message],
-        ...(durableReplacement ? { durableReplacement } : {}),
-      };
+      pendingTailMessages.push(decision.message);
+      currentMessages = [...currentMessages, decision.message];
+      canonicalMessages = [...canonicalMessages, decision.message];
+      pendingAppendCount += 1;
+      logAppendRegistered(turn, phase, decision.reason, 'tail');
+      continue;
+    }
+    if (pendingAppendCount > 0) {
+      // A durable replacement after a registered marker would have to rebase
+      // markers the hook never saw onto a history it rewrote. Production
+      // registers context compaction before every appending reminder, so this
+      // order is a composition bug; fail closed instead of guessing a rebase.
+      const reason =
+        'beforeLlmCall durable replacement after a pending appendMessage is unsupported';
+      turn.logger.error(
+        {
+          session_id: turn.input.sessionId,
+          turn_id: turn.input.turnId,
+          phase,
+          reason,
+        },
+        '[pi-turn-runner] beforeLlmCall replacement rejected',
+      );
+      return { type: 'abort', reason };
     }
     const invalidReplacementReason = validReplacement(decision.metadata);
     if (invalidReplacementReason) {
@@ -396,18 +426,41 @@ async function runBeforeLLM(
       '[pi-turn-runner] beforeLlmCall replaced context messages',
     );
   }
-  if (durableReplacement) {
+  if (durableReplacement || pendingTailMessages.length > 0) {
     return {
-      type: 'replace',
+      type: 'commit',
       messages: currentMessages,
-      durableMessages: durableReplacement.messages,
-      metadata: durableReplacement.metadata,
-      ...(durableReplacement.afterCommit ? { afterCommit: durableReplacement.afterCommit } : {}),
+      tailMessages: pendingTailMessages,
+      ...(durableReplacement ? { durableReplacement } : {}),
     };
   }
   return requestMessagesReplaced
     ? { type: 'requestOnly', messages: currentMessages }
     : { type: 'unchanged', messages };
+}
+
+interface DurableReplacement {
+  messages: AgentMessage[];
+  metadata: PiBeforeLlmCallReplaceMetadata;
+  afterCommit?: PiAfterLlmReplacementCommit;
+}
+
+function logAppendRegistered(
+  turn: turnState,
+  phase: 'initial' | 'iteration',
+  reason: string,
+  placement: 'tail' | 'before-current-user',
+): void {
+  turn.logger.info(
+    {
+      session_id: turn.input.sessionId,
+      turn_id: turn.input.turnId,
+      phase,
+      reason,
+      placement,
+    },
+    '[pi-turn-runner] beforeLlmCall registered hidden context message',
+  );
 }
 
 function captureInitialCurrentUser(
@@ -452,6 +505,16 @@ function placeBeforeCurrentUser(input: {
     return 'before-current-user could not locate one current real user';
   }
   const sourceIndex = input.initialMessages.length - 1;
+  // `currentUserSourceIndex` is reserved for placement (validReplacement
+  // rejects it from hooks), so its presence means an earlier hook in this
+  // pipeline already placed a marker and moved the exact current user to the
+  // tail of both views.
+  if (input.durableReplacement.metadata.currentUserSourceIndex !== undefined) {
+    return placeAfterEarlierPlacement(
+      { ...input, durableReplacement: input.durableReplacement },
+      currentUser,
+    );
+  }
   const sourceIndexes = input.durableReplacement.metadata.replacementSourceIndexes;
   const durableMatches = input.durableReplacement.messages.flatMap((message, index) =>
     message === currentUser || sourceIndexes?.[index] === sourceIndex ? [index] : [],
@@ -487,6 +550,65 @@ function placeBeforeCurrentUser(input: {
   };
 }
 
+/**
+ * Places another marker once an earlier placement already put the exact
+ * current user at the durable tail. Markers keep registration order, all
+ * before the current user. In the request view the user is matched by
+ * identity; if a request-only hook rewrote the user (e.g. a media guard
+ * replacing an image block), the first placement's invariant — the current
+ * user is the last request message — locates it instead.
+ */
+function placeAfterEarlierPlacement(
+  input: {
+    readonly currentMessages: readonly AgentMessage[];
+    readonly durableReplacement: {
+      readonly messages: AgentMessage[];
+      readonly metadata: PiBeforeLlmCallReplaceMetadata;
+    };
+    readonly marker: PiBeforeLlmCallAppendMessage;
+  },
+  currentUser: AgentMessage,
+):
+  | string
+  | {
+      readonly type: 'placed';
+      readonly messages: AgentMessage[];
+      readonly durableReplacement: {
+        readonly messages: AgentMessage[];
+        readonly metadata: PiBeforeLlmCallReplaceMetadata;
+      };
+    } {
+  const durable = input.durableReplacement.messages;
+  if (durable.at(-1) !== currentUser || durable.indexOf(currentUser) !== durable.length - 1) {
+    return 'before-current-user lost the placed current user';
+  }
+  const identityMatches = input.currentMessages.flatMap((message, index) =>
+    message === currentUser ? [index] : [],
+  );
+  if (identityMatches.length > 1) return 'before-current-user located multiple request users';
+  const lastIndex = input.currentMessages.length - 1;
+  const requestUserIndex =
+    identityMatches[0] ?? (input.currentMessages[lastIndex]?.role === 'user' ? lastIndex : -1);
+  if (requestUserIndex < 0) return 'before-current-user lost the placed request user';
+  const durableMessages = [...durable.slice(0, -1), input.marker, currentUser];
+  return {
+    type: 'placed',
+    messages: [
+      ...input.currentMessages.slice(0, requestUserIndex),
+      input.marker,
+      ...input.currentMessages.slice(requestUserIndex),
+    ],
+    durableReplacement: {
+      messages: durableMessages,
+      metadata: {
+        ...input.durableReplacement.metadata,
+        messagesAfter: durableMessages.length,
+        placedMarkerCount: (input.durableReplacement.metadata.placedMarkerCount ?? 1) + 1,
+      },
+    },
+  };
+}
+
 function withCurrentUserTailMetadata(
   metadata: PiBeforeLlmCallReplaceMetadata,
   removedIndex: number | undefined,
@@ -501,6 +623,7 @@ function withCurrentUserTailMetadata(
     ...metadata,
     messagesAfter,
     currentUserSourceIndex,
+    placedMarkerCount: 1,
     ...(replacementSourceIndexes === undefined ? {} : { replacementSourceIndexes }),
   };
 }
@@ -525,6 +648,9 @@ function validReplacement(metadata: PiBeforeLlmCallReplaceMetadata): string | un
   if (!metadata || typeof metadata !== 'object') return 'metadata is required';
   if (Object.hasOwn(metadata, 'currentUserSourceIndex')) {
     return 'currentUserSourceIndex is reserved for placement';
+  }
+  if (Object.hasOwn(metadata, 'placedMarkerCount')) {
+    return 'placedMarkerCount is reserved for placement';
   }
   if (!metadata.replacementId) return 'replacementId is required';
   if (!metadata.strategyVersion) return 'strategyVersion is required';
