@@ -75,7 +75,10 @@ export function parseAutoCompactWindowInput(text: string): AutoCompactWindowInpu
 
 /** Exact decimal scaling; undefined when the result is not a whole number. */
 function scaleDecimal(whole: string, fraction: string, exponent: number): number | undefined {
-  const significant = fraction.replace(/0+$/u, '');
+  // A loop instead of /0+$/, which backtracks quadratically on long zero runs.
+  let end = fraction.length;
+  while (end > 0 && fraction.endsWith('0', end)) end -= 1;
+  const significant = fraction.slice(0, end);
   if (significant.length > exponent) return undefined;
   return Number(`${whole}${significant.padEnd(exponent, '0')}`);
 }

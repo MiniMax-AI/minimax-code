@@ -18,6 +18,13 @@ import {
 import { resolveConfigFromRaw } from '../src/config.js';
 
 describe('parseAutoCompactWindowInput', () => {
+  it('strips a long run of trailing zeros without regex backtracking', () => {
+    expect(parseAutoCompactWindowInput(`1.${'0'.repeat(100_000)}k`)).toEqual({
+      kind: 'tokens',
+      tokens: 1_000,
+    });
+  });
+
   it.each([
     ['200000', 200_000],
     ['500k', 500_000],
@@ -25,6 +32,7 @@ describe('parseAutoCompactWindowInput', () => {
     ['1M', 1_000_000],
     ['1m', 1_000_000],
     ['1.5M', 1_500_000],
+    ['1.500k', 1_500],
     ['1.1k', 1_100],
     // A bare number from 100 to 1000 means thousands, like Claude Code.
     ['100', 100_000],
