@@ -619,6 +619,12 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     },
     isStopped: () => stopped,
   });
+  const readAutoCompact = options.runtime.getCompactionTrigger?.bind(options.runtime);
+  const writeAutoCompact = options.runtime.setCompactionTrigger?.bind(options.runtime);
+  const autoCompactSetting =
+    readAutoCompact && writeAutoCompact
+      ? { read: readAutoCompact, write: writeAutoCompact }
+      : undefined;
   commandFlow = new TuiCommandFlow({
     bashFlow,
     workspaceDir: options.workspaceDir,
@@ -632,6 +638,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     goalFlow,
     planModeFlow,
     permissionModeFlow,
+    ...(autoCompactSetting ? { autoCompactSetting } : {}),
     ...(options.auth ? { auth: options.auth } : {}),
     openExternalTarget: options.openExternalTarget,
     interactionFlow,

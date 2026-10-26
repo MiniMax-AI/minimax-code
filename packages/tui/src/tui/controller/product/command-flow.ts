@@ -4,6 +4,7 @@ import {
   matchTuiCommandInput,
   type TuiCommandCatalog,
   type TuiCommandContribution,
+  type TuiCommandExecutionDisposition,
   type TuiCommandHandler,
   type TuiCommandReadiness,
 } from '../../commands/catalog.js';
@@ -43,6 +44,12 @@ import { TuiLoginRequiredError } from '../../../application/login-gate.js';
 import { TuiFailure } from '../../../failure.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
 import {
+  AUTO_COMPACT_USAGE,
+  formatAutoCompactSaved,
+  formatAutoCompactStatus,
+  parseAutoCompactCommand,
+} from '../../../application/auto-compact-command.js';
+import {
   createTuiSubmissionSnapshot,
   type TuiSubmissionSeed,
   type TuiSubmissionSnapshot,
@@ -50,7 +57,11 @@ import {
 import { rebuildSessionMutationTransport } from '../../features/session-mutation/transport.js';
 import { toTuiTranscriptAttachments } from '../../features/composer/attachments.js';
 import { resolveTuiRuntimeFailure } from '../runtime/runtime-error-presentation.js';
-import type { TuiEditMessageAttachment, TuiSession } from '../../../runtime/port.js';
+import type {
+  TuiCompactionTrigger,
+  TuiEditMessageAttachment,
+  TuiSession,
+} from '../../../runtime/port.js';
 import type { TuiAttachment, TuiTransportAttachment } from '../../../types/invocation.js';
 import { sessionMutationText } from '../../features/session-mutation/copy.js';
 import { parseTuiBashInput } from '../../commands/bash-input.js';
@@ -78,6 +89,14 @@ export interface TuiCommandFlowOptions {
   readonly goalFlow?: Pick<TuiGoalFlow, 'execute' | 'resumeBlocked'>;
   readonly planModeFlow?: TuiPlanModeFlow;
   readonly permissionModeFlow?: TuiPermissionModeFlow;
+  /**
+   * The Session model's automatic compaction trigger (`modelSettings` in
+   * config.yaml); absent, or resolving undefined, when the Runtime has none.
+   */
+  readonly autoCompactSetting?: {
+    read(sessionId: string): Promise<TuiCompactionTrigger | undefined>;
+    write(sessionId: string, value: number | 'auto'): Promise<TuiCompactionTrigger | undefined>;
+  };
   readonly auth?: McodeAuthPort;
   readonly openExternalTarget?: TuiExternalTargetOpener;
   readonly interactionFlow: TuiInteractionFlow;
@@ -1267,6 +1286,7 @@ export class TuiCommandFlow {
         }
         await this.options.permissionModeFlow.set(mode);
       },
+      autocompact: async ({ args }) => this.runAutoCompactCommand(args),
       login: () => {
         this.pendingLoginContinuation = undefined;
         this.showLoginRegionPicker();
@@ -1562,6 +1582,54 @@ export class TuiCommandFlow {
     }
     this.pendingLoginContinuation = 'checkin';
     this.showLoginRegionPicker();
+  }
+
+  private async runAutoCompactCommand(args: string): Promise<TuiCommandExecutionDisposition> {
+    const setting = this.options.autoCompactSetting;
+    const reportUnavailable = () =>
+      this.options.append('Auto-compact settings are unavailable in this host.', 'warning');
+    if (!setting) {
+      reportUnavailable();
+      return 'consumed';
+    }
+    const command = parseAutoCompactCommand(args);
+    if (command.kind === 'invalid') {
+      this.options.append(AUTO_COMPACT_USAGE, 'warning');
+      return 'retained';
+    }
+    const sessionId = this.options.controller.snapshot().session?.sessionId;
+    if (!sessionId) {
+      this.options.append('Start or resume a Session before configuring auto-compact.', 'warning');
+      return 'retained';
+    }
+    let trigger: TuiCompactionTrigger | undefined;
+    try {
+      trigger =
+        command.kind === 'save'
+          ? await setting.write(sessionId, command.value)
+          : await setting.read(sessionId);
+    } catch (error) {
+      this.options.append(
+        formatTuiActionFailure(error, {
+          summary:
+            command.kind === 'save'
+              ? "Couldn't save the auto-compact setting."
+              : "Couldn't read the auto-compact setting.",
+          nextStep:
+            'Check that the Session has a usable model and that config.yaml is valid and writable, then retry.',
+        }),
+        'error',
+      );
+      return 'retained';
+    }
+    if (!trigger) {
+      reportUnavailable();
+      return 'consumed';
+    }
+    this.options.append(
+      command.kind === 'save' ? formatAutoCompactSaved(trigger) : formatAutoCompactStatus(trigger),
+    );
+    return 'consumed';
   }
 
   private showPermissionModePicker(): void {

@@ -68,6 +68,7 @@ export {
   createProductionRootArchiveTitleModel,
   createProductionSessionTitleModel,
   createSessionLLMRetryEventObserver,
+  describeCompactionTrigger,
 } from './production-composition.js';
 export type {
   CreateLocalAgentHostOptions,
@@ -77,6 +78,7 @@ export type {
   ProductionSessionTitleProductCapabilities,
 } from './production-composition.js';
 export type { ToolResultCompactionConfig } from './compaction/contracts.js';
+export { readSessionAgentExecutionSnapshot } from './agent-host/preparation/session-agent-execution-snapshot.js';
 export type { AgentHostRuntimeLifecycle } from './agent-host/native-production-dependencies.js';
 export {
   ModelRouteAvailabilityError,
@@ -129,6 +131,9 @@ export {
   endLocalPluginHookSession,
   markNextLocalPluginHookSessionStart,
 } from './agent-host/assembly/local-turn-plugin-hooks.js';
-export { buildLocalTurnPayloadTransform } from './agent-host/index.js';
+export {
+  buildLocalTurnPayloadTransform,
+  readCompactionModelSelection,
+} from './agent-host/index.js';
 
 export { normalizeModelSelection, type UserModelSelection } from './agent-host/index.js';

@@ -93,5 +93,9 @@ export {
   parseSourceQualifiedModelKey,
   parseProviderId,
 } from './resolution/model-key.js';
+export {
+  readCompactionTriggerSetting,
+  readCompactionTriggerSettings,
+} from './compaction-trigger-settings.js';
 
 export type { ManagedModelParameterSnapshot } from './resolution/model-ref.js';

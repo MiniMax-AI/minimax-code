@@ -493,6 +493,16 @@ describe('MiniMax Code ACP agent', () => {
         { providerId: 'custom', modelId: 'coder', displayName: 'Coder' },
       ],
     });
+    const setCompactionTrigger = vi.fn(async (_sessionId: string, value: number | 'auto') => ({
+      providerId: 'minimax',
+      modelId: 'm3',
+      contextWindow: 1_000_000,
+      builtInTriggerTokens: 760_000,
+      effectiveTriggerTokens: typeof value === 'number' ? value : 760_000,
+      source: 'model' as const,
+      saved: value,
+    }));
+    Object.assign(runtime, { setCompactionTrigger });
     const updates: acp.SessionNotification[] = [];
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp
@@ -559,6 +569,11 @@ describe('MiniMax Code ACP agent', () => {
                 description: 'Shorten the active conversation',
                 input: { hint: '[instructions]' },
               },
+              {
+                name: 'autocompact',
+                description: "Show or set when this model's conversation is compacted automatically",
+                input: { hint: '[auto | <tokens>]' },
+              },
             ],
           },
         }),
@@ -582,6 +597,24 @@ describe('MiniMax Code ACP agent', () => {
           prompt: [{ type: 'text', text: '/model custom/coder' }],
         }),
       ).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: '/autocompact 300k' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+
+    expect(setCompactionTrigger).toHaveBeenCalledWith('session-1', 300_000);
+    expect(updates).toContainEqual({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'Auto-compact for minimax/m3 set to 300,000 tokens · starts at 300,000 tokens (30% of window) from the next request',
+        },
+      },
     });
 
     expect(listModels).toHaveBeenCalledTimes(3);
@@ -613,6 +646,7 @@ describe('MiniMax Code ACP agent', () => {
                 '- /mcp [filter] — Inspect MCP capabilities and project configuration',
                 '- /usage — Show session usage',
                 '- /compact [instructions] — Shorten the active conversation',
+                "- /autocompact [auto | <tokens>] — Show or set when this model's conversation is compacted automatically",
               ].join('\n'),
             },
           },

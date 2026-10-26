@@ -52,6 +52,7 @@ import {
   type RuntimeSkillApplication,
 } from "./application/index.js";
 import { createRuntimeQueueSelection } from "./application/session/runtime-queue-selection.js";
+import { createCompactionTriggerApplication } from "./application/session/compaction-trigger-application.js";
 import { createForkState } from "./application/session/conversation-fork-state.js";
 import {
   createProductionConversationMutationWorkflow,
@@ -529,6 +530,12 @@ export async function createRuntimeServices(
       listSources: (input) =>
         readLocalInstructionSources({ ...input, dataDir: options.dataDir }),
     },
+    compactionTrigger: createCompactionTriggerApplication({
+      sessions: sessionSystem.sessions.execution,
+      agents: product.agents,
+      preparation,
+      config: product.preparation.configBuilder.config,
+    }),
     mcp: owners.mcp.public,
     modelProvider: {
       application: modelProviderApplication,

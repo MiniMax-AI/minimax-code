@@ -29,6 +29,7 @@ import type {
   TuiActiveRunSnapshot,
   TuiBackgroundTask,
   TuiCompactionResult,
+  TuiCompactionTrigger,
   TuiDelegationSnapshot,
   TuiDelegationStopReceipt,
   TuiFeedbackPreview,
@@ -445,6 +446,15 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode> {
     return this.productAccess.setPermissionMode(mode);
   }
+  getCompactionTrigger(sessionId: string): Promise<TuiCompactionTrigger | undefined> {
+    return this.productAccess.getCompactionTrigger(sessionId);
+  }
+  setCompactionTrigger(
+    sessionId: string,
+    value: number | 'auto',
+  ): Promise<TuiCompactionTrigger | undefined> {
+    return this.productAccess.setCompactionTrigger(sessionId, value);
+  }
   listModels(sessionId?: string): Promise<TuiModel[]> {
     return this.productAccess.listModels(sessionId);
   }
@@ -540,8 +550,8 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       customInstructions,
     );
   }
-  getContextSnapshot(sessionId: string) {
-    return this.productAccess.getContextSnapshot(sessionId);
+  getContextSnapshot(sessionId: string, options?: { readonly compactionTrigger?: boolean }) {
+    return this.productAccess.getContextSnapshot(sessionId, options);
   }
   getActiveRun(sessionId: string): Promise<TuiActiveRunSnapshot> {
     return this.productAccess.getActiveRun(sessionId);

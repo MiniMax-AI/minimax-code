@@ -252,6 +252,35 @@ describe("TuiRuntimeAdapter product access", () => {
     expect(cliService.getActiveTurn).toHaveBeenCalledWith("session-1");
   });
 
+  it('adds the compaction trigger to a requested context snapshot and keeps /context when it fails', async () => {
+    const cliService = cliServiceFixture();
+    const trigger = {
+      providerId: 'minimax',
+      modelId: 'MiniMax-M3',
+      contextWindow: 1000,
+      builtInTriggerTokens: 760,
+      effectiveTriggerTokens: 500,
+      source: 'global' as const,
+    };
+    const getCompactionTrigger = vi.fn(async () => trigger);
+    Object.assign(cliService, { getCompactionTrigger });
+    const adapter = new TuiRuntimeAdapter(cliService);
+
+    await expect(adapter.getContextSnapshot('session-1')).resolves.not.toHaveProperty(
+      'compactionTrigger',
+    );
+    expect(getCompactionTrigger).not.toHaveBeenCalled();
+    await expect(
+      adapter.getContextSnapshot('session-1', { compactionTrigger: true }),
+    ).resolves.toMatchObject({ status: 'stale', compactionTrigger: trigger });
+    expect(getCompactionTrigger).toHaveBeenCalledWith({ sessionId: 'session-1' });
+
+    getCompactionTrigger.mockRejectedValueOnce(new Error('model credentials unavailable'));
+    const degraded = await adapter.getContextSnapshot('session-1', { compactionTrigger: true });
+    expect(degraded).toMatchObject({ status: 'stale', contextUsage: { usedTokens: 300 } });
+    expect(degraded).not.toHaveProperty('compactionTrigger');
+  });
+
   it("derives decision-blocked active state from generated interaction contracts", async () => {
     const cliService = cliServiceFixture();
     vi.mocked(cliService.listPendingPermissions).mockResolvedValueOnce({

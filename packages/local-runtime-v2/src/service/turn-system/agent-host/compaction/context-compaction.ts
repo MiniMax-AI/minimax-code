@@ -21,6 +21,7 @@ import type {
   CheckpointStopReason,
   AutomaticContextCompactionInput,
   ContextCompactionLifecycleMetadata,
+  ContextCompactionModelSelection,
   ContextCompactionObservation,
   ContextCompactionObserver,
   ContextCompactionPhase,
@@ -82,6 +83,8 @@ export function createAutomaticContextCompactionHook(
   leaseId: string,
   options: {
     readonly maxSerializedInputBytes?: number;
+    /** The Turn's Session model selection, which keys per-model compaction settings. */
+    readonly modelSelection?: ContextCompactionModelSelection;
     readonly attempts?: ContextCompactionAttemptFactory;
     readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'> | undefined;
     /** Runs only after the automatic trigger matches, immediately before compaction starts. */
@@ -100,10 +103,7 @@ export function createAutomaticContextCompactionHook(
     } = { started: false };
     const providerTokenUsage = createCompactionTokenUsageAccumulator();
     try {
-      const automaticInput = automaticContextCompactionInput(
-        input,
-        options.maxSerializedInputBytes,
-      );
+      const automaticInput = automaticContextCompactionInput(input, options);
       const probe = dependencies.automatic.probeBeforeLlm?.(automaticInput);
       if (probe?.shouldStart === false) {
         return resolveAutomaticCompactionResult({
@@ -218,16 +218,38 @@ export function createAutomaticContextCompactionHook(
   };
 }
 
+/**
+ * The Session model selection in a prepared AgentConfig. It keys per-model
+ * compaction settings; the resolved Pi provider can be an alias of it.
+ */
+export function readCompactionModelSelection(agentConfig: {
+  readonly model?: unknown;
+}): ContextCompactionModelSelection | undefined {
+  const model = agentConfig.model;
+  if (!model || typeof model !== 'object') return undefined;
+  const { provider, model_id: modelId } = model as Readonly<Record<string, unknown>>;
+  const selection = {
+    providerId: typeof provider === 'string' ? provider.trim() : '',
+    modelId: typeof modelId === 'string' ? modelId.trim() : '',
+  };
+  return selection.providerId && selection.modelId ? selection : undefined;
+}
+
 function automaticContextCompactionInput(
   input: PiBeforeLlmCallHookInput,
-  maxSerializedInputBytes: number | undefined,
+  options: {
+    readonly maxSerializedInputBytes?: number;
+    readonly modelSelection?: ContextCompactionModelSelection;
+  },
 ): AutomaticContextCompactionInput {
+  const { maxSerializedInputBytes, modelSelection } = options;
   return {
     sessionId: input.sessionId,
     phase: input.phase,
     messages: input.messages,
     model: input.model,
     ...(maxSerializedInputBytes === undefined ? {} : { maxSerializedInputBytes }),
+    ...(modelSelection ? { modelSelection } : {}),
     streamFn: input.streamFn,
     apiKey: input.apiKey,
     headers: input.headers,

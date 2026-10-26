@@ -312,6 +312,7 @@ export type {
   CompactionTokenUsage,
   CompactionOutcome,
   ContextCompactionHooks,
+  ContextCompactionModelSelection,
   ManualContextCompactionInput,
   ContextCompactionResult,
   ContextCompactor,

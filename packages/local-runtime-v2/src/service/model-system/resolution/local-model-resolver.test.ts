@@ -1233,6 +1233,9 @@ describe('Codex OAuth discovered models', () => {
         thinkingRequestPatch: { reasoning: { effort } },
         model: {
           id: 'gpt-6-astra',
+          // The Pi provider is the OAuth key, not the `custom_provider:` selection
+          // id; per-model settings such as autoCompactWindow use the selection id.
+          provider: 'openai-codex',
           api: 'openai-codex-responses',
           contextWindow: 800_000,
           maxTokens: 60_000,

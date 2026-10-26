@@ -24,6 +24,7 @@ import {
 import {
   ContextCompactionAttemptFactory,
   createAutomaticContextCompactionHook,
+  readCompactionModelSelection,
 } from './compaction/context-compaction.js';
 import {
   assertAgentHostCapabilityAvailable,
@@ -596,6 +597,7 @@ export class LocalAgentHost<
       input.lease.leaseId,
       {
         maxSerializedInputBytes: preflight.preparation.llm.maxRequestBodyBytes,
+        ...compactionModelSelectionOption(preflight.preparation.agentConfig),
         attempts: this.compactionAttempts,
         logger: this.dependencies.logger,
         ...(pluginHooks.length
@@ -1037,4 +1039,9 @@ function uniqueTaskIds(values: readonly string[]): string[] {
 
 function isAcceptedAtMs(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function compactionModelSelectionOption(agentConfig: { readonly model?: unknown }) {
+  const modelSelection = readCompactionModelSelection(agentConfig);
+  return modelSelection ? { modelSelection } : {};
 }

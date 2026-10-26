@@ -87,6 +87,20 @@ interface LocalRuntimeBackgroundTaskQuery {
   readonly limit?: number;
 }
 
+/** A Session model's automatic compaction trigger, in tokens. */
+export interface LocalRuntimeCompactionTrigger {
+  /** Source-qualified selection that keys `modelSettings`. */
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly contextWindow: number;
+  readonly builtInTriggerTokens: number;
+  /** min(setting, built-in): a setting can only make compaction earlier. */
+  readonly effectiveTriggerTokens: number;
+  readonly source: 'model' | 'model-auto' | 'global' | 'built-in';
+  /** This model's own valid `autoCompactWindow`. */
+  readonly saved?: number | 'auto';
+}
+
 /** Internal peripheral Application surface consumed by process-local delivery. */
 export interface LocalRuntimeApplication {
   readonly events: {
@@ -235,6 +249,16 @@ export interface LocalRuntimeApplication {
     setPermissionMode(input: {
       mode: "default" | "acceptEdits" | "bypassPermissions" | "auto" | "off";
     }): Promise<unknown>;
+    /** Automatic compaction trigger the Session's current model would use on its next request. */
+    getCompactionTrigger?(input: { sessionId: string }): Promise<LocalRuntimeCompactionTrigger>;
+    /**
+     * Persists `modelSettings.<provider/model>.autoCompactWindow` for the
+     * Session's current model and returns the refreshed trigger.
+     */
+    setCompactionTrigger?(input: {
+      sessionId: string;
+      value: number | 'auto';
+    }): Promise<LocalRuntimeCompactionTrigger>;
   };
   readonly models?: {
     list(input?: { sessionId?: string }): Promise<readonly unknown[]>;

@@ -44,6 +44,10 @@ export const TUI_COMMAND_DESCRIPTORS = {
     name: 'compact',
     description: 'Shorten the active conversation',
   },
+  autocompact: {
+    name: 'autocompact',
+    description: "Show or set when this model's conversation is compacted automatically",
+  },
   export: {
     name: 'export',
     description: 'Export the current Session as Markdown',

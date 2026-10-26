@@ -87,9 +87,24 @@ export {
   compareAndSetLocalModelContext,
   removeLocalProviderConfig,
   replaceLocalManagedMinimaxProvider,
+  updateLocalAutoCompactWindow,
   updateLocalByokConfig,
   updateLocalModelSelection,
 } from './local-model-provider-write.js';
+export {
+  compactionTriggerAtForSetting,
+  findInvalidAutoCompactWindows,
+  isValidAutoCompactWindowTokens,
+  parseAutoCompactWindowInput,
+  selectCompactionTriggerSetting,
+} from './auto-compact-window.js';
+export type {
+  AutoCompactWindowInput,
+  AutoCompactWindowSetting,
+  CompactionTriggerSetting,
+  ModelSettingsConfig,
+  ModelSettingsEntry,
+} from './auto-compact-window.js';
 export type {
   LocalByokConfigDraft,
   ManagedMinimaxProviderSnapshot,
