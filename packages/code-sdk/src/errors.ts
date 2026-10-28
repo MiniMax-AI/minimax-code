@@ -111,8 +111,14 @@ export class MCodeProtocolError extends MCodeError {
 export class MCodeNotFoundError extends MCodeError {
   readonly installCommand = MCODE_INSTALL_HINT;
 
-  constructor(message: string, details?: MCodeErrorDetails) {
-    super(`${message} Install it with \`${MCODE_INSTALL_HINT}\` or pass \`bin\`.`, details);
+  /** `installHint: false` when a CLI is installed but cannot be used as found. */
+  constructor(message: string, details: MCodeErrorDetails & { installHint?: boolean } = {}) {
+    super(
+      details.installHint === false
+        ? message
+        : `${message} Install it with \`${MCODE_INSTALL_HINT}\` or pass \`bin\`.`,
+      details,
+    );
     this.name = 'MCodeNotFoundError';
   }
 }

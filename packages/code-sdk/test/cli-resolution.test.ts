@@ -110,7 +110,7 @@ describe('CLI resolution', () => {
 
     // Without a resolvable JS entry the SDK asks for one instead of falling back to cmd.exe.
     expect(() => resolveCli({ bin: shim, env: {}, platform: 'win32' })).toThrow(
-      /Cannot find the JS entry behind .*mcode\.cmd/u,
+      /Found .*mcode\.cmd, but could not determine the JS entry it runs/u,
     );
     expect(
       buildSpawnCommand({ kind: 'exec', path: 'C:\\bin\\mcode.exe', source: 'path' }, ['exec']),

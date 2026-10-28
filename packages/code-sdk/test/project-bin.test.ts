@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { buildSpawnCommand, resolveCli } from '../src/cli-resolver.js';
+import { MCodeNotFoundError } from '../src/errors.js';
 import { findProjectBin, parseCmdShim, parseShellShim } from '../src/project-bin.js';
 import { FAKE_MCODE, tempDir } from './helpers.js';
 
@@ -113,5 +114,90 @@ describe('project-local node_modules/.bin/mcode', () => {
       ),
     ).toBe(entry);
     expect(parseShellShim('exec "$basedir/native-mcode" "$@"', ps1)).toBeUndefined();
+  });
+});
+
+/**
+ * The Windows layout written by the official installer (install.ps1) and by CLI self-update
+ * (packages/tui/src/update/versioned-prefix.ts): a root launcher that reads `current` and
+ * calls the release launcher, which runs the CLI's JS entry with a pinned Node.js runtime.
+ */
+function windowsInstall(
+  releases: readonly string[],
+  current: string,
+): { prefix: string; entry: (release: string) => string } {
+  const prefix = tempDir();
+  const entry = (release: string): string =>
+    join(prefix, 'releases', release, 'node_modules', '@minimax-ai', 'code', 'cli.js');
+  for (const release of releases) {
+    mkdirSync(join(prefix, 'releases', release, 'node_modules', '@minimax-ai', 'code'), {
+      recursive: true,
+    });
+    copyFileSync(FAKE_MCODE, entry(release));
+    writeFileSync(
+      join(prefix, 'releases', release, '.mcode-launcher.cmd'),
+      '@ECHO off\r\n"C:\\Program Files\\nodejs\\node.exe" "%~dp0node_modules\\@minimax-ai\\code\\cli.js" %*\r\nEXIT /B %ERRORLEVEL%\r\n',
+    );
+  }
+  writeFileSync(
+    join(prefix, 'mcode.cmd'),
+    '@ECHO off\r\nSETLOCAL\r\nSET /P MCODE_RELEASE=<"%~dp0current"\r\nECHO(%MCODE_RELEASE%| %SystemRoot%\\System32\\findstr.exe /R /X "[0-9A-Za-z][0-9A-Za-z._-]*" >NUL || EXIT /B 1\r\nCALL "%~dp0releases\\%MCODE_RELEASE%\\.mcode-launcher.cmd" %*\r\nEXIT /B %ERRORLEVEL%\r\n',
+  );
+  writeFileSync(join(prefix, 'current'), `${current}\r\n`);
+  return { prefix, entry };
+}
+
+describe('official Windows installer layout', () => {
+  it('follows mcode.cmd → current → .mcode-launcher.cmd to the JS entry, without a shell', () => {
+    const { prefix, entry } = windowsInstall(['0.7.1'], '0.7.1');
+    const options = {
+      packageSearchFrom: [],
+      projectSearchFrom: tempDir(),
+      platform: 'win32' as const,
+    };
+
+    const viaPath = resolveCli({ env: { PATH: prefix, PATHEXT: '.cmd' }, ...options });
+    const viaBin = resolveCli({ bin: join(prefix, 'mcode.cmd'), env: {}, ...options });
+
+    for (const cli of [viaPath, viaBin]) {
+      expect(cli).toMatchObject({
+        kind: 'node',
+        path: entry('0.7.1'),
+        launcher: join(prefix, 'mcode.cmd'),
+      });
+      expect(buildSpawnCommand(cli, ['--version'])).toEqual({
+        command: process.execPath,
+        args: [entry('0.7.1'), '--version'],
+      });
+    }
+  });
+
+  it('re-reads the current release for every spawn, so a self-update is picked up', () => {
+    const { prefix, entry } = windowsInstall(['0.7.1', '0.7.2'], '0.7.1');
+    const cli = resolveCli({ bin: join(prefix, 'mcode.cmd'), env: {}, platform: 'win32' });
+    writeFileSync(join(prefix, 'current'), '0.7.2\r\n');
+
+    expect(buildSpawnCommand(cli, ['exec']).args[0]).toBe(entry('0.7.2'));
+
+    writeFileSync(join(prefix, 'current'), '..\\outside\r\n');
+    expect(() => buildSpawnCommand(cli, ['exec'])).toThrow(/no longer points to a usable release/u);
+  });
+
+  it('asks for bin, not an install, when an installed launcher cannot be followed', () => {
+    const { prefix } = windowsInstall(['0.7.1'], '../escape');
+    const error = (() => {
+      try {
+        resolveCli({ bin: join(prefix, 'mcode.cmd'), env: {}, platform: 'win32' });
+      } catch (caught) {
+        return caught as Error;
+      }
+      return undefined;
+    })();
+
+    expect(error).toBeInstanceOf(MCodeNotFoundError);
+    expect(error?.message).toMatch(
+      /could not determine the JS entry it runs\. Pass the CLI's JS entry as `bin`\.$/u,
+    );
+    expect(error?.message).not.toMatch(/npm install|mcode\.exe/u);
   });
 });

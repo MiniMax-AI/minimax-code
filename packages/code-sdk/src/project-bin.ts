@@ -1,9 +1,14 @@
-import { closeSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 
 import type { ResolvedCli } from './cli-resolver.js';
 
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
+/** Lines of the Windows root launcher written by the official installer and CLI self-update. */
+const VERSIONED_POINTER_LINE = 'SET /P MCODE_RELEASE=<"%~dp0current"';
+const VERSIONED_CALL_LINE = 'CALL "%~dp0releases\\%MCODE_RELEASE%\\.mcode-launcher.cmd"';
+/** Same release-key rule the root launcher enforces before following the pointer. */
+const RELEASE_KEY = /^[0-9A-Za-z][0-9A-Za-z._-]*$/u;
 const SHIM_HEAD_BYTES = 4096;
 
 /**
@@ -35,10 +40,12 @@ function resolveLauncher(launcher: string, platform: NodeJS.Platform): ResolvedC
   const extension = extname(launcher).toLowerCase();
   if (platform === 'win32') {
     const head = readHead(launcher);
-    const entry =
-      extension === '.cmd' ? parseCmdShim(head, launcher) : parseShellShim(head, launcher);
+    if (extension !== '.cmd') {
+      const entry = parseShellShim(head, launcher);
+      return entry ? { kind: 'node', path: entry, source: 'project' } : undefined;
+    }
     // Shims are only used through their JS entry; the SDK never starts a shell.
-    return entry ? { kind: 'node', path: entry, source: 'project' } : undefined;
+    return resolveCmdLauncher(head, launcher, 'project');
   }
   // npm links `.bin/mcode` to the package's JS entry; pnpm writes a shell shim.
   const real = realpathSync(launcher);
@@ -51,6 +58,47 @@ function resolveLauncher(launcher: string, platform: NodeJS.Platform): ResolvedC
   }
   const entry = parseShellShim(head, launcher);
   return { kind: entry ? 'node' : 'exec', path: entry ?? launcher, source: 'project' };
+}
+
+/**
+ * Resolves a Windows `.cmd` launcher to the JS entry it runs: an npm / pnpm shim, or the
+ * versioned root launcher of the official installer. A versioned result keeps the root
+ * launcher so the current release is looked up again before every spawn.
+ */
+export function resolveCmdLauncher(
+  content: string,
+  launcherPath: string,
+  source: ResolvedCli['source'],
+): ResolvedCli | undefined {
+  const shimEntry = parseCmdShim(content, launcherPath);
+  if (shimEntry) return { kind: 'node', path: shimEntry, source };
+  const versionedEntry = resolveVersionedLauncher(content, launcherPath);
+  return versionedEntry
+    ? { kind: 'node', path: versionedEntry, source, launcher: launcherPath }
+    : undefined;
+}
+
+/**
+ * Follows the installer's versioned layout: `<prefix>\mcode.cmd` reads the release key from
+ * `<prefix>\current` and calls `<prefix>\releases\<release>\.mcode-launcher.cmd`, which runs the
+ * CLI's JS entry. Returns that JS entry, or `undefined` when the layout does not match.
+ */
+export function resolveVersionedLauncher(
+  content: string,
+  launcherPath: string,
+): string | undefined {
+  if (!content.includes(VERSIONED_POINTER_LINE) || !content.includes(VERSIONED_CALL_LINE)) {
+    return undefined;
+  }
+  const prefix = dirname(launcherPath);
+  try {
+    const release = readFileSync(join(prefix, 'current'), 'utf8').trim();
+    if (!RELEASE_KEY.test(release)) return undefined;
+    const releaseLauncher = join(prefix, 'releases', release, '.mcode-launcher.cmd');
+    return parseCmdShim(readFileSync(releaseLauncher, 'utf8'), releaseLauncher);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -3,9 +3,9 @@ import { createRequire } from 'node:module';
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 
 import { MCodeNotFoundError } from './errors.js';
-import { findProjectBin, parseCmdShim } from './project-bin.js';
+import { findProjectBin, resolveCmdLauncher, resolveVersionedLauncher } from './project-bin.js';
 
-export { parseCmdShim, parseShellShim } from './project-bin.js';
+export { parseCmdShim, parseShellShim, resolveVersionedLauncher } from './project-bin.js';
 
 export const CLI_PACKAGE_NAME = '@minimax-ai/code';
 
@@ -14,6 +14,11 @@ export interface ResolvedCli {
   readonly kind: 'node' | 'exec';
   /** JS entry run with `process.execPath` (`node`), or a native executable (`exec`). */
   readonly path: string;
+  /**
+   * Versioned Windows root launcher behind `path`. Its current release is resolved again for
+   * every spawn, so a CLI self-update between Turns is picked up.
+   */
+  readonly launcher?: string;
   readonly source: 'option' | 'package' | 'project' | 'path';
 }
 
@@ -119,20 +124,38 @@ function fromExecutable(
     return { kind: 'node', path, source };
   }
   if (platform === 'win32' && (extension === '.cmd' || extension === '.bat')) {
-    const entry = parseCmdShim(readFileSync(path, 'utf8'), path);
-    if (entry) return { kind: 'node', path: entry, source };
+    const resolved = resolveCmdLauncher(readFileSync(path, 'utf8'), path, source);
+    if (resolved) return resolved;
     // Running a batch file would need cmd.exe and shell quoting; ask for the JS entry instead.
     throw new MCodeNotFoundError(
-      `Cannot find the JS entry behind ${path}; pass the CLI's JS entry (or mcode.exe) as \`bin\`.`,
+      `Found ${path}, but could not determine the JS entry it runs. Pass the CLI's JS entry as \`bin\`.`,
+      { installHint: false },
     );
   }
   return { kind: 'exec', path, source };
 }
 
 export function buildSpawnCommand(cli: ResolvedCli, args: readonly string[]): SpawnCommand {
-  return cli.kind === 'node'
-    ? { command: process.execPath, args: [cli.path, ...args] }
-    : { command: cli.path, args: [...args] };
+  if (cli.kind === 'exec') return { command: cli.path, args: [...args] };
+  return { command: process.execPath, args: [currentEntry(cli), ...args] };
+}
+
+/** The JS entry to run now; versioned launchers are followed again on every call. */
+function currentEntry(cli: ResolvedCli): string {
+  if (!cli.launcher) return cli.path;
+  let entry: string | undefined;
+  try {
+    entry = resolveVersionedLauncher(readFileSync(cli.launcher, 'utf8'), cli.launcher);
+  } catch {
+    entry = undefined;
+  }
+  if (!entry) {
+    throw new MCodeNotFoundError(
+      `${cli.launcher} no longer points to a usable release. Pass the CLI's JS entry as \`bin\`.`,
+      { installHint: false },
+    );
+  }
+  return entry;
 }
 
 function readEnv(
