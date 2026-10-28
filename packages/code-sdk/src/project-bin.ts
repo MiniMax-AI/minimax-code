@@ -37,9 +37,8 @@ function resolveLauncher(launcher: string, platform: NodeJS.Platform): ResolvedC
     const head = readHead(launcher);
     const entry =
       extension === '.cmd' ? parseCmdShim(head, launcher) : parseShellShim(head, launcher);
-    if (entry) return { kind: 'node', path: entry, source: 'project' };
-    // PowerShell shims are only usable through their JS entry.
-    return extension === '.cmd' ? { kind: 'cmd', path: launcher, source: 'project' } : undefined;
+    // Shims are only used through their JS entry; the SDK never starts a shell.
+    return entry ? { kind: 'node', path: entry, source: 'project' } : undefined;
   }
   // npm links `.bin/mcode` to the package's JS entry; pnpm writes a shell shim.
   const real = realpathSync(launcher);
@@ -55,8 +54,8 @@ function resolveLauncher(launcher: string, platform: NodeJS.Platform): ResolvedC
 }
 
 /**
- * Extracts the JS entry from an npm / pnpm generated `.cmd` shim, so the CLI can run with
- * `process.execPath` instead of cmd.exe.
+ * Extracts the JS entry from an npm / pnpm generated `.cmd` shim, so the CLI runs with
+ * `process.execPath` instead of through cmd.exe.
  */
 export function parseCmdShim(content: string, shimPath: string): string | undefined {
   const match = /"%~?dp0%?\\?([^"%]+\.(?:c|m)?js)"/iu.exec(content);

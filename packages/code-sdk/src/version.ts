@@ -67,7 +67,7 @@ function readVersionOutput(
   cli: ResolvedCli,
   env: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
-  const command = buildSpawnCommand(cli, ['--version'], env);
+  const command = buildSpawnCommand(cli, ['--version']);
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
@@ -75,7 +75,6 @@ function readVersionOutput(
       env: env as NodeJS.ProcessEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-      ...(command.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     });
     const timer = setTimeout(() => child.kill('SIGKILL'), VERSION_TIMEOUT_MS);
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {

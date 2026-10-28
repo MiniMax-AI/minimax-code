@@ -96,7 +96,6 @@ export class ExecProcess {
       env: options.env as NodeJS.ProcessEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      ...(command.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     });
     this.sessionId = options.sessionId;
     trackChild(this.child);

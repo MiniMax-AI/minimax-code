@@ -9,10 +9,10 @@ export { parseCmdShim, parseShellShim } from './project-bin.js';
 
 export const CLI_PACKAGE_NAME = '@minimax-ai/code';
 
-/** How to start the CLI. `cmd` is the Windows `.cmd` fallback that needs cmd.exe. */
+/** How to start the CLI. The SDK never starts it through a shell. */
 export interface ResolvedCli {
-  readonly kind: 'node' | 'exec' | 'cmd';
-  /** JS entry (`node`), executable (`exec`) or `.cmd` file (`cmd`). */
+  readonly kind: 'node' | 'exec';
+  /** JS entry run with `process.execPath` (`node`), or a native executable (`exec`). */
   readonly path: string;
   readonly source: 'option' | 'package' | 'project' | 'path';
 }
@@ -20,7 +20,6 @@ export interface ResolvedCli {
 export interface SpawnCommand {
   readonly command: string;
   readonly args: string[];
-  readonly windowsVerbatimArguments?: boolean;
 }
 
 export interface ResolveCliOptions {
@@ -121,40 +120,19 @@ function fromExecutable(
   }
   if (platform === 'win32' && (extension === '.cmd' || extension === '.bat')) {
     const entry = parseCmdShim(readFileSync(path, 'utf8'), path);
-    return entry ? { kind: 'node', path: entry, source } : { kind: 'cmd', path, source };
+    if (entry) return { kind: 'node', path: entry, source };
+    // Running a batch file would need cmd.exe and shell quoting; ask for the JS entry instead.
+    throw new MCodeNotFoundError(
+      `Cannot find the JS entry behind ${path}; pass the CLI's JS entry (or mcode.exe) as \`bin\`.`,
+    );
   }
   return { kind: 'exec', path, source };
 }
 
-export function buildSpawnCommand(
-  cli: ResolvedCli,
-  args: readonly string[],
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): SpawnCommand {
-  if (cli.kind === 'node') return { command: process.execPath, args: [cli.path, ...args] };
-  if (cli.kind === 'exec') return { command: cli.path, args: [...args] };
-  const line = [escapeCmdCommand(cli.path), ...args.map((arg) => escapeCmdArgument(arg))].join(' ');
-  return {
-    command: readEnv(env, 'ComSpec', 'win32') ?? 'cmd.exe',
-    args: ['/d', '/s', '/c', `"${line}"`],
-    windowsVerbatimArguments: true,
-  };
-}
-
-const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/gu;
-
-export function escapeCmdCommand(value: string): string {
-  return value.replace(CMD_META_CHARS, '^$1');
-}
-
-/**
- * Quotes one argument for cmd.exe running a batch shim. Batch files re-parse `%*`, so meta
- * characters are caret-escaped twice (same strategy as cross-spawn).
- */
-export function escapeCmdArgument(value: string): string {
-  let quoted = value.replace(/(\\*)"/gu, '$1$1\\"').replace(/(\\*)$/u, '$1$1');
-  quoted = `"${quoted}"`;
-  return quoted.replace(CMD_META_CHARS, '^$1').replace(CMD_META_CHARS, '^$1');
+export function buildSpawnCommand(cli: ResolvedCli, args: readonly string[]): SpawnCommand {
+  return cli.kind === 'node'
+    ? { command: process.execPath, args: [cli.path, ...args] }
+    : { command: cli.path, args: [...args] };
 }
 
 function readEnv(

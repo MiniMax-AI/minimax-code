@@ -143,7 +143,7 @@ export class Thread {
       });
       const items = new ItemAccumulator();
       const process = new ExecProcess({
-        command: buildSpawnCommand(cli, args, env),
+        command: buildSpawnCommand(cli, args),
         env,
         prompt: input,
         ...(options.signal ? { signal: options.signal } : {}),

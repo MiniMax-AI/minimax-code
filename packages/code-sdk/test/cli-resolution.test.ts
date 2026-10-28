@@ -7,7 +7,6 @@ import { describe, expect, it } from 'vitest';
 import { MCode, MCodeNotFoundError, MCodeVersionError } from '../src/index.js';
 import {
   buildSpawnCommand,
-  escapeCmdArgument,
   findOnPath,
   parseCmdShim,
   resolveCli,
@@ -104,20 +103,20 @@ describe('CLI resolution', () => {
     expect(parseCmdShim('@echo off\r\nnative.exe %*', shim)).toBeUndefined();
   });
 
-  it('escapes arguments for the cmd.exe fallback', () => {
-    expect(escapeCmdArgument('--cwd=C:\\a b')).toBe('^^^"--cwd=C:\\a^^^ b^^^"');
-    expect(escapeCmdArgument('x&y|z')).toBe('^^^"x^^^&y^^^|z^^^"');
-    const command = buildSpawnCommand(
-      { kind: 'cmd', path: 'C:\\bin\\mcode.cmd', source: 'path' },
-      ['exec'],
-      {
-        ComSpec: 'C:\\Windows\\cmd.exe',
-      },
+  it('never starts a batch file through a shell', () => {
+    const dir = tempDir();
+    const shim = join(dir, 'mcode.cmd');
+    writeFileSync(shim, '@echo off\r\nnative-launcher.exe %*\r\n');
+
+    // Without a resolvable JS entry the SDK asks for one instead of falling back to cmd.exe.
+    expect(() => resolveCli({ bin: shim, env: {}, platform: 'win32' })).toThrow(
+      /Cannot find the JS entry behind .*mcode\.cmd/u,
     );
-    expect(command).toEqual({
-      command: 'C:\\Windows\\cmd.exe',
-      args: ['/d', '/s', '/c', '"C:\\bin\\mcode.cmd ^^^"exec^^^""'],
-      windowsVerbatimArguments: true,
+    expect(
+      buildSpawnCommand({ kind: 'exec', path: 'C:\\bin\\mcode.exe', source: 'path' }, ['exec']),
+    ).toEqual({
+      command: 'C:\\bin\\mcode.exe',
+      args: ['exec'],
     });
   });
 });

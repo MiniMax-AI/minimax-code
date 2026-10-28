@@ -42,8 +42,9 @@ The SDK looks for the CLI in this order:
    `mcode.ps1` on Windows) found walking up from `process.cwd()`. The SDK prefers the JS entry behind
    the symlink or npm/pnpm shim and runs it with `process.execPath`, so the CLI package name does
    not matter.
-4. `mcode` on `PATH` (`mcode.cmd` on Windows: the JS entry behind an npm/pnpm shim is preferred;
-   otherwise it is started through `cmd.exe` with strictly escaped arguments).
+4. `mcode` on `PATH`. On Windows, `mcode.cmd` is used through the JS entry behind its npm/pnpm
+   shim; the SDK never starts the CLI through a shell, so a `.cmd` without a recognizable JS entry
+   fails with `MCodeNotFoundError` and you should pass the JS entry (or `mcode.exe`) as `bin`.
 
 Before the first run, each `MCode` instance runs `mcode --version` once and caches the result. A
 CLI older than `MIN_CLI_VERSION` (currently `0.7.0`) fails with `MCodeVersionError`. Only
