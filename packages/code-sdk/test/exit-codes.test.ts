@@ -38,6 +38,8 @@ describe('exit code mapping without exec.completed', () => {
     [6, 'timeout', undefined],
     [7, 'limit_exceeded', undefined],
     [70, 'failed', 'internal'],
+    // Codes outside the documented exec contract.
+    [1, 'failed', 'internal'],
   ] as const)('maps exit %i to MCodeRunError(status=%s)', async (code, status, category) => {
     const error = await failureFor(code);
     expect(error).toBeInstanceOf(MCodeRunError);

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { buildSpawnCommand, type ResolvedCli } from './cli-resolver.js';
 import { MCODE_INSTALL_HINT, MCodeNotFoundError, MCodeVersionError } from './errors.js';
 
-/** Minimum supported CLI version (provisional until verified on the public 0.7.x release). */
+/** Minimum supported CLI version; the public 0.7.0 release accepts every flag the SDK passes. */
 export const MIN_CLI_VERSION = '0.7.0';
 
 const VERSION_TIMEOUT_MS = 30_000;

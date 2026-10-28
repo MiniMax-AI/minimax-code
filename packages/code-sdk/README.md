@@ -20,7 +20,9 @@ agents, or orchestrate multi-turn conversations from code.
   crashed host can resume a Thread from its id with `resumeThread`.
 - The SDK consumes only the public `mcode exec` contract (stdout JSONL plus exit code) and never
   reads runtime-internal data.
-- No runtime dependencies; ESM with a `require()`-compatible export condition.
+- No runtime dependencies. The package is ESM; its `exports` have `import` and `default`
+  conditions and no separate CommonJS build. CommonJS callers can still `require()` it, because
+  every Node.js version in the supported range loads ES modules through `require(esm)`.
 
 ## Installation and CLI resolution
 
@@ -42,9 +44,18 @@ The SDK looks for the CLI in this order:
    `mcode.ps1` on Windows) found walking up from `process.cwd()`. The SDK prefers the JS entry behind
    the symlink or npm/pnpm shim and runs it with `process.execPath`, so the CLI package name does
    not matter.
-4. `mcode` on `PATH`. On Windows, `mcode.cmd` is used through the JS entry behind its npm/pnpm
-   shim; the SDK never starts the CLI through a shell, so a `.cmd` without a recognizable JS entry
-   fails with `MCodeNotFoundError` and you should pass the JS entry (or `mcode.exe`) as `bin`.
+4. `mcode` on `PATH`.
+
+The SDK never starts the CLI through a shell. On Windows, `mcode.cmd` is followed to the JS entry it
+runs, which the SDK then starts with `process.execPath`. Supported Windows installations:
+
+- the official installer (`install.ps1`): `mcode.cmd` reads the `current` release pointer and calls
+  `releases\<release>\.mcode-launcher.cmd`. The pointer is read again before every run, so a CLI
+  self-update between Turns is picked up;
+- npm and pnpm installs, global or project-local, through their generated `.cmd` / `.ps1` shims.
+
+If a `.cmd` launcher is found but its JS entry cannot be determined, resolution fails with
+`MCodeNotFoundError`; pass the CLI's JS entry as `bin`.
 
 Before the first run, each `MCode` instance runs `mcode --version` once and caches the result. A
 CLI older than `MIN_CLI_VERSION` (currently `0.7.0`) fails with `MCodeVersionError`. Only
@@ -52,9 +63,9 @@ CLI older than `MIN_CLI_VERSION` (currently `0.7.0`) fails with `MCodeVersionErr
 
 ### Compatibility
 
-| `@minimax-ai/code-sdk` | MiniMax Code CLI (`mcode`)     | Node.js                       | Event `schemaVersion` |
-| ---------------------- | ------------------------------ | ----------------------------- | --------------------- |
-| `0.1.x`                | `>=0.7.0` (`MIN_CLI_VERSION`)  | `>=22.19 <23 \|\| >=24.2 <27` | `1`                   |
+| `@minimax-ai/code-sdk` | MiniMax Code CLI (`mcode`)    | Node.js                       | Event `schemaVersion` |
+| ---------------------- | ----------------------------- | ----------------------------- | --------------------- |
+| `0.1.x`                | `>=0.7.0` (`MIN_CLI_VERSION`) | `>=22.19 <23 \|\| >=24.2 <27` | `1`                   |
 
 The SDK and the CLI are released separately. Upgrading the SDK does not require upgrading the CLI
 as long as the CLI meets `MIN_CLI_VERSION`. If the CLI ever emits a new event `schemaVersion`,
@@ -63,39 +74,39 @@ upgrade to an SDK release that supports it. The Node.js range matches the CLI's.
 ## Quick start
 
 ```ts
-import { MCode } from '@minimax-ai/code-sdk';
+import { MCode } from "@minimax-ai/code-sdk";
 
-const mcode = new MCode({ dataDir: '/srv/mcode-data' });
+const mcode = new MCode({ dataDir: "/srv/mcode-data" });
 const thread = mcode.startThread({
-  cwd: '/path/to/repo',
-  model: 'minimax/MiniMax-M3',
-  permission: 'smart',
+  cwd: "/path/to/repo",
+  model: "minimax/MiniMax-M3",
+  permission: "smart",
 });
 
-const turn = await thread.run('Diagnose and fix the failing CI job', {
-  files: ['./ci.log'],
+const turn = await thread.run("Diagnose and fix the failing CI job", {
+  files: ["./ci.log"],
   timeoutMs: 10 * 60_000,
 });
 console.log(thread.id, turn.finalResponse, turn.usage);
 
 // Continue the same Thread
-await thread.run('Add unit tests for the fix');
+await thread.run("Add unit tests for the fix");
 
 // Resume an earlier Session
-const resumed = mcode.resumeThread('mvs_xxx', { cwd: '/path/to/repo' });
-await resumed.run('Continue where you left off');
+const resumed = mcode.resumeThread("mvs_xxx", { cwd: "/path/to/repo" });
+await resumed.run("Continue where you left off");
 ```
 
 Streaming:
 
 ```ts
-const { events } = await thread.runStreamed('Implement the plan');
+const { events } = await thread.runStreamed("Implement the plan");
 for await (const event of events) {
   switch (event.type) {
-    case 'item.completed':
+    case "item.completed":
       console.log(event.item);
       break;
-    case 'turn.failed':
+    case "turn.failed":
       console.error(event.status, event.error);
       break;
     default:
@@ -109,34 +120,34 @@ for await (const event of events) {
 
 ### `new MCode(options?)`
 
-| Option       | Description                                                                         |
-| ------------ | ----------------------------------------------------------------------------------- |
-| `bin`        | Explicit `mcode` path or command name; skips package and `PATH` lookup              |
-| `dataDir`    | Data directory, passed to the CLI as the `MINIMAX_DATA_DIR` environment variable    |
+| Option       | Description                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| `bin`        | Explicit `mcode` path or command name; skips package and `PATH` lookup                               |
+| `dataDir`    | Data directory, passed to the CLI as the `MINIMAX_DATA_DIR` environment variable                     |
 | `env`        | Child process environment. **Replaces** `process.env` when set (no merge); defaults to `process.env` |
-| `configPath` | Runtime config file, passed as `--config`                                           |
+| `configPath` | Runtime config file, passed as `--config`                                                            |
 
 `env` replaces the environment entirely: passing only custom variables drops `PATH`, `HOME` and so
 on, so the CLI may fail to find Node.js or tools, or to read its credentials. To add variables,
 spread `process.env`:
 
 ```ts
-const mcode = new MCode({ env: { ...process.env, FOO: 'bar' } });
+const mcode = new MCode({ env: { ...process.env, FOO: "bar" } });
 ```
 
 ### `startThread(options?)` / `resumeThread(id, options?)`
 
 Thread options are passed to the CLI on every Turn of the Thread:
 
-| Option               | CLI flag                                                                 |
-| -------------------- | ------------------------------------------------------------------------ |
-| `cwd`                | `--cwd` (defaults to the host process working directory)                 |
-| `model` / `effort`   | `--model` / `--effort`                                                   |
-| `permission`         | `--permission`: `smart` / `full` / `off`                                 |
+| Option               | CLI flag                                                                        |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `cwd`                | `--cwd` (defaults to the host process working directory)                        |
+| `model` / `effort`   | `--model` / `--effort`                                                          |
+| `permission`         | `--permission`: `smart` / `full` / `off`                                        |
 | `mode`               | `--mode`: `standard` / `lightweight`, only on the Turn that creates the Session |
-| `promptMode`         | `--prompt-mode`: `tui` / `coding` / `work`                               |
-| `systemPrompt`       | `--system-prompt-file` (the SDK writes a temporary file)                 |
-| `appendSystemPrompt` | `--append-system-prompt-file` (the SDK writes a temporary file)          |
+| `promptMode`         | `--prompt-mode`: `tui` / `coding` / `work`                                      |
+| `systemPrompt`       | `--system-prompt-file` (the SDK writes a temporary file)                        |
+| `appendSystemPrompt` | `--append-system-prompt-file` (the SDK writes a temporary file)                 |
 
 - `mode: 'lightweight'` is only valid for a new Thread; passing it to `resumeThread` throws
   `MCodeInvocationError` immediately.
@@ -147,12 +158,12 @@ Thread options are passed to the CLI on every Turn of the Thread:
 
 ### `thread.run(input, options?)` / `thread.runStreamed(input, options?)`
 
-| Option      | Description                                                                                                                                                              |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `files`     | Attachments, `--file` (repeatable); relative paths resolve against `cwd`                                                                                                 |
-| `signal`    | `AbortSignal`; see [Cancellation](#cancellation-timeouts-and-process-cleanup)                                                                                            |
+| Option      | Description                                                                                                                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `files`     | Attachments, `--file` (repeatable); relative paths resolve against `cwd`                                                                                                                                |
+| `signal`    | `AbortSignal`; see [Cancellation](#cancellation-timeouts-and-process-cleanup)                                                                                                                           |
 | `timeoutMs` | Passed to the CLI as `--timeout <n>ms`; the SDK force-stops the CLI at `timeoutMs + 30s`. At most `MAX_TIMEOUT_MS` (about 24.8 days, a Node.js timer limit); larger values throw `MCodeInvocationError` |
-| `maxSteps`  | `--max-steps`                                                                                                                                                            |
+| `maxSteps`  | `--max-steps`                                                                                                                                                                                           |
 
 - `run()` resolves only when the status is `succeeded`, with a `Turn` (`finalResponse`, normalized
   `items`, `usage`, `model`, `sessionId`, `turnId`, `durationMs` and the full `result`). Every other
@@ -195,17 +206,43 @@ protocol error.
 Every error extends `MCodeError` and carries `exitCode`, `signal` and the last 64 KiB of the CLI
 stderr (`stderr`, for diagnostics only).
 
-| Source                                                     | Error                                                              |
-| ---------------------------------------------------------- | ------------------------------------------------------------------ |
-| Exit 2, or an option the SDK rejects                       | `MCodeInvocationError`                                             |
-| Status `failed` (exit 3 / 4 / 70)                          | `MCodeRunError` with `category` `config` / `runtime` / `internal`  |
-| Status `timeout` (exit 6) or the SDK timeout backstop      | `MCodeRunError` with `status === 'timeout'`                        |
-| Status `limit_exceeded` (exit 7)                           | `MCodeRunError` with `status === 'limit_exceeded'`                 |
-| Status `cancelled` (exit 130) or SDK cancellation          | `MCodeAbortError` with `name === 'AbortError'`                     |
-| Exit 141, non-JSON stdout, or exit without `exec.completed` | `MCodeProtocolError`                                              |
-| No CLI found                                               | `MCodeNotFoundError` (includes the install command)                |
-| CLI too old, or an unsupported event `schemaVersion`       | `MCodeVersionError`                                                |
-| Concurrent Turn on the same Thread                         | `ThreadBusyError`                                                  |
+When the CLI emits `exec.completed`, its `result.status` decides the error:
+
+| `result.status`  | Error                                                                               |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| `failed`         | `MCodeRunError` with `category` from the result (`config` / `runtime` / `internal`) |
+| `timeout`        | `MCodeRunError` with `status === 'timeout'`                                         |
+| `limit_exceeded` | `MCodeRunError` with `status === 'limit_exceeded'`                                  |
+| `cancelled`      | `MCodeAbortError` with `name === 'AbortError'`                                      |
+
+When the CLI exits without `exec.completed`, the exit code decides:
+
+| Exit code                              | Error                                                       |
+| -------------------------------------- | ----------------------------------------------------------- |
+| `2` (invalid invocation)               | `MCodeInvocationError`                                      |
+| `3`                                    | `MCodeRunError`, `status: 'failed'`, `category: 'config'`   |
+| `4`                                    | `MCodeRunError`, `status: 'failed'`, `category: 'runtime'`  |
+| `6`                                    | `MCodeRunError`, `status: 'timeout'`                        |
+| `7`                                    | `MCodeRunError`, `status: 'limit_exceeded'`                 |
+| `70`                                   | `MCodeRunError`, `status: 'failed'`, `category: 'internal'` |
+| `130`                                  | `MCodeAbortError`                                           |
+| `141` (broken pipe)                    | `MCodeProtocolError`                                        |
+| `0` (success without a result)         | `MCodeProtocolError`                                        |
+| Any other code (e.g. `1`), or a signal | `MCodeRunError`, `status: 'failed'`, `category: 'internal'` |
+
+If the SDK itself cancelled the run (`signal`, or breaking out of `runStreamed()`), a missing
+result is reported as `MCodeAbortError` unless the CLI exited with `2`. If the SDK force-stopped the
+CLI after `timeoutMs + 30s`, it is `MCodeRunError` with `status === 'timeout'`.
+
+Errors raised by the SDK itself:
+
+| Source                                                                                                                | Error                  |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| An option the SDK rejects before starting the CLI                                                                     | `MCodeInvocationError` |
+| Non-JSON stdout or an event missing required fields                                                                   | `MCodeProtocolError`   |
+| No CLI found (includes the install command), or a found launcher whose JS entry cannot be determined (asks for `bin`) | `MCodeNotFoundError`   |
+| CLI older than `MIN_CLI_VERSION`, or an unsupported event `schemaVersion`                                             | `MCodeVersionError`    |
+| Concurrent Turn on the same Thread                                                                                    | `ThreadBusyError`      |
 
 `MCodeRunError` carries `result` (the full `ExecResult` when `exec.completed` was received),
 `items`, `retryable` (from `result.error.retryable`) and `sessionId`; `MCodeAbortError` also carries
@@ -228,8 +265,10 @@ replaying writes with unknown outcomes; call `resumeThread(error.sessionId)` to 
 
   ```ts
   const controller = new AbortController();
-  process.once('SIGTERM', () => controller.abort());
-  await thread.run(prompt, { signal: controller.signal }).catch(() => undefined);
+  process.once("SIGTERM", () => controller.abort());
+  await thread
+    .run(prompt, { signal: controller.signal })
+    .catch(() => undefined);
   ```
 
 - After the CLI exits, the SDK keeps reading stdout / stderr for at most about two seconds. If a
