@@ -34,6 +34,22 @@ npm install @minimax-ai/code-sdk
 npm install @minimax-ai/code   # optional; a globally installed mcode works too
 ```
 
+`@minimax-ai/code` runs install scripts for its native dependencies. npm 11 rejects
+`--allow-scripts` for project-scoped installs (`EALLOWSCRIPTS`), so approve them in the project's
+`package.json` before installing the CLI into the project:
+
+```json
+{
+  "allowScripts": {
+    "@minimax-ai/code": true,
+    "better-sqlite3": true
+  }
+}
+```
+
+Other package managers that gate install scripts need the equivalent approval for the same two
+packages.
+
 The SDK looks for the CLI in this order:
 
 1. The `bin` constructor option (an executable, a JS entry, or a command name on `PATH`).
