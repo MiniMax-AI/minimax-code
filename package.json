@@ -26,6 +26,8 @@
     "check:source": "node scripts/source-inventory.mjs",
     "check:plugin": "node tools/plugins/validate-plugin.mjs",
     "test:capabilities": "node scripts/run-vitest-suite.mjs capability",
+    "test:code-sdk": "node scripts/run-vitest-suite.mjs code-sdk",
+    "typecheck:code-sdk": "pnpm --filter @minimax-ai/code-sdk run typecheck",
     "test:windows": "node scripts/run-vitest-suite.mjs windows",
     "test:artifact": "node --test test/public-artifact.test.mjs",
     "test:release-tools": "node --test test/source-sync.test.mjs",

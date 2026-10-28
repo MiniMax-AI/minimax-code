@@ -145,6 +145,7 @@ Use `mcode init .` to generate or update project guidance in `AGENTS.md`. Descri
 | Interactive TUI | `mcode [prompt]` | Explore code, continue a conversation, and review changes or permissions. |
 | Headless | `mcode exec [prompt]` | Shell scripts, CI, batch work, and evaluations. |
 | ACP | `mcode acp` | Editors and clients supporting Agent Client Protocol. |
+| TypeScript SDK | [`@minimax-ai/code-sdk`](packages/code-sdk/README.md) | Drive `mcode exec` from Node.js code: start, stream and resume conversations. |
 
 ### Lightweight conversations
 

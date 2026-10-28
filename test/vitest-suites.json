@@ -235,6 +235,15 @@
     "sandbox": [
       "packages/local-runtime-v2/src/service/sandbox/backend/srt-macos.test.ts",
       "test/executable-resolution.test.ts"
+    ],
+    "code-sdk": [
+      "packages/code-sdk/test/args.test.ts",
+      "packages/code-sdk/test/cli-contract.test.ts",
+      "packages/code-sdk/test/cli-resolution.test.ts",
+      "packages/code-sdk/test/exit-codes.test.ts",
+      "packages/code-sdk/test/project-bin.test.ts",
+      "packages/code-sdk/test/run.test.ts",
+      "packages/code-sdk/test/stream.test.ts"
     ]
   }
 }

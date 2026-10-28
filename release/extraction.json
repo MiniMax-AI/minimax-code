@@ -19,6 +19,7 @@
     "packages/agent-runtime",
     "packages/agent-tools",
     "packages/browser-core",
+    "packages/code-sdk",
     "packages/config",
     "packages/local-runtime",
     "packages/local-runtime-v2",

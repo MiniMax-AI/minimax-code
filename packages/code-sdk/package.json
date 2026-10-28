@@ -1,0 +1,67 @@
+{
+  "name": "@minimax-ai/code-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for driving the local MiniMax Code (mcode) agent from Node.js.",
+  "keywords": [
+    "minimax",
+    "minimax-code",
+    "mcode",
+    "agent",
+    "coding-agent",
+    "sdk"
+  ],
+  "homepage": "https://agent.minimax.io",
+  "bugs": {
+    "url": "https://github.com/MiniMax-AI/minimax-code/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MiniMax-AI/minimax-code.git",
+    "directory": "packages/code-sdk"
+  },
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=22.19 <23 || >=24.2 <27"
+  },
+  "peerDependencies": {
+    "@minimax-ai/code": ">=0.7.0"
+  },
+  "peerDependenciesMeta": {
+    "@minimax-ai/code": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "clean:build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "pnpm run clean:build && tsc --build --force",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "test": "node ../../scripts/run-vitest-suite.mjs code-sdk",
+    "release:check": "node scripts/release-check.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@minimax-ai/code": "link:test/fixtures/cli-package"
+  }
+}

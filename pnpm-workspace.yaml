@@ -30,3 +30,4 @@ packages:
   - packages/oauth-core
   - packages/oauth-lease-protocol
   - packages/mcode-tools-host
+  - packages/code-sdk
