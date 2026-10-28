@@ -216,10 +216,17 @@ const smoke = run(
 );
 console.log(`✓ ${smoke.stdout.trim()}`);
 
-console.log(`\n✓ ${spec} is ready. The tarball was checked but nothing was published.`);
-console.log('\nPublish it yourself (npm login with 2FA required), from this directory:\n');
-console.log(`  npm publish ${tarball} --registry ${REGISTRY} --access public --tag latest`);
+const rehearsal = branch !== RELEASE_BRANCH || head !== remoteMain;
 console.log(
-  `\nThen read it back:\n\n  npm view ${spec} version dist.integrity --registry ${REGISTRY}   # expect ${integrity}`,
+  rehearsal
+    ? `\n! Rehearsal passed for ${spec}. Do not publish this tarball: release from an up-to-date ${RELEASE_BRANCH}.`
+    : `\n✓ ${spec} is ready. The tarball was checked but nothing was published.`,
 );
-console.log(`  npm view ${name} dist-tags --registry ${REGISTRY}   # expect latest: ${version}`);
+if (!rehearsal) {
+  console.log('\nPublish it yourself (npm login with 2FA required):\n');
+  console.log(`  npm publish ${tarball} --registry ${REGISTRY} --access public --tag latest`);
+  console.log(
+    `\nThen read it back:\n\n  npm view ${spec} version dist.integrity --registry ${REGISTRY}   # expect ${integrity}`,
+  );
+  console.log(`  npm view ${name} dist-tags --registry ${REGISTRY}   # expect latest: ${version}`);
+}
