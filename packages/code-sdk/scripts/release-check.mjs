@@ -21,6 +21,17 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import {
+  NPMJS_REGISTRY,
+  NPMJS_TARGET_ARGS,
+  normalizeRegistry,
+  PACKAGE_SCOPE,
+  publishCommand,
+  readBackCommands,
+  resolveTool,
+  scopedRegistryProblem,
+} from './release-tools.mjs';
+
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = path.resolve(packageDir, '../..');
 // The repository's own publication rules (also used by `check:source`); this script runs only
@@ -28,7 +39,7 @@ const repoRoot = path.resolve(packageDir, '../..');
 const { embeddedCredential, internalSourceReference } = await import(
   pathToFileURL(path.join(repoRoot, 'scripts/lib/public-text-policy.mjs')).href
 );
-const REGISTRY = 'https://registry.npmjs.org/';
+const REGISTRY = NPMJS_REGISTRY;
 const RELEASE_BRANCH = 'main';
 const PUBLISHED_FILES = ['dist', 'src', 'README.md', 'CHANGELOG.md'];
 const ALLOWED_ENTRY =
@@ -64,21 +75,33 @@ function step(message) {
   console.log(`\n▸ ${message}`);
 }
 
-function run(command, commandArgs, { cwd = repoRoot, capture = false, allowFailure = false } = {}) {
-  const result = spawnSync(command, commandArgs, {
+function run(tool, commandArgs, { cwd = repoRoot, capture = false, allowFailure = false } = {}) {
+  let resolved;
+  try {
+    resolved = resolveTool(tool);
+  } catch (error) {
+    fail(error.message);
+  }
+  // Never through a shell: arguments such as the smoke-test script and temporary paths are
+  // passed to the process verbatim on every platform.
+  const result = spawnSync(resolved.command, [...resolved.args, ...commandArgs], {
     cwd,
     encoding: 'utf8',
     stdio: capture || allowFailure ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    shell: process.platform === 'win32',
     maxBuffer: 64 * 1024 * 1024,
   });
+  if (result.error) fail(`${tool} could not be started: ${result.error.message}`);
   if (result.status !== 0 && !allowFailure) {
     fail(
-      `${command} ${commandArgs.join(' ')} failed${capture ? `: ${`${result.stdout}${result.stderr}`.trim()}` : ''}`,
+      `${tool} ${commandArgs.join(' ')} failed${capture ? `: ${`${result.stdout}${result.stderr}`.trim()}` : ''}`,
     );
   }
   return result;
 }
+
+const shellWord = (value) =>
+  /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+const printable = (command) => command.map(shellWord).join(' ');
 
 function git(commandArgs) {
   return run('git', commandArgs, { capture: true }).stdout.trim();
@@ -94,6 +117,18 @@ function listFiles(directory) {
 const manifest = JSON.parse(readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
 const { name, version } = manifest;
 const spec = `${name}@${version}`;
+
+step('npm registry configuration');
+const npmConfig = (key) =>
+  normalizeRegistry(run('npm', ['config', 'get', key], { cwd: packageDir, capture: true }).stdout);
+const scopedRegistry = npmConfig(`${PACKAGE_SCOPE}:registry`);
+const defaultRegistry = npmConfig('registry');
+const registryProblem = scopedRegistryProblem(scopedRegistry);
+if (registryProblem) fail(registryProblem);
+console.log(
+  `✓ ${PACKAGE_SCOPE}:registry ${scopedRegistry || 'is not set'}; default registry ${defaultRegistry || 'is not set'}` +
+    ` (npm commands below pin ${NPMJS_TARGET_ARGS.join(' ')})`,
+);
 
 step('Checkout');
 const status = git(['status', '--porcelain']);
@@ -137,7 +172,7 @@ console.log(`✓ ${spec}, CHANGELOG first section ${firstRelease}, publishConfig
 if (args.has('--offline')) {
   console.log('! Skipped the npm registry lookup (--offline)');
 } else {
-  const view = run('npm', ['view', spec, 'version', '--registry', REGISTRY], {
+  const view = run('npm', ['view', spec, 'version', ...NPMJS_TARGET_ARGS], {
     capture: true,
     allowFailure: true,
   });
@@ -153,7 +188,7 @@ if (args.has('--offline')) {
 step('Build, type check and tests');
 run('pnpm', ['--filter', name, 'run', 'build']);
 run('pnpm', ['--filter', name, 'run', 'typecheck']);
-run(process.execPath, ['scripts/run-vitest-suite.mjs', 'code-sdk']);
+run('node', ['scripts/run-vitest-suite.mjs', 'code-sdk']);
 
 step('Pack and scan the tarball');
 const outDir = mkdtempSync(path.join(tmpdir(), 'code-sdk-release-'));
@@ -193,14 +228,22 @@ mkdirSync(project);
 writeFileSync(path.join(project, 'package.json'), '{"name":"code-sdk-smoke","private":true}\n');
 run(
   'npm',
-  ['install', tarball, '--no-audit', '--no-fund', '--ignore-scripts', '--no-package-lock'],
+  [
+    'install',
+    tarball,
+    '--no-audit',
+    '--no-fund',
+    '--ignore-scripts',
+    '--no-package-lock',
+    ...NPMJS_TARGET_ARGS,
+  ],
   {
     cwd: project,
     capture: true,
   },
 );
 const smoke = run(
-  process.execPath,
+  'node',
   [
     '--input-type=module',
     '-e',
@@ -224,9 +267,8 @@ console.log(
 );
 if (!rehearsal) {
   console.log('\nPublish it yourself (npm login with 2FA required):\n');
-  console.log(`  npm publish ${tarball} --registry ${REGISTRY} --access public --tag latest`);
-  console.log(
-    `\nThen read it back:\n\n  npm view ${spec} version dist.integrity --registry ${REGISTRY}   # expect ${integrity}`,
-  );
-  console.log(`  npm view ${name} dist-tags --registry ${REGISTRY}   # expect latest: ${version}`);
+  console.log(`  ${printable(publishCommand(tarball))}`);
+  const [viewVersion, viewTags] = readBackCommands(spec, name);
+  console.log(`\nThen read it back:\n\n  ${printable(viewVersion)}   # expect ${integrity}`);
+  console.log(`  ${printable(viewTags)}   # expect latest: ${version}`);
 }

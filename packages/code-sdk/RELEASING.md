@@ -6,9 +6,12 @@ This file is not part of the npm package.
 
 ## Rules
 
-- Publish only to `https://registry.npmjs.org/`. `package.json#publishConfig` pins that registry and
-  public access, so `npm publish` does not follow a different default registry configured on your
-  machine. Always pass `--registry https://registry.npmjs.org/` explicitly as well.
+- Publish only to `https://registry.npmjs.org/`. `package.json#publishConfig.registry` and
+  `--registry` only replace the **default** registry. A scoped setting such as
+  `@minimax-ai:registry=<mirror>` in any npmrc still wins for this `@minimax-ai/*` package, for
+  `npm publish` as well as for `npm view`. Every npm command below therefore passes both
+  `--registry=https://registry.npmjs.org/` and `--@minimax-ai:registry=https://registry.npmjs.org/`,
+  and `release:check` refuses to run while a different `@minimax-ai:registry` is configured.
 - A published version is immutable. Never try to republish or overwrite an exact version; fix
   problems in a new version. Prefer `npm deprecate` over `npm unpublish` for a broken release.
 - Versions are stable `X.Y.Z`. There is no prerelease channel yet.
@@ -34,28 +37,36 @@ pnpm --filter @minimax-ai/code-sdk run release:check
 
 `release:check` never publishes. It:
 
-1. requires a clean working tree on `main` equal to `origin/main`;
-2. checks that the version is `X.Y.Z`, matches the first CHANGELOG section, and is not on npm yet;
+1. reads the effective npm configuration and fails if `@minimax-ai:registry` points anywhere other
+   than npmjs (check with `npm config get @minimax-ai:registry`; remove it with
+   `npm config delete @minimax-ai:registry` or override it for the release);
+2. requires a clean working tree on `main` equal to `origin/main`;
+3. checks that the version is `X.Y.Z`, matches the first CHANGELOG section, and is not on npm yet;
    that the package is not private, pins `publishConfig`, has no runtime dependencies and publishes
    only `dist`, `src`, `README.md` and `CHANGELOG.md` (npm adds `package.json` and `LICENSE`);
-3. builds, type-checks and runs the SDK test suite;
-4. runs `npm pack`, rejects unexpected tarball entries, and scans every packed file for internal
+4. builds, type-checks and runs the SDK test suite;
+5. runs `npm pack`, rejects unexpected tarball entries, and scans every packed file for internal
    host names, credentials, local user paths (`/Users/…`), other repository package paths and
    internal package names;
-5. installs the tarball into an empty project and checks both `import` and `require`;
-6. prints the exact `npm publish` command for the checked tarball and the read-back commands.
+6. installs the tarball into an empty project and checks both `import` and `require`;
+7. prints the exact `npm publish` command for the checked tarball and the read-back commands.
 
-Use `-- --allow-non-main` only to rehearse on a feature branch; its output is not release-ready.
-Use `-- --offline` to skip the npm lookup when the registry is unreachable.
+Use `-- --allow-non-main` only to rehearse on a feature branch; it ends with a warning instead of a
+publish command. Use `-- --offline` to skip the npm lookup when the registry is unreachable.
+
+The check runs on macOS and Linux, where it has been exercised. It starts every tool without a
+shell; on Windows it runs npm and pnpm through their JS entries (`npm-cli.js` next to Node.js and
+the pnpm script that started it), which has not been exercised on a Windows machine yet.
 
 ## 3. Publish
 
 Run the printed command yourself. It publishes the tarball that was just checked:
 
 ```bash
-npm login --registry https://registry.npmjs.org/    # if needed; 2FA is required
+npm login --registry=https://registry.npmjs.org/    # if needed; 2FA is required
 npm publish /tmp/code-sdk-release-XXXX/minimax-ai-code-sdk-X.Y.Z.tgz \
-  --registry https://registry.npmjs.org/ --access public --tag latest
+  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/ \
+  --access public --tag latest
 ```
 
 npm may keep a new version in validation for a while; `npm view` can return 404 until it is
@@ -64,8 +75,10 @@ available.
 ## 4. Read back
 
 ```bash
-npm view @minimax-ai/code-sdk@X.Y.Z version dist.integrity --registry https://registry.npmjs.org/
-npm view @minimax-ai/code-sdk dist-tags --registry https://registry.npmjs.org/
+npm view @minimax-ai/code-sdk@X.Y.Z version dist.integrity \
+  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/
+npm view @minimax-ai/code-sdk dist-tags \
+  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/
 ```
 
 The integrity must equal the value printed by `release:check`, and `latest` must point to
@@ -77,7 +90,8 @@ tarball. Investigate and publish a new version; never overwrite.
 ```bash
 smoke="$(mktemp -d)" && cd "$smoke"
 echo '{"name":"code-sdk-smoke","private":true}' > package.json
-npm install @minimax-ai/code-sdk@X.Y.Z --registry https://registry.npmjs.org/ --no-package-lock
+npm install @minimax-ai/code-sdk@X.Y.Z --no-package-lock \
+  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/
 node --input-type=module -e "const sdk = await import('@minimax-ai/code-sdk'); console.log(typeof sdk.MCode)"
 node -e "console.log(typeof require('@minimax-ai/code-sdk').MCode)"
 ```
@@ -103,4 +117,5 @@ move or delete a pushed release tag.
   publish again unless `npm view` confirms the version does not exist.
 - **Read-back shows different integrity, or the smoke test fails**: the version is published and
   cannot be replaced. Release a fixed version; deprecate the broken one with
-  `npm deprecate @minimax-ai/code-sdk@X.Y.Z "<reason>"` if users should avoid it.
+  `npm deprecate @minimax-ai/code-sdk@X.Y.Z "<reason>" --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/`
+  if users should avoid it.
