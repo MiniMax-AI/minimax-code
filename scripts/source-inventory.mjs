@@ -52,8 +52,6 @@ for (const file of files) {
     violations.push(`${file}: retired source`);
   if (/^(?:.*\/)?\.env(?:\.|$)/u.test(file) && !file.endsWith(".env.example"))
     violations.push(`${file}: environment file`);
-  // The policy module defines the patterns and would match itself.
-  if (file === "scripts/lib/public-text-policy.mjs") continue;
   let content = readFileSync(path.join(root, file));
   if (file.endsWith(".gz")) content = gunzipSync(content);
   const text = content.toString("utf8");

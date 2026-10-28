@@ -9,6 +9,7 @@ import { extractionPath, inventoryPath } from '../scripts/lib/release-metadata.m
 import { extractSourceArchive } from '../scripts/lib/source-archive.mjs';
 import { classifyChanges } from '../scripts/ci-changes.mjs';
 import { suiteInventoryViolations } from '../scripts/lib/vitest-suites.mjs';
+import { embeddedCredential, internalSourceReference } from '../scripts/lib/public-text-policy.mjs';
 import { Header } from 'tar';
 import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -971,6 +972,15 @@ test('Windows contract profile selects focused gates', () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('the public text policy is scanned by check:source like every other file', () => {
+  const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+  // The patterns never match their own definitions, so no file needs an exemption.
+  assert.equal(internalSourceReference.test(read('scripts/lib/public-text-policy.mjs')), false);
+  assert.equal(embeddedCredential.test(read('scripts/lib/public-text-policy.mjs')), false);
+  assert.doesNotMatch(read('scripts/source-inventory.mjs'), /public-text-policy\.mjs["'`]\)?\s*continue/u);
+  assert.doesNotMatch(read('scripts/source-inventory.mjs'), /if \(file === ["'`][^"'`]+["'`]\) continue/u);
 });
 
 test('source inventory rejects unregistered, missing and duplicate first-party test gates', () => {
