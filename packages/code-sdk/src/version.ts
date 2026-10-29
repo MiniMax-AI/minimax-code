@@ -5,10 +5,10 @@ import { MCODE_INSTALL_HINT, MCodeError, MCodeNotFoundError, MCodeVersionError }
 
 /**
  * First CLI release whose `mcode exec` flags cover everything the SDK passes.
- * `--system-prompt-file`, `--append-system-prompt-file` and `--mode` landed in 0.6.3
- * (`packages/tui/CHANGELOG.md`); `--output-format stream-json` and the other exec flags were
- * already present. This repository's CLI is 0.6.5, so a source build of this tree satisfies the
- * check. Preview builds such as `0.6.3-preview.N` satisfy `0.6.3`.
+ * `--system-prompt-file`, `--append-system-prompt-file` and `--mode` landed in CLI 0.6.3;
+ * `--output-format stream-json` and the other exec flags were already present. This repository's
+ * CLI is 0.6.5, so a source build of this tree satisfies the check. Preview builds such as
+ * `0.6.3-preview.N` satisfy `0.6.3`.
  */
 export const MIN_CLI_VERSION = '0.6.3';
 

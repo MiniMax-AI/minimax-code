@@ -16,8 +16,7 @@ import { parseEventLine } from './protocol.js';
 import type { ThreadEvent, ThreadItem } from './types.js';
 
 /**
- * CLI runtime shutdown budget (`DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS` in
- * `packages/tui/src/runtime/lifecycle.ts`). Cancel and the timeout backstop wait at least this
+ * CLI runtime shutdown budget (60 seconds). Cancel and the timeout backstop wait at least this
  * long so a CLI that is already shutting down can still write `exec.completed`.
  */
 export const CLI_SHUTDOWN_BUDGET_MS = 60_000;
