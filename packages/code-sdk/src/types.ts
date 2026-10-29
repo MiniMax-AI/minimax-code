@@ -61,13 +61,14 @@ export interface ExecResult {
 /**
  * Raw tool call snapshot forwarded from the Runtime.
  *
- * @experimental `status` is an internal numeric enum and `input` / `output` are tool-specific
- * structures. Neither is covered by the SDK compatibility promise.
+ * @experimental `status` matches the CLI (`string | number`; often an internal numeric enum) and
+ * `input` / `output` are tool-specific structures. Neither is covered by the SDK compatibility
+ * promise.
  */
 export interface RawToolCall {
   readonly id?: string;
   readonly name?: string;
-  readonly status?: number;
+  readonly status?: string | number;
   readonly input?: unknown;
   readonly output?: unknown;
   readonly durationMs?: number;
@@ -185,6 +186,13 @@ export type PromptMode = 'tui' | 'coding' | 'work';
 export interface MCodeOptions {
   /** Explicit `mcode` executable or JS entry. Skips package and PATH lookup. */
   readonly bin?: string;
+  /**
+   * Search `process.cwd()` for the CLI: `@minimax-ai/code` from that directory's `package.json`,
+   * then `node_modules/.bin/mcode` walking up through parent directories. Both steps run before
+   * `PATH`. Default `false`. Leave this off when the working directory is an untrusted checkout
+   * (for example CI); pass `bin` or use a CLI installed next to the SDK or on `PATH`.
+   */
+  readonly resolveFromCwd?: boolean;
   /** Data directory for Sessions and config; passed to the CLI as `MINIMAX_DATA_DIR`. */
   readonly dataDir?: string;
   /** Child process environment. Replaces `process.env` when provided. */

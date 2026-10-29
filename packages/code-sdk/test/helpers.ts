@@ -47,6 +47,7 @@ export interface FakeEnv {
   readonly FAKE_MCODE_VERSION_LOG?: string;
   readonly FAKE_MCODE_RECORD?: string;
   readonly FAKE_MCODE_GRANDCHILD_PID?: string;
+  readonly FAKE_MCODE_SIGNAL_LOG?: string;
 }
 
 export function fakeClient(fake: FakeEnv, options: Omit<MCodeOptions, 'env'> = {}): MCode {

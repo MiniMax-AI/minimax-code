@@ -12,13 +12,15 @@ First public release.
 
 - `MCode`, `startThread`, `resumeThread`, `thread.run()` and `thread.runStreamed()` drive
   `mcode exec --output-format stream-json`, one CLI process per Turn.
-- CLI resolution: explicit `bin`, installed `@minimax-ai/code`, the nearest
-  `node_modules/.bin/mcode` above the working directory, then `mcode` on `PATH`.
-- Requires MiniMax Code CLI `0.7.0` or later and Node.js `>=22.19 <23 || >=24.2 <27`.
+- CLI resolution: explicit `bin`, `@minimax-ai/code` installed next to the SDK, then `mcode` on
+  `PATH`. `resolveFromCwd` (default off) also searches `process.cwd()` and parent
+  `node_modules/.bin/mcode` directories.
+- Requires MiniMax Code CLI `0.6.3` or later (a source build of this repository is `0.6.5`) and
+  Node.js `>=22.19 <23 || >=24.2 <27`.
 - Typed errors for invocation, run, cancellation, protocol, missing CLI, version and busy Thread
   failures, mapped from the CLI exit codes.
-- Cancellation through `AbortSignal` (SIGINT, then SIGTERM, then SIGKILL) and a `timeoutMs`
-  backstop.
+- Cancellation through `AbortSignal` (`SIGTERM`, then `SIGKILL` after the CLI's 60 second shutdown
+  budget) and a `timeoutMs` backstop of `timeoutMs + 90s`.
 - ESM with a `require()`-compatible export condition; no runtime dependencies.
 
 ### Not yet available

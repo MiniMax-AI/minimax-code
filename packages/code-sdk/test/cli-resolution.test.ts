@@ -12,7 +12,12 @@ import {
   resolveCli,
   resolvePackageEntry,
 } from '../src/cli-resolver.js';
-import { parseVersion, satisfiesMinimum } from '../src/version.js';
+import {
+  checkCliVersion,
+  MIN_CLI_VERSION,
+  parseVersion,
+  satisfiesMinimum,
+} from '../src/version.js';
 import { FAKE_MCODE, fakeClient, fixture, tempDir } from './helpers.js';
 
 const isWindows = process.platform === 'win32';
@@ -125,23 +130,48 @@ describe('CLI version check', () => {
   it('compares major.minor.patch and accepts preview builds of the minimum', () => {
     const satisfies = (text: string): boolean => {
       const version = parseVersion(text);
-      const minimum = parseVersion('0.7.0');
+      const minimum = parseVersion(MIN_CLI_VERSION);
       if (!version || !minimum) throw new Error(`unparseable version ${text}`);
       return satisfiesMinimum(version, minimum);
     };
+    expect(MIN_CLI_VERSION).toBe('0.6.3');
+    expect(satisfies('0.6.3-preview.1')).toBe(true);
+    expect(satisfies('0.6.3')).toBe(true);
+    expect(satisfies('0.6.5')).toBe(true);
     expect(satisfies('0.7.0-preview.1015121')).toBe(true);
     expect(satisfies('mcode 0.7.1')).toBe(true);
     expect(satisfies('1.0.0')).toBe(true);
-    expect(satisfies('0.6.12')).toBe(false);
+    expect(satisfies('0.6.2')).toBe(false);
+  });
+
+  it('accepts this repository CLI and the minimum, and rejects the version before it', async () => {
+    const cli = resolveCli({ bin: FAKE_MCODE, env: {} });
+    const repoVersion = (
+      JSON.parse(
+        readFileSync(fileURLToPath(new URL('../../tui/package.json', import.meta.url)), 'utf8'),
+      ) as {
+        version: string;
+      }
+    ).version;
+    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: MIN_CLI_VERSION })).resolves.toBe(
+      MIN_CLI_VERSION,
+    );
+    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: repoVersion })).resolves.toBe(
+      repoVersion,
+    );
+    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: '0.7.0' })).resolves.toBe('0.7.0');
+    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: '0.6.2' })).rejects.toBeInstanceOf(
+      MCodeVersionError,
+    );
   });
 
   it('rejects an older CLI before running', async () => {
-    const error = await fakeClient({ FAKE_MCODE_VERSION: '0.6.12' })
+    const error = await fakeClient({ FAKE_MCODE_VERSION: '0.6.2' })
       .startThread()
       .run('x')
       .catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(MCodeVersionError);
-    expect((error as MCodeVersionError).version).toBe('0.6.12');
+    expect((error as MCodeVersionError).version).toBe('0.6.2');
     expect((error as Error).message).toContain('npm install @minimax-ai/code@latest');
   });
 
@@ -164,5 +194,11 @@ describe('package metadata', () => {
         engines: { node: string };
       };
     expect(read('../package.json').engines.node).toBe(read('../../tui/package.json').engines.node);
+    const sdk = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+    ) as {
+      peerDependencies: { '@minimax-ai/code': string };
+    };
+    expect(sdk.peerDependencies['@minimax-ai/code']).toBe(`>=${MIN_CLI_VERSION}`);
   });
 });

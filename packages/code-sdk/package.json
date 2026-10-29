@@ -46,7 +46,7 @@
     "node": ">=22.19 <23 || >=24.2 <27"
   },
   "peerDependencies": {
-    "@minimax-ai/code": ">=0.7.0"
+    "@minimax-ai/code": ">=0.6.3"
   },
   "peerDependenciesMeta": {
     "@minimax-ai/code": {
@@ -58,7 +58,8 @@
     "build": "pnpm run clean:build && tsc --build --force",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "node ../../scripts/run-vitest-suite.mjs code-sdk",
-    "release:check": "node scripts/release-check.mjs"
+    "release:check": "node scripts/release-check.mjs",
+    "prepublishOnly": "node scripts/release-tools.mjs"
   },
   "dependencies": {},
   "devDependencies": {

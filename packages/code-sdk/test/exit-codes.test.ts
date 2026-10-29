@@ -1,14 +1,25 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ChildProcess, spawn } from 'node:child_process';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   MCodeAbortError,
+  MCodeError,
   MCodeInvocationError,
   MCodeProtocolError,
   MCodeRunError,
 } from '../src/index.js';
-import { processTimings } from '../src/exec-process.js';
+import {
+  ExecProcess,
+  processTimings,
+  releaseTrackedResources,
+  trackTempDir,
+} from '../src/exec-process.js';
+import { checkCliVersion } from '../src/version.js';
 import { fakeClient, fixture, tempDir } from './helpers.js';
 
 const posixOnly = process.platform === 'win32' ? it.skip : it;
@@ -117,9 +128,9 @@ describe('process exit with inherited pipes', () => {
 });
 
 describe('cancellation escalation and timeout backstop', () => {
-  posixOnly('escalates SIGINT to SIGTERM and SIGKILL when the CLI ignores signals', async () => {
+  posixOnly('escalates SIGTERM to SIGKILL when the CLI ignores the cancel signal', async () => {
     const original = { ...processTimings };
-    Object.assign(processTimings, { interruptGraceMs: 50, terminateGraceMs: 50 });
+    Object.assign(processTimings, { cancelGraceMs: 50 });
     try {
       const mcode = fakeClient({
         FAKE_MCODE_FIXTURE: fixture('cancelled'),
@@ -166,5 +177,77 @@ describe('cancellation escalation and timeout backstop', () => {
     } finally {
       Object.assign(processTimings, original);
     }
+  });
+});
+
+function nullStdioChild(): ChildProcess {
+  const child = new EventEmitter() as ChildProcess;
+  child.stdin = null;
+  child.stdout = null;
+  child.stderr = null;
+  child.kill = () => true;
+  return child;
+}
+
+describe('spawn without stdio', () => {
+  it('turns a null-stdio child into MCodeError and handles the delayed error event', async () => {
+    const child = nullStdioChild();
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on('uncaughtException', onUncaught);
+    try {
+      expect(
+        () =>
+          new ExecProcess({
+            command: { command: 'mcode', args: ['exec'] },
+            env: {},
+            prompt: 'x',
+            spawn: (() => child) as typeof spawn,
+          }),
+      ).toThrow(MCodeError);
+      child.emit('error', Object.assign(new Error('spawn EMFILE'), { code: 'EMFILE' }));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+    }
+  });
+
+  it('rejects a version check with null stdio and clears the failure timer', async () => {
+    const child = nullStdioChild();
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on('uncaughtException', onUncaught);
+    try {
+      const pending = checkCliVersion(
+        { kind: 'exec', path: 'mcode', source: 'path' },
+        {},
+        (() => child) as typeof spawn,
+      );
+      const rejected = expect(pending).rejects.toBeInstanceOf(MCodeError);
+      child.emit('error', Object.assign(new Error('spawn EMFILE'), { code: 'EMFILE' }));
+      await rejected;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+    }
+  });
+});
+
+describe('process exit cleanup', () => {
+  it('removes tracked prompt directories synchronously', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mcode-sdk-'));
+    writeFileSync(join(directory, 'system-prompt.txt'), 'secret', { mode: 0o600 });
+    trackTempDir(directory);
+    expect(process.listeners('exit')).toContain(releaseTrackedResources);
+
+    releaseTrackedResources();
+
+    expect(existsSync(directory)).toBe(false);
   });
 });

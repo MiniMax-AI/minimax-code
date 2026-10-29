@@ -208,6 +208,6 @@ describe('thread.runStreamed', () => {
     })().catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(MCodeAbortError);
-    expect((error as MCodeAbortError).signal).toBe('SIGINT');
+    expect((error as MCodeAbortError).signal).toBe('SIGTERM');
   });
 });

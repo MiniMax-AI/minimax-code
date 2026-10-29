@@ -9,6 +9,7 @@
 //   FAKE_MCODE_STDERR    text written to stderr before exiting
 //   FAKE_MCODE_RECORD    file that receives { argv, stdin, env, promptFiles } as JSON
 //   FAKE_MCODE_MODE      'normal' | 'wait-sigint' | 'ignore-signals' | 'hang'
+//   FAKE_MCODE_SIGNAL_LOG  wait-sigint: file that receives the cancel signal name
 //   FAKE_MCODE_SPLIT     non-normal modes: lines replayed before waiting (default 3)
 //   FAKE_MCODE_PREFIX    raw text written to stdout before the fixture
 //   FAKE_MCODE_GRANDCHILD_PID  normal mode: before exiting, spawn a long-lived grandchild that
@@ -73,10 +74,15 @@ function run() {
   const keepAlive = setInterval(() => {}, 1_000);
   // Install handlers before replaying, so a consumer that saw an event can signal safely.
   if (mode === 'wait-sigint') {
-    process.once('SIGINT', () => {
+    // The CLI cancels on SIGINT and SIGTERM. The SDK sends SIGTERM so a terminal Ctrl+C
+    // (SIGINT to the process group) does not consume the only cancel handler.
+    const finishCancel = (signal) => {
+      if (env.FAKE_MCODE_SIGNAL_LOG) writeFileSync(env.FAKE_MCODE_SIGNAL_LOG, signal);
       clearInterval(keepAlive);
       finish(lines.slice(split), 130);
-    });
+    };
+    process.once('SIGINT', () => finishCancel('SIGINT'));
+    process.once('SIGTERM', () => finishCancel('SIGTERM'));
   } else if (mode === 'ignore-signals') {
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

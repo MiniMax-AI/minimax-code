@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import type { SpawnCommand } from './cli-resolver.js';
@@ -14,14 +15,28 @@ import {
 import { parseEventLine } from './protocol.js';
 import type { ThreadEvent, ThreadItem } from './types.js';
 
+/**
+ * CLI runtime shutdown budget (`DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS` in
+ * `packages/tui/src/runtime/lifecycle.ts`). Cancel and the timeout backstop wait at least this
+ * long so a CLI that is already shutting down can still write `exec.completed`.
+ */
+export const CLI_SHUTDOWN_BUDGET_MS = 60_000;
+
+/** Slack for work the CLI does before it starts its own `timeoutMs` timer. */
+export const CLI_STARTUP_SLACK_MS = 30_000;
+
 /** Cancellation and cleanup timings. Mutable only so tests can shorten them. */
 export const processTimings = {
-  /** SIGINT → SIGTERM. */
-  interruptGraceMs: 10_000,
-  /** SIGTERM → SIGKILL. */
+  /** SIGTERM → SIGKILL. Covers {@link CLI_SHUTDOWN_BUDGET_MS}. */
+  cancelGraceMs: CLI_SHUTDOWN_BUDGET_MS,
+  /** After `exec.completed`, how long a lingering CLI may take to exit before SIGKILL. */
   terminateGraceMs: 5_000,
-  /** Extra time after `timeoutMs` before the SDK force-kills a CLI that did not stop itself. */
-  backstopExtraMs: 30_000,
+  /**
+   * Extra time after `timeoutMs` before the SDK force-kills a CLI that did not stop itself.
+   * Shutdown budget plus startup slack, because the SDK timer starts at spawn and the CLI timer
+   * starts only after access, session and model resolution.
+   */
+  backstopExtraMs: CLI_SHUTDOWN_BUDGET_MS + CLI_STARTUP_SLACK_MS,
   /**
    * After the CLI exits, how long to keep reading stdout / stderr. A grandchild process that
    * inherited the pipes can keep them open indefinitely; the streams are destroyed afterwards.
@@ -32,28 +47,60 @@ export const processTimings = {
 const STDERR_TAIL_BYTES = 64 * 1024;
 
 const liveChildren = new Set<ChildProcess>();
+const tempDirectories = new Set<string>();
 let exitHookInstalled = false;
+
+/** Registers a prompt directory so `process.exit()` can delete it synchronously. */
+export function trackTempDir(directory: string): void {
+  tempDirectories.add(directory);
+  ensureExitHook();
+}
+
+export function untrackTempDir(directory: string): void {
+  tempDirectories.delete(directory);
+}
+
+/**
+ * SIGTERM to live CLI processes, then `rmSync` of prompt directories. Installed as the `exit`
+ * hook: asynchronous cleanup does not run after `process.exit()`.
+ */
+export function releaseTrackedResources(): void {
+  for (const live of liveChildren) {
+    try {
+      // The CLI treats SIGTERM as a graceful cancel.
+      live.kill('SIGTERM');
+    } catch {
+      // The child already exited.
+    }
+  }
+  liveChildren.clear();
+  for (const directory of tempDirectories) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // Already removed.
+    }
+  }
+  tempDirectories.clear();
+}
+
+function ensureExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on('exit', releaseTrackedResources);
+}
 
 function trackChild(child: ChildProcess): void {
   liveChildren.add(child);
-  if (exitHookInstalled) return;
-  exitHookInstalled = true;
-  // The CLI treats SIGTERM as a graceful cancel. Without this, children outlive the host.
-  process.once('exit', () => {
-    for (const live of liveChildren) {
-      try {
-        live.kill('SIGTERM');
-      } catch {
-        // The child already exited.
-      }
-    }
-  });
+  ensureExitHook();
 }
 
 export interface ExecProcessOptions {
   readonly command: SpawnCommand;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly prompt: string;
+  /** Test seam. Production uses `node:child_process` `spawn` with `shell: false`. */
+  readonly spawn?: typeof spawn;
   readonly signal?: AbortSignal;
   /** CLI-side timeout; enables the SDK backstop at `timeoutMs + backstopExtraMs`. */
   readonly timeoutMs?: number;
@@ -92,13 +139,18 @@ export class ExecProcess {
 
   constructor(private readonly options: ExecProcessOptions) {
     const { command } = options;
-    this.child = spawn(command.command, command.args, {
+    const spawnChild = options.spawn ?? spawn;
+    this.child = spawnChild(command.command, command.args, {
       env: options.env as NodeJS.ProcessEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      shell: false,
     });
     this.sessionId = options.sessionId;
     trackChild(this.child);
+    // Before attach(): a failed spawn emits 'error' with null stdio on the next tick, and
+    // reading stdout throws before a listener registered later in attach() can run.
+    this.child.once('error', (error: NodeJS.ErrnoException) => this.onChildError(error));
     this.attach();
     options.signal?.addEventListener('abort', this.onAbort, { once: true });
     // `abort` listeners added after the signal fired are never called.
@@ -144,20 +196,40 @@ export class ExecProcess {
     }
   }
 
-  /** SIGINT, then SIGTERM after the grace period, then SIGKILL. */
+  /**
+   * SIGTERM, then SIGKILL after {@link processTimings.cancelGraceMs}.
+   * SIGTERM is the CLI's cancel signal (same path as SIGINT). Starting there avoids a second
+   * SIGINT after Ctrl+C, which would hit the default action once the CLI's one-shot SIGINT
+   * handler has already run and would skip shutdown and `exec.completed`. On Windows,
+   * `kill('SIGTERM')` is a hard kill.
+   */
   interrupt(): void {
     if (this.exited || this.abortRequested) return;
     this.abortRequested = true;
-    // Windows cannot deliver a catchable SIGINT; kill() terminates the process there.
-    this.kill(process.platform === 'win32' ? 'SIGTERM' : 'SIGINT');
-    this.schedule(processTimings.interruptGraceMs, () => {
-      this.kill('SIGTERM');
-      this.schedule(processTimings.terminateGraceMs, () => this.kill('SIGKILL'));
-    });
+    this.kill('SIGTERM');
+    this.schedule(processTimings.cancelGraceMs, () => this.kill('SIGKILL'));
+  }
+
+  private onChildError(error: NodeJS.ErrnoException): void {
+    this.exited = true;
+    this.fail(
+      error.code === 'ENOENT' || error.code === 'EACCES'
+        ? new MCodeNotFoundError(`Could not start mcode (${error.code}).`, { cause: error })
+        : new MCodeError(`Could not start mcode: ${error.message}`, { cause: error }),
+    );
+    this.cleanup();
   }
 
   private attach(): void {
     const { child } = this;
+    const { stdin, stdout, stderr } = child;
+    if (!stdin || !stdout || !stderr) {
+      this.exited = true;
+      const error = new MCodeError('mcode stdout is unavailable.');
+      this.fail(error);
+      this.cleanup();
+      throw error;
+    }
     let lines = 0;
     let streamsOpen = 2;
     let settled = false;
@@ -168,21 +240,20 @@ export class ExecProcess {
       this.settle(exit.code, exit.signal);
     };
 
-    child.stdin?.on('error', () => {
+    stdin.on('error', () => {
       // EPIPE when the CLI exits before reading stdin; the exit code reports the cause.
     });
-    child.stdin?.end(JSON.stringify({ prompt: this.options.prompt }));
+    stdin.end(JSON.stringify({ prompt: this.options.prompt }));
 
-    child.stderr?.setEncoding('utf8').on('data', (chunk: string) => {
+    stderr.setEncoding('utf8').on('data', (chunk: string) => {
       this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_BYTES);
     });
-    child.stderr?.once('close', () => {
+    stderr.once('close', () => {
       streamsOpen -= 1;
       settle();
     });
 
-    if (!child.stdout) throw new MCodeError('mcode stdout is unavailable.');
-    const reader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const reader = createInterface({ input: stdout, crlfDelay: Infinity });
     reader.on('line', (line) => {
       if (this.finished || this.completed) return;
       lines += 1;
@@ -203,15 +274,6 @@ export class ExecProcess {
       settle();
     });
 
-    child.once('error', (error: NodeJS.ErrnoException) => {
-      this.exited = true;
-      this.fail(
-        error.code === 'ENOENT' || error.code === 'EACCES'
-          ? new MCodeNotFoundError(`Could not start mcode (${error.code}).`, { cause: error })
-          : new MCodeError(`Could not start mcode: ${error.message}`, { cause: error }),
-      );
-      this.cleanup();
-    });
     child.once('exit', (code, signal) => {
       this.exited = true;
       exit = { code, signal };

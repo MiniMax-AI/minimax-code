@@ -30,16 +30,28 @@ export interface SpawnCommand {
 export interface ResolveCliOptions {
   readonly bin?: string;
   readonly env: Readonly<Record<string, string | undefined>>;
+  /**
+   * Also search `cwd` (default `process.cwd()`) for `@minimax-ai/code` and for
+   * `node_modules/.bin/mcode` above that directory. Off unless set: a working directory can
+   * belong to an untrusted checkout.
+   */
+  readonly resolveFromCwd?: boolean;
+  /** Directory used by {@link ResolveCliOptions.resolveFromCwd}. Defaults to `process.cwd()`. */
+  readonly cwd?: string;
   /** Base paths for resolving the optional `@minimax-ai/code` peer dependency. */
   readonly packageSearchFrom?: readonly string[];
-  /** Directory where the upward `node_modules/.bin/mcode` search starts. */
+  /**
+   * Directory where the upward `node_modules/.bin/mcode` search starts. Set this to search even
+   * when `resolveFromCwd` is off (tests and callers that already chose a directory).
+   */
   readonly projectSearchFrom?: string;
   readonly platform?: NodeJS.Platform;
 }
 
 /**
- * Resolution order: explicit `bin` → installed `@minimax-ai/code` package → nearest
- * `node_modules/.bin/mcode` above the working directory → `mcode` on PATH.
+ * Resolution order: explicit `bin` → `@minimax-ai/code` installed next to the SDK →
+ * (only when `resolveFromCwd` is set) the same package from `cwd` and the nearest
+ * `node_modules/.bin/mcode` above `cwd` → `mcode` on PATH.
  */
 export function resolveCli(options: ResolveCliOptions): ResolvedCli {
   const platform = options.platform ?? process.platform;
@@ -54,17 +66,34 @@ export function resolveCli(options: ResolveCliOptions): ResolvedCli {
       throw new MCodeNotFoundError(`The configured mcode bin was not found: ${options.bin}.`);
     return fromExecutable(found, 'option', platform);
   }
-  const fromPackage = resolvePackageEntry(
-    options.packageSearchFrom ?? [import.meta.url, join(process.cwd(), 'package.json')],
-  );
+  const fromPackage = resolvePackageEntry(packageSearchBases(options));
   if (fromPackage) return { kind: 'node', path: fromPackage, source: 'package' };
-  const fromProject = findProjectBin(options.projectSearchFrom ?? process.cwd(), platform);
-  if (fromProject) return fromProject;
+  const projectStart = projectSearchStart(options);
+  if (projectStart !== undefined) {
+    const fromProject = findProjectBin(projectStart, platform);
+    if (fromProject) return fromProject;
+  }
   const onPath = findOnPath('mcode', options.env, platform);
   if (onPath) return fromExecutable(onPath, 'path', platform);
+  const searchedCwd = options.resolveFromCwd === true || options.projectSearchFrom !== undefined;
   throw new MCodeNotFoundError(
-    `Could not find the mcode CLI (${CLI_PACKAGE_NAME} is not installed, no node_modules/.bin/mcode was found above the working directory, and mcode is not on PATH).`,
+    searchedCwd
+      ? `Could not find the mcode CLI (${CLI_PACKAGE_NAME} is not installed, no node_modules/.bin/mcode was found above the working directory, and mcode is not on PATH).`
+      : `Could not find the mcode CLI (${CLI_PACKAGE_NAME} is not installed next to the SDK, and mcode is not on PATH). Set \`resolveFromCwd\` to also search the working directory, or pass \`bin\`.`,
   );
+}
+
+function packageSearchBases(options: ResolveCliOptions): readonly string[] {
+  if (options.packageSearchFrom) return options.packageSearchFrom;
+  const bases = [import.meta.url];
+  if (options.resolveFromCwd) bases.push(join(options.cwd ?? process.cwd(), 'package.json'));
+  return bases;
+}
+
+function projectSearchStart(options: ResolveCliOptions): string | undefined {
+  if (options.projectSearchFrom !== undefined) return options.projectSearchFrom;
+  if (options.resolveFromCwd) return options.cwd ?? process.cwd();
+  return undefined;
 }
 
 /** Resolves `bin.mcode` of an installed `@minimax-ai/code` package to an existing JS file. */

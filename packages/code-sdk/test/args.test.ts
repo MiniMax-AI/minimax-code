@@ -5,7 +5,15 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_TIMEOUT_MS, validateRunOptions } from '../src/args.js';
 import { MCode, MCodeInvocationError, MCodeRunError } from '../src/index.js';
+import type { RawToolCall } from '../src/types.js';
 import { FAKE_MCODE, fakeClient, fixture, readRecord, tempDir } from './helpers.js';
+
+describe('tool call status', () => {
+  it('accepts the CLI status union of string and number', () => {
+    const statuses: Array<RawToolCall['status']> = ['completed', 2];
+    expect(statuses).toEqual(['completed', 2]);
+  });
+});
 
 describe('CLI argument mapping', () => {
   it('maps Thread, run and client options to exec flags, stdin and environment', async () => {
@@ -134,7 +142,7 @@ describe('CLI argument mapping', () => {
 
   it('rejects timeoutMs values whose SDK backstop would overflow a Node timer', async () => {
     expect(() => validateRunOptions({ timeoutMs: MAX_TIMEOUT_MS })).not.toThrow();
-    // 2_200_000_000 + 30s used to overflow and fire the force-kill after ~1ms.
+    // A backstop past the signed 32-bit timer limit used to fire the force-kill after ~1ms.
     const record = `${tempDir()}/record.json`;
     await expect(
       fakeClient({ FAKE_MCODE_RECORD: record })

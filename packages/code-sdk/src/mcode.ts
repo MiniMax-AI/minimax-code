@@ -46,6 +46,7 @@ export class MCode {
       const env = this.childEnv();
       const cli = resolveCli({
         ...(this.options.bin === undefined ? {} : { bin: this.options.bin }),
+        ...(this.options.resolveFromCwd ? { resolveFromCwd: true } : {}),
         env,
       });
       await checkCliVersion(cli, env);

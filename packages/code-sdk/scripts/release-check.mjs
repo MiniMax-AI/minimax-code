@@ -22,44 +22,34 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
+  isReleaseRehearsal,
   NPMJS_REGISTRY,
   NPMJS_TARGET_ARGS,
   normalizeRegistry,
   PACKAGE_SCOPE,
-  publishCommand,
-  readBackCommands,
+  PACKAGE_TEXT_RULES,
+  releaseClosingLines,
   resolveTool,
   scopedRegistryProblem,
+  tarballProblems,
+  textLabels,
 } from './release-tools.mjs';
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = path.resolve(packageDir, '../..');
-// The repository's own publication rules (also used by `check:source`); this script runs only
-// inside the repository checkout, never from the published package.
+// Shared with `check:source`. Dynamic import keeps this repository file out of the SDK typecheck
+// root. The script runs only inside the checkout, never from the published package.
 const { embeddedCredential, internalSourceReference } = await import(
   pathToFileURL(path.join(repoRoot, 'scripts/lib/public-text-policy.mjs')).href
 );
+const textRules = [
+  ['internal source reference', internalSourceReference],
+  ['embedded credential', embeddedCredential],
+  ...PACKAGE_TEXT_RULES,
+];
 const REGISTRY = NPMJS_REGISTRY;
 const RELEASE_BRANCH = 'main';
 const PUBLISHED_FILES = ['dist', 'src', 'README.md', 'CHANGELOG.md'];
-const ALLOWED_ENTRY =
-  /^package\/(?:package\.json|README\.md|CHANGELOG\.md|LICENSE|(?:dist|src)\/[^/]+\.(?:js|js\.map|d\.ts|d\.ts\.map|ts))$/u;
-const REQUIRED_ENTRIES = [
-  'package/package.json',
-  'package/README.md',
-  'package/CHANGELOG.md',
-  'package/LICENSE',
-  'package/dist/index.js',
-  'package/dist/index.d.ts',
-];
-/** Published text must not point into the repository, at a local machine, or at private names. */
-const PUBLIC_TEXT_RULES = [
-  ['internal source reference', internalSourceReference],
-  ['embedded credential', embeddedCredential],
-  ['local user path', /(?:\/Users\/|[A-Za-z]:\\Users\\)/u],
-  ['repository package path', /\b(?:packages\/(?!code-sdk\b)[\w.-]+|third_party)\//u],
-  ['internal package name', /@minimax\/code\b|@mavis\//u],
-];
 
 const args = new Set(process.argv.slice(2).filter((arg) => arg !== '--'));
 for (const arg of args) {
@@ -98,10 +88,6 @@ function run(tool, commandArgs, { cwd = repoRoot, capture = false, allowFailure 
   }
   return result;
 }
-
-const shellWord = (value) =>
-  /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
-const printable = (command) => command.map(shellWord).join(' ');
 
 function git(commandArgs) {
   return run('git', commandArgs, { capture: true }).stdout.trim();
@@ -200,20 +186,21 @@ const tarball = path.join(outDir, packed.filename);
 const entries = run('tar', ['-tzf', tarball], { capture: true })
   .stdout.split(/\r?\n/u)
   .filter((entry) => entry && !entry.endsWith('/'));
-const unexpected = entries.filter(
-  (entry) => !ALLOWED_ENTRY.test(entry) || entry.split('/').includes('..'),
-);
-if (unexpected.length) fail(`Unexpected tarball entries: ${unexpected.join(', ')}`);
-const missing = REQUIRED_ENTRIES.filter((entry) => !entries.includes(entry));
-if (missing.length) fail(`Missing tarball entries: ${missing.join(', ')}`);
+const packedEntries = tarballProblems(entries);
+if (packedEntries.unexpected.length) {
+  fail(`Unexpected tarball entries: ${packedEntries.unexpected.join(', ')}`);
+}
+if (packedEntries.missing.length) {
+  fail(`Missing tarball entries: ${packedEntries.missing.join(', ')}`);
+}
 const extracted = path.join(outDir, 'extracted');
 mkdirSync(extracted);
 run('tar', ['-xzf', tarball, '-C', extracted]);
 const findings = [];
 for (const file of listFiles(path.join(extracted, 'package'))) {
   const text = readFileSync(file, 'utf8');
-  for (const [label, pattern] of PUBLIC_TEXT_RULES) {
-    if (pattern.test(text)) findings.push(`${path.relative(extracted, file)}: ${label}`);
+  for (const label of textLabels(text, textRules)) {
+    findings.push(`${path.relative(extracted, file)}: ${label}`);
   }
 }
 if (findings.length)
@@ -259,16 +246,20 @@ const smoke = run(
 );
 console.log(`✓ ${smoke.stdout.trim()}`);
 
-const rehearsal = branch !== RELEASE_BRANCH || head !== remoteMain;
-console.log(
-  rehearsal
-    ? `\n! Rehearsal passed for ${spec}. Do not publish this tarball: release from an up-to-date ${RELEASE_BRANCH}.`
-    : `\n✓ ${spec} is ready. The tarball was checked but nothing was published.`,
-);
-if (!rehearsal) {
-  console.log('\nPublish it yourself (npm login with 2FA required):\n');
-  console.log(`  ${printable(publishCommand(tarball))}`);
-  const [viewVersion, viewTags] = readBackCommands(spec, name);
-  console.log(`\nThen read it back:\n\n  ${printable(viewVersion)}   # expect ${integrity}`);
-  console.log(`  ${printable(viewTags)}   # expect latest: ${version}`);
+const rehearsal = isReleaseRehearsal({
+  branch,
+  head,
+  remoteMain,
+  releaseBranch: RELEASE_BRANCH,
+});
+for (const line of releaseClosingLines({
+  rehearsal,
+  spec,
+  releaseBranch: RELEASE_BRANCH,
+  tarball,
+  integrity,
+  version,
+  name,
+})) {
+  console.log(line);
 }

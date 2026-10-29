@@ -46,8 +46,9 @@ pnpm --filter @minimax-ai/code-sdk run release:check
    only `dist`, `src`, `README.md` and `CHANGELOG.md` (npm adds `package.json` and `LICENSE`);
 4. builds, type-checks and runs the SDK test suite;
 5. runs `npm pack`, rejects unexpected tarball entries, and scans every packed file for internal
-   host names, credentials, local user paths (`/Users/…`), other repository package paths and
-   internal package names;
+   host names, credentials, local user paths (`/Users/…`, `/home/<name>/`, `/root/`,
+   `/private/var/folders/…`, `C:\Users\…` and the escaped `C:\\Users\\…` form), other repository
+   package paths and internal package names;
 6. installs the tarball into an empty project and checks both `import` and `require`;
 7. prints the exact `npm publish` command for the checked tarball and the read-back commands.
 
@@ -59,6 +60,11 @@ shell; on Windows it runs npm and pnpm through their JS entries (`npm-cli.js` ne
 the pnpm script that started it), which has not been exercised on a Windows machine yet.
 
 ## 3. Publish
+
+Do not run `npm publish` in `packages/code-sdk`. That package is the first non-private workspace
+package, and its `prepublishOnly` script refuses a directory publish so a fresh checkout cannot
+skip `release:check` and upload a package without `dist`. Publishing the checked tarball does not
+run that script.
 
 Run the printed command yourself. It publishes the tarball that was just checked:
 

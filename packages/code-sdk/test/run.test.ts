@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { MCodeAbortError, MCodeRunError, ThreadBusyError, type ThreadItem } from '../src/index.js';
@@ -111,11 +113,13 @@ describe('thread.run', () => {
     expect(second.some((arg) => arg.startsWith('--mode'))).toBe(false);
   });
 
-  posixOnly('cancels with SIGINT and rejects with an AbortError', async () => {
+  posixOnly('cancels with SIGTERM and rejects with an AbortError', async () => {
+    const signalLog = `${tempDir()}/signal.txt`;
     const mcode = fakeClient({
       FAKE_MCODE_FIXTURE: fixture('cancelled'),
       FAKE_MCODE_MODE: 'wait-sigint',
       FAKE_MCODE_SPLIT: '9',
+      FAKE_MCODE_SIGNAL_LOG: signalLog,
     });
     const thread = mcode.startThread();
     const controller = new AbortController();
@@ -130,6 +134,7 @@ describe('thread.run', () => {
     expect(abort.name).toBe('AbortError');
     expect(abort.exitCode).toBe(130);
     expect(abort.result?.status).toBe('cancelled');
+    expect(readFileSync(signalLog, 'utf8')).toBe('SIGTERM');
     expect(abort.sessionId).toBe('mvs_78b922a823a345728486967e33c95770');
     // Neither the message nor the tool call received item.completed before cancellation.
     expect(abort.items.map((item) => [item.type, item.incomplete])).toEqual([

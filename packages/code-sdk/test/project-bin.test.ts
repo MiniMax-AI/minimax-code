@@ -35,7 +35,7 @@ function project(): { root: string; entry: string; bin: string } {
 }
 
 function versionOf(command: ReturnType<typeof buildSpawnCommand>): string {
-  return spawnSync(command.command, command.args, { encoding: 'utf8' }).stdout.trim();
+  return spawnSync(command.command, command.args, { encoding: 'utf8', shell: false }).stdout.trim();
 }
 
 describe('project-local node_modules/.bin/mcode', () => {
@@ -98,6 +98,33 @@ describe('project-local node_modules/.bin/mcode', () => {
 
   it('returns nothing when no ancestor has node_modules/.bin/mcode', () => {
     expect(findProjectBin(tempDir())).toBeUndefined();
+  });
+
+  it('searches the working directory only when resolveFromCwd is set', () => {
+    const { root, bin } = project();
+    if (process.platform === 'win32') {
+      writeFileSync(
+        join(bin, 'mcode.cmd'),
+        '"%~dp0\\..\\@scope\\any-mcode-cli\\dist\\index.js" %*',
+      );
+    } else {
+      symlinkSync(join('..', '@scope', 'any-mcode-cli', 'dist', 'index.js'), join(bin, 'mcode'));
+    }
+    const onPath = tempDir();
+    const pathBin = join(onPath, process.platform === 'win32' ? 'mcode.cmd' : 'mcode');
+    writeFileSync(pathBin, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n');
+    chmodSync(pathBin, 0o755);
+    const shared = {
+      env: { PATH: onPath, PATHEXT: '.CMD' },
+      packageSearchFrom: [] as string[],
+      cwd: root,
+    };
+
+    expect(resolveCli(shared).source).toBe('path');
+    expect(resolveCli({ ...shared, resolveFromCwd: true }).source).toBe('project');
+    expect(() => resolveCli({ env: { PATH: '' }, packageSearchFrom: [], cwd: root })).toThrow(
+      /resolveFromCwd/u,
+    );
   });
 
   it('parses Windows cmd and PowerShell shims to the JS entry', () => {

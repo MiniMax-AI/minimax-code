@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 
+import { processTimings } from './exec-process.js';
 import { MCodeInvocationError } from './errors.js';
 import type { RunOptions, ThreadOptions } from './types.js';
 
@@ -74,10 +75,10 @@ export function validateThreadOptions(options: ThreadOptions, resuming: boolean)
 }
 
 /**
- * Largest accepted `timeoutMs`: the SDK backstop timer (`timeoutMs + 30s`) must fit in a Node
- * timer, whose delay is a signed 32-bit integer (about 24.8 days).
+ * Largest accepted `timeoutMs`: the SDK backstop timer (`timeoutMs + backstopExtraMs`) must fit
+ * in a Node timer, whose delay is a signed 32-bit integer (about 24.8 days).
  */
-export const MAX_TIMEOUT_MS = 2 ** 31 - 1 - 30_000;
+export const MAX_TIMEOUT_MS = 2 ** 31 - 1 - processTimings.backstopExtraMs;
 
 export function validateRunOptions(options: RunOptions): void {
   if (

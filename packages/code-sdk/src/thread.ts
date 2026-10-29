@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { buildExecArgs, validateRunOptions } from './args.js';
 import { buildSpawnCommand, type ResolvedCli } from './cli-resolver.js';
 import { errorForResult, MCodeAbortError, MCodeProtocolError, ThreadBusyError } from './errors.js';
-import { ExecProcess } from './exec-process.js';
+import { ExecProcess, trackTempDir, untrackTempDir } from './exec-process.js';
 import { ItemAccumulator } from './items.js';
 import type {
   ExecResult,
@@ -104,7 +104,9 @@ export class Thread {
     let tempDir: string | undefined;
     const release = async (): Promise<void> => {
       this.busy = false;
-      if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      if (!tempDir) return;
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+      untrackTempDir(tempDir);
     };
     try {
       if (typeof input !== 'string') throw new TypeError('input must be a string.');
@@ -118,6 +120,7 @@ export class Thread {
         this.options.appendSystemPrompt !== undefined
       ) {
         tempDir = await mkdtemp(join(tmpdir(), 'mcode-sdk-'));
+        trackTempDir(tempDir);
         if (this.options.systemPrompt !== undefined) {
           promptFiles.systemPromptFile = await writePrivate(
             join(tempDir, 'system-prompt.txt'),
