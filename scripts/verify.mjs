@@ -56,6 +56,11 @@ const steps = [
   { name: "check:standalone", script: "check:standalone", windows: true },
   { name: "test:artifact", script: "test:artifact", windows: true },
   { name: "test:capabilities", script: "test:capabilities" },
+  // The SDK is outside the CLI compiler graph; its type check is small enough to
+  // run in every Linux/macOS profile.
+  { name: "typecheck:code-sdk", script: "typecheck:code-sdk" },
+  // The SDK cancels `mcode` with POSIX signals; Windows only supports a hard kill.
+  { name: "test:code-sdk", script: "test:code-sdk", platforms: ["darwin", "linux"] },
   { name: "test:windows", script: "test:windows", platforms: ["win32"], windows: true },
   { name: "test:status-contract", script: "test:status-contract" },
   { name: "test:smoke", script: "test:smoke" },

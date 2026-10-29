@@ -376,6 +376,12 @@
       "@mavis/system-reminder": [
         "./packages/agent-modules/system-reminder/src/index.ts"
       ],
+      "@minimax-ai/code-sdk": [
+        "./packages/code-sdk/src/index.ts"
+      ],
+      "@minimax-ai/code-sdk/package.json": [
+        "./packages/code-sdk/package.json"
+      ],
       "@minimax/code/package.json": [
         "./packages/tui/package.json"
       ],

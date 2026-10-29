@@ -1,0 +1,13 @@
+{
+  "name": "@minimax-ai/code",
+  "version": "0.7.0",
+  "private": true,
+  "description": "Test double for the optional @minimax-ai/code peer dependency; never published.",
+  "type": "module",
+  "bin": {
+    "mcode": "mcode.mjs"
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  }
+}

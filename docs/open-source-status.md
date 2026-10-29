@@ -13,7 +13,7 @@ The current source target is **TUI 0.6.3**. This repository contains the termina
 | Embedded mcode-tools | 0.0.4, extracted from public `@minimax-ai/code@0.3.11` | `scripts/lib/mcode-tools-artifact.mjs` |
 | Historical live-service acceptance and demo | TUI 0.3.11, recorded 2026-09-11 | `docs/verification.md`, `docs/release-audit.md`, `docs/demo.md` |
 
-The product, TUI, and root workspace use the same 0.6.3 version. The embedded tool has its own version. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication. Matching version strings do not prove that this source tree reproduces the published npm tarball.
+The product, TUI, and root workspace use the same 0.6.3 version. The embedded tool has its own version. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication, except `@minimax-ai/code-sdk`, the TypeScript SDK. It is published separately, only from a tarball checked by `release:check`, and `prepublishOnly` rejects `npm publish` in that package directory (see `packages/code-sdk/RELEASING.md`). Matching version strings do not prove that this source tree reproduces the published npm tarball.
 
 ## Source boundary
 
