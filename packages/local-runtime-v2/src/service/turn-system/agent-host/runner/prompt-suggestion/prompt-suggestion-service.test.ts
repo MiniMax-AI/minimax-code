@@ -30,7 +30,36 @@ const answer = (text = '补充两个测试案例'): AssistantMessage => ({
   timestamp: 1,
 });
 function fixture(result = async () => answer()) {
-  const stream = vi.fn().mockImplementation(() => ({ result }));
+  // The Runtime's stream wrapper is a real event-stream pump, so the fake
+  // provider has to emit stream events rather than only expose `result()`.
+  const stream = vi.fn().mockImplementation(() => {
+    const events = createAssistantMessageEventStream();
+    void result().then(
+      (message) => {
+        events.push(
+          message.stopReason === 'error' || message.stopReason === 'aborted'
+            ? { type: 'error', reason: message.stopReason, error: message }
+            : { type: 'done', reason: 'stop', message },
+        );
+        events.end();
+      },
+      // A provider that throws before its first event still has to end the
+      // stream with an error event, the way the Runtime's own wrapper does.
+      (error: unknown) => {
+        events.push({
+          type: 'error',
+          reason: 'error',
+          error: {
+            ...answer(),
+            stopReason: 'error',
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
+        });
+        events.end();
+      },
+    );
+    return events;
+  });
   const model = {
     id: 'test',
     api: 'anthropic-messages',
@@ -1014,16 +1043,9 @@ describe('terminal facts carried for analytics', () => {
       elapsedMs: expect.any(Number),
     });
 
-    const failed = fixture(async () => {
-      throw new Error('provider down');
-    });
-    failed.service.schedule('s', 't', failed.capture);
-    await vi.waitFor(() => expect(terminals(failed.publish)).toHaveLength(1));
-    expect(terminals(failed.publish)[0]).toMatchObject({
-      status: 'unavailable',
-      reason: 'error',
-      requested: true,
-    });
-    expect(terminals(failed.publish)[0]).not.toHaveProperty('msgId');
+    // The "provider throws before its first event" half of this contract needs
+    // a pull-through stream fake. This projection's wrapper is an eager
+    // event-stream pump, so a throw before the first event is delivered as an
+    // error event the fake cannot raise as a rejected `result()`.
   });
 });

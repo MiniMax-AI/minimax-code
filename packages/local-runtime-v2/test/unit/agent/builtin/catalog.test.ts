@@ -1581,10 +1581,9 @@ describe('BuiltinAgentCatalog PTC section', () => {
     'puts the section before # Harness of the $name agent.md seed and swaps the conflicting lines',
     async ({ input }) => {
       const catalog = new BuiltinAgentCatalog();
-      const template = (await catalog.readCanonicalTemplate(input)).systemPrompt;
       const section = await catalog.renderPtcSection(input);
-      const off = await catalog.render(input, template);
-      const on = await catalog.render({ ...input, ptc: { section } }, template);
+      const off = await catalog.render(input);
+      const on = await catalog.render({ ...input, ptc: { section } });
 
       expect(on.corePrompt).toContain(`${section}\n\n# Harness\n`);
       expect(on.corePrompt.indexOf('# Tool calls in this turn (PTC)')).toBeLessThan(
@@ -1609,11 +1608,10 @@ describe('BuiltinAgentCatalog PTC section', () => {
   it('keeps the authoritative-data guidance in the Work PTC branch', async () => {
     const catalog = new BuiltinAgentCatalog();
     const input = modes[2]!.input;
-    const template = (await catalog.readCanonicalTemplate(input)).systemPrompt;
-    const on = await catalog.render(
-      { ...input, ptc: { section: await catalog.renderPtcSection(input) } },
-      template,
-    );
+    const on = await catalog.render({
+      ...input,
+      ptc: { section: await catalog.renderPtcSection(input) },
+    });
     // Own line: the source policy inserts the file-reference rule right after the pointer line.
     expect(on.corePrompt).toContain(
       `${POINTER}\n- When specialized tools overlap in responsibility, prefer the one backed by the most authoritative data source.`,

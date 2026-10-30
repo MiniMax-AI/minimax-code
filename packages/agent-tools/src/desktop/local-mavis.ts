@@ -411,18 +411,6 @@ export class LocalMavisTool implements ToolImpl<
       });
       return mavisRefusal(text);
     }
-    if (normalizeCommand(input.command).startsWith('cron ')) {
-      const text = JSON.stringify({
-        ok: false,
-        error: {
-          code: 'CRON_TOOL_MOVED',
-          message: isCronCallableInRunCode(ctx)
-            ? 'Use self_reminder for task follow-up. Search for cron_create, cron_read, cron_update or cron_delete with tool_search, then call the chosen tool inside run_code, e.g. await tools.cron_read(args).'
-            : 'Use self_reminder for task follow-up. Search for cron_create, cron_read, cron_update or cron_delete with tool_search, then call mcp_invoke.',
-        },
-      });
-      return mavisRefusal(text);
-    }
     const command = normalizeCommand(input.command);
     if (!(LOCAL_MAVIS_COMMANDS as readonly string[]).includes(command)) {
       const text = JSON.stringify({
@@ -1027,10 +1015,6 @@ function currentTurnModel(ctx: LocalRuntimeToolContext): string | undefined {
  * a failed call. The PTC executor answers only for this Turn's run_code
  * children, so ordinary Turns keep their original wording.
  */
-export function isCronCallableInRunCode(ctx: LocalRuntimeToolContext): boolean {
-  return isCallableInRunCode(ctx, 'cron_read');
-}
-
 /** Same check for one on-demand tool, such as session_create. */
 function isCallableInRunCode(ctx: LocalRuntimeToolContext, toolName: string): boolean {
   return ctx.ptcExecutor?.getToolExecutionMode(toolName) !== undefined;
