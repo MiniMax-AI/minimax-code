@@ -1,4 +1,4 @@
-import { RespDataType, ToolCallStatus } from '@mavis/agent-core/protocol/agent-message';
+import { RespDataType, Role, ToolCallStatus } from '@mavis/agent-core/protocol/agent-message';
 import { RuntimeEventStatus, RuntimeEventType, type IRuntimeEvent } from '@mavis/protocol';
 
 import type { LocalRuntimeTurnRuntimeOutcome } from '../execution/executor.js';
@@ -50,12 +50,57 @@ interface MutableOutcome {
   errorProviderId?: string;
   messageId?: string;
   waitingForUser: boolean;
+  /** Assistant msg_id that carried the latest waiting-for-user tool result. */
+  waitingForUserMessageId?: string;
+}
+
+/**
+ * waitingForUser reflects only the tail of the turn: it is set by a finished
+ * waiting ask_user result and cleared once a different assistant message
+ * produces further output (text, thinking, or tool calls). Repeated frames of
+ * the waiting message itself, user-role frames, and frames without msg_id
+ * never clear it.
+ */
+function updateWaitingForUser(
+  state: MutableOutcome,
+  event: IRuntimeEvent,
+  eventMessageId: string | undefined,
+): void {
+  const parsed = parseStreamResponse(event);
+  if (hasWaitingForUserToolResult(parsed)) {
+    state.waitingForUser = true;
+    state.waitingForUserMessageId = eventMessageId ?? state.waitingForUserMessageId;
+    return;
+  }
+  if (!state.waitingForUser || eventMessageId === undefined) return;
+  if (eventMessageId === state.waitingForUserMessageId) return;
+  if (!hasAssistantOutput(parsed)) return;
+  state.waitingForUser = false;
+  state.waitingForUserMessageId = undefined;
+}
+
+function readParsedAgentMessage(parsed: ReturnType<typeof parseStreamResponse>) {
+  if (parsed?.type === RespDataType.AgentMessage) return parsed.agent_message;
+  if (parsed?.type === RespDataType.AgentMessageChunk) return parsed.agent_message_chunk;
+  return undefined;
+}
+
+function hasAssistantOutput(parsed: ReturnType<typeof parseStreamResponse>): boolean {
+  const message = readParsedAgentMessage(parsed);
+  if (!message || message.role === Role.User) return false;
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return true;
+  return isNonEmptyString(message.msg_content) || isNonEmptyString(message.thinking_content);
+}
+
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function updateOutcome(state: MutableOutcome, event: IRuntimeEvent): void {
   if (event.type === RuntimeEventType.STREAM_RESP) {
-    state.messageId = readAssistantMessageId(event) ?? state.messageId;
-    state.waitingForUser = hasWaitingForUserToolResult(event) || state.waitingForUser;
+    const eventMessageId = readAssistantMessageId(event);
+    state.messageId = eventMessageId ?? state.messageId;
+    updateWaitingForUser(state, event, eventMessageId);
     return;
   }
   if (event.type !== RuntimeEventType.SESSION_STATUS) return;
@@ -218,8 +263,8 @@ function readAssistantMessageId(event: IRuntimeEvent): string | undefined {
   return undefined;
 }
 
-function hasWaitingForUserToolResult(event: IRuntimeEvent): boolean {
-  const calls = readToolCalls(parseStreamResponse(event));
+function hasWaitingForUserToolResult(parsed: ReturnType<typeof parseStreamResponse>): boolean {
+  const calls = readToolCalls(parsed);
   if (!Array.isArray(calls)) return false;
   return calls.some(isWaitingForUserCall);
 }
@@ -263,17 +308,19 @@ function parseToolCallResult(value: unknown):
   }
 }
 
+interface StreamMessageFields {
+  readonly msg_id?: unknown;
+  readonly role?: unknown;
+  readonly msg_content?: unknown;
+  readonly thinking_content?: unknown;
+  readonly tool_calls?: unknown;
+}
+
 function parseStreamResponse(event: IRuntimeEvent):
   | {
       readonly type?: unknown;
-      readonly agent_message?: {
-        readonly msg_id?: unknown;
-        readonly tool_calls?: unknown;
-      };
-      readonly agent_message_chunk?: {
-        readonly msg_id?: unknown;
-        readonly tool_calls?: unknown;
-      };
+      readonly agent_message?: StreamMessageFields;
+      readonly agent_message_chunk?: StreamMessageFields;
     }
   | undefined {
   const raw = event.payload?.stream_resp;

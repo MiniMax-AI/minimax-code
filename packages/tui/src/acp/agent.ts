@@ -40,6 +40,12 @@ import {
 import { runTuiAcpInteractions, type TuiAcpRuntimeProjection } from './interactions.js';
 import { modelSupportsVariant } from './model-selection.js';
 import { TuiAcpPromptContinuation } from './prompt-continuation.js';
+import {
+  parseTuiAcpPrompt,
+  readTuiAcpHistoryImages,
+  writeTuiAcpPromptAttachments,
+  type TuiAcpPromptAttachments,
+} from './prompt-content.js';
 import { TuiAcpUpdateProjector } from './updates.js';
 
 const AUTH_METHOD_ID = 'minimax-code-login';
@@ -445,7 +451,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           sse: true,
         },
         promptCapabilities: {
-          image: false,
+          image: true,
           audio: false,
           embeddedContext: false,
         },
@@ -1069,6 +1075,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     if (promptCancelLatches.delete(context.params.sessionId)) {
       return { stopReason: 'cancelled' };
     }
+    const prompt = parseTuiAcpPrompt(context.params.prompt);
     const admissionCancelEpoch = promptCancelEpochs.get(context.params.sessionId) ?? 0;
     const admission = await runSessionLifecycle(context.params.sessionId, async (signal) => {
       const isCancelled = () =>
@@ -1161,13 +1168,19 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       }
     };
 
+    let promptAttachments: TuiAcpPromptAttachments | undefined;
     try {
+      if (promptController.signal.aborted) return { stopReason: 'cancelled' };
+      promptAttachments = await writeTuiAcpPromptAttachments(prompt);
       if (promptController.signal.aborted) return { stopReason: 'cancelled' };
       const result = await executeTuiInteractiveTurn({
         request: {
           turnId,
           session: Promise.resolve(active.session),
-          content: promptToText(context.params.prompt),
+          content: prompt.content,
+          ...(promptAttachments.attachments.length > 0
+            ? { attachments: promptAttachments.attachments }
+            : {}),
           workspace: active.session.workspaceDir ?? process.cwd(),
           version: options.version,
           ...(submittedModeIntent ? { clientIntent: submittedModeIntent } : {}),
@@ -1219,6 +1232,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       if (modeIntentAccepted && active.pendingModeIntent === submittedModeIntent) {
         active.pendingModeIntent = undefined;
       }
+      await promptAttachments?.dispose().catch(() => undefined);
       try {
         const refreshed = await options.runtime.getSession(active.session.sessionId);
         const isCurrent = () => sessions.get(context.params.sessionId) === active;
@@ -1792,16 +1806,17 @@ async function replayHistory(
   for (const message of messages) {
     const updates =
       message.role === 'user'
-        ? buildTuiMessageParts(message).flatMap((part): acp.SessionUpdate[] =>
-            part.type === 'text'
-              ? [
-                  {
-                    sessionUpdate: 'user_message_chunk',
-                    ...(message.id ? { messageId: message.id } : {}),
-                    content: { type: 'text', text: part.content },
-                  },
-                ]
-              : [],
+        ? [
+            ...buildTuiMessageParts(message).flatMap((part): acp.ContentBlock[] =>
+              part.type === 'text' ? [{ type: 'text', text: part.content }] : [],
+            ),
+            ...(await readTuiAcpHistoryImages(message.attachments)),
+          ].map(
+            (content): acp.SessionUpdate => ({
+              sessionUpdate: 'user_message_chunk',
+              ...(message.id ? { messageId: message.id } : {}),
+              content,
+            }),
           )
         : projector.project({ type: 'message', message });
     for (const update of updates) {
@@ -2116,19 +2131,4 @@ async function assertAuthenticated(runtime: TuiAcpRuntime): Promise<void> {
     }
     throw error;
   }
-}
-
-function promptToText(blocks: readonly acp.ContentBlock[]): string {
-  return blocks
-    .map((block) => {
-      if (block.type === 'text') return block.text;
-      if (block.type === 'resource_link') {
-        return `Referenced resource: ${block.title ?? block.name} (${block.uri})`;
-      }
-      throw acp.RequestError.invalidParams(
-        undefined,
-        `Prompt content type ${block.type} is not supported in ACP P0.`,
-      );
-    })
-    .join('\n\n');
 }
