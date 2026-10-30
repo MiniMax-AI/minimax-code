@@ -70,3 +70,38 @@ describe('literal edit replacement text', () => {
     });
   });
 });
+
+describe('buildReplaceAllEdit in pi edit space', () => {
+  let directory: string;
+  let file: string;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'replace-all-edit-'));
+    file = join(directory, 'example.txt');
+  });
+
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('counts and replaces with the BOM stripped and line endings normalized to LF', async () => {
+    // pi's edit matches oldText against stripBom + normalizeToLF content and
+    // restores the BOM and CRLF itself on write, so the full-file edit must
+    // live in that same space; otherwise a BOM file never matches and a CRLF
+    // file cannot match a multi-line old_string.
+    await writeFile(file, '\uFEFFa\r\nb\r\na\r\nb\r\n', 'utf-8');
+
+    const result = await buildReplaceAllEdit(file, 'a\nb', 'X\r\nY');
+
+    expect(result.replacedCount).toBe(2);
+    expect(result.edits).toEqual([{ oldText: 'a\nb\na\nb\n', newText: 'X\nY\nX\nY\n' }]);
+  });
+
+  it('still fails with OLD_STRING_NOT_FOUND on a BOM + CRLF file without occurrences', async () => {
+    await writeFile(file, '\uFEFFa\r\nb\r\n', 'utf-8');
+
+    await expect(buildReplaceAllEdit(file, 'absent', 'x')).rejects.toMatchObject({
+      code: 'OLD_STRING_NOT_FOUND',
+    });
+  });
+});

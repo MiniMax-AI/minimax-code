@@ -19,6 +19,7 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
+export { normalizeToLF, stripBom } from "./edit-diff.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,

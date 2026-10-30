@@ -59,7 +59,11 @@ import {
   type LocalBashEnvPolicySource,
 } from './permission-execution.js';
 import { inferReadVideoMimeType, readVideoAsToolResult } from '../shared/read-video.js';
-import { buildReplaceAllEdit, ReplaceAllError } from '../shared/replace-all-edit.js';
+import {
+  buildReplaceAllEdit,
+  ReplaceAllError,
+  withReplaceAllCount,
+} from '../shared/replace-all-edit.js';
 import {
   checkBlockedDeviceRead,
   checkNonRegularFileRead,
@@ -301,7 +305,11 @@ export class LocalEditTool implements ToolImpl<
     const piInput = await buildPiEditInput(input, this.workspaceRoot);
     const capture = createCapturingEditOperations();
     const tool = createEditTool(this.workspaceRoot, { operations: capture.operations });
-    const res = await executeEditWithLineNumberRetry(tool, piInput, signal);
+    const piResult = await executeEditWithLineNumberRetry(tool, piInput, signal);
+    const res =
+      piInput.replacedCount === undefined
+        ? piResult
+        : withReplaceAllCount(piResult, piInput.path, piInput.replacedCount);
     const result = toToolResult(LocalEditToolDef.name, res);
     const editCapture = capture.takeCapture(
       resolveLocalCandidatePath(input.file_path, this.workspaceRoot),
@@ -337,6 +345,7 @@ async function buildPiEditInput(
 ): Promise<{
   path: string;
   edits: Array<{ oldText: string; newText: string }>;
+  replacedCount?: number;
 }> {
   if (input.replace_all === true) {
     // replace_all reads the file itself (outside pi), so it MUST resolve the
@@ -352,7 +361,11 @@ async function buildPiEditInput(
         input.old_string,
         input.new_string,
       );
-      return { path: replacement.path, edits: replacement.edits };
+      return {
+        path: replacement.path,
+        edits: replacement.edits,
+        replacedCount: replacement.replacedCount,
+      };
     } catch (err) {
       if (err instanceof ReplaceAllError) {
         throw new Error(err.message);
