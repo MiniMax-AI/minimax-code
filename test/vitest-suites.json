@@ -261,7 +261,8 @@
       "packages/oauth-core/test/unit/refresh-owner.test.ts",
       "packages/oauth-core/test/unit/watch.test.ts",
       "packages/agent-modules/permission/test/unit/permission/tools/fs-permission-runtime-read.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/session-readable-grants.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/session-readable-grants.test.ts",
+      "packages/tui/test/unit/tui-stdin-buffer-blocked-loop.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

@@ -126,10 +126,10 @@
     },
     {
       "path": "stdin-buffer.ts",
-      "currentSha256": "1aca0d7fb7dacaf16a28ede79f52fcf7bea651d8a263777ee327fdaeb2dcaa28",
-      "changeIds": ["L005", "L036"],
-      "reason": "Keep strict TypeScript guards and preserve unframed multiline text chunks before key splitting.",
-      "behaviorImpact": "Plain-text chunks with internal line endings use the existing paste path; standalone Enter and control sequences retain key semantics."
+      "currentSha256": "5af2f323a3ff40e26255aa841815c987032ea2a7f27835ed5fff174e298c08c6",
+      "changeIds": ["L005", "L036", "L050"],
+      "reason": "Keep strict TypeScript guards and preserve unframed multiline text chunks before key splitting. Arm the final 1ms of the sequence timeout from inside the timer so stdin already queued while the event loop was blocked is read before the timeout fires.",
+      "behaviorImpact": "Plain-text chunks with internal line endings use the existing paste path; standalone Enter and control sequences retain key semantics. While a render blocks the event loop, a split SGR mouse report no longer reaches the composer as text and no longer reads as Escape; the total timeout and genuinely late input are unchanged."
     },
     {
       "path": "terminal-colors.ts",

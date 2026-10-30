@@ -401,13 +401,19 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 		if (this.buffer.length > 0) {
 			const timeoutMs = this.buffer === ESC ? this.escapeTimeoutMs : this.timeoutMs;
+			// Timers run before stdin reads within one event-loop turn. If a render
+			// blocks past the deadline, the rest of this sequence may already be
+			// queued. Arm the final 1ms from inside the timer so Node runs it in a
+			// later turn, after queued stdin has reached process(), which cancels it.
 			this.timeout = setTimeout(() => {
-				const flushed = this.flush();
+				this.timeout = setTimeout(() => {
+					const flushed = this.flush();
 
-				for (const sequence of flushed) {
-					this.emitDataSequence(sequence);
-				}
-			}, timeoutMs);
+					for (const sequence of flushed) {
+						this.emitDataSequence(sequence);
+					}
+				}, 1);
+			}, Math.max(0, timeoutMs - 1));
 		}
 	}
 
