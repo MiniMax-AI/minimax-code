@@ -32,6 +32,9 @@ import type {
 
 export type TuiSkill = NonNullable<TuiSkillList['skills']>[number];
 
+const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1_000;
+const WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
+
 export interface TuiStatusPresentationOptions {
   readonly version?: string;
   readonly accountLoading?: boolean;
@@ -63,7 +66,8 @@ export function createTuiAccountStatusInspection(
   const sessionModel = options.model;
   const status = account?.status ?? 'unknown';
   const needsLogin = status === 'needs-login' || account?.managedTokenPresent === false;
-  const identity = account?.identity?.email?.trim() || account?.identity?.name?.trim();
+  // Match Desktop: show the editable profile name, falling back to the email.
+  const identity = account?.identity?.name?.trim() || account?.identity?.email?.trim();
   const accountLabel = options.accountLoading
     ? 'Loading…'
     : needsLogin
@@ -265,12 +269,12 @@ function createTokenPlanQuotaRows(
   return [
     {
       label: '5-hour',
-      value: formatQuotaWindowDetail(quota.fiveHour),
+      value: formatQuotaWindowDetail(quota.fiveHour, FIVE_HOUR_WINDOW_MS),
       ...(quota.fiveHour.unlimited ? {} : remainingPercentRatio(quota.fiveHour.remainingPercent)),
     },
     {
       label: 'Weekly',
-      value: formatQuotaWindowDetail(quota.weekly),
+      value: formatQuotaWindowDetail(quota.weekly, WEEKLY_WINDOW_MS),
       ...(quota.weekly.unlimited ? {} : remainingPercentRatio(quota.weekly.remainingPercent)),
     },
     ...(quota.video
@@ -310,13 +314,14 @@ function remainingCountRatio(
 
 function formatQuotaWindowDetail(
   window: NonNullable<TuiAccountStatus['tokenPlanQuota']>['fiveHour'],
+  windowMs: number,
 ): string {
   if (window.unlimited) return 'Unlimited';
   const remaining =
     typeof window.remainingPercent === 'number'
       ? `${formatNumber(window.remainingPercent)}% left`
       : '—';
-  return appendResetTime(remaining, window.resetAtMs);
+  return appendResetTime(remaining, window.resetAtMs, windowMs);
 }
 
 function formatVideoQuotaDetail(
@@ -333,17 +338,22 @@ function formatVideoQuotaDetail(
   return appendResetTime(remaining, video.resetAtMs);
 }
 
-function appendResetTime(value: string, resetAtMs: number | undefined): string {
+function appendResetTime(value: string, resetAtMs: number | undefined, windowMs?: number): string {
   if (resetAtMs === undefined || !Number.isFinite(resetAtMs)) return value;
   const remainingMs = resetAtMs - Date.now();
   if (remainingMs <= 0) return `${value} · reset pending`;
-  const minutes = Math.ceil(remainingMs / 60_000);
+  // A quota window can never reset later than its own length; the server may
+  // round its end time up or run ahead of the local clock, so cap the countdown.
+  const boundedMs = windowMs === undefined ? remainingMs : Math.min(remainingMs, windowMs);
+  const minutes = Math.floor(boundedMs / 60_000);
   const duration =
-    minutes < 60
-      ? `${minutes}m`
-      : minutes < 24 * 60
-        ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-        : `${Math.floor(minutes / (24 * 60))}d ${Math.floor((minutes % (24 * 60)) / 60)}h`;
+    minutes < 1
+      ? '<1m'
+      : minutes < 60
+        ? `${minutes}m`
+        : minutes < 24 * 60
+          ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+          : `${Math.floor(minutes / (24 * 60))}d ${Math.floor((minutes % (24 * 60)) / 60)}h`;
   return `${value} · resets in ${duration}`;
 }
 

@@ -92,6 +92,12 @@ export interface TuiRuntimeAdapterOptions {
   workspaceDir?: string;
   synchronizeAuth?: () => Promise<void>;
   accountIdentityGetter?: () => TuiAccountStatus["identity"];
+  /**
+   * Re-reads the account profile from the server. Used only by explicit,
+   * force-refreshed inspections so a name changed elsewhere shows up without a
+   * new login; failures fall back to `accountIdentityGetter`.
+   */
+  accountIdentityRefresher?: () => Promise<TuiAccountStatus["identity"]>;
   observability?: TuiObservability;
   contextMode?: McodeContextMode;
   /** `--ptc` forced PTC on for this process. */
@@ -139,6 +145,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     | undefined;
   private readonly synchronizeAuth: TuiRuntimeAdapterOptions["synchronizeAuth"];
   private readonly accountIdentityGetter: TuiRuntimeAdapterOptions["accountIdentityGetter"];
+  private readonly accountIdentityRefresher: TuiRuntimeAdapterOptions["accountIdentityRefresher"];
   private readonly feedback: TuiRuntimeAdapterOptions["feedback"];
   private readonly dailyCheckin: TuiRuntimeAdapterOptions["dailyCheckin"];
   private readonly contextMode: McodeContextMode;
@@ -152,6 +159,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     this.tokenPlanAccountStatusGetter = options.tokenPlanAccountStatusGetter;
     this.synchronizeAuth = options.synchronizeAuth;
     this.accountIdentityGetter = options.accountIdentityGetter;
+    this.accountIdentityRefresher = options.accountIdentityRefresher;
     this.feedback = options.feedback;
     this.dailyCheckin = options.dailyCheckin;
     this.contextMode = options.contextMode ?? "standard";
@@ -383,16 +391,18 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       await this.synchronizeAuth();
       account = await this.productAccess.getAccountStatus(sessionId, options);
     }
-    const identity = account.managedTokenPresent
-      ? this.accountIdentityGetter?.()
-      : undefined;
-    if (identity)
-      account = {
-        ...account,
-        identity: { email: identity.email, name: identity.name },
-      };
     const membershipRequested = options?.includeMembership !== false;
     const explicitUsageInspection = options?.includeMembership === true;
+    // Starts before the Token Plan request so an explicit refresh adds no serial latency.
+    const identityRequest = account.managedTokenPresent
+      ? this.resolveAccountIdentity(explicitUsageInspection && options?.forceRefresh === true)
+      : Promise.resolve(undefined);
+    const withIdentity = async (): Promise<TuiAccountStatus> => {
+      const identity = await identityRequest;
+      return identity
+        ? { ...account, identity: { email: identity.email, name: identity.name } }
+        : account;
+    };
     if (
       !membershipRequested ||
       (!explicitUsageInspection &&
@@ -400,13 +410,16 @@ export class TuiRuntimeAdapter implements TuiRuntime {
           account.managedTokenPresent !== true)) ||
       !this.tokenPlanAccountStatusGetter
     ) {
-      return account;
+      return withIdentity();
     }
-    const tokenPlan = await (
-      options?.forceRefresh
+    const [identifiedAccount, tokenPlan] = await Promise.all([
+      withIdentity(),
+      (options?.forceRefresh
         ? this.tokenPlanAccountStatusGetter({ forceRefresh: true })
         : this.tokenPlanAccountStatusGetter()
-    ).catch(() => undefined);
+      ).catch(() => undefined),
+    ]);
+    account = identifiedAccount;
     if (!tokenPlan) return account;
     return {
       ...account,
@@ -418,6 +431,17 @@ export class TuiRuntimeAdapter implements TuiRuntime {
         ? { tokenPlanSummary: tokenPlan.summary }
         : {}),
     };
+  }
+  private async resolveAccountIdentity(
+    refresh: boolean,
+  ): Promise<TuiAccountStatus["identity"]> {
+    if (refresh && this.accountIdentityRefresher) {
+      const refreshed = await this.accountIdentityRefresher().catch(
+        () => undefined,
+      );
+      if (refreshed) return refreshed;
+    }
+    return this.accountIdentityGetter?.();
   }
   getRuntimeDiagnostics(): Promise<TuiRuntimeDiagnostics> {
     return this.productAccess.getRuntimeDiagnostics();

@@ -6,6 +6,7 @@ import type { CliService } from "@mavis/local-runtime-v2/cli-service";
 import { describe, expect, it, vi } from "vitest";
 
 import { TuiRuntimeAdapter } from "../../src/runtime/adapter.js";
+import { projectAccountDisplayIdentity } from "../../src/account/display-identity.js";
 import { buildTuiSkillCommands } from "../../src/tui/controller/run/active-run-flow.js";
 
 describe("TuiRuntimeAdapter product access", () => {
@@ -390,6 +391,64 @@ describe("TuiRuntimeAdapter product access", () => {
       (await adapter.getAccountStatus(undefined, { includeMembership: false }))
         .identity,
     ).toBeUndefined();
+  });
+
+  it("re-reads the account name only for explicit refreshed inspections", async () => {
+    const accountIdentityRefresher = vi.fn(async () => ({ name: "Renamed" }));
+    const adapter = new TuiRuntimeAdapter(cliServiceFixture(), {
+      tokenPlanAccountStatusGetter: async () => ({
+        quotaState: "available" as const,
+      }),
+      accountIdentityGetter: () => ({ name: "Registered" }),
+      accountIdentityRefresher,
+    });
+
+    expect((await adapter.getAccountStatus()).identity).toEqual({
+      name: "Registered",
+    });
+    expect(
+      (await adapter.getAccountStatus(undefined, { forceRefresh: true }))
+        .identity,
+    ).toEqual({ name: "Registered" });
+    expect(accountIdentityRefresher).not.toHaveBeenCalled();
+
+    const inspected = await adapter.getAccountStatus(undefined, {
+      includeMembership: true,
+      forceRefresh: true,
+    });
+    expect(inspected).toMatchObject({
+      identity: { name: "Renamed" },
+      tokenPlanQuotaState: "available",
+    });
+    expect(accountIdentityRefresher).toHaveBeenCalledOnce();
+
+    accountIdentityRefresher.mockRejectedValueOnce(
+      new TypeError("fetch failed"),
+    );
+    expect(
+      (
+        await adapter.getAccountStatus(undefined, {
+          includeMembership: true,
+          forceRefresh: true,
+        })
+      ).identity,
+    ).toEqual({ name: "Registered" });
+  });
+
+  it("prefers the editable profile name over the registration name", () => {
+    expect(
+      projectAccountDisplayIdentity({
+        userEmail: " dev@example.com ",
+        userName: "Registered",
+        subUserName: "令酱",
+      }),
+    ).toEqual({ email: "dev@example.com", name: "令酱" });
+    expect(
+      projectAccountDisplayIdentity({
+        userName: "Registered",
+        subUserName: "  ",
+      }),
+    ).toEqual({ name: "Registered" });
   });
 
   it("keeps BYOK usable while account-only actions surface unavailable OAuth", async () => {

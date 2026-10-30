@@ -40,6 +40,7 @@ import {
   TuiAuthenticationError,
   TuiMatrixAccountClient,
 } from '../account/matrix-account-client.js';
+import { projectAccountDisplayIdentity } from '../account/display-identity.js';
 import {
   invalidateCliAuthContext,
   importSharedCliAuthContext,
@@ -540,9 +541,13 @@ export async function createTuiRuntime(
           accountClient.getTokenPlanAccountStatus(undefined, accountOptions),
         accountIdentityGetter: () => {
           const identity = authContextGetter();
-          return identity?.accessToken
-            ? { email: identity.userEmail, name: identity.userName ?? identity.subUserName }
-            : undefined;
+          return identity?.accessToken ? projectAccountDisplayIdentity(identity) : undefined;
+        },
+        accountIdentityRefresher: async () => {
+          const auth = authContextGetter();
+          if (!auth?.accessToken) return undefined;
+          const identity = await accountClient.getAuthContextForAuth(auth);
+          return identity ? projectAccountDisplayIdentity(identity) : undefined;
         },
         dailyCheckin: new TuiDailyCheckinApplication(
           new TuiDailyCheckinHttpGateway({
