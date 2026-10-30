@@ -2,7 +2,11 @@ import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tool
 import { MEMORY_TOOL_OUTPUT_MAX_BYTES } from '@mavis/shared/memory-limits';
 
 import { LocalMemoryToolDef, type LocalMemoryToolInput } from './builtin-defs.js';
-import { applyDesktopTextLimit, limitDesktopHeadTailLines } from './output-limit.js';
+import {
+  applyDesktopTextLimit,
+  isPtcChildCall,
+  limitDesktopHeadTailLines,
+} from './output-limit.js';
 import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 import type { LocalMemoryAdapter, LocalRuntimeToolContext } from './types.js';
 
@@ -28,6 +32,14 @@ export class LocalMemoryTool implements ToolImpl<
       // A failed operation is an error result, not text that reads like memory.
       ...(result.details?.ok === false ? { isError: true } : {}),
     };
+    if (isPtcChildCall(ctx)) {
+      // A run_code child gets the whole text and data (see isPtcChildCall).
+      const uncappedOutput = Buffer.byteLength(result.text, 'utf8') > MEMORY_TOOL_OUTPUT_MAX_BYTES;
+      return withDesktopCompletenessReport(LocalMemoryToolDef.name, toolResult, {
+        ...(result.data ? { data: result.data } : {}),
+        ...(uncappedOutput ? { uncappedOutput } : {}),
+      });
+    }
     const limited = applyDesktopTextLimit(
       toolResult,
       limitDesktopHeadTailLines(result.text, {

@@ -434,6 +434,12 @@ export interface DesktopCompletenessReportExtras {
   readonly data?: Readonly<Record<string, unknown>>;
   /** Cursor of the next page when the output was complete but the source has more. */
   readonly more?: { readonly nextOffset: number; readonly offsetUnit: 'line' | 'match' | 'file' };
+  /**
+   * A PTC child skipped a cap that would have cut this output (see
+   * isPtcChildCall in output-limit.ts). Reported as
+   * `programmatic.uncappedOutput` for the run_code log only.
+   */
+  readonly uncappedOutput?: boolean;
 }
 
 /**
@@ -453,9 +459,10 @@ export function withDesktopCompletenessReport(
   const states = verdict.state === 'truncated' || verdict.state === 'complete';
   const prior = result.programmatic?.completeness;
   const more = verdict.state === 'complete' && extras.more ? { hasMore: true, ...extras.more } : {};
-  if (!states && !extras.data) return result;
+  if (!states && !extras.data && !extras.uncappedOutput) return result;
   return withProgrammaticResult(result, {
     ...(extras.data ? { data: extras.data } : {}),
+    ...(extras.uncappedOutput ? { uncappedOutput: true } : {}),
     ...(states
       ? { completeness: { ...prior, ...more, truncated: verdict.state === 'truncated' } }
       : {}),

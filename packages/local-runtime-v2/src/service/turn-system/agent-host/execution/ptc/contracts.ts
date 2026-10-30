@@ -24,8 +24,20 @@ export const PTC_LIMITS = {
   maxToolCalls: 100,
   // Parallel tools only; a sequential (writing) tool still runs alone.
   maxConcurrentToolCalls: 16,
-  maxBridgeMessageBytes: 8 * 1024 * 1024,
-  maxBridgeResultBytes: 16 * 1024 * 1024,
+  // One serialized message: a child result, a call's arguments, the return
+  // value the host parses. Child results are no longer cut to the model caps
+  // (agent-tools isPtcChildCall), so 8 MiB became 16 MiB: a result carries its
+  // content twice (output and data), so this is about 8 MiB of real content.
+  // Measured 2026-10-28: a 64 MiB guest heap holds 16 MiB mixed-language
+  // results passed in by the host. A larger child result fails only that call
+  // (PTC_RESULT_TOO_LARGE); the program continues.
+  maxBridgeMessageBytes: 16 * 1024 * 1024,
+  // Results sent to the Worker it has not taken yet; raised with the message
+  // limit so one 16 MiB result does not use up the whole allowance. A result
+  // that would bring the total over it fails only that call
+  // (PTC_RESULT_TOO_LARGE, ptcUnconsumedResultsTooLargeFailure); the program
+  // continues and the failed result is not counted.
+  maxBridgeResultBytes: 32 * 1024 * 1024,
   maxOuterResultBytes: 64 * 1024,
   // console.* output shown in the outer result; the rest is cut with a note.
   maxConsoleBytes: 16 * 1024,
@@ -33,6 +45,55 @@ export const PTC_LIMITS = {
 
 /** Host-enumerated guest error code for a call refused by the per-program call budget. */
 const PTC_TOOL_CALL_LIMIT_EXCEEDED = 'PTC_TOOL_CALL_LIMIT_EXCEEDED';
+
+/**
+ * Host-enumerated guest error code for a child whose result is larger than
+ * `maxBridgeMessageBytes`, or would bring the results the Worker has not
+ * taken yet over `maxBridgeResultBytes`. The tool ran; only its result is
+ * not delivered.
+ */
+export const PTC_RESULT_TOO_LARGE = 'PTC_RESULT_TOO_LARGE';
+
+/**
+ * Guest result for a child whose serialized result exceeds the per-message
+ * bridge limit. Only this call fails, so the program can narrow the
+ * arguments and call again. Same shape as ptcToolCallLimitRefusal.
+ */
+export function ptcResultTooLargeFailure(toolCallId: string, bytes: number, limit: number) {
+  return {
+    status: 'failed',
+    isError: true,
+    data: {},
+    truncation: { truncated: 'unknown' },
+    error: {
+      code: PTC_RESULT_TOO_LARGE,
+      message: `PTC child result is ${bytes} bytes, over the ${limit}-byte per-call limit, so it was not delivered; the tool itself ran. Narrow the arguments and retry.`,
+      toolCallId,
+    },
+  } as const;
+}
+
+/**
+ * Guest result for a child whose result fits one message but would bring the
+ * results the Worker has not taken yet over `maxBridgeResultBytes` (parallel
+ * large calls while the guest is busy). Only this call fails; the program can
+ * run fewer calls at once and retry. Same shape as ptcResultTooLargeFailure.
+ */
+export function ptcUnconsumedResultsTooLargeFailure(
+  toolCallId: string,
+  bytes: number,
+  pendingBytes: number,
+  limit: number,
+) {
+  return {
+    ...ptcResultTooLargeFailure(toolCallId, bytes, limit),
+    error: {
+      code: PTC_RESULT_TOO_LARGE,
+      message: `PTC child result is ${bytes} bytes; with ${pendingBytes} bytes of earlier results the program has not taken yet, the total would exceed the ${limit}-byte limit, so it was not delivered; the tool itself ran. Run fewer large calls in parallel or read in smaller batches, then retry.`,
+      toolCallId,
+    },
+  } as const;
+}
 
 /**
  * Guest result for a call refused by the call budget. The call never reached a
@@ -182,6 +243,10 @@ export type PtcExecutionResult = (
 ) & {
   /** Calls refused by the call budget without running; kept in memory only. */
   readonly refusedToolCalls?: number;
+  /** Largest serialized child result in bytes, delivered or not; kept in memory only. */
+  readonly maxChildResultBytes?: number;
+  /** Children whose result failed with PTC_RESULT_TOO_LARGE; kept in memory only. */
+  readonly oversizedChildren?: number;
   /** console.* output, also after a failure; kept in memory only, never in details. */
   readonly console?: PtcConsoleOutput;
 };
@@ -303,10 +368,12 @@ export function serializePtcValue(value: unknown, maximumBytes: number): string 
   const json = JSON.stringify(value);
   if (json === undefined)
     throw new PtcSerializationError('invalid_tool_result', 'Value is not JSON-serializable.');
-  if (utf8ByteLength(json) > maximumBytes) {
+  const bytes = utf8ByteLength(json);
+  if (bytes > maximumBytes) {
     throw new PtcSerializationError(
       'bridge_limit_exceeded',
       `Serialized value exceeds the ${maximumBytes}-byte PTC transport limit.`,
+      bytes,
     );
   }
   return json;
@@ -316,6 +383,8 @@ export class PtcSerializationError extends Error {
   constructor(
     readonly code: 'invalid_tool_result' | 'bridge_limit_exceeded',
     message: string,
+    /** UTF-8 size of the serialized value; set for bridge_limit_exceeded. */
+    readonly bytes?: number,
   ) {
     super(message);
     this.name = 'PtcSerializationError';

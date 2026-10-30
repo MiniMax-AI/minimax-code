@@ -180,7 +180,8 @@ export interface PostprocessPiReadTextResult {
  */
 export function postprocessPiReadText(
   outputText: string,
-  opts: { offset?: number } = {},
+  /** maxLineChars: per-line cap, READ_MAX_LINE_CHARS unless a caller (a PTC child) lifts it. */
+  opts: { offset?: number; maxLineChars?: number } = {},
 ): PostprocessPiReadTextResult {
   if (outputText === '') {
     return { text: READ_EMPTY_FILE_REMINDER, truncatedLines: [] };
@@ -193,7 +194,7 @@ export function postprocessPiReadText(
   const startLine = opts.offset !== undefined && opts.offset > 0 ? opts.offset : 1;
   const { text: truncatedBody, truncatedLines } = truncateLongLines(
     body,
-    READ_MAX_LINE_CHARS,
+    opts.maxLineChars ?? READ_MAX_LINE_CHARS,
     startLine,
   );
   return {

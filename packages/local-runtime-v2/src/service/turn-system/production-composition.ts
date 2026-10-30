@@ -399,7 +399,10 @@ export async function createLocalAgentHost<
     options.eventObserver,
   );
   const contextUsageAnchor = new ContextUsageAnchorState();
-  const toolOutputArtifacts = createToolOutputArtifactRepository(options);
+  const toolOutputArtifacts = new ToolOutputArtifactRepository({
+    resolveSessionReportsDirectory: (id) => options.sessions.artifacts.ensureReportsDirectory(id),
+    inspectSessionReportsDirectory: (id) => options.sessions.artifacts.inspectReportsDirectory(id),
+  });
   const getToolResultCompactionConfig = createToolResultCompactionConfigGetter(options);
   const getRequestMediaConfig = createRequestMediaConfigGetter(options);
   const getImageEncoding = () => requestImageEncoding(getRequestMediaConfig().image);
@@ -463,6 +466,8 @@ export async function createLocalAgentHost<
       },
       config: options.product.preparation.configBuilder.config().mcpToolSearch,
       env: process.env,
+      // run_code saves a return value over 64 KiB where oversized results are externalized.
+      writePtcReturnArtifact: (input) => toolOutputArtifacts.write(input),
     },
     inputPreparation: { ...options.product.inputPreparation, getImageEncoding },
     permission: createHostPermissionPolicy(options, toolOutputArtifacts),

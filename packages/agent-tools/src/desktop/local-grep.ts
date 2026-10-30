@@ -44,6 +44,7 @@ import {
   applyDesktopTextLimit,
   createDesktopOutputContinuation,
   DESKTOP_GREP_CONTENT_MAX_BYTES,
+  isPtcChildCall,
   limitDesktopPrefixLines,
   withDesktopOutputContinuation,
 } from './output-limit.js';
@@ -146,7 +147,7 @@ export class LocalGrepTool implements ToolImpl<
   ) {}
 
   async execute(
-    _ctx: LocalRuntimeToolContext,
+    ctx: LocalRuntimeToolContext,
     input: LocalGrepToolInput,
     signal?: AbortSignal,
   ): Promise<ToolResult> {
@@ -212,7 +213,12 @@ export class LocalGrepTool implements ToolImpl<
     } else if (mode === 'count') {
       parsed = parseCountOutput(result.stdout, parseOpts);
     } else {
-      parsed = parseGrepOutput(result.stdout, { ...parseOpts, partitionContext: true });
+      parsed = parseGrepOutput(result.stdout, {
+        ...parseOpts,
+        partitionContext: true,
+        // A run_code child keeps whole lines and the whole page (see isPtcChildCall).
+        ...(isPtcChildCall(ctx) ? { uncapped: true } : {}),
+      });
     }
     const { text, details } = parsed;
     if (result.stdoutTruncated) {
@@ -295,6 +301,22 @@ export class LocalGrepTool implements ToolImpl<
       );
     }
 
+    if (isPtcChildCall(ctx)) {
+      // A run_code child gets every match line of the page in full; the
+      // 16 KiB cap below is for the model (see isPtcChildCall).
+      return reportGrep(
+        withMatchLimitContinuation(toolResult, details, offset + effectiveLimit),
+        {
+          matches: (parsed.matchEntries ?? []).map(({ path, line, text: matchText }) => ({
+            path,
+            line,
+            text: matchText,
+          })),
+        },
+        parsed.uncappedOutput === true ||
+          Buffer.byteLength(finalText, 'utf8') > DESKTOP_GREP_CONTENT_MAX_BYTES,
+      );
+    }
     let matchLineIndexes = parsed.matchLineIndexes ?? [];
     // Output line index of the first line still shown after leading context was dropped.
     let shownFrom = 0;
@@ -419,8 +441,15 @@ function emptyGrepData(mode: GrepOutputMode): GrepProgrammaticData {
 }
 
 /** Every non-error return states its completeness and carries the page as data. */
-function reportGrep(result: ToolResult, data: GrepProgrammaticData): ToolResult {
-  return withDesktopCompletenessReport(LocalGrepToolDef.name, result, { data });
+function reportGrep(
+  result: ToolResult,
+  data: GrepProgrammaticData,
+  uncappedOutput = false,
+): ToolResult {
+  return withDesktopCompletenessReport(LocalGrepToolDef.name, result, {
+    data,
+    ...(uncappedOutput ? { uncappedOutput } : {}),
+  });
 }
 
 /**

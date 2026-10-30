@@ -812,7 +812,7 @@ describe('local native turn tools', () => {
           deleteSession: async () => ({ success: true }),
           listMessages: async (req) => {
             sessionCalls.push(req);
-            return { messages: [{ content: 'ok' }] };
+            return { messages: [{ msg_id: 'msg-1', msg_content: 'ok' }] };
           },
         },
       });
@@ -856,7 +856,7 @@ describe('local native turn tools', () => {
       expect(JSON.parse(sessionResult.text)).toMatchObject({
         ok: true,
         command: 'session messages',
-        response: { messages: [{ content: 'ok' }] },
+        response: { messages: [{ msg_id: 'msg-1', msg_content: 'ok' }] },
       });
       expect(sessionCalls).toEqual([{ sessionId: 'session-current' }]);
 

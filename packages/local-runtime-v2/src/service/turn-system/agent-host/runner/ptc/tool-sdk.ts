@@ -153,7 +153,7 @@ const NATIVE_DATA_TYPES: Readonly<Record<string, NativeDataType>> = {
   memory: {
     name: 'MemoryData',
     declaration:
-      'type MemoryData = { ok: true; target: string; operation: string; content?: string; sizeBytes?: number; updatedAt?: string; sources?: Array<{ sourceAgent: string; content: string }>; sourceAgent?: string; name?: string; description?: string; matches?: Array<{ lineNumber: number; line: string; context?: string[]; sourceAgent?: string }>; topics?: Array<{ name: string; description: string; sizeBytes: number; updatedAt: string; sourceAgent?: string }>; replacements?: number; deleted?: boolean; matchCount?: number; topicCount?: number } | { ok: false; target: string; operation: string; code: string }; // fields by operation; a cut output keeps only sizeBytes, matchCount and topicCount',
+      'type MemoryData = { ok: true; target: string; operation: string; content?: string; sizeBytes?: number; updatedAt?: string; sources?: Array<{ sourceAgent: string; content: string }>; sourceAgent?: string; name?: string; description?: string; matches?: Array<{ lineNumber: number; line: string; context?: string[]; sourceAgent?: string }>; topics?: Array<{ name: string; description: string; sizeBytes: number; updatedAt: string; sourceAgent?: string }>; replacements?: number; deleted?: boolean; matchCount?: number; topicCount?: number } | { ok: false; target: string; operation: string; code: string }; // fields by operation; run_code calls are never cut, so content and matches are whole',
   },
   ...COMPUTER_DATA_TYPES,
 };
@@ -162,7 +162,7 @@ const NATIVE_DATA_TYPES: Readonly<Record<string, NativeDataType>> = {
 const MAVIS_DATA_TYPE: NativeDataType = {
   name: 'MavisData',
   declaration:
-    'type MavisData = { ok: true; command: string; response: unknown } | { ok: false; command: string; error: { kind: string; message: string; [key: string]: unknown } }; // only { ok, command } when output was cut',
+    'type MavisData = { ok: true; command: string; response: unknown } | { ok: false; command: string; error: { kind: string; message: string; [key: string]: unknown } }; // the whole result object; run_code calls are never cut',
 };
 
 /**

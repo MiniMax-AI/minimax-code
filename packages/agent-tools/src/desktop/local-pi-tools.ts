@@ -14,10 +14,11 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
+  DEFAULT_MAX_LINES,
 } from '@earendil-works/pi-coding-agent/tools';
 import { getShellConfig } from '@earendil-works/pi-coding-agent/shell';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import {
   IMAGE_DIMENSION_HEADER_BYTES,
   parseImageDimensionsFromBytes,
@@ -97,8 +98,10 @@ import {
   DESKTOP_BASH_MAX_BYTES,
   DESKTOP_BASH_PREVIEW_BYTES,
   DESKTOP_READ_TEXT_MAX_BYTES,
+  isPtcChildCall,
   limitDesktopHeadTailLines,
   limitDesktopPrefixLines,
+  PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
   withDesktopOutputContinuation,
 } from './output-limit.js';
 
@@ -128,11 +131,22 @@ export class LocalReadTool implements ToolImpl<
   LocalRuntimeToolContext
 > {
   private readonly tool: AgentTool;
+  /**
+   * For run_code children: no line limit, and Pi's byte limit raised to
+   * PTC_CHILD_FULL_OUTPUT_MAX_BYTES, so an over-budget window is cut by Pi
+   * before it becomes one huge numbered string (the read then falls back).
+   */
+  private readonly uncappedTool: AgentTool;
 
   constructor(private readonly workspaceRoot: string) {
     // The host's request media extension encodes every tool result image to
     // `requestMedia.image`; a second resize here would cap it and add a note.
-    this.tool = createReadTool(workspaceRoot, { autoResizeImages: false });
+    const options = { autoResizeImages: false };
+    this.tool = createReadTool(workspaceRoot, options);
+    this.uncappedTool = createReadTool(workspaceRoot, {
+      ...options,
+      truncation: { maxLines: Number.POSITIVE_INFINITY, maxBytes: PTC_CHILD_FULL_OUTPUT_MAX_BYTES },
+    });
   }
 
   async execute(
@@ -231,6 +245,21 @@ export class LocalReadTool implements ToolImpl<
     // Strip `pages` before delegating: pi's read schema does not know the
     // parameter, and models occasionally send it for non-PDF files.
     const { pages: _pages, ...piInput } = input;
+    // A run_code child reads the whole file, or exactly offset/limit: Pi's
+    // 2000-line / 50 KB head limit, the 2000-character line cap and the
+    // Desktop 24 KiB cap are for the model (see isPtcChildCall). Over
+    // PTC_CHILD_FULL_OUTPUT_MAX_BYTES it gets the direct-call page and the
+    // offset to continue instead, like a Bash child's preview.
+    if (isPtcChildCall(ctx) && !(await fileOverPtcReadBudget(readAbs, input.limit))) {
+      const res = await this.uncappedTool.execute('', piInput, signal);
+      const result = piReadResultToToolResult(LocalReadToolDef.name, res, {
+        offset: input.offset,
+        maxLineChars: Number.POSITIVE_INFINITY,
+      });
+      if (!textOverPtcReadBudget(result)) {
+        return withReadProgrammaticResult(result, input.limit, readCapSkipped(result));
+      }
+    }
     const res = await this.tool.execute('', piInput, signal);
     const result = piReadResultToToolResult(LocalReadToolDef.name, res, {
       offset: input.offset,
@@ -243,13 +272,60 @@ export class LocalReadTool implements ToolImpl<
 }
 
 /**
+ * A child read without `limit` would return the whole file: over the budget
+ * it takes the direct-call path without loading the file twice. With a
+ * `limit` the window may be small even in a large file, so only its text is
+ * checked (textOverPtcReadBudget). An unreadable size is left to Pi.
+ */
+async function fileOverPtcReadBudget(path: string, limit: number | undefined): Promise<boolean> {
+  if (limit !== undefined) return false;
+  try {
+    return (await stat(path)).size > PTC_CHILD_FULL_OUTPUT_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/** Pi cut the window at the raised byte limit, or the numbered text is still over it. */
+function textOverPtcReadBudget(result: ToolResult): boolean {
+  const truncation = result.details?.truncation as { truncated?: unknown } | undefined;
+  return (
+    truncation?.truncated === true ||
+    Buffer.byteLength(result.text, 'utf8') > PTC_CHILD_FULL_OUTPUT_MAX_BYTES
+  );
+}
+
+/**
+ * Whether a direct read would have cut this uncapped child read. The Desktop
+ * 24 KiB check also covers Pi's 50 KB limit, since the numbered text is never
+ * shorter than the file text it shows.
+ */
+function readCapSkipped(result: ToolResult): boolean {
+  const textFile = result.details?.textFile as
+    | { readonly content?: unknown; readonly numLines?: unknown }
+    | undefined;
+  if (!textFile || typeof textFile.content !== 'string') return false;
+  if (Buffer.byteLength(result.text, 'utf8') > DESKTOP_READ_TEXT_MAX_BYTES) return true;
+  if (typeof textFile.numLines === 'number' && textFile.numLines > DEFAULT_MAX_LINES) return true;
+  return textFile.content
+    .split('\n')
+    .some(
+      (line) => line.length > READ_MAX_LINE_CHARS && Array.from(line).length > READ_MAX_LINE_CHARS,
+    );
+}
+
+/**
  * PTC payload of a text read: the window's original text without line
  * numbers, cut exactly where the output was cut (Desktop 24 KiB prefix,
  * 2000-character lines) so data never shows more than the model text, plus
  * the completeness statement. A read that stopped at the caller's `limit`
  * with lines left is complete but reports hasMore and the next line offset.
  */
-function withReadProgrammaticResult(result: ToolResult, limit: number | undefined): ToolResult {
+function withReadProgrammaticResult(
+  result: ToolResult,
+  limit: number | undefined,
+  uncappedOutput = false,
+): ToolResult {
   const data = readTextData(result);
   if (!data) {
     const image = readImageData(result);
@@ -273,6 +349,7 @@ function withReadProgrammaticResult(result: ToolResult, limit: number | undefine
     ...(more && limit !== undefined
       ? { more: { nextOffset: data.startLine + limit, offsetUnit: 'line' as const } }
       : {}),
+    ...(uncappedOutput ? { uncappedOutput } : {}),
   });
 }
 
@@ -691,7 +768,13 @@ export class LocalBashTool implements ToolImpl<
     });
     if (hostTrashResult) {
       if (ptcTimeout) ctx.ptcDeadline?.reportTimeout?.(ptcTimeout);
-      return applyDesktopTextLimit(hostTrashResult, limitDesktopBashOutput(hostTrashResult.text));
+      const childOutput = isPtcChildCall(ctx)
+        ? await fullPtcBashOutput(hostTrashResult)
+        : undefined;
+      return (
+        childOutput ??
+        applyDesktopTextLimit(hostTrashResult, limitDesktopBashOutput(hostTrashResult.text))
+      );
     }
     if (input.run_in_background === true) {
       if (!this.backgroundAdapter) {
@@ -840,12 +923,20 @@ export class LocalBashTool implements ToolImpl<
       });
     }
     result = withLocalBashTiming(result, foregroundTiming);
-    const fullOutputPath =
-      typeof result.details?.fullOutputPath === 'string'
-        ? result.details.fullOutputPath
-        : undefined;
-    const limited = limitDesktopBashOutput(result.text, fullOutputPath, result.details);
-    result = applyDesktopTextLimit(result, limited);
+    // A PTC child never reaches the managed path above: Agent Core gives it
+    // allowBashAutoPromotion: false, so only this path and host trash read
+    // the whole output back for it.
+    const childOutput = isPtcChildCall(ctx) ? await fullPtcBashOutput(result) : undefined;
+    if (childOutput) {
+      result = childOutput;
+    } else {
+      const fullOutputPath =
+        typeof result.details?.fullOutputPath === 'string'
+          ? result.details.fullOutputPath
+          : undefined;
+      const limited = limitDesktopBashOutput(result.text, fullOutputPath, result.details);
+      result = applyDesktopTextLimit(result, limited);
+    }
     result.details = this.consumeEnvSanitizationHint({
       ...(result.details ?? {}),
       ...(this.lastEnvRemoved.length > 0 ? { envSanitized: this.lastEnvRemoved } : {}),
@@ -878,6 +969,52 @@ function directForegroundIdentity(ctx: LocalRuntimeToolContext): LocalSandboxInv
     ...(ctx.toolCallId ? { toolCallId: ctx.toolCallId } : {}),
     ...(ctx.forceReadOnlyFilesystem ? { forceReadOnlyFilesystem: true } : {}),
   };
+}
+
+/**
+ * The whole output of a PTC child Bash call, or undefined to keep the
+ * Desktop preview. Pi keeps only a head+tail preview in memory and writes the
+ * complete output to `fullOutputPath` (Pi core/tools/output-accumulator.ts);
+ * a cut output is read back from that file, and the status lines appended
+ * after the preview (exit code, timeout receipt) are kept. An incomplete or
+ * failed save, or a file over PTC_CHILD_FULL_OUTPUT_MAX_BYTES, falls back to
+ * the preview.
+ */
+async function fullPtcBashOutput(result: ToolResult): Promise<ToolResult | undefined> {
+  const details = result.details ?? {};
+  const cut = details.truncation as { truncated?: unknown; content?: unknown } | undefined;
+  if (cut?.truncated !== true) {
+    // Pi did not cut it: the text is already the whole output.
+    const bytes = Buffer.byteLength(result.text, 'utf8');
+    if (bytes > PTC_CHILD_FULL_OUTPUT_MAX_BYTES) return undefined;
+    return bytes > DESKTOP_BASH_MAX_BYTES
+      ? withProgrammaticResult(result, { uncappedOutput: true })
+      : result;
+  }
+  const path = details.fullOutputPath;
+  const persistence = (details.output as { persistence?: unknown } | undefined)?.persistence;
+  const preview = cut.content;
+  if (
+    typeof path !== 'string' ||
+    persistence !== 'complete' ||
+    typeof preview !== 'string' ||
+    !result.text.startsWith(preview)
+  ) {
+    return undefined;
+  }
+  let full: string;
+  try {
+    if ((await stat(path)).size > PTC_CHILD_FULL_OUTPUT_MAX_BYTES) return undefined;
+    full = await readFile(path, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const text = `${full}${result.text.slice(preview.length)}`;
+  const rest = Object.fromEntries(Object.entries(details).filter(([key]) => key !== 'truncation'));
+  return withProgrammaticResult(
+    { ...result, text, content: [{ type: 'text', text }], details: rest },
+    { uncappedOutput: true },
+  );
 }
 
 function limitDesktopBashOutput(

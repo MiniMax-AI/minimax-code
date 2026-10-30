@@ -6,6 +6,7 @@ import {
 } from '@mavis/agent-core/tools';
 
 import { LocalWebFetchToolDef, type LocalWebFetchToolInput } from './builtin-defs.js';
+import { isPtcChildCall } from './output-limit.js';
 import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 import type { LocalRuntimeToolContext, LocalWebFetchAdapter } from './types.js';
 
@@ -20,7 +21,7 @@ export class LocalWebFetchTool implements ToolImpl<
   constructor(private readonly adapter: LocalWebFetchAdapter) {}
 
   async execute(
-    _ctx: LocalRuntimeToolContext,
+    ctx: LocalRuntimeToolContext,
     input: LocalWebFetchToolInput,
     signal?: AbortSignal,
   ): Promise<ToolResult> {
@@ -60,11 +61,14 @@ export class LocalWebFetchTool implements ToolImpl<
       );
     }
 
-    const clipped = truncateWebFetchContentByEstimatedTokens(
-      resp.content ?? '',
-      WEB_FETCH_MAX_RESULT_TOKENS,
-    );
-    const content = clipped.text;
+    const body = resp.content ?? '';
+    // A run_code child gets the whole body (see isPtcChildCall); the adapter's
+    // own download limit still applies and stays reported as details.truncated.
+    const childCall = isPtcChildCall(ctx);
+    const clipped = childCall
+      ? undefined
+      : truncateWebFetchContentByEstimatedTokens(body, WEB_FETCH_MAX_RESULT_TOKENS);
+    const content = clipped?.text ?? body;
     const result: ToolResult = {
       tool_name: LocalWebFetchToolDef.name,
       text: content,
@@ -78,10 +82,10 @@ export class LocalWebFetchTool implements ToolImpl<
         ...(resp.contentType ? { content_type: resp.contentType } : {}),
         ...(resp.retryAfter ? { retry_after: resp.retryAfter } : {}),
         ...(resp.bytes !== undefined ? { bytes: resp.bytes } : {}),
-        ...(resp.truncated !== undefined || clipped.truncated
-          ? { truncated: Boolean(resp.truncated || clipped.truncated) }
+        ...(resp.truncated !== undefined || clipped?.truncated
+          ? { truncated: Boolean(resp.truncated || clipped?.truncated) }
           : {}),
-        ...(clipped.truncated
+        ...(clipped?.truncated
           ? {
               token_truncated: true,
               original_estimated_tokens: clipped.originalTokens,
@@ -118,7 +122,11 @@ export class LocalWebFetchTool implements ToolImpl<
       ...(resp.bytes !== undefined ? { bytes: resp.bytes } : {}),
       content,
     };
-    return withDesktopCompletenessReport(LocalWebFetchToolDef.name, result, { data });
+    const uncappedOutput = childCall && estimateTextTokens(body) > WEB_FETCH_MAX_RESULT_TOKENS;
+    return withDesktopCompletenessReport(LocalWebFetchToolDef.name, result, {
+      data,
+      ...(uncappedOutput ? { uncappedOutput } : {}),
+    });
   }
 }
 

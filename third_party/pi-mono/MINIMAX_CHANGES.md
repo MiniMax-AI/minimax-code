@@ -13,6 +13,15 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-10-28 — configurable text truncation limits for the read tool
+
+- Reason: a MCode `run_code` (PTC) child call hands its result to the program, not to the model context, so the host needs `read` to return a whole file for that caller, or exactly the `offset`/`limit` window it asked for. Pi hard-codes a 2000-line / 50KB head truncation inside `read`, which even an explicit `limit` cannot exceed, so a script paged the same data across many small calls.
+- Affected package: `packages/coding-agent` (`@earendil-works/pi-coding-agent`), `src/core/tools/read.ts`. `ReadToolOptions` gained an optional `truncation: TruncationOptions`, passed to `truncateHead`. The two continuation notices and the oversized-first-line message now report the effective limits instead of the constants `DEFAULT_MAX_LINES` / `DEFAULT_MAX_BYTES`. Omitting `truncation` keeps the default limits and the existing wording byte for byte.
+- Change type: generic, upstreamable host seam. It only exposes limits that were already parameters of `truncateHead`; no path handling, image handling, or default behaviour changes.
+- minimax integration: `packages/agent-tools/src/desktop/local-pi-tools.ts` builds a second, uncapped `read` tool for PTC child calls with `maxLines: Infinity` and `maxBytes: PTC_CHILD_FULL_OUTPUT_MAX_BYTES` (8 MiB). A file above that budget falls back to the direct-call page so a huge file cannot exhaust memory or hit V8's string length limit. Direct calls keep the default limits.
+- Upstream PR: not opened.
+- Validation: `third_party/pi-mono/packages/coding-agent/test/read-truncation-options.test.ts` (4 cases) covers the raised line and byte limits, the continuation wording, and unchanged defaults. Vendored upstream suites remain outside this distribution's verification gates.
+
 ### 2026-10-29 — treat an Anthropic stream without a stop_reason as a truncated answer
 
 - Reason: an Anthropic-compatible endpoint can cut a message short mid-thinking and end with `event: message_delta` carrying an empty `stop_reason`, followed by `event: message_stop`. `streamAnthropic` starts from `stopReason: "stop"` and `message_delta` only overwrites it for a truthy value, so the truncated answer looked like a normal finish: the turn stopped silently, reported no error, and did not retry. An unknown non-empty `stop_reason` already throws in `mapStopReason`, and the 2026-09-10 completeness guard covered a missing `message_start` / `message_stop`; only the empty-or-missing case was left.

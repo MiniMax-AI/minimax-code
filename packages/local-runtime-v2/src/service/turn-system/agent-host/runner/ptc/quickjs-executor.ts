@@ -3,7 +3,10 @@ import { Worker } from 'node:worker_threads';
 import {
   mergedPtcLimits,
   parsePtcToolArgs,
+  PTC_RESULT_TOO_LARGE,
+  ptcResultTooLargeFailure,
   ptcToolCallLimitRefusal,
+  ptcUnconsumedResultsTooLargeFailure,
   PtcSerializationError,
   serializePtcValue,
   type PtcChildCallRecord,
@@ -93,6 +96,10 @@ class PtcQuickJsExecution {
   private toolCalls = 0;
   /** Calls refused by the call budget (guest-side or host-side) without running. */
   private refusedToolCalls = 0;
+  /** Largest serialized child result, for the run_code log. */
+  private maxChildResultBytes = 0;
+  /** Children that failed with PTC_RESULT_TOO_LARGE, for the run_code log. */
+  private oversizedChildren = 0;
   private consoleText = '';
   private consoleBytes = 0;
   private consoleTruncated = false;
@@ -453,7 +460,7 @@ class PtcQuickJsExecution {
       invocationSettled = true;
       const guestResult = guestResultFor(result, childToolCallId ?? message.requestId);
       const resultJson = this.serializeChildResult(message, guestResult, childToolCallId);
-      this.sendReply(message.requestId, resultJson);
+      this.sendReply(message.requestId, resultJson, childToolCallId ?? message.requestId);
     } catch (error) {
       if (!invocationSettled)
         this.childCalls.set(message.requestId, { ...initial, state: 'failed' });
@@ -540,6 +547,12 @@ class PtcQuickJsExecution {
     try {
       return serializePtcValue(result, this.limits.maxBridgeMessageBytes);
     } catch (error) {
+      if (error instanceof PtcSerializationError && error.code === 'bridge_limit_exceeded') {
+        // Child results are no longer cut to the model caps, so one can be
+        // larger than a bridge message. The tool already ran: fail only this
+        // call so the program can narrow its arguments, instead of stopping.
+        return this.oversizedChildResult(childToolCallId ?? message.requestId, error.bytes);
+      }
       const failure: PtcFailure = {
         code: error instanceof PtcSerializationError ? error.code : 'invalid_tool_result',
         message: `PTC child result delivery failed: ${safeMessage(error)}`,
@@ -548,6 +561,27 @@ class PtcQuickJsExecution {
       this.recordDeliveryFailure(childToolCallId ?? message.requestId, failure);
       throw new PtcChildFailure(failure);
     }
+  }
+
+  private oversizedChildResult(childToolCallId: string, bytes: number | undefined): string {
+    const size = bytes ?? this.limits.maxBridgeMessageBytes + 1;
+    this.recordResultTooLarge(childToolCallId, size);
+    return JSON.stringify(
+      ptcResultTooLargeFailure(childToolCallId, size, this.limits.maxBridgeMessageBytes),
+    );
+  }
+
+  /** Fact, log count and largest size for a child result that was not delivered. */
+  private recordResultTooLarge(childToolCallId: string, bytes: number): void {
+    this.maxChildResultBytes = Math.max(this.maxChildResultBytes, bytes);
+    this.oversizedChildren += 1;
+    const fact: PtcRetainedFact = {
+      kind: 'child_error',
+      child_tool_call_id: childToolCallId,
+      code: PTC_RESULT_TOO_LARGE,
+    };
+    if (this.persisted.has(childToolCallId)) this.addChildFacts(childToolCallId, [fact]);
+    else this.globalFacts.push(fact);
   }
 
   private recordDeliveryFailure(childToolCallId: string, failure: PtcFailure): void {
@@ -566,15 +600,39 @@ class PtcQuickJsExecution {
     this.endGuest(failed(failure.code, failure.message, false), reason);
   }
 
-  private sendReply(requestId: string, resultJson: string): void {
+  private sendReply(requestId: string, resultJson: string, childToolCallId?: string): void {
     const bytes = new TextEncoder().encode(resultJson).byteLength;
     if (this.pendingBridgeBytes + bytes > this.limits.maxBridgeResultBytes) {
-      this.recordBudgetExceeded('bridge');
-      this.stop('bridge_limit_exceeded');
-      throw new Error('PTC tool results exceed the cumulative bridge limit.');
+      // The Worker has not taken earlier results yet (parallel large calls
+      // while the guest is busy). Fail only this call, uncounted, and keep the
+      // program running; a call-budget refusal is tiny and goes as it is.
+      this.postReply(
+        requestId,
+        childToolCallId === undefined
+          ? resultJson
+          : this.unconsumedResultsTooLarge(childToolCallId, bytes),
+      );
+      return;
     }
     this.pendingReplyBytes.set(requestId, bytes);
     this.pendingBridgeBytes += bytes;
+    this.maxChildResultBytes = Math.max(this.maxChildResultBytes, bytes);
+    this.postReply(requestId, resultJson);
+  }
+
+  private unconsumedResultsTooLarge(childToolCallId: string, bytes: number): string {
+    this.recordResultTooLarge(childToolCallId, bytes);
+    return JSON.stringify(
+      ptcUnconsumedResultsTooLargeFailure(
+        childToolCallId,
+        bytes,
+        this.pendingBridgeBytes,
+        this.limits.maxBridgeResultBytes,
+      ),
+    );
+  }
+
+  private postReply(requestId: string, resultJson: string): void {
     if (!this.acceptingCalls || this.finished || this.stopReason) return;
     this.worker.postMessage({ type: 'tool_result', requestId, resultJson });
   }
@@ -656,6 +714,8 @@ class PtcQuickJsExecution {
     return {
       ...result,
       refusedToolCalls: this.refusedToolCalls,
+      maxChildResultBytes: this.maxChildResultBytes,
+      oversizedChildren: this.oversizedChildren,
       ...(this.consoleBytes > 0 || this.consoleTruncated
         ? {
             console: {
@@ -827,8 +887,7 @@ function toToolFailure(error: unknown, toolCallId: string): PtcFailure {
 }
 
 function toolFailureCode(message: string): PtcFailure['code'] {
-  if (message.includes('bridge message limit') || message.includes('cumulative bridge limit'))
-    return 'bridge_limit_exceeded';
+  if (message.includes('bridge message limit')) return 'bridge_limit_exceeded';
   if (message.includes('call limit')) return 'tool_call_limit_exceeded';
   if (message.includes('stopped') || message.includes('cancelled')) return 'cancelled';
   return 'invalid_tool_call';

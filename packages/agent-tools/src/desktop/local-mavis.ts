@@ -17,7 +17,8 @@ import {
   LocalMavisCronUnsupportedError,
   LocalMavisCronValidationError,
 } from './local-mavis-cron-adapter.js';
-import { createDesktopOutputContinuation } from './output-limit.js';
+import { projectSessionMessagesPage, sessionMessagesView } from './local-mavis-session-messages.js';
+import { createDesktopOutputContinuation, isPtcChildCall } from './output-limit.js';
 import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 import { toAgentRequestRef } from './subagent-roles.js';
 import type {
@@ -217,6 +218,10 @@ const sessionMessagesSchema = z.object({
   source: sessionReadSource,
   limit: optionalNumber,
   before: optionalString,
+  include_tool_outputs: optionalBoolean,
+  // Values above SESSION_MESSAGES_MAX_OUTPUT_CHARS use the maximum.
+  max_output_chars: z.number().int().positive().optional(),
+  include_thinking: optionalBoolean,
 });
 
 const mcpTransportSchema = z.enum(['stdio', 'http', 'streamable-http', 'sse']);
@@ -447,6 +452,16 @@ export class LocalMavisTool implements ToolImpl<
       details: { command: output.command, output: historyOutput },
       ...(output.ok ? {} : { isError: true }),
     };
+    if (isPtcChildCall(ctx)) {
+      // A run_code child gets the whole response in output and data; only the
+      // program's return value reaches the model (see isPtcChildCall).
+      const uncappedOutput =
+        estimateMavisResultTokens(ctx, text, !output.ok) > DESKTOP_MAVIS_MAX_TOKENS;
+      return withDesktopCompletenessReport(LocalMavisToolDef.name, result, {
+        data: historyOutput,
+        ...(uncappedOutput ? { uncappedOutput } : {}),
+      });
+    }
     const recovery = mavisRecoveryInstruction(
       output.command,
       ptcMavisRunCodeTool(ctx, output.command),
@@ -1297,18 +1312,18 @@ async function handleSessionMessages(
   signal?: AbortSignal,
 ): Promise<LocalMavisOutput> {
   const sessionId = resolveSessionId(ctx, args.session_id);
-  return success(
-    ctx.command,
-    await requireSessionAdapter(ctx).listMessages(
-      {
-        sessionId,
-        ...(args.source ? { source: args.source } : {}),
-        ...(args.limit !== undefined ? { limit: args.limit } : {}),
-        ...(args.before ? { before: args.before } : {}),
-      },
-      signal,
-    ),
+  const page = await requireSessionAdapter(ctx).listMessages(
+    {
+      sessionId,
+      ...(args.source ? { source: args.source } : {}),
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      ...(args.before ? { before: args.before } : {}),
+    },
+    signal,
   );
+  // Projected here, before the caller serializes and token-counts the response,
+  // so a stored multi-megabyte tool result is never copied whole.
+  return success(ctx.command, projectSessionMessagesPage(page, sessionMessagesView(args)));
 }
 
 async function handleSessionHelp(ctx: LocalMavisCommandContext): Promise<LocalMavisOutput> {
@@ -1348,7 +1363,12 @@ async function handleSessionHelp(ctx: LocalMavisCommandContext): Promise<LocalMa
           'source? (local|cloud; default local)',
           'limit? (cloud default 20, max 100)',
           'before?',
+          'include_tool_outputs? (default false)',
+          'max_output_chars? (default 2000, max 20000)',
+          'include_thinking? (default false)',
         ],
+        summary:
+          'Message text is returned in full. Each tool call is summarized as tool_name, tool_call_id, status, parent_tool_call_id (the run_code that made a child call), args_preview (first 200 characters), args_chars and result_chars, without its result; thinking and usage statistics are omitted. include_tool_outputs: true returns args and result instead, include_thinking: true adds thinking_content, each cut to max_output_chars with *_truncated: true when cut.',
       },
     ],
   });

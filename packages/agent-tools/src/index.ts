@@ -55,6 +55,9 @@ export {
   type DesktopPtcTruncationVerdict,
 } from "./desktop/ptc-result-projection.js";
 export {
+  PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
+} from "./desktop/output-limit.js";
+export {
   isPtcMavisChildToolName,
   isPtcMavisDirectCommand,
   isPtcMavisProgrammaticCommand,

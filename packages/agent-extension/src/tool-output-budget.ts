@@ -57,6 +57,13 @@ export function toolOutputBudgetExtension(
   const sensitiveTools = new Set(options.sensitiveTools ?? []);
 
   const afterToolCall: AfterToolCallHandler = async (toolContext, _signal, turnCtx) => {
+    // A run_code (PTC) child result goes to the program, not to the model
+    // context, so it is not this budget's to cut: a receipt would hand the
+    // script a pointer instead of its data (and its structured data would be
+    // dropped as a rewritten result). Only results the model sees, including
+    // run_code's own outer result, are externalized. Pi sets parentToolCallId
+    // only on PTC child calls (pi-agent-core AfterToolCallContext).
+    if (toolContext.parentToolCallId) return undefined;
     // A receipt is only a safe replacement when this exact turn can recover
     // the archived result. Keep the original ToolResult otherwise.
     if (!toolContext.context.tools?.some((tool) => tool.name === 'read')) return undefined;

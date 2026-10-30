@@ -80,6 +80,7 @@ export interface NativeLocalTurnToolCatalogOptions {
   /** Structured log sink for catalog decisions (PTC long-tail resolution). */
   readonly logger?: BuildLocalTurnToolCatalogInput['logger'];
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
+  readonly writePtcReturnArtifact?: BuildLocalTurnToolCatalogInput['writePtcReturnArtifact'];
 }
 
 export interface NativeAgentPreparationOptions {
@@ -422,6 +423,7 @@ function toolCatalogBuildOptions(
     ...(options.hostCapabilityRegistry
       ? { hostCapabilityRegistry: options.hostCapabilityRegistry }
       : {}),
+    writePtcReturnArtifact: options.writePtcReturnArtifact,
   };
 }
 

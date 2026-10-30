@@ -277,6 +277,28 @@ export function createPtcTurnObserver(options: {
   };
 }
 
+/**
+ * Child-output fields of the `ptc run_code finished` line. Children skip the
+ * model-visible output caps and only the return value is cut (agent-tools
+ * isPtcChildCall), so these show how often that mattered: children a direct
+ * call would have cut, the largest serialized child result, children over the
+ * per-call bridge limit (PTC_RESULT_TOO_LARGE) and whether the return value
+ * was saved to a file. Counts and a flag only; never arguments, content or
+ * file paths.
+ */
+export function ptcChildOutputFields(
+  result: Pick<PtcExecutionResult, 'maxChildResultBytes' | 'oversizedChildren'>,
+  uncappedChildren: number,
+  returnSpilled: boolean,
+) {
+  return {
+    uncapped_children: uncappedChildren,
+    max_child_result_bytes: result.maxChildResultBytes ?? 0,
+    oversized_children: result.oversizedChildren ?? 0,
+    return_spilled: returnSpilled,
+  };
+}
+
 interface PtcProgramTiming {
   /** The guest asked for the child; it may still wait for a scheduler slot. */
   queued(requestId: string): void;

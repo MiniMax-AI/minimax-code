@@ -109,6 +109,12 @@ export interface ProgrammaticToolResult {
   readonly completeness?: ProgrammaticToolCompleteness;
   /** Raw protocol or connection error of a third-party call; hosts never branch on it. */
   readonly errorRaw?: unknown;
+  /**
+   * PTC child calls only: a model-visible output cap that a direct call of the
+   * same tool applies would have cut this output, and the tool returned it in
+   * full instead. Hosts only count it for logs; it never changes the result.
+   */
+  readonly uncappedOutput?: boolean;
 }
 
 /**

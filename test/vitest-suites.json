@@ -276,7 +276,9 @@
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-admission-observability.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-prefix-fingerprint.test.ts",
       "packages/local-runtime/test/unit/remote-token-counter-fallback.test.ts",
-      "packages/local-runtime/test/unit/local-matrix-client-401-recovery.test.ts"
+      "packages/local-runtime/test/unit/local-matrix-client-401-recovery.test.ts",
+      "packages/agent-tools/test/desktop/ptc-child-uncapped.test.ts",
+      "packages/agent-tools/test/desktop/local-mavis-session-messages.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

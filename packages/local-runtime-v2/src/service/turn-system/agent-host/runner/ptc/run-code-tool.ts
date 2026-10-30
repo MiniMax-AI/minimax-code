@@ -14,6 +14,7 @@ import {
 import {
   classifyDesktopPtcTruncation,
   projectDesktopPtcToolResult,
+  PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
   readPtcMavisChildTarget,
   type DesktopPtcTruncationVerdict,
   type MultimodalAttachmentCapabilities,
@@ -26,18 +27,26 @@ import { createPtcToolBridge } from '../../execution/ptc/tool-bridge.js';
 import {
   isPtcJsonValue,
   PTC_LIMITS,
+  PTC_RESULT_TOO_LARGE,
   type PtcConsoleOutput,
   type PtcRetainedFact,
   type PtcToolCallResult,
   type PtcToolDescriptor,
 } from '../../execution/ptc/contracts.js';
 import { programWallClock } from '../../execution/ptc/program-wall-clock.js';
+import {
+  ptcReturnTruncationNotice,
+  spillPtcReturnValue,
+  type PtcReturnArtifactWriter,
+  type PtcReturnSpill,
+} from '../../execution/ptc/return-spill.js';
 import { executePtcQuickJs } from './quickjs-executor.js';
 import type { PtcWorkerFactory } from './quickjs-executor.js';
 import { projectPtcOuterMedia } from './media-projection.js';
 import {
   createPtcProgramTiming,
   ptcChildCallStatus,
+  ptcChildOutputFields,
   ptcProgramOutcome,
   ptcRejectedProgram,
 } from './ptc-observability.js';
@@ -108,6 +117,8 @@ type RunCodeInput = Static<typeof RunCodeSchema>;
 export interface PtcRunCodeToolOptions {
   /** Direct-module test seam; production always uses the packaged Worker resolver. */
   readonly workerFactory?: PtcWorkerFactory;
+  /** Saves a return value over 64 KiB as a Session tool-output artifact (return-spill.ts). */
+  readonly writeReturnArtifact?: PtcReturnArtifactWriter;
 }
 
 /**
@@ -224,6 +235,7 @@ async function executeRunCode(
   const failureByChild = new Map<string, ChildFailureNote>();
   // Aggregate child timing for the finished line; never one line per child.
   const timing = createPtcProgramTiming();
+  let uncappedChildren = 0;
   const descriptors: PtcToolDescriptor[] = childTools.map((tool) => ({
     name: tool.def.name,
     ...(executor.getToolExecutionMode(tool.def.name)
@@ -264,6 +276,7 @@ async function executeRunCode(
         }),
       );
       truncationByChild.set(outcome.record.child_tool_call_id, classifyChildTruncation(outcome));
+      if (outcome.programmatic?.uncappedOutput === true) uncappedChildren += 1;
       const adapted = adaptChildOutcome(
         outcome,
         (event, fields) => writeRunCodeEvent(context, parentToolCallId, event, fields),
@@ -305,11 +318,15 @@ async function executeRunCode(
       { batch, startedAtMs, wallClockMs },
       executor.getBatch(parentToolCallId),
     );
-    const outer = runCodeToolResult(result, context, failureByChild, allowedMs);
+    const outer = await runCodeToolResult(result, context, failureByChild, {
+      wallClockMs: allowedMs,
+      writeReturnArtifact: options.writeReturnArtifact,
+    });
     logRunCodeFinished(context, parentToolCallId, result, {
       verdicts: truncationByChild,
       failures: failureByChild,
       returnTruncated: outer.returnTruncated !== undefined,
+      childOutput: ptcChildOutputFields(result, uncappedChildren, !!outer.returnTruncated?.spilled),
       wallClock,
       wallClockMs: allowedMs,
       admissionWaitMs,
@@ -628,6 +645,9 @@ function childFailureSummary(
   toolName: string | undefined,
   message: string | undefined,
 ): string {
+  // The tool ran; only its result was over the per-call bridge limit (quickjs-executor.ts).
+  if (fact.code === PTC_RESULT_TOO_LARGE)
+    return `PTC child ${toolName ?? 'unknown-tool'} (${fact.child_tool_call_id}) ran, but its result exceeded a bridge size limit and was not delivered (${PTC_RESULT_TOO_LARGE}); the program continued.`;
   const child = `PTC child ${toolName ?? 'unknown-tool'} (${fact.child_tool_call_id}) failed with ${fact.code}`;
   if (message === undefined) return `${child}.`;
   const excerpt = Array.from(message).slice(0, FAILURE_EXCERPT_CHARS).join('');
@@ -770,7 +790,7 @@ function runCodeDescription(
     ...hiddenToolsParagraph(childTools),
     `Execute a JavaScript async function body, not TypeScript. Use await tools.<name>(args) for the eligible tools below, await every foreground call, and return a JSON-serializable result (no return shows "No return value."). ${PROMISE_ALL_SCHEDULING} Do not call run_code from inside run_code. Bash commands belong in tools.bash({ command: ... }), never in JavaScript itself.`,
     'Supported globals: tools, Object, Array, String, Number, Boolean, BigInt, Math, JSON, RegExp, Date, Map, Set, Promise, async/await, and standard Error types. Returned values and tool arguments follow JSON.stringify: undefined fields and functions are dropped, NaN/Infinity become null; cycles, BigInt, Map, Set and other class instances are errors that name the field path.',
-    `Every call resolves to the ToolResult declared below and does not throw when the tool fails: check r.isError before using r.output or r.data. On failure r.error has code (host-defined), message, toolCallId, and raw (third-party protocol error) when available; r.output is the tool's own error text. A program may make ${PTC_LIMITS.maxToolCalls} calls; later calls return isError with code PTC_TOOL_CALL_LIMIT_EXCEEDED and do not run. Do not infer data fields absent from the actual tool result. Media base64 stays in the host; guest JS receives only refs and metadata.`,
+    `Every call resolves to the ToolResult declared below and does not throw when the tool fails: check r.isError before using r.output or r.data. On failure r.error has code (host-defined), message, toolCallId, and raw (third-party protocol error) when available; r.output is the tool's own error text. A program may make ${PTC_LIMITS.maxToolCalls} calls; later calls return isError with code PTC_TOOL_CALL_LIMIT_EXCEEDED and do not run. Tool calls inside run_code are not cut to the model-visible output caps: r.output and r.data hold the whole result, except that Bash output and text-file reads over ${PTC_CHILD_FULL_OUTPUT_MAX_BYTES / 1024 / 1024} MiB keep the preview with r.truncation telling how to continue, and a single result over ${PTC_LIMITS.maxBridgeMessageBytes / 1024 / 1024} MiB, or one that would bring results the program has not taken yet over ${PTC_LIMITS.maxBridgeResultBytes / 1024 / 1024} MiB in total, fails that call with PTC_RESULT_TOO_LARGE. Only the return value is limited, to ${PTC_LIMITS.maxOuterResultBytes / 1024} KiB. Do not infer data fields absent from the actual tool result. Media base64 stays in the host; guest JS receives only refs and metadata.`,
     // The eval model patched read .output and wrote the line-number prefixes
     // back into the file; .output is display text, data.content is the file.
     // status sums up isError and truncation, so a program checks one field.
@@ -822,27 +842,30 @@ function modelCapabilities(
     : undefined;
 }
 
-function runCodeToolResult(
+async function runCodeToolResult(
   result: Awaited<ReturnType<typeof executePtcQuickJs>>,
   context: LocalRuntimeTurnToolContext,
   failures: ReadonlyMap<string, ChildFailureNote>,
-  wallClockMs: number,
-): { readonly toolResult: ToolResult; readonly returnTruncated?: ReturnValueTruncation } {
+  options: Pick<PtcRunCodeToolOptions, 'writeReturnArtifact'> & { readonly wallClockMs: number },
+): Promise<{ readonly toolResult: ToolResult; readonly returnTruncated?: ReturnValueTruncation }> {
   const forced = result.details.retained_facts.flatMap((fact) =>
     fact.kind === 'plugin_feedback' && fact.text ? [fact.text] : [],
   );
   const media = projectPtcOuterMedia(result.media, modelCapabilities(context));
   // Order: host notes, then console output, then the return value.
-  const outer = buildOuterText(
-    [
-      ...hostStatusSummary(result, failures),
-      ...media.retainedFacts.flatMap((fact) => factSummary(fact)),
-      ...media.notes,
-      ...forced,
-    ],
-    consoleBlock(result.console),
-    primaryResult(result, wallClockMs),
-  );
+  const notes = [
+    ...hostStatusSummary(result, failures),
+    ...media.retainedFacts.flatMap((fact) => factSummary(fact)),
+    ...media.notes,
+    ...forced,
+  ];
+  const primary = primaryResult(result, options.wallClockMs);
+  let outer = buildOuterText(notes, consoleBlock(result.console), primary);
+  // Only a return value that is actually cut is saved, then the note names the artifact.
+  if (outer.returnTruncated && options.writeReturnArtifact) {
+    const spill = await spillPtcReturnValue(context, primary.body, options.writeReturnArtifact);
+    outer = buildOuterText(notes, consoleBlock(result.console), primary, spill);
+  }
   const details = {
     ...result.details,
     retained_facts: [
@@ -930,6 +953,7 @@ function logRunCodeFinished(
     readonly verdicts: ReadonlyMap<string, DesktopPtcTruncationVerdict>;
     readonly failures: ReadonlyMap<string, ChildFailureNote>;
     readonly returnTruncated: boolean;
+    readonly childOutput: ReturnType<typeof ptcChildOutputFields>;
     readonly wallClock: PtcWallClock;
     readonly wallClockMs: number;
     /** Child admission time (hooks, approvals) during this program; not part of `wallClockMs`. */
@@ -981,6 +1005,7 @@ function logRunCodeFinished(
     console_bytes: result.console?.bytes ?? 0,
     console_truncated: result.console?.truncated === true,
     return_truncated: returnTruncated,
+    ...children.childOutput,
     ...timeoutLogFields(wallClock, wallClockMs),
     admission_wait_ms: Math.round(admissionWaitMs),
     ...children.timing,
@@ -1102,10 +1127,7 @@ function failedRunCode(code: string, message: string): ToolResult {
 interface ReturnValueTruncation {
   readonly shownBytes: number;
   readonly totalBytes: number;
-}
-
-function returnTruncationNotice(shownBytes: number, totalBytes: number): string {
-  return `[run_code result truncated: showing ${shownBytes} of ${totalBytes} bytes. Return a smaller value or aggregate inside the code.]`;
+  readonly spilled: boolean;
 }
 
 /**
@@ -1118,6 +1140,7 @@ function buildOuterText(
   forced: readonly string[],
   consoleText: string | undefined,
   primary: OuterPrimary,
+  spill?: PtcReturnSpill,
 ): {
   readonly text: string;
   readonly forcedContent?: string;
@@ -1131,18 +1154,17 @@ function buildOuterText(
   if (utf8Bytes(text) <= PTC_LIMITS.maxOuterResultBytes) return { text, ...forcedContent };
   if (primary.truncatable) {
     const totalBytes = utf8Bytes(primary.body);
+    const notice = (shown: number) => ptcReturnTruncationNotice(shown, totalBytes, spill);
     const before = leading ? `${leading}\n` : '';
     const available =
-      PTC_LIMITS.maxOuterResultBytes -
-      utf8Bytes(before) -
-      utf8Bytes(`\n${returnTruncationNotice(totalBytes, totalBytes)}`);
+      PTC_LIMITS.maxOuterResultBytes - utf8Bytes(before) - utf8Bytes(`\n${notice(totalBytes)}`);
     if (available >= 0) {
       const shown = truncateUtf8(primary.body, available);
       const shownBytes = utf8Bytes(shown);
       return {
-        text: `${before}${shown}\n${returnTruncationNotice(shownBytes, totalBytes)}`,
+        text: `${before}${shown}\n${notice(shownBytes)}`,
         ...forcedContent,
-        returnTruncated: { shownBytes, totalBytes },
+        returnTruncated: { shownBytes, totalBytes, spilled: Boolean(spill && 'path' in spill) },
       };
     }
   }

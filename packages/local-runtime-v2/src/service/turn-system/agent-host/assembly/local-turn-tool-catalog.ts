@@ -31,6 +31,7 @@ import { getBrowserHostBinding } from './host-capability/browser.js';
 import { mergeAgentHostTurnCapabilities } from './local-turn-plugin-capabilities.js';
 import { createPtcRunCodeTool } from '../runner/ptc/run-code-tool.js';
 import { registerPtcNativeCatalog, registerPtcTurnReminder } from '../execution/ptc/catalog.js';
+import type { PtcReturnArtifactWriter } from '../execution/ptc/return-spill.js';
 import {
   isPtcChildTool,
   isPtcDirectMcpTarget,
@@ -156,6 +157,8 @@ export interface BuildLocalTurnToolCatalogInput {
   readonly userText?: string;
   /** Trusted local top-level provenance and beta state, frozen before assembly. */
   readonly ptcEnabled?: boolean;
+  /** Where run_code saves a return value over 64 KiB (Session tool-output artifacts). */
+  readonly writePtcReturnArtifact?: PtcReturnArtifactWriter;
 }
 
 /** The already-gated inventory shared by Turn assembly and Task capture. */
@@ -448,7 +451,7 @@ function resolvedTurnCatalog(
   tools: readonly RuntimeTool[],
   ptc: boolean,
   trustedNativeTools: readonly RuntimeTool[],
-  input: Pick<BuildLocalTurnToolCatalogInput, 'sessionId' | 'logger' | 'hostCapabilityRegistry'>,
+  input: PtcCatalogInput,
 ): {
   readonly tools: readonly RuntimeTool[];
   readonly reminder: string;
@@ -467,10 +470,15 @@ function isPtcTurnEnabled(input: BuildLocalTurnToolCatalogInput): boolean {
   return isSharedPtcTurnEnabled({ requested: input.ptcEnabled === true });
 }
 
+type PtcCatalogInput = Pick<
+  BuildLocalTurnToolCatalogInput,
+  'sessionId' | 'logger' | 'hostCapabilityRegistry' | 'writePtcReturnArtifact'
+>;
+
 function buildPtcCatalog(
   tools: readonly RuntimeTool[],
   trustedNativeTools: readonly RuntimeTool[],
-  input: Pick<BuildLocalTurnToolCatalogInput, 'sessionId' | 'logger' | 'hostCapabilityRegistry'>,
+  input: PtcCatalogInput,
 ): {
   readonly tools: readonly RuntimeTool[];
   readonly reminder: string;
@@ -504,7 +512,12 @@ function buildPtcCatalog(
   // listing it would put back the definitions Tool Search keeps out.
   const runCode = registerPtcNativeCatalog(
     registerPtcTurnReminder(
-      createPtcRunCodeTool(childTools, {}, observable.trustedNativeTools, onDemand.callable),
+      createPtcRunCodeTool(
+        childTools,
+        input.writePtcReturnArtifact ? { writeReturnArtifact: input.writePtcReturnArtifact } : {},
+        observable.trustedNativeTools,
+        onDemand.callable,
+      ),
       reminder,
     ),
     tools,

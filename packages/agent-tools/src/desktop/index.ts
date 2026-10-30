@@ -205,4 +205,7 @@ export {
   CloudSessionReadError,
   type CloudSessionReaderOptions,
 } from './cloud-session-reader.js';
-export { DESKTOP_BASH_PREVIEW_BYTES } from './output-limit.js';
+export {
+  DESKTOP_BASH_PREVIEW_BYTES,
+  PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
+} from './output-limit.js';
