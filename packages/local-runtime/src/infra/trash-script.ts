@@ -374,29 +374,70 @@ trash_file() {
 
   case "$(uname -s)" in
     Darwin)
-      # macOS: prefer the Finder trash (it records "Put Back" metadata).
-      # Inside the sandbox MAVIS_TRASH_FORCE_MV is set: Finder would perform
-      # the unlink from its own unsandboxed process, so the kernel would never
-      # evaluate unlinkAllowOnly and delete_guard would silently not hold.
-      if [ -z "\${MAVIS_TRASH_FORCE_MV:-}" ]; then
-        # Escape backslashes and double-quotes to prevent AppleScript injection
-        local escaped_file
-        escaped_file="\${file//\\\\/\\\\\\\\}"
-        escaped_file="\${escaped_file//\\"/\\\\\\"}"
-        if osascript -e "tell application \\"Finder\\" to delete POSIX file \\"$escaped_file\\"" >/dev/null 2>&1; then
-          return 0
-        fi
+      # The sandbox must move the item in its own restricted process. Neither
+      # native recycling API may be used to delegate an unlink outside it.
+      local mode="trash"
+      if [ -n "\${MAVIS_TRASH_FORCE_MV:-}" ]; then mode="move"; fi
+      if osascript -l JavaScript -e '
+function moveWithoutOverwrite(source, trashDir) {
+  ObjC.import("Foundation");
+  ObjC.bindFunction("renamex_np", ["int", ["char *", "char *", "unsigned int"]]);
+  ObjC.bindFunction("__error", ["int *", []]);
+  var name = source.slice(source.lastIndexOf("/") + 1);
+  for (var attempt = 0; attempt < 16; attempt++) {
+    var suffix = attempt === 0 ? "" : "." + ObjC.unwrap($.NSUUID.UUID.UUIDString);
+    // RENAME_EXCL atomically refuses existing files, directories and symlinks.
+    if ($.renamex_np(source, trashDir + "/" + name + suffix, 4) === 0) return;
+    var error = $.__error()[0];
+    if (error !== 17) throw new Error("exclusive trash move failed: errno " + error);
+  }
+  throw new Error("exclusive trash move failed: too many name conflicts");
+}
+function trashWithFileManager(source) {
+  ObjC.import("Foundation");
+  var error = Ref();
+  if (!$.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(
+    $.NSURL.fileURLWithPath(source), null, error
+  )) throw new Error("FileManager trash failed: " + ObjC.unwrap(error[0].localizedDescription));
+}
+function trashWithCoreServices(source) {
+  // Only framework/symbol unavailability permits the modern API fallback.
+  // Keep Foundation initialization out of the successful CoreServices path:
+  // preserve the Put Back behavior validated on macOS 14.
+  try {
+    ObjC.import("CoreServices");
+    ObjC.bindFunction("FSPathMakeRefWithOptions", ["int", ["char *", "unsigned int", "void *", "void *"]]);
+    ObjC.bindFunction("FSMoveObjectToTrashSync", ["int", ["void *", "void *", "unsigned int"]]);
+  } catch (unavailable) {
+    return false;
+  }
+  ObjC.bindFunction("calloc", ["void *", ["unsigned long", "unsigned long"]]);
+  ObjC.bindFunction("free", ["void", ["void *"]]);
+  // FSRef is an opaque 80-byte struct. Option 1 preserves a leaf symlink.
+  var ref = $.calloc(1, 80);
+  try {
+    var status = $.FSPathMakeRefWithOptions(source, 1, ref, null);
+    if (status === 0) status = $.FSMoveObjectToTrashSync(ref, null, 0);
+    // unimpErr / errFSOperationNotSupported; permission and other failures
+    // must not be retried through another backend.
+    if (status === -4 || status === -1426) return false;
+    if (status !== 0) throw new Error("CoreServices trash failed: OSStatus " + status);
+    return true;
+  } finally {
+    $.free(ref);
+  }
+}
+function run(argv) {
+  if (argv[1] === "move") {
+    moveWithoutOverwrite(argv[0], argv[2]);
+  } else if (!trashWithCoreServices(argv[0])) {
+    trashWithFileManager(argv[0]);
+  }
+}' -- "$file" "$mode" "$HOME/.Trash" >/dev/null; then
+        return 0
       fi
-      # In-sandbox path (and fallback): mv to ~/.Trash/
-      local basename
-      basename="$(basename "$file")"
-      local dest="$HOME/.Trash/$basename"
-      if [ -e "$dest" ]; then
-        dest="$HOME/.Trash/\${basename}.$(date +%s)"
-      fi
-      mv "$file" "$dest" 2>/dev/null && return 0
-      if [ -n "\${MAVIS_TRASH_FORCE_MV:-}" ]; then
-        echo "mavis-trash: '$file': the sandbox denied moving this file to the trash (deleting this path is not allowed in the current sandbox mode)" >&2
+      if [ "$mode" = "move" ]; then
+        echo "mavis-trash: failed to move '$file' to the trash within the sandbox; no unsafe fallback was attempted" >&2
       else
         echo "mavis-trash: failed to trash '$file'" >&2
       fi

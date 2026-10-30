@@ -268,7 +268,8 @@
       "packages/local-runtime-v2/src/service/session-system/messages/history/mutation/canonical-history-scanner.test.ts",
       "packages/tui/test/unit/tui/transcript/streaming-presentation.test.ts",
       "packages/agent-core/test/unit/tools/input-validation.test.ts",
-      "packages/local-runtime-v2/src/service/plugin-system/plugin/package/local-plugin-apps.test.ts"
+      "packages/local-runtime-v2/src/service/plugin-system/plugin/package/local-plugin-apps.test.ts",
+      "packages/local-runtime/test/unit/trash-script.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
