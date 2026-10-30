@@ -19,6 +19,19 @@ import { projectBackgroundHistory } from './background-cadence.js';
 /** Derived from the prompt's own heading list so the protocol cannot drift. */
 const CHECKPOINT_HEADINGS = parseCheckpointHeadings(CHECKPOINT_SYSTEM_PROMPT);
 
+/**
+ * Backstop for a checkpoint that drops the newest typed ask. The note only
+ * states what the host can verify: questionnaire answers and automated
+ * messages carry no genuine-query provenance, so the last listed query is not
+ * necessarily the user's latest decision and must not override the sections
+ * above. Withdrawn and superseded asks also leave Pending, so the prompt
+ * records them under Key Decisions and the note checks that section before
+ * reviving a query. The note sits outside the versioned appendix, whose
+ * format is unchanged.
+ */
+const RECENT_QUERY_PRECEDENCE_NOTE =
+  'Host note: `Recent user queries` below are the latest typed user messages the host could verify, copied verbatim, oldest first. Questionnaire answers and automated messages are not listed, so a later user decision may appear only in the sections above, and any such decision takes precedence over this list. Before acting, check `Completed Work`, `Current State`, `Key Decisions`, and `Pending User Asks`; treat the last query as the current request only if none of them shows it done, withdrawn, superseded, or already pending.';
+
 export interface CheckpointGeneration extends CheckpointGenerationMetadata {
   readonly text: string;
 }
@@ -97,9 +110,11 @@ export function buildCheckpointMessage(
     previous?.recentUserQueries ?? [],
     options.subagents,
   );
-  const body = options.earlierFiles
-    ? `${summary}\n\n${earlierFilesText(options.earlierFiles)}`
-    : summary;
+  const body = [
+    summary,
+    ...(options.earlierFiles ? [earlierFilesText(options.earlierFiles)] : []),
+    ...(state.recentUserQueries.length > 0 ? [RECENT_QUERY_PRECEDENCE_NOTE] : []),
+  ].join('\n\n');
   const checkpoint: AgentMessage = {
     role: 'compactionSummary',
     summary: appendCompactionState(body, state),
