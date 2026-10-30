@@ -396,6 +396,9 @@ test(
       modalities: { input: ["text", "image"], output: ["text"] },
     };
     effortConfig.custom_provider.fixture.models["attachment-only"] = { attachment: true };
+    // Pin the production default shape: PTC is a beta flag that defaults on in the test
+    // channel, and this acceptance checks the direct-tool contract (read, bash) a user gets.
+    effortConfig.beta = { ...(effortConfig.beta ?? {}), ptc: false };
     writeFileSync(configPath, stringifyYaml(effortConfig));
     // The packaged command must carry the declaration through saving, a fresh
     // process/config reload, attachment preparation and SDK serialization.
@@ -415,18 +418,24 @@ test(
       const turns = requests.slice(beforeImage).filter((r) => r.body.stream === true);
       assert.ok(turns.length > 0, `Expected a runtime request for ${model}`);
       for (const { body } of turns) {
-        const images = body.messages.flatMap((message) =>
-          Array.isArray(message.content)
-            ? message.content.filter((part) => part.type === "image_url")
-            : []);
+        const parts = body.messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []));
+        const images = parts.filter((part) => part.type === "image_url");
+        // A compaction checkpoint summarizes the conversation instead of continuing it, and
+        // describes each image by its saved path rather than inlining it.
+        const isSummaryRequest = parts.some(
+          (part) => part.type === "text" && part.text.startsWith("[Image not sent to the summary request."),
+        );
+        if (isSummaryRequest) {
+          assert.deepEqual(images, [], `A summary request must not inline images for ${model}`);
+          continue;
+        }
         if (supportsImage) {
           assert.equal(images.length, 1, `Expected an inline image for ${model}`);
-          // PNG inputs are transcoded to JPEG by the real attachment pipeline.
+          // requestMedia.image is the only resize, and this PNG is inside every default limit,
+          // so the attachment is sent unchanged instead of being re-encoded.
           const url = images[0].image_url.url;
-          assert.match(url, /^data:image\/jpeg;base64,/);
-          const bytes = Buffer.from(url.split(",")[1], "base64");
-          assert.deepEqual([...bytes.subarray(0, 3)], [0xff, 0xd8, 0xff]);
-          assert.deepEqual([...bytes.subarray(-2)], [0xff, 0xd9]);
+          assert.equal(url, `data:image/png;base64,${imageBase64}`,
+            `Expected the unchanged PNG attachment for ${model}`);
           assert.doesNotMatch(JSON.stringify(body.messages), /current model cannot read this image inline/);
         } else {
           assert.deepEqual(images, [], `${model} must remain text-only`);
