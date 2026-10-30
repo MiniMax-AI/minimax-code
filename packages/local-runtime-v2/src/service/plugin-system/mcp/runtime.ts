@@ -23,8 +23,6 @@ import type {
 type DesktopRuntimeTool = DesktopTurnCapabilityView['runtimeTools'][number];
 
 const LIST_TOOLS_CONCURRENCY = 4;
-const MAX_TOOLS_PER_SERVER = 128;
-const MAX_TOOLS_PER_SNAPSHOT = 256;
 
 export interface PluginMcpPool {
   listTools(serverName: string): Promise<McpToolInfo[]>;
@@ -158,7 +156,6 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
         ? this.resolveInventory(entry, options.reuseExistingInventory === true)
         : this.resolveCachedInventory(entry),
     );
-    await this.enforceInventoryLimits(entries, inventories, inventoryMode);
 
     for (const [index, entry] of entries.entries()) {
       const inventory = inventories[index];
@@ -336,11 +333,6 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
         this.listToolsTimeoutMs,
         `Plugin MCP tools/list timed out for ${entry.server.name}`,
       );
-      if (tools.length > MAX_TOOLS_PER_SERVER) {
-        throw new Error(
-          `Plugin MCP server ${entry.server.name} returned more than ${MAX_TOOLS_PER_SERVER} tools`,
-        );
-      }
       this.metrics?.incr('plugin_mcp_list_total', { status: 'ok' });
       const inventory = freeze({ lifecycleKey: key, tools: freeze([...tools]), failed: false });
       this.inventories.set(poolName(entry), inventory);
@@ -362,68 +354,6 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
       this.inventories.set(poolName(entry), inventory);
       return inventory;
     }
-  }
-
-  private async rejectInventory(
-    entry: PluginSnapshotMcpServer,
-    key: string,
-    reason: string,
-  ): Promise<CachedMcpInventory> {
-    await this.disconnectBounded(poolName(entry));
-    this.metrics?.incr('plugin_mcp_list_total', { status: 'limit' });
-    this.logger.warn('Plugin MCP tools/list inventory rejected', {
-      pluginName: entry.pluginName,
-      source: entry.source,
-      serverName: entry.server.name,
-      reason,
-    });
-    const inventory = freeze({
-      lifecycleKey: key,
-      tools: freeze([] as McpToolInfo[]),
-      failed: true,
-    });
-    this.inventories.set(poolName(entry), inventory);
-    return inventory;
-  }
-
-  private async enforceInventoryLimits(
-    entries: readonly PluginSnapshotMcpServer[],
-    inventories: CachedMcpInventory[],
-    inventoryMode: NonNullable<PluginMcpReconcileOptions['inventoryMode']>,
-  ): Promise<void> {
-    let acceptedToolCount = 0;
-    for (const [index, entry] of entries.entries()) {
-      const inventory = inventories[index];
-      if (!inventory || inventory.failed) continue;
-      const exceedsServer = inventory.tools.length > MAX_TOOLS_PER_SERVER;
-      const exceedsSnapshot = acceptedToolCount + inventory.tools.length > MAX_TOOLS_PER_SNAPSHOT;
-      if (exceedsServer || exceedsSnapshot) {
-        const reason = exceedsServer
-          ? `Plugin MCP server returned more than ${MAX_TOOLS_PER_SERVER} tools`
-          : `Plugin MCP snapshot exceeds ${MAX_TOOLS_PER_SNAPSHOT} tools`;
-        inventories[index] = shouldDiscoverInventory(entry, inventoryMode)
-          ? await this.rejectInventory(entry, inventory.lifecycleKey, reason)
-          : this.rejectCachedInventory(entry, inventory.lifecycleKey, reason);
-        continue;
-      }
-      acceptedToolCount += inventory.tools.length;
-    }
-  }
-
-  private rejectCachedInventory(
-    entry: PluginSnapshotMcpServer,
-    key: string,
-    reason: string,
-  ): CachedMcpInventory {
-    this.metrics?.incr('plugin_mcp_list_total', { status: 'limit' });
-    this.logger.warn('Plugin MCP cached inventory rejected', {
-      pluginName: entry.pluginName,
-      source: entry.source,
-      serverName: entry.server.name,
-      reason,
-    });
-    this.inventories.delete(poolName(entry));
-    return freeze({ lifecycleKey: key, tools: freeze([] as McpToolInfo[]), failed: true });
   }
 
   private replaceLookup(entries: readonly PluginSnapshotMcpServer[]): void {

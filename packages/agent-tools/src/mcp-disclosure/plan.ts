@@ -22,6 +22,13 @@ export function modelInWhitelist(provider: string, id: string, list: readonly st
   });
 }
 
+/**
+ * Configured tools above this count are deferred even when their estimated schema fits the token
+ * budget: providers cap function counts (OpenAI-compatible APIs reject more than 128), and large
+ * context windows would otherwise admit hundreds of inline tools next to the builtins.
+ */
+export const MAX_INLINE_CONFIGURED_TOOLS = 64;
+
 function defaultEstimate(def: ToolDefinition): number {
   return Math.ceil(
     JSON.stringify({ name: def.name, description: def.description, schema: def.schema }).length / 4,
@@ -47,11 +54,17 @@ export function planMcpDisclosure(input: {
   if (!(Number.isFinite(model.contextWindow) && model.contextWindow > 0)) return inlineAll();
 
   const candidates = entries.filter((e) => e.source === 'configured');
+  if (candidates.length < options.minDeferCount) return inlineAll();
+
   const estimate = options.estimateTokens ?? defaultEstimate;
   const estTokens = candidates.reduce((s, e) => s + estimate(e.tool.def), 0);
   const thresholdTokens = options.thresholdPct * model.contextWindow;
 
-  if (candidates.length < options.minDeferCount || estTokens <= thresholdTokens) return inlineAll();
+  // Defer on the count as well as the token budget: a server may expose hundreds of small tools
+  // that together still fit a large context window, and providers cap function counts.
+  if (candidates.length <= MAX_INLINE_CONFIGURED_TOOLS && estTokens <= thresholdTokens) {
+    return inlineAll();
+  }
 
   const inlineTools = entries.filter((e) => e.source !== 'configured').map((e) => e.tool);
   const index = buildOrReuseIndex(candidates, { maxSchemaTextLen: options.maxSchemaTextLen });
