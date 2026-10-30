@@ -76,7 +76,10 @@ export {
 export { defineRuntimeTool, type RuntimeToolDeclaration } from './define.js';
 export { bindTool, toRuntimeTool } from './bind.js';
 export { prepareEditArguments, type PreparedEditArguments } from './edit-prepare-arguments.js';
-export { isRuntimeToolInputValid } from './input-validation.js';
+export {
+  coerceRuntimeToolInput,
+  isRuntimeToolInputValid,
+} from './input-validation.js';
 export {
   ReadToolDef,
   WriteToolDef,

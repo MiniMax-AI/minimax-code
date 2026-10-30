@@ -1,6 +1,7 @@
 import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import {
+  coerceRuntimeToolInput,
   defineRuntimeTool,
   type RuntimeTool,
   type ToolExecutionContext,
@@ -222,15 +223,30 @@ function resolveTarget(
       message: `Arguments could not be prepared for "${selector}": ${boundedError(error)}`,
     };
   }
+  if (!isRecord(prepared)) {
+    return { kind: 'error', message: `Prepared arguments for "${selector}" must be an object.` };
+  }
   const inputSchema = reference?.inputSchema ?? target.def.schema;
-  const mismatch = schemaMismatch(inputSchema, selector, prepared, selectorKind === 'tool_ref');
+  // Built-in on-demand tools get the same primitive coercion a direct call would
+  // ("2" -> 2 for integer fields). Host-bound tool_ref payloads stay structure-preserving.
+  let finalArguments: Record<string, unknown> = prepared;
+  if (selectorKind === 'tool_name') {
+    const coerced = coerceRuntimeToolInput(inputSchema, prepared);
+    if (isRecord(coerced)) finalArguments = coerced;
+  }
+  const mismatch = schemaMismatch(
+    inputSchema,
+    selector,
+    finalArguments,
+    selectorKind === 'tool_ref',
+  );
   if (mismatch) return { kind: 'error', message: mismatch };
   return {
     kind: 'resolved',
     selectorKind,
     selector,
     target,
-    arguments: isRecord(prepared) ? prepared : {},
+    arguments: finalArguments,
     inputSchema,
     ...(reference?.pluginName ? { pluginName: reference.pluginName } : {}),
   };
