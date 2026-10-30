@@ -10,7 +10,7 @@ import {
   type CanonicalPluginRoot,
 } from './filesystem.js';
 import { readOptionalMiniAppContribution } from './miniapp/reader.js';
-import { readerFail } from './reader-errors.js';
+import { ignoredManifestFieldDiagnostics, readerFail } from './reader-errors.js';
 import { readPluginHooks } from './hook/reader.js';
 import {
   MARKETPLACE_CATEGORY_NAMES,
@@ -151,7 +151,10 @@ export async function readMiniMaxPluginPackage(
     hostBindings,
     hooks: hookResult.hooks,
     ...(miniapp ? { miniapp } : {}),
-    diagnostics: hookResult.diagnostics,
+    diagnostics: [
+      ...hookResult.diagnostics,
+      ...ignoredManifestFieldDiagnostics(value, MANIFEST_FIELDS),
+    ],
   };
 }
 
@@ -311,8 +314,9 @@ function readManifest(value: Record<string, unknown>): MiniMaxManifest {
 }
 
 function assertManifestEnvelope(value: Record<string, unknown>): void {
-  if (Object.keys(value).some((key) => !MANIFEST_FIELDS.has(key))) {
-    readerFail('MANIFEST_SCHEMA_INVALID', 'MiniMax manifest contains an unknown field');
+  // Host capabilities are granted only through Host Bindings, never by a manifest claim.
+  if (Object.hasOwn(value, 'hostCapabilities')) {
+    readerFail('MANIFEST_SCHEMA_INVALID', 'MiniMax manifest cannot declare host capabilities');
   }
   if (
     (value.$schema !== undefined && typeof value.$schema !== 'string') ||
