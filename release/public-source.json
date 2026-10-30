@@ -3754,6 +3754,7 @@
     "third_party/pi-mono/packages/ai/test/anthropic-empty-thinking-signature-compat.test.ts",
     "third_party/pi-mono/packages/ai/test/anthropic-force-adaptive-thinking.test.ts",
     "third_party/pi-mono/packages/ai/test/anthropic-long-cache-retention-e2e.test.ts",
+    "third_party/pi-mono/packages/ai/test/anthropic-missing-stop-reason.test.ts",
     "third_party/pi-mono/packages/ai/test/anthropic-oauth.test.ts",
     "third_party/pi-mono/packages/ai/test/anthropic-opus-4-8-smoke.test.ts",
     "third_party/pi-mono/packages/ai/test/anthropic-sse-parsing.test.ts",

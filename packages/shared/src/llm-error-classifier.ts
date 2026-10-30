@@ -64,7 +64,8 @@ export type LLMErrorSignal =
   | 'image_limit'
   | 'invalid_request'
   | 'request_too_large'
-  | 'context_overflow';
+  | 'context_overflow'
+  | 'incomplete_stream';
 
 /**
  * Model-side safety classifier decline (Messages API `stop_reason: "refusal"`). Providers surface it
@@ -76,6 +77,20 @@ const PROVIDER_REFUSAL_MESSAGE_RE = /\bstop_reason:\s*refusal\b/i;
 /** True when an LLM error message reports a provider safety refusal; it must not be retried. */
 export function isLLMProviderRefusalMessage(message: string | undefined): boolean {
   return typeof message === 'string' && PROVIDER_REFUSAL_MESSAGE_RE.test(message);
+}
+
+/**
+ * pi-ai's Messages stream completeness guard for a provider stream that ended
+ * without a non-empty `stop_reason`: the upstream truncated the answer. Only this
+ * wording matches, whatever provider prefix precedes it; the `without
+ * message_start` / `before message_stop` guards keep their own classification.
+ * The diagnostics after it are event counts and timings, so they must never feed
+ * the numeric status/code heuristics.
+ */
+const MISSING_STOP_REASON_MESSAGE_RE = /\bstream ended without stop_reason\b/;
+
+function isLLMIncompleteStreamMessage(message: string | undefined): boolean {
+  return typeof message === 'string' && MISSING_STOP_REASON_MESSAGE_RE.test(message);
 }
 
 export interface LLMErrorFacts {
@@ -216,10 +231,16 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
       return { facts, ...(visibleMessage ? { sanitizedMessage: visibleMessage } : {}) };
     }
     const legacy = extractLegacyMessageFacts(visibleMessage);
+    const message = legacy.message ?? visibleMessage;
+    if (isLLMIncompleteStreamMessage(visibleMessage)) {
+      // Counts and millisecond timings in the diagnostics look like status codes
+      // (429, 1008, 2066, ...); keep only the structural signal.
+      signals.add('incomplete_stream');
+      return { facts, ...(message ? { sanitizedMessage: message } : {}) };
+    }
     facts.httpStatus ??= legacy.httpStatus;
     facts.upstreamStatusCode ??= legacy.upstreamStatusCode;
     facts.existingProtocolCode ??= legacy.existingProtocolCode;
-    const message = legacy.message ?? visibleMessage;
     applyMessageSignals(message, facts, signals);
     // Payload extraction keeps only the inner `message`, which drops a JSON
     // `type` such as `invalid_request_error`; check the raw text for the two
@@ -252,6 +273,8 @@ export function isLLMImageLimitMessage(message: string | undefined): boolean {
  * either recovered at once or not treated as a size rejection at all.
  */
 export function isLLMRequestTooLargeMessage(message: string | undefined): boolean {
+  // The missing-stop_reason diagnostics are counts and timings; a count of 413 is not a 413.
+  if (isLLMIncompleteStreamMessage(message)) return false;
   return (
     typeof message === 'string' &&
     LLM_REQUEST_TOO_LARGE_MESSAGE_RES.some((pattern) => pattern.test(message))
@@ -433,6 +456,8 @@ export function toLLMProtocolClassification(
     } else if (httpStatus !== undefined) {
       code = mapUpstreamHttpError(httpStatus);
     } else if (facts.timeout) {
+      code = LLM_ERROR_CODES.LLM_UPSTREAM_ERROR;
+    } else if (facts.signals.has('incomplete_stream')) {
       code = LLM_ERROR_CODES.LLM_UPSTREAM_ERROR;
     }
     return code === undefined
@@ -1021,13 +1046,16 @@ export function mapUpstreamHttpError(httpStatus: number): LLMErrorStatusCode | u
  *
  * Priority:
  * 1. Explicit payload errorCode / code (status_code enum).
- * 2. Upstream payload status_code matching UPSTREAM_STATUS_CODE_MAP (MiniMax 1400010161 / 2056 /
+ * 2. Provider stream that ended without a stop_reason (`stream ended without
+ *    stop_reason`) → LLM_UPSTREAM_ERROR(50113); the counts and timings in its
+ *    diagnostics take no part in the numeric checks below.
+ * 3. Upstream payload status_code matching UPSTREAM_STATUS_CODE_MAP (minimax 1400010161 / 2056 /
  *   2067).
- * 3. Message-only quota/credits signal, e.g. "usage limit exceeded (2056)".
- * 4. HTTP 429 + TPM provider message code → LLM_TPM_RATE_LIMITED(50150).
- * 5. LLM HTTP timeout signal → LLM_UPSTREAM_ERROR(50113).
- * 6. LLM transport network signal → LLM_UPSTREAM_ERROR(50113).
- * 7. HTTP status in payload / err.statusCode → mapUpstreamHttpError.
+ * 4. Message-only quota/credits signal, e.g. "usage limit exceeded (2056)".
+ * 5. HTTP 429 + TPM provider message code → LLM_TPM_RATE_LIMITED(50150).
+ * 6. LLM HTTP timeout signal → LLM_UPSTREAM_ERROR(50113).
+ * 7. LLM transport network signal → LLM_UPSTREAM_ERROR(50113).
+ * 8. HTTP status in payload / err.statusCode → mapUpstreamHttpError.
  *
  * Return null if unrecognized; callers fall back to ProtocolErrorCode.INTERNAL_ERROR.
  *
@@ -1058,6 +1086,14 @@ export function classifyLLMErrorToCode(
         message: extracted.message ?? fallbackMessage(err),
       };
     }
+  }
+  // 1b. Provider stream truncated before a stop_reason. Its diagnostics are
+  // event counts and timings, so stop before any numeric status/quota check.
+  if (isLLMIncompleteStreamMessage(extracted.message ?? fallbackMessage(err))) {
+    return {
+      status_code: LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
+      message: extracted.message ?? fallbackMessage(err),
+    };
   }
   // 2. Match upstream status_code.
   if (extracted.statusCode !== undefined && UPSTREAM_STATUS_CODE_MAP[extracted.statusCode]) {

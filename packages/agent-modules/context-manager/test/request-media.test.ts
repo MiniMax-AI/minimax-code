@@ -135,6 +135,16 @@ describe('isRequestMediaRejection', () => {
     expect(isRequestMediaRejection(rejection('rate limit exceeded'))).toBe(false);
     expect(isRequestMediaRejection(rejection('4130 tokens left'))).toBe(false);
   });
+
+  it('does not treat a missing stop_reason with a count of 413 as a size rejection', () => {
+    expect(
+      isRequestMediaRejection(
+        rejection(
+          'Provider stream ended without stop_reason (messageDeltaCount=1; rawEventCount=413; messageEventCount=413; lastEventAtMs=413; eofAtMs=413)',
+        ),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('placeholder text', () => {
