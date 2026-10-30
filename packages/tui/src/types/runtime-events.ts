@@ -100,6 +100,7 @@ export type TuiCompactionEvent = TuiRuntimeEventBase & {
 export type TuiContentLifecycleEvent =
   | (TuiRuntimeEventBase & {
       type: 'content.retry.exceeded';
+      turnId?: string;
       variant: 'content' | 'network' | 'auth';
       lastUserMsgId?: string;
     })

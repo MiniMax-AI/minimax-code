@@ -683,7 +683,11 @@ export class TuiChatController {
     });
   }
 
-  async reconcileOwnerHistory(retractActiveTurn = false): Promise<boolean> {
+  /** `retractedRuntimeTurnId`: a withdrawn Runtime-owned Turn whose live cells are dropped. */
+  async reconcileOwnerHistory(
+    retractActiveTurn = false,
+    retractedRuntimeTurnId?: string,
+  ): Promise<boolean> {
     if (retractActiveTurn && this.activeTurn) {
       this.activeTurn.retracted = true;
       this.pendingHistoryRefresh = true;
@@ -693,6 +697,9 @@ export class TuiChatController {
     if (this.activeTurn) {
       this.pendingHistoryRefresh = true;
       return false;
+    }
+    if (retractActiveTurn && retractedRuntimeTurnId) {
+      this.turnProjection.removeTurn(retractedRuntimeTurnId);
     }
     await this.refreshCurrentSessionHistory();
     return true;

@@ -174,6 +174,7 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       return compact({
         ...base,
         type: event.type,
+        turnId: readString(payload, ['turnId', 'turn_id']),
         variant,
         lastUserMsgId: readString(payload, ['lastUserMsgId', 'last_user_msg_id']),
       });
