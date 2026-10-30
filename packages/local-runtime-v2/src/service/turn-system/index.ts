@@ -38,7 +38,10 @@ export type {
 export type { TurnOutputContract } from './agent-host/contracts.js';
 export { isUserSteeringProducer } from './agent-host/contracts.js';
 export { digestTurnInput } from './execution/turn-input-identity.js';
-export { parseBackgroundTaskOriginMetadata } from './agent-host/contracts.js';
+export {
+  parseBackgroundTaskDeliveryOrigin,
+  parseBackgroundTaskOriginMetadata,
+} from './agent-host/contracts.js';
 export { queueClaimDeliveryInput } from './queue.dispatcher.js';
 export { composeTurnAdmissionPolicies } from './admission-contracts.js';
 export { initializeTurnSystem } from './initialize.js';

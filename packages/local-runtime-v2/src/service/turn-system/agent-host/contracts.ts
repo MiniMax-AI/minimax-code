@@ -153,6 +153,16 @@ export function parseBackgroundTaskOriginMetadata(
   };
 }
 
+/** Display snapshots stay on the queue message; AgentHost receives only execution metadata. */
+export function parseBackgroundTaskDeliveryOrigin(
+  value: unknown,
+): BackgroundTaskOriginMetadata | undefined {
+  if (!isProtocolRecord(value)) return undefined;
+  const metadata = { ...value };
+  delete metadata.tasks;
+  return parseBackgroundTaskOriginMetadata(metadata);
+}
+
 function readNonEmptyTaskIds(value: unknown): readonly string[] | undefined {
   if (
     !Array.isArray(value) ||

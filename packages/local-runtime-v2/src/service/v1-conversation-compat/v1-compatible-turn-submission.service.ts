@@ -9,7 +9,7 @@ import type {
 
 import { sanitizeDisplayAttachment } from '../session-system/index.js';
 import {
-  parseBackgroundTaskOriginMetadata,
+  parseBackgroundTaskDeliveryOrigin,
   type ActivateTurnResult,
   type AgentHostInputAttachment,
   type SteerSessionResult,
@@ -200,8 +200,10 @@ function isReviewTrigger(value: unknown): value is 'slash' | 'natural_language' 
 }
 
 function toAgentInput(message: ConversationMessageInput, trustBackgroundOrigin: boolean) {
+  // Same contract as the Queue dispatcher: the Bash display snapshot (`tasks`) stays on the
+  // display row; dropping the whole origin would turn the hidden notice into a real user.
   const origin = trustBackgroundOrigin
-    ? parseBackgroundTaskOriginMetadata(message.origin)
+    ? parseBackgroundTaskDeliveryOrigin(message.origin)
     : undefined;
   return {
     text: message.content,
