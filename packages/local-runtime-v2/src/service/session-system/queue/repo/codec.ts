@@ -99,8 +99,12 @@ function hasOptionalMetadata(value: Record<string, unknown>) {
     optionalRecord(value.channelContext, isChannelContext) &&
     optionalRecord(value.model, isModel) &&
     optionalRecord(value.immediateSendBatch, isQueueImmediateSendBatch) &&
+    validPtcEligibility(value) &&
     validDeliveryAttempts(value.deliveryAttempts)
   );
+}
+function validPtcEligibility(value: Record<string, unknown>): boolean {
+  return value.ptcEligible === undefined || (value.ptcEligible === true && value.source === 'api');
 }
 export function isQueueImmediateSendBatch(value: unknown): value is QueueImmediateSendBatch {
   if (

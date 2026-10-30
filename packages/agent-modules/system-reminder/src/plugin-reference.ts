@@ -45,12 +45,32 @@ export function detectPluginReferencesForMessages<T extends EffectivePluginCapab
   return selected;
 }
 
+export interface PluginReferenceReminderOptions {
+  /**
+   * This Turn runs with PTC (programmatic tool calling). Tool Search results
+   * are then called inside run_code and no name-routed mcp_invoke exists, so
+   * the reminder names the run_code call form, worded like the PTC Tool Search
+   * hint. Without PTC the text is unchanged.
+   */
+  readonly ptc?: boolean;
+}
+
+const PTC_RUN_CODE_CALL =
+  'inside run_code like any other tool: `await tools.<name>(args)`, or `await tools["<name>"](args)` when the name contains characters such as `-`.';
+
+/** The `via ...` marker of a capability discovered through Tool Search. */
+function toolSearchAccess(ptc: boolean): string {
+  return ptc ? 'via `tool_search` + `run_code`' : 'via `tool_search` + `mcp_invoke`';
+}
+
 /** Render one self-contained reminder for every Plugin selected in this turn. */
 export function buildPluginReferenceReminder(
   plugins: readonly EffectivePluginCapabilityInventory[],
   unavailablePluginIds: readonly string[] = [],
+  options: PluginReferenceReminderOptions = {},
 ): string | undefined {
   if (plugins.length === 0 && unavailablePluginIds.length === 0) return undefined;
+  const ptc = options.ptc === true;
   const blocks = plugins.slice(0, 8).map((plugin) => {
     const name = inlineCode(plugin.name);
     const detail = [
@@ -62,7 +82,7 @@ export function buildPluginReferenceReminder(
       '</connected-app-tools>',
       '',
       '<plugin-mcp-tools>',
-      formatToolGroups(plugin.mcpTools, 'server'),
+      formatToolGroups(plugin.mcpTools, 'server', ptc),
       '</plugin-mcp-tools>',
       '',
       '<plugin-skills>',
@@ -109,7 +129,9 @@ export function buildPluginReferenceReminder(
       [...plugin.appTools, ...plugin.mcpTools].some((group) => group.access === 'tool_search'),
     )
       ? [
-          'For tools marked `via tool_search + mcp_invoke`, discover the exact tool with `tool_search` before calling it through `mcp_invoke`.',
+          ptc
+            ? `For capabilities marked \`via tool_search + run_code\`, discover the exact tool with \`tool_search\`, read its complete parameter schema, then call it ${PTC_RUN_CODE_CALL}`
+            : 'For capabilities marked `via tool_search + mcp_invoke`, discover the exact tool with `tool_search`, read its complete parameter schema, then call it through `mcp_invoke`.',
         ]
       : []),
     'Before following a listed Skill, call the `skill` tool with its exact name.',
@@ -168,7 +190,8 @@ function detectReferencesInText<T extends EffectivePluginCapabilityInventory>(
 
 function formatToolGroups(
   groups: readonly EffectivePluginToolGroup[],
-  label: 'app' | 'server',
+  label: 'app' | 'server' | 'host',
+  ptc: boolean,
 ): string {
   if (groups.length === 0) return 'none';
   return [...groups]
@@ -176,7 +199,7 @@ function formatToolGroups(
     .sort((left, right) => normalizedName(left.source).localeCompare(normalizedName(right.source)))
     .map((group) => {
       const tools = formatToolNames(group.tools);
-      const access = group.access === 'tool_search' ? ' via `tool_search` + `mcp_invoke`' : '';
+      const access = group.access === 'tool_search' ? ` ${toolSearchAccess(ptc)}` : '';
       return `- ${label} \`${inlineCode(group.source)}\`${access}: ${tools || 'none'}`;
     })
     .join('\n');

@@ -252,6 +252,9 @@ export class ForkService {
         : {}),
       title: resolveChildTitle(request, suggestedTitle),
       ...(source.appMode ? { appMode: source.appMode } : {}),
+      // The copied history was built under the source's mode; keep it so the fork's prefix
+      // matches. A source from before the field existed ran native.
+      toolCallMode: source.toolCallMode ?? 'native',
       ...(runLocation ? { runLocation } : {}),
       ...(source.effectiveModel !== undefined ? { effectiveModel: source.effectiveModel } : {}),
       ...(source.effectiveModelVariant !== undefined

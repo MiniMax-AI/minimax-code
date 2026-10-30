@@ -11,7 +11,12 @@ import {
 import { RespDataType, Role, type AgentMessage } from '@mavis/agent-core/protocol/agent-message';
 import type { CompactionTokenUsage } from '@mavis/shared/global-events';
 
-import type { MessageRepository } from './messages/repo/contract.js';
+import type { DisplayMessageRecord, MessageRepository } from './messages/repo/contract.js';
+import {
+  mergePtcDisplayToolCalls,
+  ptcToolCallDisplayMessage,
+} from './messages/ptc/display-tool-calls.js';
+import { projectPtcSafetyDisplay } from './messages/ptc/safety-reconcile.js';
 import type { QueryCollapseProjector } from './query-collapse-projector.js';
 import type {
   ConversationActionProjectionService,
@@ -19,6 +24,10 @@ import type {
 } from './messages/query/conversation-action-projection.js';
 import type { SessionStateWriter } from './sessions/recovery/capabilities.js';
 import type { SessionRepository } from './sessions/repo/contract.js';
+import {
+  refreshToolCallModeAfterCompaction,
+  type SessionToolCallModeRefresh,
+} from './sessions/support/tool-call-mode.js';
 import type { SessionStreamWriter } from './stream/session-frame.js';
 
 export interface SessionAgentEventContext {
@@ -43,7 +52,7 @@ export interface SessionAgentProjectionInput {
 export interface SessionSystemAgentProjectionOptions {
   readonly state: Pick<SessionStateWriter, 'markStarted' | 'markIdle' | 'markTerminal'>;
   readonly sessions: Pick<SessionRepository, 'update'>;
-  readonly messages: Pick<MessageRepository, 'upsert' | 'listTurn' | 'rewind'>;
+  readonly messages: Pick<MessageRepository, 'get' | 'upsert' | 'listTurn' | 'rewind'>;
   readonly stream: Pick<SessionStreamWriter, 'write'>;
   readonly conversationActions?: Pick<ConversationActionProjectionService, 'projectTerminalTurn'>;
   readonly conversationFacts: SessionConversationFactSink;
@@ -58,6 +67,7 @@ export interface SessionSystemAgentProjectionOptions {
     counter(name: string, delta?: number, labels?: Record<string, string>): void;
     histogram(name: string, value: number, labels?: Record<string, string>): void;
   };
+  readonly toolCallMode?: SessionToolCallModeRefresh;
   readonly nowMs?: () => number;
 }
 
@@ -74,15 +84,21 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
     },
     messages: {
       projectRuntimeEvent: async (input: SessionAgentProjectionInput) => {
-        const message = displayMessage(input.event);
+        const message =
+          displayMessage(input.event) ?? ptcToolCallDisplayMessage(streamResponseData(input.event));
         if (message && !isTerminalAssistantDisplayError(message)) {
           const queryKey = await queryKeyForTurn(options, input.context);
+          const merged = await mergePtcDisplayToolCalls(
+            options.messages,
+            input.context.sessionId,
+            message,
+          );
           await options.messages.upsert(
             {
               sessionId: input.context.sessionId,
               turnId: input.context.turnId,
               message: {
-                ...message,
+                ...merged,
                 turn_id: input.context.turnId,
                 ...(queryKey ? { query_key: queryKey } : {}),
               },
@@ -91,10 +107,11 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
                 ? { sourceContext: input.context.provenance.sourceContext }
                 : {}),
             },
-            // Complete tool messages describe work already executed, including
-            // abort cleanup. Persist these facts within the write-lock budget
-            // even when the lease is cancelled; text-only waits may stop early.
-            message.tool_calls?.length ? undefined : { signal: input.signal },
+            // Tool results and approved abort partials are cleanup facts. Persist
+            // them within the write-lock budget even when the lease is cancelled.
+            message.tool_calls?.length || message.finish_reason === 'aborted'
+              ? undefined
+              : { signal: input.signal },
           );
         }
         await projectQueryCollapse(() => options.queryCollapse?.projectRuntimeEvent(input));
@@ -188,6 +205,9 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
         compactionLane.run(input.attemptId, async () => {
           await writeCompactionFact(options, input, 'compaction');
           recordCompletedCompactionMetrics(options, input, startedCompactions.get(input.attemptId));
+          // Reached only after AgentHost durably committed the replacement history (automatic
+          // and manual alike); failed, skipped or deferred compactions never get here.
+          await refreshToolCallModeAfterCompaction(options.toolCallMode, input.context.sessionId);
         }),
       failCommittedHistory: (input: SessionCompactionFailureInput) =>
         compactionLane.run(input.attemptId, () =>
@@ -347,6 +367,7 @@ export interface SessionAgentHistoryProjectionInput {
     readonly operation: {
       readonly kind: string;
       readonly variant?: 'content' | 'network' | 'auth';
+      readonly slowNetworkRead?: true;
     };
   };
 }
@@ -476,6 +497,13 @@ async function projectCommittedConversation(
   options: SessionSystemAgentProjectionOptions,
   input: SessionAgentHistoryProjectionInput,
 ): Promise<void> {
+  if (input.change.operation.kind === 'safety-reconcile') {
+    await projectPtcSafetyDisplay(options.messages, options.stream, input.context);
+    return;
+  }
+  const slowNetworkRead = input.change.operation.slowNetworkRead
+    ? { slowNetworkRead: true as const }
+    : {};
   if (input.change.operation.kind === 'network-reconcile') {
     await options.conversationFacts.handle({
       kind: 'network-stopped',

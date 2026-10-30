@@ -17,6 +17,7 @@ import {
 } from "@mavis/agent-core/pi-turn-runner";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import {
+  defineRuntimeTool,
   toRuntimeTool,
   type RuntimeTool,
   type ToolExecutionContext,
@@ -1159,6 +1160,66 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
         assembly: { ...input.assembly, tools: [bash, output] },
       });
       expect(startBackground).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    },
+  );
+});
+
+describe('LocalRuntimeTurnExecutor PTC program Bash promotion', () => {
+  it.each([
+    { name: 'a native task_output', source: 'builtin' as const, allowed: true },
+    { name: 'a native task_output without source', source: undefined, allowed: true },
+    { name: 'a configured task_output namesake', source: 'configured' as const, allowed: false },
+    { name: 'no task_output', source: null, allowed: false },
+  ])(
+    'sets the Turn fact on a PTC Turn with $name and keeps the foreground Bash wording in run_code',
+    async ({ source, allowed }) => {
+      const bash = toRuntimeTool(
+        new LocalBashTool('/tmp/workspace', { startBackground: vi.fn() }, { mode: 'off' }),
+      );
+      const output = {
+        impl: runtimeMatrixTool().impl,
+        def: { ...runtimeMatrixTool().def, name: 'task_output' },
+        ...(source ? { source } : {}),
+      };
+      const catalog = buildLocalTurnToolCatalog({
+        sessionId: 'session-1',
+        sources: {
+          nativeTools: source === null ? [bash] : [bash, output],
+          mcpEntries: [],
+          threadGoalTools: [],
+          cuRuntimeAvailable: false,
+        },
+        agentProfile: {
+          trustedBuiltin: true,
+          canonicalRole: 'mavis',
+          surface: 'interactive',
+          capabilityCeiling: {
+            personaEnabled: true,
+            features: { mavis: true, delegation: true, webSearch: true },
+          },
+        },
+        llmModel: { provider: 'p', id: 'm', contextWindow: 100_000 },
+        env: {},
+        ptcEnabled: true,
+      });
+      const input = executionInput();
+      await new LocalRuntimeTurnExecutor(
+        options(async (runInput) => {
+          // The Turn's own fact, as for a direct call. Agent Core still gives
+          // every run_code child false (ptc-tool-executor.ts).
+          expect(runInput.toolContext).toHaveProperty('allowBashAutoPromotion', allowed);
+          expect(runInput.ptcTools?.map(({ def }) => def.name)).toEqual(
+            source === null ? ['bash'] : ['bash', 'task_output'],
+          );
+          // task_output and bash are run_code children only, never top-level.
+          // tool_search is listed on every Turn since on-demand loading.
+          expect(runInput.tools?.map(({ def }) => def.name)).toEqual(['run_code', 'tool_search']);
+          const description = runInput.tools?.[0]?.def.description ?? '';
+          expect(description).not.toContain('moves to the background');
+          expect(description).toContain('extends the program to fit it');
+          await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+        }),
+      ).execute({ ...input, assembly: { ...input.assembly, tools: catalog.tools } });
     },
   );
 });

@@ -1,3 +1,4 @@
+import { readImageEncodedContent } from '@mavis/agent-core/tools';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@earendil-works/pi-coding-agent/image-resize', async (importOriginal) => {
@@ -17,9 +18,13 @@ describe('image processor unavailable', () => {
       { type: 'image', data: 'AAAA', mimeType: 'image/png' },
     ];
 
-    await expect(encodeRequestImageBlocks(blocks)).resolves.toEqual([
+    const output = await encodeRequestImageBlocks(blocks);
+    expect(output).toEqual([
       { type: 'text', text: 'Read image file [image/png]' },
       { type: 'text', text: '[Image omitted: image processing runtime is unavailable.]' },
+    ]);
+    expect(readImageEncodedContent(output, JSON.stringify(blocks))).toEqual([
+      { mimeType: 'image/png', omittedReason: 'processor_unavailable' },
     ]);
   });
 

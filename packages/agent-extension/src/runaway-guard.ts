@@ -27,6 +27,7 @@ export {
   type RunawayGuardReplayInput,
   type RunawayGuardReplayResult,
   type RunawayGuardToolPolicy,
+  type RunawayGuardChildStep,
   type RunawayGuardTrustedToolProvenance,
   type RunawayGuardObservation,
   type RunawayGuardSignalSummary,

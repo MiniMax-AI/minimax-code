@@ -290,6 +290,11 @@ export interface LocalPermissionRequest {
   persistWholeToolRuleOnReply?: boolean;
   toolInput?: string;
   toolDescription?: string;
+  /** PTC only: the run_code child call this approval belongs to. */
+  parentToolCallId?: string;
+  parentToolDescription?: string;
+  /** PTC only: denying this child call stops the whole program instead of failing one call. */
+  stopPtcOnDeny?: boolean;
   reason: string;
   createdAt: number;
   /**

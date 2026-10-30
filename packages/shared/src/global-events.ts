@@ -282,6 +282,12 @@ export type GlobalEventPayloadMap = {
     ruleContents: string[];
     toolInput?: string;
     toolDescription?: string;
+    /** Parent run_code id for a PTC child request. */
+    parentToolCallId?: string;
+    /** Model-provided outer run_code description, displayed by current Desktop UI. */
+    parentToolDescription?: string;
+    /** Denial stops only the enclosing PTC program, never the entire Turn. */
+    stopPtcOnDeny?: boolean;
     reason: string;
     allowAlwaysSupported: boolean;
     createdAt: number;

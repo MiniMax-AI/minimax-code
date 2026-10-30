@@ -56,6 +56,7 @@ export interface SessionMetadataCreateInput {
   readonly originCronId?: string;
   readonly runLocation?: SessionRecord['runLocation'];
   readonly appMode?: NonNullable<SessionRecord['appMode']>;
+  readonly toolCallMode?: SessionRecord['toolCallMode'];
   readonly effectiveModel?: string;
   readonly effectiveModelVariant?: string;
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;

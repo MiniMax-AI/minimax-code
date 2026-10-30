@@ -35,6 +35,11 @@ export type SessionRunLocationMode = (typeof SESSION_RUN_LOCATION_MODES)[number]
 export type SessionDataOrigin = 'local-runtime' | 'legacy-opencode' | 'unknown';
 export type SessionOrigin = 'user' | 'root-repair';
 export type AppMode = 'coding' | 'work';
+/**
+ * How a Session calls tools: `ptc` hides ordinary tools behind run_code, `native` calls them
+ * directly. Absent (Sessions created before the field existed) reads as `native`.
+ */
+export type SessionToolCallMode = 'native' | 'ptc';
 export type SessionInteractionMode = 'plan' | 'goal';
 
 export interface SessionRunLocation {
@@ -61,6 +66,11 @@ export interface SessionRecord {
   readonly originCronId?: string;
   readonly runLocation?: SessionRunLocation;
   readonly appMode?: AppMode;
+  /**
+   * Set when the Session is created and refreshed only after a compaction, so a `beta.ptc`
+   * toggle never rewrites the prompt prefix of an ongoing conversation.
+   */
+  readonly toolCallMode?: SessionToolCallMode;
   readonly interactionMode?: SessionInteractionMode;
   readonly memoryPolicy?: SessionMemoryPolicy;
   readonly status: SessionStatus;
@@ -113,6 +123,7 @@ export interface SessionCreateInput {
   readonly isDefaultWorkspace?: boolean;
   readonly runLocation?: SessionRecord['runLocation'];
   readonly appMode?: SessionRecord['appMode'];
+  readonly toolCallMode?: SessionRecord['toolCallMode'];
   readonly errorMessage?: string;
   readonly errorCode?: number;
   readonly errorSource?: string;

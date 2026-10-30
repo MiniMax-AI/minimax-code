@@ -2,7 +2,9 @@ import type {
   AgentHostTurnCapabilityView as DesktopTurnCapabilityView,
   AgentHostTurnRuntimeToolBinding as DesktopTurnRuntimeToolBinding,
 } from '../../turn-system/index.js';
+import { attachProgrammaticErrorRaw } from '@mavis/agent-core/tools';
 import {
+  describeMcpCallError,
   McpNameRegistry,
   pluginMcpNameKey,
   McpConnectionPool,
@@ -449,13 +451,30 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
       def,
       impl: freeze({
         execute: async (_context, input, signal) => {
-          const result = await this.pool.callTool(
-            poolName(entry),
-            tool.name,
-            toRecord(input),
-            undefined,
-            signal ? { signal } : undefined,
-          );
+          let result: McpToolCallResult;
+          try {
+            result = await this.pool.callTool(
+              poolName(entry),
+              tool.name,
+              toRecord(input),
+              undefined,
+              signal ? { signal } : undefined,
+            );
+          } catch (error) {
+            // The thrown error still fails the call exactly as before; PTC
+            // scripts additionally get the JSON-RPC or connection error as
+            // `error.raw`. Only the error class and code are logged.
+            const raw = describeMcpCallError(error);
+            const attached = raw !== undefined && attachProgrammaticErrorRaw(error, raw);
+            this.logger.warn('Plugin MCP tool call failed', {
+              pluginName: entry.pluginName,
+              serverName: entry.server.name,
+              toolName: tool.name,
+              errorCode: raw?.code ?? null,
+              rawAttached: attached,
+            });
+            throw error;
+          }
           const text = mcpContentToText(result);
           const content = toToolResultContent(result, text);
           return {
@@ -470,6 +489,10 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
               plugin: entry.pluginName,
             },
             output: { mcp: result },
+            // PTC-only: structuredContent becomes `data` on success and on isError.
+            ...(isPlainRecord(result.structuredContent)
+              ? { programmatic: { data: result.structuredContent } }
+              : {}),
           };
         },
       }),
@@ -551,6 +574,10 @@ function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function toToolResultContent(

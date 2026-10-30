@@ -63,6 +63,8 @@ export function createSessionForkDataCapability(input: {
               }
             : {}),
           ...(session.appMode ? { appMode: session.appMode } : {}),
+          // ForkService always sets it from the source; no branch keeps create() under budget.
+          toolCallMode: session.toolCallMode,
           ...(session.runLocation ? { runLocation: session.runLocation } : {}),
           ...(await readForkedBindingFields(input.records, session)),
           ...(session.effectiveModel !== undefined
@@ -133,6 +135,7 @@ type ForkSessionInput = {
   readonly isDefaultWorkspace?: SessionRecord['isDefaultWorkspace'];
   readonly title: string;
   readonly appMode?: SessionRecord['appMode'];
+  readonly toolCallMode?: SessionRecord['toolCallMode'];
   readonly runLocation?: Parameters<
     SessionRecordService['createInternalSession']
   >[0]['runLocation'];

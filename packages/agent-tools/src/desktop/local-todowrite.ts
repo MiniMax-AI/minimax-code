@@ -3,6 +3,7 @@ import { updateTodoState } from '@mavis/system-reminder';
 
 import { LocalTodoWriteToolDef, type LocalTodoWriteToolInput } from './builtin-defs.js';
 import type { LocalRuntimeToolContext, LocalTodoEventSink } from './types.js';
+import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 
 type TodoItem = LocalTodoWriteToolInput['todos'][number];
 
@@ -51,19 +52,23 @@ export class LocalTodoWriteTool implements ToolImpl<
     const completed = todos.filter((t) => t.status === 'completed').length;
     const cancelled = todos.filter((t) => t.status === 'cancelled').length;
     const text = TODO_WRITE_SUCCESS;
-    return {
-      tool_name: LocalTodoWriteToolDef.name,
-      text,
-      content: [{ type: 'text', text }],
-      details: {
-        todos,
-        total: todos.length,
-        active,
-        completed,
-        cancelled,
-        event_emitted: eventEmitted,
+    return withDesktopCompletenessReport(
+      LocalTodoWriteToolDef.name,
+      {
+        tool_name: LocalTodoWriteToolDef.name,
+        text,
+        content: [{ type: 'text', text }],
+        details: {
+          todos,
+          total: todos.length,
+          active,
+          completed,
+          cancelled,
+          event_emitted: eventEmitted,
+        },
       },
-    };
+      { data: { total: todos.length, active, completed, cancelled } },
+    );
   }
 }
 

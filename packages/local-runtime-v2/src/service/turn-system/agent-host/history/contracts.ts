@@ -49,8 +49,14 @@ export type HistoryReconcileIntent =
       readonly kind: 'output-recall';
       readonly source?: 'input-review' | 'output-review';
       readonly variant: 'content' | 'network' | 'auth';
+      readonly slowNetworkRead?: true;
     }
-  | { readonly kind: 'network-reconcile'; readonly approvedContent: string }
+  | {
+      readonly kind: 'network-reconcile';
+      readonly approvedContent: string;
+      readonly slowNetworkRead?: true;
+    }
+  | { readonly kind: 'safety-reconcile'; readonly approvedContent: string }
   | { readonly kind: 'abort-reconcile'; readonly approvedContent: string };
 
 export type HistoryCommitOperationKind =
@@ -60,6 +66,7 @@ export type HistoryCommitOperationKind =
   | 'output-recall'
   | 'turn-retraction'
   | 'network-reconcile'
+  | 'safety-reconcile'
   | 'abort-reconcile';
 
 export interface HistoryCommitOperation {
@@ -112,7 +119,7 @@ export interface SettleTurnTailMutation {
   readonly kind: 'settle-turn-tail';
   readonly sessionId: string;
   readonly turnId: string;
-  readonly mode: 'abort' | 'network';
+  readonly mode: 'abort' | 'network' | 'safety';
   readonly approvedContent: string;
   readonly operation: HistoryCommitOperation;
 }

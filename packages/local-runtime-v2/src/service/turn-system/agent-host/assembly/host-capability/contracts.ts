@@ -36,5 +36,7 @@ export interface PreparedHostCapabilities {
 }
 
 export interface HostCapabilityResolver {
+  /** Desktop keeps its gateway; CLI and its children add it only for real refs/deferred tools. */
+  readonly reserveInlineGateway?: boolean;
   prepare(input: HostCapabilityPrepareInput): PreparedHostCapabilities;
 }

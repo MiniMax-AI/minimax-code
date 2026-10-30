@@ -1,7 +1,11 @@
+import { readPtcExecutionDetails } from '@mavis/agent-core/tools';
 import type { RunawayGuardToolPolicy } from '@mavis/agent-extension';
 
 type RunawayGuardToolStep = Parameters<NonNullable<RunawayGuardToolPolicy['projectProgress']>>[0];
 type RunawayGuardToolResult = RunawayGuardToolStep['result'];
+type RunawayGuardChildStep = ReturnType<
+  NonNullable<RunawayGuardToolPolicy['projectChildSteps']>
+>[number];
 
 /** Shared by production assembly and offline replay so typed task rules cannot drift. */
 export function createProductionRunawayGuardToolPolicies(): Readonly<
@@ -28,7 +32,50 @@ export function createProductionRunawayGuardToolPolicies(): Readonly<
       kind: 'polling',
       projectProgress: projectTaskOutputProgress,
     },
+    run_code: {
+      kind: 'detect',
+      projectChildSteps: projectRunCodeChildSteps,
+    },
   };
+}
+
+/**
+ * A run_code result stays successful when its children fail, so the guard
+ * reads the children from the host-written PTC envelope of this exact call.
+ * Text is never parsed; a missing or untrusted envelope yields no children.
+ */
+function projectRunCodeChildSteps(step: RunawayGuardToolStep): readonly RunawayGuardChildStep[] {
+  if (step.toolName !== 'run_code' || step.result?.toolName !== 'run_code') return [];
+  const ptc = readPtcExecutionDetails({
+    role: 'toolResult',
+    toolName: step.result.toolName,
+    details: step.result.details,
+  });
+  if (!ptc) return [];
+  const errors = new Map<string, { readonly code: string; readonly toolErrorCode?: string }>();
+  for (const fact of ptc.retained_facts) {
+    if (fact.kind !== 'child_error' || errors.has(fact.child_tool_call_id)) continue;
+    errors.set(fact.child_tool_call_id, {
+      code: fact.code,
+      ...(fact.tool_error_code === undefined ? {} : { toolErrorCode: fact.tool_error_code }),
+    });
+  }
+  return ptc.child_calls
+    .filter((call) => call.parent_tool_call_id === step.toolCallId)
+    .map((call) => {
+      const isError = call.is_error === true;
+      const error = isError ? errors.get(call.child_tool_call_id) : undefined;
+      // The envelope keeps arguments only for a few builtin tools and writes an
+      // empty object for the rest, so empty means "not kept", never "no arguments".
+      const kept = call.input && Object.keys(call.input).length > 0 ? call.input : undefined;
+      return {
+        toolName: call.tool_name,
+        ...(kept ? { arguments: kept } : {}),
+        isError,
+        ...(error ? { errorCode: error.code } : {}),
+        ...(error?.toolErrorCode === undefined ? {} : { toolErrorCode: error.toolErrorCode }),
+      };
+    });
 }
 
 function isExpectedShellSearchNoMatch(

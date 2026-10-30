@@ -8,6 +8,7 @@ import type {
   QueueDispatchCapability,
   QueueDispatchClaim,
   QueueItem,
+  PtcCrashRecoveryTerminalFact,
   SessionHistoryMutationCapability,
   SessionSystemCanonicalHistoryProvider,
   SessionMaintenanceGuard,
@@ -619,7 +620,11 @@ export interface TurnSystemSessionCapabilities {
       recoverPreviousProcess(input: {
         readonly processStartedAtMs: number;
         readonly protectedSessionIds?: readonly string[];
-      }): Promise<{ readonly interruptedSessionIds: readonly string[] }>;
+        readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
+      }): Promise<{
+        readonly interruptedSessionIds: readonly string[];
+        readonly recoveredPtcTurnIds?: readonly string[];
+      }>;
     };
     readonly deletion: {
       begin(

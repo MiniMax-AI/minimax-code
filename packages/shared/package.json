@@ -84,6 +84,10 @@
       "types": "./src/logging/index.ts",
       "import": "./dist/logging/index.js"
     },
+    "./logging/redact-log-secret": {
+      "types": "./src/logging/redact-log-secret.ts",
+      "import": "./dist/logging/redact-log-secret.js"
+    },
     "./mavis-widget-types": {
       "types": "./src/mavis-widget-types.ts",
       "import": "./dist/mavis-widget-types.js"
@@ -219,6 +223,9 @@
       ],
       "logging": [
         "src/logging/index.ts"
+      ],
+      "logging/redact-log-secret": [
+        "src/logging/redact-log-secret.ts"
       ],
       "mavis-tags": [
         "src/mavis-tags.ts"

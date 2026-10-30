@@ -270,7 +270,11 @@ class DrizzleQueueRepository implements QueueRepository {
       const item = this.find(db, sessionId, itemId);
       if (!item) return committed(undefined, facts);
       if (item.status !== 'queued') return committed('not_editable', facts);
-      const updated = { ...item, source };
+      const updated = {
+        ...item,
+        source,
+        ptcEligible: source === 'api' ? item.ptcEligible : undefined,
+      };
       this.write(db, updated);
       return committed(updated, facts);
     });

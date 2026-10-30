@@ -1,8 +1,12 @@
 import {
+  attachProgrammaticErrorData,
   bindTool,
+  type PtcChildDeadline,
+  type PtcChildTimeoutDecision,
   type ToolImpl,
   type ToolResult,
   type ToolResultContent,
+  withProgrammaticResult,
 } from '@mavis/agent-core/tools';
 import { sanitizeBashSubprocessEnv } from '@mavis/agent-core/bash-subprocess-env';
 import {
@@ -13,7 +17,11 @@ import {
 } from '@earendil-works/pi-coding-agent/tools';
 import { getShellConfig } from '@earendil-works/pi-coding-agent/shell';
 import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
-import { access } from 'node:fs/promises';
+import { access, readFile } from "node:fs/promises";
+import {
+  IMAGE_DIMENSION_HEADER_BYTES,
+  parseImageDimensionsFromBytes,
+} from "@mavis/shared/image-dimensions";
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { homedir, release } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -72,6 +80,8 @@ import {
 import { isPdfReadPath, readPdfAsToolResult } from '../shared/read-pdf.js';
 import { isNotebookReadPath, readNotebookAsToolResult } from '../shared/read-notebook.js';
 import { piReadResultToToolResult, readErrorResult } from '../shared/read-result.js';
+import { READ_MAX_LINE_CHARS } from '../shared/read-contract.js';
+import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 import {
   executeEditWithLineNumberRetry,
   normalizeEditsForLineNumberRetry,
@@ -130,6 +140,20 @@ export class LocalReadTool implements ToolImpl<
     input: LocalReadToolInput,
     signal?: AbortSignal,
   ): Promise<ToolResult> {
+    try {
+      return await this.read(ctx, input, signal);
+    } catch (error) {
+      // Pi keeps only the message; PTC data still says what kind of read failed.
+      attachProgrammaticErrorData(error, { kind: readKind(input.path) });
+      throw error;
+    }
+  }
+
+  private async read(
+    ctx: LocalRuntimeToolContext,
+    input: LocalReadToolInput,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     if (signal?.aborted) throw new Error('Operation aborted');
     const readAbs = await resolveLocalReadPath(input.path, this.workspaceRoot);
 
@@ -137,13 +161,16 @@ export class LocalReadTool implements ToolImpl<
     // every later step that opens the file (binary sampling, PDF/notebook
     // parsing, pi itself) would hang forever on /dev/zero-style paths.
     const deviceError = checkBlockedDeviceRead(readAbs);
-    if (deviceError) return readErrorResult(LocalReadToolDef.name, deviceError);
+    if (deviceError)
+      return withReadKind(readErrorResult(LocalReadToolDef.name, deviceError), 'text');
 
     // Closes the FIFO/socket/block-device blind spot the path-only device
     // guard misses (one stat, follows symlinks) — a named pipe would block
     // the whole turn just like /dev/zero.
     const irregularError = await checkNonRegularFileRead(readAbs);
-    if (irregularError) return readErrorResult(LocalReadToolDef.name, irregularError);
+    if (irregularError) {
+      return withReadKind(readErrorResult(LocalReadToolDef.name, irregularError), 'text');
+    }
 
     // pi natively inlines images (jpg/png/gif/webp). Video is not part of
     // pi's built-in mime detection, so we mirror cloud-runtime here: when
@@ -154,13 +181,16 @@ export class LocalReadTool implements ToolImpl<
     const videoMime = inferReadVideoMimeType(readAbs);
     if (videoMime) {
       try {
-        return await readVideoAsToolResult({
-          toolName: LocalReadToolDef.name,
-          absolutePath: readAbs,
-          mimeType: videoMime,
-          capabilities: ctx.parentAgentConfig?.model?.capabilities,
-          signal,
-        });
+        return withReadKind(
+          await readVideoAsToolResult({
+            toolName: LocalReadToolDef.name,
+            absolutePath: readAbs,
+            mimeType: videoMime,
+            capabilities: ctx.parentAgentConfig?.model?.capabilities,
+            signal,
+          }),
+          'video',
+        );
       } catch (err) {
         if (!isFsNotFoundError(err)) throw err;
         // ENOENT — let pi retry with its macOS-aware path variants.
@@ -170,25 +200,33 @@ export class LocalReadTool implements ToolImpl<
     // PDF / notebook dispatch: these never reach pi (which would read them
     // as UTF-8 garbage / raw JSON).
     if (isPdfReadPath(readAbs)) {
-      return readPdfAsToolResult({
-        toolName: LocalReadToolDef.name,
-        absolutePath: readAbs,
-        pages: input.pages,
-        signal,
-      });
+      return withReadKind(
+        await readPdfAsToolResult({
+          toolName: LocalReadToolDef.name,
+          absolutePath: readAbs,
+          pages: input.pages,
+          signal,
+        }),
+        'pdf',
+      );
     }
     if (isNotebookReadPath(readAbs)) {
-      return readNotebookAsToolResult({
-        toolName: LocalReadToolDef.name,
-        absolutePath: readAbs,
-        signal,
-      });
+      return withReadKind(
+        await readNotebookAsToolResult({
+          toolName: LocalReadToolDef.name,
+          absolutePath: readAbs,
+          signal,
+        }),
+        'notebook',
+      );
     }
 
     // Binary guard: pi would decode anything else as UTF-8 — turn silent
     // garbage into an explicit, recoverable tool error.
     const binary = await detectBinaryRead(readAbs);
-    if (binary.binary) return readErrorResult(LocalReadToolDef.name, binary.message);
+    if (binary.binary) {
+      return withReadKind(readErrorResult(LocalReadToolDef.name, binary.message), 'text');
+    }
 
     // Strip `pages` before delegating: pi's read schema does not know the
     // parameter, and models occasionally send it for non-PDF files.
@@ -197,8 +235,139 @@ export class LocalReadTool implements ToolImpl<
     const result = piReadResultToToolResult(LocalReadToolDef.name, res, {
       offset: input.offset,
     });
-    return limitDesktopReadTextResult(result, input.offset);
+    return withReadProgrammaticResult(
+      limitDesktopReadTextResult(result, input.offset),
+      input.limit,
+    );
   }
+}
+
+/**
+ * PTC payload of a text read: the window's original text without line
+ * numbers, cut exactly where the output was cut (Desktop 24 KiB prefix,
+ * 2000-character lines) so data never shows more than the model text, plus
+ * the completeness statement. A read that stopped at the caller's `limit`
+ * with lines left is complete but reports hasMore and the next line offset.
+ */
+function withReadProgrammaticResult(result: ToolResult, limit: number | undefined): ToolResult {
+  const data = readTextData(result);
+  if (!data) {
+    const image = readImageData(result);
+    return withDesktopCompletenessReport(
+      LocalReadToolDef.name,
+      result,
+      image ? { data: image } : {},
+    );
+  }
+  // Only a caller's `limit` stops a complete read early; without one Pi reads
+  // to the end or marks a cut. Same condition and offset as Pi's own
+  // "[N more lines in file. Use offset=X to continue.]" (Pi core/tools/read.ts),
+  // whose line count includes the empty piece after a trailing newline, so
+  // data and model text never disagree.
+  const more =
+    limit !== undefined && Number.isSafeInteger(limit) && limit > 0
+      ? data.startLine - 1 + limit < data.totalLines
+      : false;
+  return withDesktopCompletenessReport(LocalReadToolDef.name, result, {
+    data,
+    ...(more && limit !== undefined
+      ? { more: { nextOffset: data.startLine + limit, offsetUnit: 'line' as const } }
+      : {}),
+  });
+}
+
+/**
+ * Metadata of an image read. autoResizeImages is off, so Pi returns the file
+ * itself (the request media step sizes it later, reported as media delivery)
+ * and its size is also the original size. Only the header is decoded.
+ */
+function readImageData(result: ToolResult): Record<string, unknown> | undefined {
+  const images = result.content.filter((block) => block.type === 'image');
+  const image = images.length === 1 ? images[0] : undefined;
+  if (!image || image.type !== 'image' || !image.mimeType.startsWith('image/')) return undefined;
+  const headerChars = Math.ceil(IMAGE_DIMENSION_HEADER_BYTES / 3) * 4;
+  const size = parseImageDimensionsFromBytes(
+    Buffer.from(image.data.slice(0, headerChars), 'base64'),
+  );
+  return {
+    kind: 'image',
+    mimeType: image.mimeType,
+    ...(size
+      ? {
+          width: size.width,
+          height: size.height,
+          originalWidth: size.width,
+          originalHeight: size.height,
+        }
+      : {}),
+  };
+}
+
+type ReadKind = 'text' | 'image' | 'pdf' | 'notebook' | 'video';
+
+function withReadKind(result: ToolResult, kind: ReadKind): ToolResult {
+  return withProgrammaticResult(result, { data: { kind } });
+}
+
+/** What a failed read was trying to read, from the path alone (the file may not exist). */
+function readKind(path: string): ReadKind {
+  if (inferReadVideoMimeType(path)) return 'video';
+  if (isPdfReadPath(path)) return 'pdf';
+  if (isNotebookReadPath(path)) return 'notebook';
+  return /\.(png|jpe?g|gif|webp)$/iu.test(path) ? 'image' : 'text';
+}
+
+function readTextData(
+  result: ToolResult,
+):
+  | { kind: 'text'; content: string; startLine: number; lineCount: number; totalLines: number }
+  | undefined {
+  const textFile = result.details?.textFile;
+  if (!textFile || typeof textFile !== 'object' || Array.isArray(textFile)) return undefined;
+  if (result.content.some((block) => block.type !== 'text')) return undefined;
+  const { content, startLine, numLines, totalLines } = textFile as Record<string, unknown>;
+  if (
+    typeof content !== 'string' ||
+    !isPositiveInteger(startLine) ||
+    !isNonNegativeInteger(numLines) ||
+    !isNonNegativeInteger(totalLines)
+  ) {
+    return undefined;
+  }
+  let lines = content.split('\n');
+  let lineCount = numLines;
+  if (result.details?.desktop_output_truncation !== undefined) {
+    // The Desktop cap kept a prefix of numbered lines; the last one it kept ends the data.
+    const lastShown = lastNumberedLine(result.text);
+    lines = lines.slice(0, lastShown === undefined ? 0 : Math.max(0, lastShown - startLine + 1));
+    lineCount = lines.length;
+  }
+  const cutLines = new Set(
+    Array.isArray(result.details?.line_truncations) ? result.details.line_truncations : [],
+  );
+  const shown = lines.map((line, index) =>
+    cutLines.has(startLine + index)
+      ? Array.from(line).slice(0, READ_MAX_LINE_CHARS).join('')
+      : line,
+  );
+  return { kind: 'text', content: shown.join('\n'), startLine, lineCount, totalLines };
+}
+
+function lastNumberedLine(text: string): number | undefined {
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index]?.match(/^\s*(\d+)→/);
+    if (match?.[1]) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function limitDesktopReadTextResult(result: ToolResult, requestedOffset?: number): ToolResult {
@@ -269,15 +438,24 @@ export class LocalWriteTool implements ToolImpl<
     // encoding — see write-capture.ts / design doc.
     const { operations, takeCapture } = createCapturingWriteOperations();
     const tool = createWriteTool(this.workspaceRoot, { operations });
-    const res = await tool.execute('', input, signal);
+    const res = await executeWithFailurePath(input.path, () => tool.execute('', input, signal));
     const capture = takeCapture(resolveLocalCandidatePath(input.path, this.workspaceRoot));
-    return buildWriteToolResult(
+    const result = buildWriteToolResult(
       LocalWriteToolDef.name,
       input.path,
       input.content,
       capture,
       toToolResult(LocalWriteToolDef.name, res).text,
     );
+    const created = result.details?.created;
+    const bytesWritten = result.details?.bytes_written;
+    return withDesktopCompletenessReport(LocalWriteToolDef.name, result, {
+      data: {
+        path: input.path,
+        ...(typeof created === 'boolean' ? { created } : {}),
+        ...(typeof bytesWritten === 'number' ? { bytesWritten } : {}),
+      },
+    });
   }
 }
 
@@ -302,10 +480,15 @@ export class LocalEditTool implements ToolImpl<
     // withFileMutationQueue locking for free. The execution is then routed
     // through the line-number-retry wrapper so a model that pasted read's
     // `N→` prefixes into old_string still recovers (CR !4027 P1).
-    const piInput = await buildPiEditInput(input, this.workspaceRoot);
     const capture = createCapturingEditOperations();
-    const tool = createEditTool(this.workspaceRoot, { operations: capture.operations });
-    const piResult = await executeEditWithLineNumberRetry(tool, piInput, signal);
+    const { piInput, piResult } = await executeWithFailurePath(input.file_path, async () => {
+      const prepared = await buildPiEditInput(input, this.workspaceRoot);
+      const tool = createEditTool(this.workspaceRoot, { operations: capture.operations });
+      return {
+        piInput: prepared,
+        piResult: await executeEditWithLineNumberRetry(tool, prepared, signal),
+      };
+    });
     const res =
       piInput.replacedCount === undefined
         ? piResult
@@ -314,21 +497,41 @@ export class LocalEditTool implements ToolImpl<
     const editCapture = capture.takeCapture(
       resolveLocalCandidatePath(input.file_path, this.workspaceRoot),
     );
-    if (!editCapture) return result;
+    // replace_all counts every occurrence it replaced; a single edit replaces one.
+    const data = {
+      path: input.file_path,
+      replacements: piInput.replacedCount ?? 1,
+      replaceAll: input.replace_all === true,
+    };
+    if (!editCapture) return withDesktopCompletenessReport(LocalEditToolDef.name, result, { data });
     const normalized =
       result.details?.line_number_prefixes_stripped === true
         ? normalizeEditsForLineNumberRetry([
             { oldText: input.old_string, newText: input.new_string },
           ])?.[0]
         : undefined;
-    return withCompatibleEditToolResponse(result, {
-      filePath: editCapture.path,
-      oldString: normalized?.oldText ?? input.old_string,
-      newString: normalized?.newText ?? input.new_string,
-      originalFile: editCapture.originalFile,
-      replaceAll: input.replace_all === true,
-      userModified: false,
-    });
+    return withDesktopCompletenessReport(
+      LocalEditToolDef.name,
+      withCompatibleEditToolResponse(result, {
+        filePath: editCapture.path,
+        oldString: normalized?.oldText ?? input.old_string,
+        newString: normalized?.newText ?? input.new_string,
+        originalFile: editCapture.originalFile,
+        replaceAll: input.replace_all === true,
+        userModified: false,
+      }),
+      { data },
+    );
+  }
+}
+
+/** Runs a write or edit and, when it throws, leaves the path in PTC data. */
+async function executeWithFailurePath<T>(path: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    attachProgrammaticErrorData(error, { path });
+    throw error;
   }
 }
 
@@ -423,13 +626,14 @@ export class LocalBashTool implements ToolImpl<
       );
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      return {
+      // Every Bash return path states its completeness for PTC.
+      return withDesktopCompletenessReport(LocalBashToolDef.name, {
         tool_name: LocalBashToolDef.name,
         text,
         content: [{ type: 'text', text }],
         isError: true,
         details: { status: 'invalid_input', error_code: 'BASH_INVALID_INPUT' },
-      };
+      });
     }
     try {
       const result = await this.executeValidated(
@@ -443,7 +647,10 @@ export class LocalBashTool implements ToolImpl<
         timing,
         signal,
       );
-      return { ...result, details: { ...result.details, description } };
+      return withDesktopCompletenessReport(LocalBashToolDef.name, {
+        ...result,
+        details: { ...result.details, description },
+      });
     } catch (error) {
       if (error instanceof Error) {
         const details = (error as Error & { details?: Record<string, unknown> }).details;
@@ -464,15 +671,25 @@ export class LocalBashTool implements ToolImpl<
     }
     const permissionExecutionPlan = readPermissionExecutionPlan(input);
     const envPolicy = () => resolvePermissionBashEnvPolicy(this.envPolicy, permissionExecutionPlan);
+    // Only a PTC child carries ptcDeadline; every other call keeps the
+    // ordinary foreground timing. Computed after approval, so time spent
+    // waiting on a card already counts against the program. A longer
+    // foreground timeout first extends the program (ptcBashDeadline).
+    const ptcTimeout = ctx.ptcDeadline
+      ? resolvePtcForegroundTimeout(input, ptcBashDeadline(input, ctx.ptcDeadline), Date.now())
+      : undefined;
     const hostTrashResult = await executeLocalHostTrashIfRequested({
       toolInput: input,
       workspaceRoot: this.workspaceRoot,
       runtime: this.hostTrashRuntime,
       envPolicy,
-      timeoutSeconds: resolveForegroundTimeout({ timeout: timing.commandTimeoutSeconds }),
+      timeoutSeconds:
+        ptcTimeout?.timeoutSeconds ??
+        resolveForegroundTimeout({ timeout: timing.commandTimeoutSeconds }),
       ...(signal ? { signal } : {}),
     });
     if (hostTrashResult) {
+      if (ptcTimeout) ctx.ptcDeadline?.reportTimeout?.(ptcTimeout);
       return applyDesktopTextLimit(hostTrashResult, limitDesktopBashOutput(hostTrashResult.text));
     }
     if (input.run_in_background === true) {
@@ -510,12 +727,18 @@ export class LocalBashTool implements ToolImpl<
     }
 
     const { run_in_background: _runInBackground, ...rest } = input;
+    // A PTC child runs against its program's deadline instead of the ordinary
+    // foreground limit; the program reports that decision itself.
+    const foregroundTiming: LocalBashTiming = ptcTimeout
+      ? { commandTimeoutSeconds: ptcTimeout.timeoutSeconds }
+      : timing;
     const foregroundInput = permissionExecutionPlan
       ? copyWithPermissionExecutionPlan(
-          { ...rest, timeout: timing.commandTimeoutSeconds },
+          { ...rest, timeout: foregroundTiming.commandTimeoutSeconds },
           permissionExecutionPlan,
         )
-      : { ...rest, timeout: timing.commandTimeoutSeconds };
+      : { ...rest, timeout: foregroundTiming.commandTimeoutSeconds };
+    if (ptcTimeout) ctx.ptcDeadline?.reportTimeout?.(ptcTimeout);
     if (
       ctx.canConsumeBackgroundBashOutput === true &&
       ctx.allowBashAutoPromotion !== false &&
@@ -535,7 +758,7 @@ export class LocalBashTool implements ToolImpl<
             this.consumeEnvSanitizationHint({
               ...managed.details,
               description: input.description,
-              timing: { ...timing, ...(managed.details?.timing as object) },
+              timing: { ...foregroundTiming, ...(managed.details?.timing as object) },
             }),
           );
         }
@@ -566,7 +789,7 @@ export class LocalBashTool implements ToolImpl<
           },
           ...(managed.isError ? { isError: true } : {}),
         }),
-        timing,
+        foregroundTiming,
       );
       return applyDesktopTextLimit(
         result,
@@ -615,7 +838,7 @@ export class LocalBashTool implements ToolImpl<
         content: [{ type: 'text', text: failed.text }],
       });
     }
-    result = withLocalBashTiming(result, timing);
+    result = withLocalBashTiming(result, foregroundTiming);
     const fullOutputPath =
       typeof result.details?.fullOutputPath === 'string'
         ? result.details.fullOutputPath
@@ -717,6 +940,57 @@ function limitDesktopBashOutput(
 
 export function resolveForegroundTimeout(input: { timeout?: number }): number {
   return resolveLocalBashTiming(input.timeout, 'direct_foreground').commandTimeoutSeconds!;
+}
+
+/**
+ * Program deadline a PTC Bash child runs against. A foreground call whose own
+ * `timeout` (seconds) is longer than the program has left asks Agent Core to
+ * extend the program, which owns that rule, its margin and the one-hour cap:
+ * a model that gave tools.bash a long timeout but no run_code timeout_ms
+ * expects the command to get that long, not to be cut at the program's 120s.
+ * Background Bash is not bounded by the program, so it never extends it.
+ */
+function ptcBashDeadline(input: LocalBashToolInput, deadline: PtcChildDeadline): number {
+  const requested = input.timeout;
+  if (
+    input.run_in_background === true ||
+    requested === undefined ||
+    !Number.isFinite(requested) ||
+    requested <= 0
+  ) {
+    return deadline.atMs;
+  }
+  return deadline.extendForTimeout?.(requested) ?? deadline.atMs;
+}
+
+/**
+ * Foreground timeout of a Bash call made inside a run_code program. The
+ * program already has a wall clock (`timeout_ms`, 120s by default); a fixed
+ * 120s/300s Bash bound would kill a long command even after the model raised
+ * `timeout_ms`, so here the program's remaining time is the default and the
+ * cap instead. With the default `timeout_ms` the remaining time never exceeds
+ * 120s, so nothing changes for programs that do not raise it. A longer
+ * requested timeout has already extended the deadline (ptcBashDeadline), so
+ * the cap only bites at the one-hour maximum or for an expired program.
+ *
+ * Rounded up to whole seconds and at least 1: Pi treats 0 as "no timeout",
+ * and rounding down would let Bash time out just before the program's own
+ * wall clock, changing the result of a default program that runs too long.
+ */
+export function resolvePtcForegroundTimeout(
+  input: { timeout?: number },
+  deadlineAtMs: number,
+  nowMs: number,
+): PtcChildTimeoutDecision {
+  const remainingMs = Math.max(0, deadlineAtMs - nowMs);
+  const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  const requested = input.timeout;
+  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
+    return { source: 'program_remaining', timeoutSeconds: remainingSeconds, remainingMs };
+  }
+  return requested > remainingSeconds
+    ? { source: 'requested_capped', timeoutSeconds: remainingSeconds, remainingMs }
+    : { source: 'requested', timeoutSeconds: requested, remainingMs };
 }
 
 function backgroundBashToolResult(

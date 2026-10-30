@@ -55,6 +55,7 @@ export * from './support/artifact-service.js';
 export * from './support/conversation-mutation-eligibility.js';
 export * from './support/native-record-factory.js';
 export * from './support/run-location.js';
+export * from './support/tool-call-mode.js';
 export * from './support/version.js';
 export * from './representation/canonical-history-contract.js';
 export * from './representation/canonical-history.js';

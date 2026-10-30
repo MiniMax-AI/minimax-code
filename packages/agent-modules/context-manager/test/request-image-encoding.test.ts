@@ -1,5 +1,6 @@
 import { crc32, deflateSync } from 'node:zlib';
 
+import { readImageEncodedContent } from '@mavis/agent-core/tools';
 import { describe, expect, it } from 'vitest';
 
 import { encodeRequestImage, encodeRequestImageBlocks } from '../src/index.js';
@@ -156,5 +157,27 @@ describe('encodeRequestImageBlocks', () => {
       },
       small,
     ]);
+    const source = [intro, broken, small];
+    const output = await encodeRequestImageBlocks(source);
+    // No image state to report for data that could not be decoded.
+    expect(readImageEncodedContent(output, JSON.stringify(source))).toBeUndefined();
+  });
+
+  it('marks its output with what happened to each changed image', async () => {
+    const intro = { type: 'text', text: 'Read image file [image/png]' };
+    const wide = { type: 'image', data: png(2_400, 8).toString('base64'), mimeType: 'image/png' };
+    const source = [intro, wide];
+    const sourceJson = JSON.stringify(source);
+    const output = (await encodeRequestImageBlocks(source))!;
+    const sent = output[1] as { mimeType: string };
+
+    expect(readImageEncodedContent(output, sourceJson)).toEqual([
+      { mimeType: sent.mimeType, width: 2_000, height: 7, originalWidth: 2_400, originalHeight: 8 },
+    ]);
+    // Only this exact transform: another input, a copy, or a later edit is not marked.
+    expect(readImageEncodedContent(output, JSON.stringify([wide]))).toBeUndefined();
+    expect(readImageEncodedContent([...output], sourceJson)).toBeUndefined();
+    output.push({ type: 'text', text: 'added by a later hook' });
+    expect(readImageEncodedContent(output, sourceJson)).toBeUndefined();
   });
 });

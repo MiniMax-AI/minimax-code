@@ -273,6 +273,91 @@ describe('createSteeringRequeue teardown fallback retries (Decision v5)', () => 
   });
 });
 
+describe('createSteeringRequeue PTC provenance', () => {
+  it('keeps the original eligibility for a trusted single or complete GUI batch', async () => {
+    for (const messages of [[trustedSteering('A')], [trustedSteering('A'), trustedSteering('B')]]) {
+      const enqueue = enqueueOk();
+      const requeue = createSteeringRequeue({
+        queue: queuePorts({ enqueue }),
+        released: { publish: vi.fn(async () => undefined) },
+      });
+      requeue.discard(batch(messages));
+      await requeue.drain();
+      const input = enqueue.mock.calls[0]?.[0];
+      expect(input?.ptcEligible).toBe(true);
+      expect(
+        input?.immediateSendBatch?.members.every(
+          (member) => member.provenance.sourceContext?.ptcEligible === true,
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('keeps mixed, RC-shaped, channel, and legacy batches closed instead of trusting the first member', async () => {
+    const legacy = steering('composer-steer', 'B', 'ordinary');
+    const channel = {
+      ...trustedSteering('B'),
+      provenance: {
+        source: 'channel:feishu',
+        routingFingerprint: 'channel',
+        sourceContext: { ptcEligible: true },
+      },
+    };
+    const rc = {
+      ...legacy,
+      provenance: {
+        source: 'api',
+        routingFingerprint: 'rc',
+        sourceContext: { channelContext: { ptcEligible: true } },
+      },
+    };
+    const unknown = {
+      ...trustedSteering('B'),
+      provenance: {
+        source: 'unknown-user-source',
+        routingFingerprint: 'unknown',
+        sourceContext: { ptcEligible: true },
+      },
+    };
+    for (const messages of [
+      [legacy],
+      [trustedSteering('A'), legacy],
+      [legacy, trustedSteering('A')],
+      [trustedSteering('A'), channel],
+      [trustedSteering('A'), rc],
+      [unknown],
+      [trustedSteering('A'), unknown],
+    ]) {
+      const enqueue = enqueueOk();
+      const requeue = createSteeringRequeue({
+        queue: queuePorts({ enqueue }),
+        released: { publish: vi.fn(async () => undefined) },
+      });
+      requeue.discard(batch(messages));
+      await requeue.drain();
+      expect(enqueue).toHaveBeenCalledOnce();
+      const input = enqueue.mock.calls[0]?.[0];
+      expect(input?.ptcEligible).toBeUndefined();
+      expect(input?.source).toBe('api');
+      if (messages.includes(unknown)) {
+        expect(
+          input?.immediateSendBatch?.members.find(
+            (member) => member.userMessageId === unknown.userMessageId,
+          )?.provenance.source,
+        ).toBe('api');
+      }
+    }
+  });
+});
+
+function trustedSteering(id: string): AgentHostSteeringMessage {
+  const message = steering('composer-steer', id, id);
+  return {
+    ...message,
+    provenance: { ...message.provenance, sourceContext: { ptcEligible: true } },
+  };
+}
+
 type AgentHostSteeringMessage = DiscardedSteeringBatch['messages'][number];
 
 type TeardownCommitInput = Parameters<NonNullable<SteeringRequeueOptions['teardown']>['commit']>[0];

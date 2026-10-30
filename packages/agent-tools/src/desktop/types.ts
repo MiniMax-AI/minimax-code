@@ -573,7 +573,12 @@ export interface LocalMemoryAdapter {
     ctx: LocalRuntimeToolContext,
     input: LocalMemoryToolInput,
     signal?: AbortSignal,
-  ): Promise<{ text: string; details?: Record<string, unknown> }>;
+  ): Promise<{
+    text: string;
+    details?: Record<string, unknown>;
+    /** Structured copy of the same result for PTC; never shown to the model. */
+    data?: Record<string, unknown>;
+  }>;
 }
 
 export interface LocalMavisAgentDetail {

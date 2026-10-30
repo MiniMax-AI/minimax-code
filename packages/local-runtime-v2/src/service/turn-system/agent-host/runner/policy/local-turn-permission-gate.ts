@@ -4,6 +4,7 @@ import { withPermissionExecutionPlan } from '@mavis/agent-tools';
 
 import type { AgentHostChannelContext } from '../../preparation/contracts.js';
 import { assertAgentHostCapabilityAvailable } from '../../empty-dependencies.js';
+import { observePtcChildPermission, type PtcMetrics } from '../ptc/ptc-observability.js';
 import {
   SIDE_SESSION_APPROVAL_REASON,
   sideSessionRequiresApproval,
@@ -84,6 +85,10 @@ export interface LocalTurnPermissionApprovalOwner {
     readonly ruleMatchers?: readonly LocalTurnPermissionRuleMatcher[];
     readonly signal?: AbortSignal;
     readonly channelContext?: AgentHostChannelContext;
+    /** Present only for a trusted PTC child call. */
+    readonly parentToolCallId?: string;
+    readonly parentToolDescription?: string;
+    readonly stopPtcOnDeny?: boolean;
   }): Promise<'allowOnce' | 'allowAlways' | 'deny'>;
 }
 
@@ -108,6 +113,8 @@ export interface LocalTurnPermissionGateOptions {
     ): Readonly<LocalTurnPermissionExecutionPlan>;
   };
   readonly logger?: PiTurnRunnerLogger;
+  /** Counts run_code children's permission outcomes only (`ptc_child_permission_total`). */
+  readonly metricsClient?: Pick<PtcMetrics, 'counter'>;
   readonly mutations?: LocalTurnPermissionMutationOwner;
   /**
    * Resolves the directories the active Session owns and may READ, e.g. the
@@ -334,7 +341,9 @@ export class LocalTurnPermissionGate {
         rewrite_applied: false,
         side_session: true,
       });
-      return permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
+      return input.toolContext.parentToolCallId
+        ? userDeniedBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON)
+        : permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
     }
     this.logEnforcement(input, request, {
       policy_behavior: 'ask',
@@ -558,7 +567,9 @@ export class LocalTurnPermissionGate {
         approval_decision: approval,
         rewrite_applied: false,
       });
-      return permissionBlock(request.toolName, decision.reason, 'user');
+      return input.toolContext.parentToolCallId
+        ? userDeniedBlock(request.toolName, decision.reason)
+        : permissionBlock(request.toolName, decision.reason, 'user');
     }
     applyExecutionPlan(input.toolContext, executionPlan);
     this.logEnforcement(input, request, {
@@ -574,7 +585,7 @@ export class LocalTurnPermissionGate {
   }
 
   private logEnforcement(
-    input: { readonly sessionId: string; readonly turnId: string },
+    input: Parameters<typeof observePtcChildPermission>[1],
     request: PermissionToolRequest,
     fields: Readonly<Record<string, unknown>>,
   ): void {
@@ -588,6 +599,8 @@ export class LocalTurnPermissionGate {
       },
       'permission.enforcement',
     );
+    // Every final decision passes here; a run_code child also gets its PTC line.
+    observePtcChildPermission(this.options, input, request, fields);
   }
 
   private requestApproval(
@@ -621,8 +634,23 @@ export class LocalTurnPermissionGate {
       ...(decision.ruleMatchers ? { ruleMatchers: decision.ruleMatchers } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.channelContext ? { channelContext: input.channelContext } : {}),
+      ...ptcApprovalContext(input.toolContext),
     });
   }
+}
+
+function ptcApprovalContext(
+  context: BeforeToolCallContext,
+): Pick<
+  Parameters<LocalTurnPermissionApprovalOwner['request']>[0],
+  'parentToolCallId' | 'parentToolDescription' | 'stopPtcOnDeny'
+> {
+  if (!context.parentToolCallId) return {};
+  return {
+    parentToolCallId: context.parentToolCallId,
+    ...(context.parentDescription ? { parentToolDescription: context.parentDescription } : {}),
+    stopPtcOnDeny: true,
+  };
 }
 
 function preToolHookAllowsWithoutApproval(
@@ -779,6 +807,13 @@ function permissionBlock(
         ? `Permission denied by user for ${toolName}: ${reason}`
         : `Permission denied for ${toolName}: ${reason}`,
   };
+}
+
+function userDeniedBlock(
+  toolName: string,
+  reason: string,
+): { readonly block: true; readonly reason: string; readonly approvalStatus: 'denied' } {
+  return { ...permissionBlock(toolName, reason, 'user'), approvalStatus: 'denied' };
 }
 
 async function requestApproval(

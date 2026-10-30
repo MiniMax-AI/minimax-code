@@ -41,6 +41,10 @@ export function restoreLegacyFileReferenceInstructions(prompt: string): string {
   const toolAnchors = [
     '- Independent tool calls can run in parallel in one response.',
     "- Issue independent tool calls together when safe. Run dependent calls or conflicting writes sequentially, and follow each tool's concurrency restrictions.",
+    // On a PTC Turn the V2 templates replace the first anchor with this pointer to the
+    // "Tool calls in this turn" section. Without it the file-reference rule and the
+    // References section would silently disappear from PTC prompts.
+    '- Tool selection for this turn is described in "Tool calls in this turn".',
   ];
   const toolAnchor = toolAnchors.find((anchor) => prompt.includes(anchor));
   if (!toolAnchor) return prompt;

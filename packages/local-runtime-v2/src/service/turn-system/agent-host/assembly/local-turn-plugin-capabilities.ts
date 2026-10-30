@@ -78,12 +78,20 @@ export interface MergeAgentHostTurnCapabilitiesInput {
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
   readonly surface?: HostCapabilitySurface;
   readonly userText?: string;
+  /** PTC Turn: only the tool_search and @Plugin reminder wording change; disclosure is the same. */
+  readonly ptc?: boolean;
 }
 
 export interface MergedAgentHostTurnCapabilities {
   readonly tools: readonly RuntimeTool[];
   readonly plan: McpDisclosurePlan;
   readonly reminder?: string;
+  /**
+   * Attribution wrapper of each tool it decorated, keyed by the undecorated
+   * object. Catalog trust is by object identity, so a caller holding the
+   * undecorated native tools follows this to the objects `tools` lists.
+   */
+  readonly attributed?: ReadonlyMap<RuntimeTool, RuntimeTool>;
 }
 
 /** Applies the v1 final-catalog precedence and explicit @Plugin reminder semantics in v2. */
@@ -99,17 +107,26 @@ export function mergeAgentHostTurnCapabilities(
     );
     return { ...merged, ...(reminder ? { reminder } : {}) };
   }
+  const attributedTools = attachPluginCapabilityAttribution(
+    merged.tools,
+    buildAttributionIndex({
+      capabilities,
+      effectivePluginSkills: input.effectivePluginSkills,
+      finalTools: merged.tools,
+      plan: merged.plan,
+    }),
+  );
+  // Attribution maps one to one; a wrapper is a different object at the same index.
+  const wrappers = new Map(
+    merged.tools.flatMap((tool, index) => {
+      const wrapper = attributedTools[index];
+      return wrapper && wrapper !== tool ? [[tool, wrapper] as const] : [];
+    }),
+  );
   const attributed = {
     ...merged,
-    tools: attachPluginCapabilityAttribution(
-      merged.tools,
-      buildAttributionIndex({
-        capabilities,
-        effectivePluginSkills: input.effectivePluginSkills,
-        finalTools: merged.tools,
-        plan: merged.plan,
-      }),
-    ),
+    tools: attributedTools,
+    ...(wrappers.size > 0 ? { attributed: wrappers } : {}),
   };
   if (input.userText === undefined) return attributed;
   const inventory = buildCapabilityInventory({
@@ -137,6 +154,8 @@ export function mergeAgentHostTurnCapabilities(
     buildPluginReferenceReminder(
       detectPluginReferencesForMessages([{ content: input.userText }], input.userText, inventory),
       unavailable,
+      // PTC Turn: Tool Search results are called inside run_code, not via mcp_invoke.
+      input.ptc ? { ptc: true } : {},
     ),
     renderPluginAgentRoster(capabilities.agents, merged.tools),
   ]

@@ -1,6 +1,7 @@
 import type { RunTurnInput } from '@mavis/agent-core/pi-turn-runner';
 import type { ToolExecutionContext } from '@mavis/agent-core/tools';
 
+import type { HistoryReconcileIntent } from '../history/contracts.js';
 import type { AgentExecutionSnapshot } from '../preparation/contracts.js';
 import type {
   AgentHostCommittedFacts,
@@ -9,7 +10,7 @@ import type {
   LocalTurnExecutionInput,
   LocalTurnOutputTokenCapResolver,
 } from '../runner/contracts.js';
-import type { LocalRuntimeTurnExecutorOptions } from './contracts.js';
+import type { LocalRuntimeTurnExecutorOptions, LocalRuntimeTurnRunnerResult } from './contracts.js';
 
 type PiAgentMessage = NonNullable<RunTurnInput['history']>[number];
 
@@ -78,6 +79,39 @@ export function attachWaitingForUser(
   return waitingForUser && outcome.status === 'completed'
     ? { ...outcome, waitingForUser: true }
     : outcome;
+}
+
+/**
+ * Maps the neutral runner's optional reconcile signal onto a host reconcile
+ * intent. The concrete detection lives in the v2 native runner adapter; the
+ * host only normalizes the approved partial content to a string.
+ */
+export function reconcileIntent(
+  result: LocalRuntimeTurnRunnerResult | void,
+): HistoryReconcileIntent | undefined {
+  const signal = result?.reconcile;
+  if (!signal) return undefined;
+  switch (signal.kind) {
+    case 'output-recall':
+      return {
+        kind: 'output-recall',
+        source: signal.source,
+        variant: signal.variant,
+        ...(signal.slowNetworkRead ? { slowNetworkRead: true as const } : {}),
+      };
+    case 'network-reconcile':
+      return {
+        kind: 'network-reconcile',
+        approvedContent: signal.approvedContent ?? '',
+        ...(signal.slowNetworkRead ? { slowNetworkRead: true as const } : {}),
+      };
+    case 'safety-reconcile':
+      return { kind: 'safety-reconcile', approvedContent: signal.approvedContent };
+    case 'abort-reconcile':
+      return { kind: 'abort-reconcile', approvedContent: signal.approvedContent ?? '' };
+    default:
+      return undefined;
+  }
 }
 
 export function continuationRunMode(input: Pick<LocalTurnExecutionInput, 'request'>) {

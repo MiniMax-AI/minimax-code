@@ -18,14 +18,18 @@ import {
 import { type RuntimeTool, type ToolExecutionContext } from '@mavis/agent-core/tools';
 import { prepareBashTurnTools } from '../assembly/local-turn-tool-catalog.js';
 import { createPluginAgentRoster } from '../assembly/turn-capability-lifecycle.js';
-import { buildCompletedTerminalStatusEvent } from '@mavis/agent-core/event-bridge';
+import {
+  buildCompletedTerminalStatusEvent,
+  buildRuntimeWarningEvent,
+} from '@mavis/agent-core/event-bridge';
+import { withPtcCompactionReminder } from './ptc/compaction-reminder.js';
+import { createPtcTurnCompactionReminder, preparePtcExecution } from './ptc/turn-preparation.js';
 import {
   beginLocalPluginHookTurn,
   createLocalPluginHookEventReporter,
   emitLocalPluginHookWarnings,
   localPluginHookCoordinator as pluginHookCoordinator,
 } from '../assembly/local-turn-plugin-hooks.js';
-import type { HistoryReconcileIntent } from '../history/contracts.js';
 import { copyCanonicalHistoryForPiCompatibility } from '../history/canonical-history-validation.js';
 import type { AgentExecutionSnapshot, TurnOutputContract } from '../preparation/contracts.js';
 import type {
@@ -82,6 +86,7 @@ import {
   type PromptSuggestionScope,
 } from '../runner/prompt-suggestion/capture.js';
 import { withExecutionObservability } from './execution-observability.js';
+import type { HistoryReconcileIntent } from '../history/contracts.js';
 import {
   ackCommittedToolResultTailClaims,
   attachCommittedFacts,
@@ -363,6 +368,7 @@ export class LocalRuntimeTurnExecutor<
         history: prepared.history,
         signal: input.lease.signal,
         tools: prepared.tools,
+        ...(prepared.ptcTools ? { ptcTools: prepared.ptcTools } : {}),
         disableBuiltinToolFallback: prepared.toolResolution.disableBuiltinToolFallback,
         toolContext: prepared.toolContext,
         hooks: withExecutionObservability(
@@ -378,6 +384,7 @@ export class LocalRuntimeTurnExecutor<
               toolSafetyGuard,
               toolPolicyGuard: this.options.toolPolicyGuard,
               finalizeToolResultForHistory: this.options.finalizeToolResultForHistory,
+              ptcFactCollector: prepared.ptcFactCollector,
             }),
             promptSuggestion?.capture,
           ),
@@ -515,10 +522,8 @@ export class LocalRuntimeTurnExecutor<
       validateRoutedTurnTools(input.assembly.tools),
       this.options.cliProductPolicy === true,
     );
-    const canConsumeBackgroundBashOutput = admittedTools.some(
-      (tool) =>
-        tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
-    );
+    const ptc = preparePtcExecution(input.assembly.tools, admittedTools, this.options, input);
+    const canConsumeBackgroundBashOutput = ptc.canConsumeNativeTaskOutput;
     const standardTools = prepareBashTurnTools(
       admittedTools,
       canConsumeBackgroundBashOutput,
@@ -531,6 +536,8 @@ export class LocalRuntimeTurnExecutor<
       // configured/MCP namesake cannot read the native background task store.
       allowBashAutoPromotion: canConsumeBackgroundBashOutput,
       canConsumeBackgroundBashOutput,
+      canConsumeBackgroundTaskOutput: canConsumeBackgroundBashOutput,
+      ...ptc.context,
     } as TContext;
     const caller = preparedExecution.caller;
     const standardSystemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
@@ -605,14 +612,17 @@ export class LocalRuntimeTurnExecutor<
     });
     const beforeLlmCallHooks = await this.resolveBeforeLlmCallHooks(
       input,
-      afterCompactionReminderHooks(
-        createExecutionBudgetReminder(
-          input.request.executionDeadlineAtMs,
-          this.options.nowMs,
-          this.options.canAppendExecutionBudgetReminder,
-          this.options.logger,
+      withPtcCompactionReminder(
+        createPtcTurnCompactionReminder(input, this.options),
+        afterCompactionReminderHooks(
+          createExecutionBudgetReminder(
+            input.request.executionDeadlineAtMs,
+            this.options.nowMs,
+            this.options.canAppendExecutionBudgetReminder,
+            this.options.logger,
+          ),
+          backgroundReminder?.hook,
         ),
-        backgroundReminder?.hook,
       ),
     );
     validateResolvedInput({
@@ -634,6 +644,7 @@ export class LocalRuntimeTurnExecutor<
         ...beforeBatchMessages,
       ],
       tools,
+      ...(ptc.ptcTools ? { ptcTools: ptc.ptcTools } : {}),
       toolResolution,
       toolContext,
       beforeLlmCallHooks,
@@ -650,6 +661,7 @@ export class LocalRuntimeTurnExecutor<
           }
         : {}),
       readTaskOutputTaskIds,
+      ptcFactCollector: ptc.ptcFactCollector,
       prepareSteering: preparedExecution.prepareSteering ?? preparePlainSteering,
     };
   }
@@ -841,6 +853,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly history: PiAgentMessage[];
   readonly beforeUserMessages: NonNullable<RunTurnInput['beforeUserMessages']>;
   readonly tools: readonly RuntimeTool[];
+  readonly ptcTools?: readonly RuntimeTool[];
   readonly toolResolution: LocalTurnPermissionResolution<TContext>;
   readonly toolContext: TContext;
   readonly beforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
@@ -849,6 +862,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
   readonly contextUsageRequiresProviderAnchor?: boolean;
   readonly readTaskOutputTaskIds: Set<string>;
+  readonly ptcFactCollector: import('@mavis/agent-core/tools').PtcToolFactCollector;
   readonly prepareSteering: (
     input: AgentHostSteeringMessage,
   ) => Promise<PreparedSteeringUserMessage>;
@@ -898,6 +912,7 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolSafetyGuard,
     toolPolicyGuard,
     finalizeToolResultForHistory,
+    ptcFactCollector,
   } = options;
   const toolHooks = createControlledToolHooks({
     input,
@@ -909,6 +924,7 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolSafetyGuard,
     toolPolicyGuard,
     finalizeToolResultForHistory,
+    ...(ptcFactCollector ? { ptcFactCollector } : {}),
   });
   return {
     ...input.assembly.hooks,

@@ -37,6 +37,8 @@ interface McpInvokeMetadata {
   readonly resolve: (input: McpInvokeInput) => McpInvokeTargetResolution;
   readonly pendingResolutions: WeakMap<object, ResolvedMcpInvokeTarget>;
   readonly authorizedInputs: WeakMap<object, ResolvedMcpInvokeTarget>;
+  readonly registry: ReadonlyMap<string, RuntimeTool>;
+  readonly referenceRegistry: ReadonlyMap<string, McpInvokeReferenceTarget>;
 }
 
 const METADATA = new WeakMap<RuntimeTool, McpInvokeMetadata>();
@@ -78,6 +80,8 @@ export function createMcpInvokeTool<TCtx extends ToolExecutionContext = ToolExec
     resolve: (input) => resolveTarget(input, registry, referenceRegistry),
     pendingResolutions: new WeakMap(),
     authorizedInputs: new WeakMap(),
+    registry,
+    referenceRegistry,
   };
   const tool = defineRuntimeTool({
     name: 'mcp_invoke',
@@ -401,4 +405,11 @@ function boundedError(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Assembly-only access; adding built-in targets preserves the existing Host reference bindings. */
+export function getMcpInvokeRegistries(
+  tool: RuntimeTool,
+): Pick<McpInvokeMetadata, 'registry' | 'referenceRegistry'> | undefined {
+  return readMetadata(tool);
 }

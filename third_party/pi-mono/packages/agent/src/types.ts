@@ -55,6 +55,10 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
+	/** Trusted permission-gate classification for a blocked admission. */
+	blockedBy?: "permission";
+	/** Optional approval terminal state when the host can distinguish it. */
+	approvalStatus?: "denied" | "expired";
 	/** Stops the whole agent run after publishing this blocked tool result. */
 	terminateAgent?: boolean;
 }
@@ -75,6 +79,8 @@ export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
 	isError?: boolean;
+	/** Source of an explicit `isError: true` override. */
+	isErrorOrigin?: "tool" | "hook";
 	/**
 	 * Hint that the agent should stop after the current tool batch.
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
@@ -94,6 +100,10 @@ export interface BeforeToolCallContext {
 	args: unknown;
 	/** Current agent context at the time the tool call is prepared. */
 	context: AgentContext;
+	/** Host-owned PTC parent call, absent for model-issued top-level calls. */
+	parentToolCallId?: string;
+	/** User-visible PTC description for approval surfaces. */
+	parentDescription?: string;
 }
 
 /** Context passed to `afterToolCall`. */
@@ -110,6 +120,10 @@ export interface AfterToolCallContext {
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
 	context: AgentContext;
+	/** Host-owned PTC parent call, absent for model-issued top-level calls. */
+	parentToolCallId?: string;
+	/** User-visible PTC description for approval surfaces. */
+	parentDescription?: string;
 }
 
 /** Context passed to `shouldStopAfterTurn`. */
@@ -262,6 +276,19 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Default: "parallel"
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/** Optional host formatting for a tool omitted from the current catalog. */
+	missingToolMessage?: (toolName: string) => string | undefined;
+
+	/**
+	 * Optional host lookup for a tool the model called although the current catalog omits it.
+	 *
+	 * Called once for each such tool call, before its batch starts. A returned tool with the
+	 * same name runs that call like a catalog tool (argument preparation and validation, hooks,
+	 * execution mode); `undefined` keeps the missing-tool result. The tools sent to the model
+	 * are unchanged.
+	 */
+	resolveMissingTool?: (toolCall: AgentToolCall) => AgentTool<any> | undefined;
 
 	/**
 	 * Converts an unexpected provider tool call into a terminal text response.
@@ -432,6 +459,26 @@ export type AgentEvent =
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
-	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| {
+			type: "tool_execution_start";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			parentToolCallId?: string;
+		}
+	| {
+			type: "tool_execution_update";
+			toolCallId: string;
+			toolName: string;
+			args: any;
+			partialResult: any;
+			parentToolCallId?: string;
+		}
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			result: any;
+			isError: boolean;
+			parentToolCallId?: string;
+		};

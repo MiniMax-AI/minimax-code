@@ -232,6 +232,9 @@ function toQueueInput(
     // Review is still an interactive API queue row. Its execution provenance
     // lives on the nested message so the composer can keep managing the row.
     source: values.source === 'code_review' ? 'api' : values.source,
+    ...(input.provenance.source === 'api' && input.provenance.sourceContext?.ptcEligible === true
+      ? { ptcEligible: true as const }
+      : {}),
     ...(input.queuePlacement ? { queuePlacement: input.queuePlacement } : {}),
     message: toQueueMessage(input),
     ...toQueueModel(input.input.model),
@@ -391,8 +394,10 @@ function toQueueChannelContext(input: SubmitTurnSubmission): QueueChannelContext
   const chatId = channelField(context, fallback?.chatId, 'chatId');
   const senderId = channelField(context, fallback?.senderId, 'senderId');
   if (!platform || !chatId || !senderId) return undefined;
+  const { ptcEligible, ...channelContext } = context ?? {};
+  void ptcEligible;
   return {
-    ...(context ?? {}),
+    ...channelContext,
     platform,
     chatType: channelField(context, fallback?.chatType, 'chatType') ?? 'private',
     chatId,

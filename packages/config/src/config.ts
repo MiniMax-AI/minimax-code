@@ -326,6 +326,7 @@ export type * from "./asr.js";
  *   browserAgentCursor: false
  *   desktopPlanMode: true
  *   desktopPlanModeAgentEntry: false
+ *   ptc: false
  *   taskHistoryProjectGrouping: false
  *   threadGoal: false
  *   mcodeTools: false
@@ -436,6 +437,12 @@ export interface BetaConfig {
    * a controlled rollback while the parent Plan Mode switch remains enabled.
    */
   desktopPlanModeAgentEntry: boolean;
+  /**
+   * Programmatic Tool Calling for eligible local root conversations. Read only when a
+   * conversation is created or has just compacted: the conversation keeps that run mode
+   * (`toolCallMode`) so toggling this never rewrites an existing prompt prefix.
+   */
+  ptc: boolean;
   /**
    * /btw side-question peek command (the UI's "Aside" slash palette row). Both visibility fields
    * are `test`, so dev/test ships ON by default while prod is force-off regardless of config.yaml
@@ -633,6 +640,14 @@ export const BETA_FEATURE_DEFS = {
   },
   desktopPlanModeAgentEntry: {
     defaultVisibility: "none",
+    configurableVisibility: "online",
+  },
+  // On by default everywhere except the public production build: dev/test/staging through the
+  // test channel, Internal and inside packages through their build variant. An explicit `false`
+  // always wins, and explicit `true` still opts a production install in.
+  ptc: {
+    defaultVisibility: "test",
+    defaultBuildVariants: ["internal", "inside"],
     configurableVisibility: "online",
   },
   peek: { defaultVisibility: "test", configurableVisibility: "test" },
@@ -2174,7 +2189,21 @@ function parseBetaConfig(raw: Record<string, unknown>): BetaConfig {
       ? (raw.beta as Record<string, unknown>)
       : {};
 
-  const context: BetaFeatureResolutionContext = {
+  const context = currentBetaResolutionContext();
+  const result = {} as BetaConfig;
+  for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
+    result[key] = resolveBetaFeature(key, obj[key], context);
+  }
+  return result;
+}
+
+/**
+ * The build facts `parseBetaConfig` resolves every flag with. Exported so a caller holding a
+ * raw (unparsed) config can resolve one flag exactly as `getConfig()` would for this process,
+ * instead of rebuilding the context and drifting from it.
+ */
+export function currentBetaResolutionContext(): BetaFeatureResolutionContext {
+  return {
     buildEnv: getRuntimeBuildEnv(),
     defaultBuildEnvironment: getBetaDefaultBuildEnvironment(),
     internalBuild: isInternalBuild(),
@@ -2184,11 +2213,6 @@ function parseBetaConfig(raw: Record<string, unknown>): BetaConfig {
         ? "published"
         : undefined,
   };
-  const result = {} as BetaConfig;
-  for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
-    result[key] = resolveBetaFeature(key, obj[key], context);
-  }
-  return result;
 }
 
 // ── Skill Evolve config parsing ─────────────────────────────────

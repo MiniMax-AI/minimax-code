@@ -90,6 +90,8 @@ export interface QueueImmediateSendBatch {
 }
 
 export interface QueueItem {
+  /** Host-owned eligibility captured from the original trusted Desktop API ingress. */
+  readonly ptcEligible?: true;
   /** Trusted startup attempts whose Host fence was never released while this item survived. */
   readonly deliveryAttempts?: readonly { readonly claimId: string; readonly turnId: string }[];
   readonly immediateSendBatch?: QueueImmediateSendBatch;
@@ -126,6 +128,8 @@ export interface QueueSessionRef {
   readonly agentName: string;
 }
 export interface QueueEnqueueInput {
+  /** Internal only; never inferred from message/channel context or the dispatching client. */
+  readonly ptcEligible?: true;
   readonly immediateSendBatch?: QueueImmediateSendBatch;
   readonly createdAt?: number;
   readonly session: QueueSessionRef;

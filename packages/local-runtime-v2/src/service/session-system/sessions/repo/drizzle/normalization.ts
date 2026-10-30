@@ -171,6 +171,8 @@ const DEFINED_UPDATE_FIELDS = [
   'archived',
   'visibility',
   'status',
+  // Only the post-compaction refresh writes it, always with a value; never cleared.
+  'toolCallMode',
 ] as const;
 
 const OWNED_UPDATE_FIELDS = [

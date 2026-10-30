@@ -1,5 +1,10 @@
-import type { QueueEnqueueInput, QueueUpdateInput, QueueItem } from './contract.js';
-import { queueRoutingFingerprint } from '../routing.js';
+import type {
+  QueueClaimRecoveryScope,
+  QueueEnqueueInput,
+  QueueUpdateInput,
+  QueueItem,
+} from './contract.js';
+import { queuePtcEligible, queueRoutingFingerprint } from '../routing.js';
 import { isQueueMessageInput, isQueueMessageSource, isQueueImmediateSendBatch } from './codec.js';
 
 export function validEnqueue(input: QueueEnqueueInput): boolean {
@@ -31,6 +36,7 @@ export function makeQueued(input: QueueEnqueueInput, itemId: string, nowMs: numb
     sessionId: input.session.sessionId,
     agentName: input.session.agentName,
     source,
+    ...ptcQueueMetadata(input, source),
     status: 'queued',
     message: input.message,
     ...(input.message.channelContext ? { channelContext: input.message.channelContext } : {}),
@@ -42,6 +48,12 @@ export function makeQueued(input: QueueEnqueueInput, itemId: string, nowMs: numb
     ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
   };
+}
+function ptcQueueMetadata(
+  input: QueueEnqueueInput,
+  source: QueueItem['source'],
+): Pick<QueueItem, 'ptcEligible'> {
+  return queuePtcEligible({ ...input, source }) ? { ptcEligible: true } : {};
 }
 export function completePermutation(items: readonly QueueItem[], ids: readonly string[]) {
   return (
@@ -62,6 +74,7 @@ function validEnqueueMetadata(input: QueueEnqueueInput): boolean {
   return (
     (input.immediateSendBatch === undefined ||
       isQueueImmediateSendBatch(input.immediateSendBatch)) &&
+    (input.ptcEligible === undefined || input.ptcEligible === true) &&
     (input.createdAt === undefined || Number.isFinite(input.createdAt)) &&
     (input.expiresAt === undefined || Number.isFinite(input.expiresAt))
   );

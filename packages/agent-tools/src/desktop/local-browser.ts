@@ -9,6 +9,7 @@ import { Type, type Static, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 
 import {
+  BROWSER_OBSERVABLE_ACTIONS,
   LOCAL_BROWSER_ACTION_INPUT_CONTRACTS,
   LOCAL_BROWSER_ACTION_NAMES,
   LocalBrowserClickToolDef,
@@ -16,6 +17,7 @@ import {
   LocalBrowserHoverToolDef,
   LocalBrowserInspectEditableTargetsToolDef,
   LocalBrowserInspectToolDef,
+  LocalBrowserObserveInput,
   LocalBrowserNavigateToolDef,
   LocalBrowserPasteToolDef,
   LocalBrowserPressKeyToolDef,
@@ -26,6 +28,11 @@ import {
   LocalBrowserVerifyTextToolDef,
   LocalBrowserWaitForToolDef,
 } from './builtin-browser-defs.js';
+import {
+  observationReadFailure,
+  observePage,
+  type BrowserObserveRequest,
+} from './local-browser-observe.js';
 import type {
   LocalBrowserAdapter,
   LocalBrowserSkillSessionStore,
@@ -69,6 +76,10 @@ const pendingPostActionVisuals = new WeakMap<LocalBrowserAdapter, Map<string, Pr
 // runtime executes them concurrently. Queue them per session in arrival order
 // so the second call observes the first call's result instead of failing.
 const browserSessionQueues = new WeakMap<LocalBrowserAdapter, Map<string, Promise<void>>>();
+const OBSERVABLE_ACTIONS = new Set<LocalBrowserToolAction>(BROWSER_OBSERVABLE_ACTIONS);
+/** Appended to the run_code Browser variant's description; the top-level definition never says it. */
+const OBSERVE_DESCRIPTION_SENTENCE =
+  'Page-changing actions accept observe to return the page after the action in the same call.';
 const COMPACT_INSPECT_CONTINUATION_INSTRUCTION =
   'For truncated inspect results, continue with the returned continuation input; do not invent snapshot IDs or offsets.';
 
@@ -200,7 +211,14 @@ export function buildLocalBrowserRuntimeTools(
   return tools;
 }
 
-/** Builds the exact compact Browser input contract disclosed by a Host Binding. */
+/**
+ * Builds the exact compact Browser input contract disclosed by a Host Binding.
+ * The Host uses it only to validate a Plugin PreToolUse rewrite of the admitted
+ * `mcp_browser` call; it never reaches a model request. Page-changing actions
+ * accept `observe` here so a rewrite of a run_code child that carries it stays
+ * valid; the model can send `observe` only where the definition declares it
+ * (the PTC variant, `withLocalBrowserObserve`).
+ */
 export function describeLocalBrowserToolInput(target: RuntimeTool): TSchema {
   const actions: unknown = target.def.schema.properties?.action?.enum;
   const allowed = new Set(Array.isArray(actions) ? actions : []);
@@ -212,11 +230,51 @@ export function describeLocalBrowserToolInput(target: RuntimeTool): TSchema {
           {
             action: Type.Literal(action),
             input: contract.optional ? Type.Optional(contract.schema) : contract.schema,
+            ...(OBSERVABLE_ACTIONS.has(action as LocalBrowserToolAction)
+              ? { observe: Type.Optional(LocalBrowserObserveInput) }
+              : {}),
           },
           { additionalProperties: false },
         ),
       ),
   );
+}
+
+/**
+ * The compact Browser definition a PTC Turn lists inside run_code: the same
+ * tool plus a declared `observe`, so a program acts and reads the result in
+ * one call. Only run_code's child catalog uses it (and a direct call of that
+ * hidden child); a Turn that lists Browser as a top-level tool keeps its
+ * definition byte for byte. The compact argument repair moves unknown
+ * top-level keys into `input`, so `observe` is set aside around it. Returns
+ * undefined for any definition that is not the compact Browser shape.
+ */
+export function withLocalBrowserObserve(def: ToolDefinition): ToolDefinition | undefined {
+  const properties: unknown = def.schema.properties;
+  if (
+    def.schema.type !== 'object' ||
+    !isRecord(properties) ||
+    !('action' in properties) ||
+    !('input' in properties) ||
+    'observe' in properties
+  ) {
+    return undefined;
+  }
+  const prepare = def.prepareArguments;
+  return {
+    ...def,
+    description: `${def.description} ${OBSERVE_DESCRIPTION_SENTENCE}`,
+    schema: {
+      ...def.schema,
+      properties: { ...properties, observe: Type.Optional(LocalBrowserObserveInput) },
+    },
+    prepareArguments: (args: unknown) => {
+      if (!isRecord(args) || !('observe' in args)) return prepare ? prepare(args) : args;
+      const { observe, ...rest } = args;
+      const prepared: unknown = prepare ? prepare(rest) : rest;
+      return isRecord(prepared) ? { ...prepared, observe } : prepared;
+    },
+  };
 }
 
 function buildDetailedBrowserRuntimeTools(
@@ -348,6 +406,29 @@ function createBrowserCompactRuntimeTool(
         );
       }
 
+      // Declared only by the run_code variant (withLocalBrowserObserve); the
+      // top-level schema rejects it before execute, so a direct Turn never
+      // gets here with it.
+      const observe = (input as { readonly observe?: unknown }).observe;
+      if (observe !== undefined) {
+        if (!OBSERVABLE_ACTIONS.has(action)) {
+          return browserToolError(
+            LocalBrowserToolDef.name,
+            action,
+            `observe is accepted only by page-changing actions (${[...OBSERVABLE_ACTIONS].join(', ')}).`,
+            'invalid_input',
+          );
+        }
+        if (!Value.Check(LocalBrowserObserveInput, observe)) {
+          return browserToolError(
+            LocalBrowserToolDef.name,
+            action,
+            'observe must be { kind: "inspect" | "text", selector?, waitForText?, timeout?, maxChars? }.',
+            'invalid_input',
+          );
+        }
+      }
+
       const rawInput = normalizeBrowserActionInput(action, input.input ?? {});
       if (!Value.Check(contract.schema, rawInput)) {
         return browserToolError(
@@ -376,6 +457,7 @@ function createBrowserCompactRuntimeTool(
         options.browserSkillSessionStore,
         options.postActionVisualCountByTurn,
         options.interactiveTakeover,
+        observe as BrowserObserveRequest | undefined,
       );
     },
   });
@@ -434,6 +516,7 @@ async function executeBrowserAction(
   browserSkillSessionStore?: LocalBrowserSkillSessionStore,
   postActionVisualCountByTurn?: Map<string, number>,
   interactiveTakeover = true,
+  observe?: BrowserObserveRequest,
 ): Promise<ToolResult> {
   let releaseSession: (() => void) | undefined;
   try {
@@ -485,7 +568,7 @@ async function executeBrowserAction(
                 preprocessScreenshot,
                 postActionVisualCountByTurn,
               );
-        return browserToolResult(
+        const actionResult = browserToolResult(
           toolName,
           action,
           result,
@@ -493,6 +576,46 @@ async function executeBrowserAction(
           postActionVisual,
           interactiveTakeover,
         );
+        // An ordinary click that navigated reports UNEXPECTED_NAVIGATION: the
+        // input did run and the page moved, which is exactly when the model
+        // must read the new page. Observe it instead of spending a round trip.
+        const navigated = readResultCode(actionResult) === 'UNEXPECTED_NAVIGATION';
+        if (
+          !observe ||
+          (actionResult.isError && !navigated) ||
+          readRequiredNextToolMarker(actionResult)
+        ) {
+          return actionResult;
+        }
+        // Read only after the post-action screenshot has settled: the provider
+        // admits one action per session and refuses a read sent alongside it.
+        await waitForPendingPostActionVisual(adapter, ctx.sessionId, operationSignal);
+        let observed: ToolResult;
+        let waitTimedOut = false;
+        try {
+          const observation = await observePage(
+            observe,
+            adapter,
+            ctx,
+            operationSignal,
+            MAX_PENDING_VISUAL_SETTLE_MS,
+          );
+          waitTimedOut = observation.waitTimedOut;
+          observed = browserToolResult(
+            toolName,
+            observation.kind === 'inspect' ? 'inspect' : 'query',
+            observation.result,
+            exposure,
+            undefined,
+            interactiveTakeover,
+          );
+        } catch (error) {
+          // Cancellation keeps its existing path; any other read failure is
+          // observation evidence and must not turn the finished action into an error.
+          if (operationSignal.aborted) throw error;
+          observed = observationReadFailure(toolName, observe, error);
+        }
+        return withObservation(actionResult, observed, waitTimedOut);
       },
       LOCAL_BROWSER_TOOL_TIMEOUT_MS,
       'Local Browser tool',
@@ -661,6 +784,11 @@ function browserToolResult(
       action,
       result: sanitized,
     },
+    // A run_code program reads refs, effects and URLs from data instead of
+    // re-parsing the text; it carries exactly the bounded result the text
+    // shows. Agent Core drops `programmatic` from model-visible results, so a
+    // direct call is unchanged.
+    programmatic: { data: { action, result: sanitized } },
     ...(isError ? { isError: true } : {}),
   };
 }
@@ -737,6 +865,76 @@ function summarizeScriptResult(result: unknown, imagesOmitted = false): unknown 
     }));
   }
   return summary;
+}
+
+function readResultCode(result: ToolResult): string | undefined {
+  const details = isRecord(result.details) ? result.details : undefined;
+  const inner = details && isRecord(details.result) ? details.result : undefined;
+  return typeof inner?.code === 'string' ? inner.code : undefined;
+}
+
+/**
+ * Nests the read under `observation` of the action result. The action keeps its
+ * own effect fields; the observation is evidence the model judges. An
+ * observation that itself requires user takeover keeps that marker, so the
+ * Browser guard still demands ask_user next.
+ *
+ * A click that navigated (UNEXPECTED_NAVIGATION) fails only because it asks
+ * the caller to read the new page before continuing. Once the observation has
+ * read that page the request is met, so the result is no longer an error:
+ * `success` becomes true, `navigation.detected` and `code` stay so the model
+ * still sees that the URL changed. Without this a program checking r.isError
+ * returns before it can use the observation, costing the round trip back.
+ */
+function withObservation(
+  actionResult: ToolResult,
+  observed: ToolResult,
+  waitTimedOut: boolean,
+): ToolResult {
+  const actionDetails = isRecord(actionResult.details) ? actionResult.details : {};
+  const observedDetails = isRecord(observed.details) ? observed.details : {};
+  const observedResult = isRecord(observedDetails.result) ? observedDetails.result : {};
+  const observation: Record<string, unknown> = {
+    ...observedResult,
+    ...(waitTimedOut ? { waitTimedOut: true } : {}),
+    ...(observed.isError ? { observationFailed: true } : {}),
+  };
+  const safety = isRecord(observedResult.safety) ? observedResult.safety : undefined;
+  const actionFields = isRecord(actionDetails.result) ? actionDetails.result : {};
+  const navigationRead = actionFields.code === 'UNEXPECTED_NAVIGATION' && !observed.isError;
+  const result = {
+    ...actionFields,
+    ...(navigationRead
+      ? {
+          success: true,
+          error: undefined,
+          recovery: 'The click navigated; observation is the new page. Use its refs.',
+        }
+      : {}),
+    observation,
+    ...(safety ? { safety } : {}),
+  };
+  const action = actionDetails.action;
+  const text = JSON.stringify({ action, result });
+  return {
+    tool_name: actionResult.tool_name,
+    text,
+    content: [
+      { type: 'text', text },
+      ...actionResult.content.filter((block) => block.type !== 'text'),
+      ...observed.content.filter((block) => block.type !== 'text'),
+    ],
+    details: { ...actionDetails, result },
+    programmatic: { data: { action, result } },
+    ...(actionResult.isError && !navigationRead ? { isError: true } : {}),
+  };
+}
+
+function readRequiredNextToolMarker(result: ToolResult): string | undefined {
+  const details = isRecord(result.details) ? result.details : undefined;
+  const inner = details && isRecord(details.result) ? details.result : undefined;
+  const safety = inner && isRecord(inner.safety) ? inner.safety : undefined;
+  return typeof safety?.requiredNextTool === 'string' ? safety.requiredNextTool : undefined;
 }
 
 interface PostActionVisualRequest extends Record<string, unknown> {
@@ -1154,10 +1352,7 @@ function isDeduplicatedVisual(value: unknown): boolean {
  * This note replaces the image to keep the text honest about the omission and
  * route the model to a fresh observation instead of a phantom attachment.
  */
-function appendErrorVisualOmissionNote(
-  action: LocalBrowserToolAction,
-  result: unknown,
-): unknown {
+function appendErrorVisualOmissionNote(action: LocalBrowserToolAction, result: unknown): unknown {
   if (!isRecord(result)) return result;
   return {
     ...result,
@@ -1329,7 +1524,7 @@ const CREDENTIAL_SIGN_IN_SAFETY = {
   classification: 'authentication_credential_prompt',
   mutationAllowed: true,
   instruction:
-    "No takeover surface: sign in yourself with credentials the user or task supplied, or an account this sign-in page publishes for that user or task. If values are missing, request them with ask_user when available; otherwise report what is missing and continue the rest of the task. Never guess credentials or echo secrets.",
+    'No takeover surface: sign in yourself with credentials the user or task supplied, or an account this sign-in page publishes for that user or task. If values are missing, request them with ask_user when available; otherwise report what is missing and continue the rest of the task. Never guess credentials or echo secrets.',
 } as const;
 
 function appendBrowserSafetyGuidance(

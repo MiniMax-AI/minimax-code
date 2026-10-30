@@ -41,6 +41,10 @@ export function createBuiltinPromptContext(
       cli: input.surface === 'cli',
     },
     featurePrompts,
+    // Templates must read this only through `lookup` (see _v2/tui/SYSTEM.md.hbs):
+    // online prompts are shared by every client version, older contexts have
+    // no `ptc`, and strict mode throws on `ptc.enabled` when it is missing.
+    ptc: { enabled: input.ptc !== undefined, section: input.ptc?.section ?? '' },
     DATA_DIR: input.dataDirToken ?? '{{DATA_DIR}}',
     ROLE_DIRECTORY: roleDirectoryText(),
   };

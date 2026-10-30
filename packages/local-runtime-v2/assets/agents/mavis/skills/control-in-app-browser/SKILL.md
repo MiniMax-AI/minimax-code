@@ -325,6 +325,25 @@ opaque refs for actions.
 Call one Browser action at a time and wait for its result before issuing the next action. Browser
 actions share page, snapshot, frame, and navigation state; never emit parallel Browser calls.
 
+When this turn exposes Browser only inside `run_code`, "one at a time" means awaiting each Browser
+call in order inside the program, not one model response per action. There, and only there,
+page-changing actions also accept a top-level `observe` next to `action` and `input`. After a
+successful action, the same call reads the page and returns it as `result.observation`:
+`{ kind: "inspect" }` gives fresh refs, `{ kind: "text", selector? }` gives visible text, and
+`waitForText` first waits for text you expect the action to produce (a search suggestion, a
+confirmation). It also runs when a click navigates (`UNEXPECTED_NAVIGATION`), so the observation is
+the new page. Prefer `observe` to a separate `inspect` or `query` after an action. The observation
+is evidence for your judgment; it does not turn `effect.verified: false` into a verified effect. Put
+one whole bounded step in a single program: fill the related fields, type a search term with
+`observe.waitForText`, click the matching option from that observation, and read the form back.
+Check `r.isError` after every call and return early; the host refuses the remaining Browser calls of
+a program after one fails (`BROWSER_PTC_STOPPED`). An irreversible or externally visible commit
+(submit, send, save, pay, delete, share) is the last Browser call of its program, made only after
+the program read back what it commits; give the commit `observe` so its result already shows the
+outcome. `safety.requiredNextTool` still means returning from the program and making that call
+directly. A turn that lists `browser` as a top-level tool has no `observe`; read the page there with
+`inspect` or `query`.
+
 1. `inspect` the current tab.
 2. Choose an opaque element ref or an action supported by the compact Browser schema.
 3. Call `browser` with the selected `action` and only that action's `input` fields.
@@ -337,7 +356,7 @@ compressed post-action visual automatically. Native `input` and `textarea` write
 because their structured value/effect verification is cheaper. The automatic image is supplemental
 evidence: it never changes the action's `success`, authorizes a sensitive action, or turns
 `effect.verified: false` into a runtime-verified postcondition. Do not call `screenshot` merely to
-repeat an attached visual that already answers the question. At most two automatic images are
+repeat an attached visual that already answers the question. At most four automatic images are
 attached in one turn; use explicit `screenshot` only when later visual evidence is actually needed.
 
 If an inspected icon control has no meaningful name and exposes only a numeric counter such as a
@@ -383,18 +402,20 @@ the workspace, local files, test metadata, or unrelated tools to reinterpret the
 mismatch; report the visible choices and ask the user directly.
 
 Navigation and interaction actions return short status metadata and may include one bounded
-post-action visual; they do not return a fresh structured page snapshot. Call `inspect` or `query`
-explicitly when page details are needed after an action. Do not expect `browserState`, ElementMap
-indices, or local map paths in compact action results.
+post-action visual; without `observe` (available only inside `run_code`) they do not return a fresh
+structured page snapshot. Call `inspect` or `query` explicitly when page details are needed after an
+action and no observation answers it. Do not expect `browserState`, ElementMap indices, or local map
+paths in compact action results.
 
 An ordinary `click` result means the input was dispatched, but the requested page effect is not
 verified. Its `effect.verified` remains `false` and `verificationRequired` remains `true`. Use
 `inspect`, `query`, or `screenshot` and observe the expected panel, control, text, or state before
-claiming that the click achieved the user's goal. When an ordinary click navigates the page, the
-result reports `navigation.detected: true`; every earlier ref is invalid, so inspect the new page
-before the next interaction. A provider that treats that navigation as unexpected reports
-`UNEXPECTED_NAVIGATION`; inspect the current page before deciding whether to go back or
-retry with a newly observed target. An attached `visualObservation` can establish a visible UI
+claiming that the click achieved the user's goal; inside `run_code`, `observe` on the click returns
+that evidence in the same call. When an ordinary click navigates the page, the result reports
+`navigation.detected: true`; every earlier ref is invalid, so inspect the new page (or use the refs
+of an `observe` read of it) before the next interaction. A provider that treats that navigation as
+unexpected reports `UNEXPECTED_NAVIGATION`; read the current page before deciding whether to go back
+or retry with a newly observed target. An attached `visualObservation` can establish a visible UI
 effect, but it does not rewrite the structured click effect or navigation status.
 
 When clicking a link or control is expected to navigate the main document, use the atomic action:

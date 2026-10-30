@@ -73,7 +73,8 @@
       "src/service/model-system/index.ts!",
       "src/http/routing/bindings.gen.ts!",
       "src/http/routing/contracts.gen.ts!",
-      "src/http/generated/**!"
+      "src/http/generated/**!",
+      "src/service/turn-system/agent-host/runner/ptc/quickjs-worker.ts!"
     ],
     "project": [
       "src/**/*.ts!",
@@ -109,6 +110,7 @@
     "hono": "^4.7.11",
     "jszip": "^3.10.1",
     "proper-lockfile": "^4",
+    "quickjs-emscripten": "0.31.0",
     "typebox": "1.1.38",
     "smol-toml": "1.7.1",
     "yaml": "^2.9.0"

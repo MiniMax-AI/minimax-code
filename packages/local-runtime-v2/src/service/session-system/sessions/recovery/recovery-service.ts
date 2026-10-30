@@ -1,4 +1,10 @@
 import type { SessionRepository } from '../repo/contract.js';
+import {
+  recoverPtcCrashState,
+  type PtcCrashRecoveryTerminalFact,
+} from '../../messages/ptc/crash-recovery.js';
+import type { SessionSystemCanonicalHistoryProvider } from '../../messages/history/canonical-history-provider.js';
+import type { MessageRepository } from '../../messages/repo/contract.js';
 import type {
   SessionProcessRestartRecovery,
   SessionProcessRestartRecoveryResult,
@@ -11,6 +17,9 @@ const DEFAULT_RECOVERY_BATCH_SIZE = 1000;
 
 export interface SessionRecoveryServiceOptions {
   readonly sessions: Pick<SessionRepository, 'listStalePiSessions' | 'update'>;
+  /** Existing display and canonical stores, used only to close interrupted PTC turns. */
+  readonly messages?: Pick<MessageRepository, 'list' | 'upsert'>;
+  readonly canonicalHistory?: Pick<SessionSystemCanonicalHistoryProvider, 'readActive' | 'append'>;
   readonly batchSize?: number;
 }
 
@@ -30,11 +39,13 @@ export class SessionRecoveryService implements SessionProcessRestartRecovery {
   async recoverPreviousProcess(input: {
     readonly processStartedAtMs: number;
     readonly protectedSessionIds?: readonly string[];
+    readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
   }): Promise<SessionProcessRestartRecoveryResult> {
     if (!Number.isFinite(input.processStartedAtMs)) {
       throw new TypeError('processStartedAtMs must be finite');
     }
     const interruptedSessionIds: string[] = [];
+    const recoveredPtcTurnIds = new Set<string>();
     let candidates;
     do {
       candidates = await this.options.sessions.listStalePiSessions({
@@ -44,6 +55,16 @@ export class SessionRecoveryService implements SessionProcessRestartRecovery {
           : {}),
         limit: this.batchSize,
       });
+      // Do this before changing `started` to `interrupted`. If the process
+      // stops between the two durable stores, the next startup still sees the
+      // Session as stale and retries the PTC closure instead of losing facts.
+      for (const turnId of await this.recoverInterruptedPtcState({
+        processStartedAtMs: input.processStartedAtMs,
+        interruptedSessionIds: candidates.map((candidate) => candidate.sessionId),
+        terminalFacts: input.terminalFacts,
+      })) {
+        recoveredPtcTurnIds.add(turnId);
+      }
       for (const candidate of candidates) {
         const updated = await this.options.sessions.update(candidate.sessionId, {
           status: 'interrupted',
@@ -58,7 +79,28 @@ export class SessionRecoveryService implements SessionProcessRestartRecovery {
         }
       }
     } while (candidates.length === this.batchSize);
-    return { interruptedSessionIds };
+    for (const turnId of await this.recoverInterruptedPtcState({
+      processStartedAtMs: input.processStartedAtMs,
+      interruptedSessionIds: [],
+      terminalFacts: input.terminalFacts,
+    })) {
+      recoveredPtcTurnIds.add(turnId);
+    }
+    return {
+      interruptedSessionIds,
+      ...(recoveredPtcTurnIds.size > 0 ? { recoveredPtcTurnIds: [...recoveredPtcTurnIds] } : {}),
+    };
+  }
+
+  private async recoverInterruptedPtcState(input: {
+    readonly processStartedAtMs: number;
+    readonly interruptedSessionIds: readonly string[];
+    readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
+  }): Promise<readonly string[]> {
+    const { messages, canonicalHistory } = this.options;
+    if (!messages || !canonicalHistory) return [];
+    return (await recoverPtcCrashState({ messages, history: canonicalHistory }, input))
+      .recoveredTurnIds;
   }
 }
 

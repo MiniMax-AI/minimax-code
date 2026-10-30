@@ -32,6 +32,7 @@ export {
   selectMultimodalAttachments,
   encodeAttachmentImage,
   nativeMultimodalKindForMime,
+  multimodalDemotionTextNotes,
   type AttachmentImageEncoding,
   type MultimodalAttachmentCapabilities,
   type MultimodalAttachmentKind,
@@ -45,4 +46,30 @@ export {
 } from "./desktop/canonical-tool-policy.js";
 
 export { getLocalBashEnvironment } from "./desktop/local-pi-tools.js";
+export {
+  createDesktopPtcResultProjection,
+  classifyDesktopPtcTruncation,
+  projectDesktopPtcEvidenceInput,
+  projectDesktopPtcToolResult,
+  sanitizePtcChildExecutionDetailsForSafety,
+  sanitizePtcExecutionDetailsForSafety,
+  type DesktopPtcTruncationVerdict,
+} from "./desktop/ptc-result-projection.js";
+export {
+  isPtcMavisChildToolName,
+  isPtcMavisDirectCommand,
+  isPtcMavisProgrammaticCommand,
+  PTC_MAVIS_CHILD_TOOLS,
+  ptcMavisChildToolName,
+  ptcMavisRunCodeCall,
+  ptcMavisRunCodeTool,
+  type PtcMavisChildToolName,
+} from "./desktop/local-mavis-commands.js";
+export {
+  createPtcMavisTools,
+  PTC_MAVIS_RUN_CODE_NOTE,
+  readPtcMavisChildTarget,
+} from "./desktop/local-mavis-ptc.js";
+export { getMcpInvokeRegistries } from "./mcp-disclosure/mcp-invoke.js";
+export { withLocalBrowserObserve } from "./desktop/local-browser.js";
 export { pluginHookTranscriptPath, pluginHookCodexTranscriptPath } from "./plugin-hooks/index.js";

@@ -33,6 +33,7 @@ export interface LocalTurnToolCatalogBuildInput {
   readonly userText?: string;
   readonly agentProfile?: LocalTurnAgentProfileFacts;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
+  readonly ptcEnabled?: boolean;
 }
 
 export function createLocalTurnToolCatalogInput(
@@ -53,6 +54,9 @@ export function createLocalTurnToolCatalogInput(
     llmModel: readResolvedModel(context.model),
     effectivePluginSkills: readEffectivePluginSkills(context.agentConfig),
     ...(context.userInput ? { userText: context.userInput.text } : {}),
+    ...(context.agentConfig.ptc_enabled === true && context.turnIntent?.kind === 'desktop-ptc'
+      ? { ptcEnabled: true }
+      : {}),
     ...(modelCapabilities ? { modelCapabilities } : {}),
     ...(agentProfile ? { agentProfile } : {}),
     ...(desktopCapabilities ? { desktopCapabilities } : {}),

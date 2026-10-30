@@ -3,6 +3,7 @@ export {
   type McpConnectionPoolOptions,
   type McpServerLookup,
 } from './runtime/connection-pool.js';
+export { describeMcpCallError, type McpCallErrorRaw } from './runtime/call-error.js';
 export {
   MCP_DEFAULTS,
   NOOP_MCP_RUNTIME_LOGGER,

@@ -18,6 +18,7 @@ import {
   resolveMaxImagesPerRequest,
   type RequestImage,
 } from '@mavis/agent-core/pi-turn-runner';
+import { type ProgrammaticImageEncoding, recordImageEncodedContent } from '@mavis/agent-core/tools';
 
 /** Strictest known per-image provider limit, in base64 bytes. */
 export const PROVIDER_IMAGE_MAX_BASE64_BYTES = 5 * 1024 * 1024;
@@ -231,38 +232,65 @@ const IMAGE_PROCESSOR_UNAVAILABLE_NOTE =
  * image over the limits is replaced with `IMAGE_PROCESSOR_UNAVAILABLE_NOTE`
  * when the image processor cannot load, as the Read tool did, and an image it
  * cannot decode is replaced with a note, so its bytes never enter history.
+ *
+ * The returned array is marked with what happened to each changed image
+ * (recordImageEncodedContent), so PTC can report a native read's image as
+ * resized or omitted instead of as rewritten by an unknown hook. Output with
+ * an undecodable image is not marked: there is no image state to report.
  */
 export async function encodeRequestImageBlocks<T extends { readonly type: string }>(
   blocks: readonly T[],
   encoding: RequestImageEncoding = DEFAULT_REQUEST_IMAGE_ENCODING,
 ): Promise<T[] | undefined> {
-  let changed = false;
-  const encoded = await Promise.all(
-    blocks.map(async (block): Promise<T[]> => {
-      const { data, mimeType } = block as { data?: unknown; mimeType?: unknown };
-      if (block.type !== 'image' || typeof data !== 'string' || typeof mimeType !== 'string') {
-        return [block];
-      }
-      const bytes = Buffer.from(data, 'base64');
-      const encodedImage = await encodeImageOrUnavailable(bytes, mimeType, encoding);
-      if (encodedImage === PROCESSOR_UNAVAILABLE) {
-        changed = true;
-        return [{ type: 'text', text: IMAGE_PROCESSOR_UNAVAILABLE_NOTE } as unknown as T];
-      }
-      if (encodedImage === 'undecodable') {
-        changed = true;
-        const text = `[Image omitted: the ${mimeType} data (${bytes.length} bytes) could not be decoded; it may be corrupt, truncated, or in an unsupported format.]`;
-        return [{ type: 'text', text } as unknown as T];
-      }
-      if (!encodedImage) return [block];
-      changed = true;
-      const image = { ...block, ...encodedImage.image };
-      return encodedImage.dimensionNote
-        ? [image, { type: 'text', text: encodedImage.dimensionNote } as unknown as T]
-        : [image];
-    }),
-  );
-  return changed ? encoded.flat() : undefined;
+  const encoded = await Promise.all(blocks.map((block) => encodeImageBlock(block, encoding)));
+  if (!encoded.some(({ fact }) => fact !== undefined)) return undefined;
+  const output = encoded.flatMap(({ blocks: next }) => next);
+  const facts = encoded.flatMap(({ fact }) => (fact ? [fact] : []));
+  if (!facts.includes('undecodable')) {
+    recordImageEncodedContent(blocks, output, facts as ProgrammaticImageEncoding[]);
+  }
+  return output;
+}
+
+/** One block's replacement and what changed; no fact when it is kept as it was. */
+async function encodeImageBlock<T extends { readonly type: string }>(
+  block: T,
+  encoding: RequestImageEncoding,
+): Promise<{ readonly blocks: T[]; readonly fact?: ProgrammaticImageEncoding | 'undecodable' }> {
+  const { data, mimeType } = block as { data?: unknown; mimeType?: unknown };
+  if (block.type !== 'image' || typeof data !== 'string' || typeof mimeType !== 'string') {
+    return { blocks: [block] };
+  }
+  const bytes = Buffer.from(data, 'base64');
+  const encodedImage = await encodeImageOrUnavailable(bytes, mimeType, encoding);
+  if (encodedImage === PROCESSOR_UNAVAILABLE) {
+    return {
+      blocks: [{ type: 'text', text: IMAGE_PROCESSOR_UNAVAILABLE_NOTE } as unknown as T],
+      fact: { mimeType, omittedReason: 'processor_unavailable' },
+    };
+  }
+  if (encodedImage === 'undecodable') {
+    const text = `[Image omitted: the ${mimeType} data (${bytes.length} bytes) could not be decoded; it may be corrupt, truncated, or in an unsupported format.]`;
+    return { blocks: [{ type: 'text', text } as unknown as T], fact: 'undecodable' };
+  }
+  if (!encodedImage) return { blocks: [block] };
+  const image = { ...block, ...encodedImage.image };
+  const fact = {
+    mimeType: encodedImage.image.mimeType,
+    width: encodedImage.width,
+    height: encodedImage.height,
+    originalWidth: encodedImage.originalWidth,
+    originalHeight: encodedImage.originalHeight,
+  };
+  return encodedImage.dimensionNote
+    ? { blocks: [image, { type: 'text', text: encodedImage.dimensionNote } as unknown as T], fact }
+    : { blocks: [image], fact };
+}
+
+/** The encoder's result with the original size, which only the block encoder reports. */
+interface EncodedImage extends EncodedRequestImageDetails {
+  readonly originalWidth: number;
+  readonly originalHeight: number;
 }
 
 async function encodeImage(
@@ -271,7 +299,10 @@ async function encodeImage(
   encoding: RequestImageEncoding,
 ): Promise<EncodedRequestImageDetails | 'undecodable' | undefined> {
   const encoded = await encodeImageOrUnavailable(bytes, mimeType, encoding);
-  return encoded === PROCESSOR_UNAVAILABLE ? undefined : encoded;
+  if (encoded === PROCESSOR_UNAVAILABLE || encoded === undefined) return undefined;
+  if (encoded === 'undecodable') return encoded;
+  const { image, width, height, dimensionNote } = encoded;
+  return { image, width, height, ...(dimensionNote ? { dimensionNote } : {}) };
 }
 
 const PROCESSOR_UNAVAILABLE = Symbol('image processor unavailable');
@@ -280,7 +311,7 @@ async function encodeImageOrUnavailable(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding,
-): Promise<EncodedRequestImageDetails | 'undecodable' | typeof PROCESSOR_UNAVAILABLE | undefined> {
+): Promise<EncodedImage | 'undecodable' | typeof PROCESSOR_UNAVAILABLE | undefined> {
   if (!mimeType.toLowerCase().startsWith('image/')) return undefined;
   try {
     const resized = await resizeImage(bytes, mimeType, {
@@ -296,6 +327,8 @@ async function encodeImageOrUnavailable(
       image: { data: resized.data, mimeType: resized.mimeType },
       width: resized.width,
       height: resized.height,
+      originalWidth: resized.originalWidth,
+      originalHeight: resized.originalHeight,
     };
     const shrunk =
       resized.width !== resized.originalWidth || resized.height !== resized.originalHeight;

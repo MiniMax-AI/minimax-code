@@ -177,6 +177,9 @@ export function toolCallFromRuntime(tc: RuntimeToolCall): ToolCall {
   return {
     tool_name: displayTc.tool_name,
     tool_call_id: displayTc.tool_call_id,
+    ...(displayTc.parent_tool_call_id
+      ? { parent_tool_call_id: displayTc.parent_tool_call_id }
+      : {}),
     tool_call_status: toLegacyToolCallStatus(displayTc.status),
     ...(displayTc.args !== undefined ? { tool_call_args: JSON.stringify(displayTc.args) } : {}),
     ...(displayTc.args_text_delta !== undefined

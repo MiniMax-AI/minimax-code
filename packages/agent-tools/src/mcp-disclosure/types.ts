@@ -38,6 +38,26 @@ export interface McpSearchHit {
   readonly score: number;
 }
 
+export interface ToolLoadingCatalogOptions {
+  /** Provenance for tools already present in the inventory or an existing named registry. */
+  readonly entries?: readonly McpToolEntry[];
+  readonly model?: McpModelIdentity;
+  /** Controls automatic disclosure; explicit loading declarations always apply. */
+  readonly options?: McpDisclosureOptions;
+  /** Keeps both gateway definitions present even when the directory is empty. */
+  readonly alwaysExpose?: boolean;
+  /**
+   * PTC Turn: tool_search names the run_code call form (TOOL_SEARCH_PTC_CALL_SENTENCE).
+   * Which tools are deferred and how mcp_invoke resolves them stays the same.
+   */
+  readonly ptc?: boolean;
+}
+
+export interface ToolLoadingCatalog<T extends RuntimeTool = RuntimeTool> {
+  readonly tools: T[];
+  readonly plan: McpDisclosurePlan;
+}
+
 export interface McpToolIndex {
   search(input: { query?: string; regex?: string; topK: number }): McpSearchHit[];
   readonly size: number;

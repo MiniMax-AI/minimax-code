@@ -287,6 +287,23 @@ describe('McpConnectionPool — metrics emission', () => {
     ]);
   });
 
+  it('keeps the original protocol error as the cause of the wrapped call failure', async () => {
+    pool = new McpConnectionPool(stubLookup(stdioServer));
+    const protocolError = Object.assign(new Error('MCP error -32602: Invalid params'), {
+      name: 'McpError',
+      code: -32602,
+      data: { field: 'query' },
+    });
+    seedFakeConnection(pool, 'demo', async () => {
+      throw protocolError;
+    });
+
+    const failure = await pool.callTool('demo', 'ping', {}).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('MCP tool call failed: MCP error -32602: Invalid params');
+    expect((failure as Error).cause).toBe(protocolError);
+  });
+
   it('does not count pre-dispatch aborts (never acquired a permit)', async () => {
     const { events, metrics } = makeRecorder();
     pool = new McpConnectionPool(stubLookup(stdioServer), { metrics });

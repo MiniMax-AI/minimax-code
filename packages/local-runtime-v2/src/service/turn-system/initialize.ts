@@ -40,7 +40,10 @@ import {
   createUserMessageId,
   SessionMaintenanceService,
 } from "../session-system/index.js";
-import type { TurnRepository } from "./persistence/contracts.js";
+import type {
+  TurnRecoveryTerminalFact,
+  TurnRepository,
+} from "./persistence/contracts.js";
 import type { SessionOperationGate } from "./lifecycle/session-operation-gate.js";
 import { createTurnContinuationService } from "./execution/turn-continuation.service.js";
 
@@ -430,6 +433,7 @@ function createRuntimeRecoveryCoordinator(
     await options.sessions.sessions.recovery.recoverPreviousProcess({
       processStartedAtMs: options.processStartedAtMs,
       ...(protectedSessionIds.length > 0 ? { protectedSessionIds } : {}),
+      ...sessionRecoveryEvidence(restarted.terminalFacts),
     });
     const taskRecoveryState = JSON.stringify([...protectedSessionIds].sort());
     if (
@@ -498,6 +502,20 @@ function createRuntimeRecoveryCoordinator(
       if (inFlightRecovery) await inFlightRecovery;
     },
   };
+}
+
+function sessionRecoveryEvidence(terminalFacts: readonly TurnRecoveryTerminalFact[]): {
+  readonly terminalFacts?: readonly TurnRecoveryTerminalFact[];
+} {
+  return terminalFacts.length > 0 ? { terminalFacts } : {};
+}
+
+function currentRecoveryObservationMs(options: InitializeTurnSystemOptions): number {
+  const observedAtMs = options.nowMs?.() ?? Date.now();
+  if (!Number.isFinite(observedAtMs)) {
+    throw new TypeError('runtime recovery observation time must be finite');
+  }
+  return Math.max(options.processStartedAtMs, observedAtMs);
 }
 
 function createTrustedEditSubmission(

@@ -25,6 +25,22 @@ import type {
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /**
+ * Optional host-owned relationship for a tool call executed outside a model
+ * tool batch. The loop does not infer it from arguments or message text.
+ */
+export interface ToolCallExecutionOptions {
+	parentToolCallId?: string;
+	parentDescription?: string;
+	missingToolMessage?: (toolName: string) => string | undefined;
+}
+
+/** The subset of loop configuration used by one tool-call lifecycle. */
+export type ToolCallLifecycleConfig = Pick<
+	AgentLoopConfig,
+	"beforeToolCall" | "onToolExecutionStart" | "afterToolCall" | "missingToolMessage"
+>;
+
+/**
  * Start an agent loop with a new prompt message.
  * The prompt is added to the context and events are emitted for it.
  */
@@ -413,13 +429,35 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	const batchContext = withResolvedMissingTools(currentContext, toolCalls, config);
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+		(tc) => batchContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
+		return executeToolCallsSequential(batchContext, assistantMessage, toolCalls, config, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+	return executeToolCallsParallel(batchContext, assistantMessage, toolCalls, config, signal, emit);
+}
+
+/**
+ * Adds the tools the host resolved for this batch's uncataloged calls to the context the batch
+ * executes with. The context used for model requests keeps its own tools.
+ */
+function withResolvedMissingTools(
+	context: AgentContext,
+	toolCalls: readonly AgentToolCall[],
+	config: AgentLoopConfig,
+): AgentContext {
+	if (!config.resolveMissingTool) return context;
+	const catalogNames = new Set((context.tools ?? []).map((tool) => tool.name));
+	const resolved: AgentTool<any>[] = [];
+	for (const toolCall of toolCalls) {
+		if (catalogNames.has(toolCall.name)) continue;
+		const tool = config.resolveMissingTool(toolCall);
+		if (tool?.name !== toolCall.name) continue;
+		if (!resolved.some((candidate) => candidate.name === tool.name)) resolved.push(tool);
+	}
+	return resolved.length === 0 ? context : { ...context, tools: [...(context.tools ?? []), ...resolved] };
 }
 
 type ExecutedToolCallBatch = {
@@ -439,42 +477,14 @@ async function executeToolCallsSequential(
 	const messages: ToolResultMessage[] = [];
 
 	for (const [toolIndex, toolCall] of toolCalls.entries()) {
-		await emit({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
-		});
-
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
-		let finalized: FinalizedToolCallOutcome;
-		if (preparation.kind === "immediate") {
-			finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
-				terminateAgent: preparation.terminateAgent,
-			};
-		} else {
-			const executed = await executePreparedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				config,
-				signal,
-				emit,
-			);
-			finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				config,
-				signal,
-			);
-		}
-
-		await emitToolExecutionEnd(finalized, emit);
+		const finalized = await executeToolCall(
+			currentContext,
+			assistantMessage,
+			toolCall,
+			config,
+			signal,
+			emit,
+		);
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
@@ -537,6 +547,8 @@ async function executeToolCallsParallel(
 				toolCall,
 				result: preparation.result,
 				isError: preparation.isError,
+				args: preparation.args,
+				...(preparation.failure === undefined ? {} : { failure: preparation.failure }),
 				terminateAgent: preparation.terminateAgent,
 			} satisfies FinalizedToolCallOutcome;
 			await emitToolExecutionEnd(finalized, emit);
@@ -615,29 +627,53 @@ async function executeToolCallsParallel(
 	};
 }
 
-type PreparedToolCall = {
+export type PreparedToolCall = {
 	kind: "prepared";
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
 };
 
-type ImmediateToolCallOutcome = {
+export type ToolCallFailureKind =
+	| "tool_not_found"
+	| "argument_preparation"
+	| "argument_validation"
+	| "before_hook"
+	| "blocked"
+	| "cancelled"
+	| "execution"
+	| "after_hook";
+
+/** Source-owned failure classification; hosts must not infer it from text. */
+export interface ToolCallFailure {
+	kind: ToolCallFailureKind;
+	message: string;
+	blockedBy?: string;
+	approvalStatus?: "denied" | "expired";
+}
+
+export type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
+	args?: unknown;
+	failure?: ToolCallFailure;
 	terminateAgent?: boolean;
 };
 
-type ExecutedToolCallOutcome = {
+export type ExecutedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
+	failure?: ToolCallFailure;
 };
 
-type FinalizedToolCallOutcome = {
+export type FinalizedToolCallOutcome = {
 	toolCall: AgentToolCall;
 	result: AgentToolResult<any>;
 	isError: boolean;
+	args?: unknown;
+	failure?: ToolCallFailure;
+	isErrorOrigin?: "tool" | "hook";
 	terminateAgent?: boolean;
 };
 
@@ -712,90 +748,157 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
-async function prepareToolCall(
+export async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	toolCall: AgentToolCall,
-	config: AgentLoopConfig,
+	config: ToolCallLifecycleConfig,
 	signal: AbortSignal | undefined,
+	options: ToolCallExecutionOptions = {},
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
 	if (!tool) {
+		const message =
+			options.missingToolMessage?.(toolCall.name) ??
+			config.missingToolMessage?.(toolCall.name) ??
+			`Tool ${toolCall.name} not found`;
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
+			result: createErrorToolResult(message),
 			isError: true,
+			failure: { kind: "tool_not_found", message },
 		};
 	}
 
+	let preparedToolCall: AgentToolCall;
 	try {
-		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
-		const validatedArgs = validateToolArguments(tool, preparedToolCall);
-		if (config.beforeToolCall) {
-			const beforeResult = await config.beforeToolCall(
+		preparedToolCall = prepareToolCallArguments(tool, toolCall);
+	} catch (error) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			isError: true,
+			failure: {
+				kind: "argument_preparation",
+				message: error instanceof Error ? error.message : String(error),
+			},
+		};
+	}
+
+	let validatedArgs: unknown;
+	try {
+		validatedArgs = validateToolArguments(tool, preparedToolCall);
+	} catch (error) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			isError: true,
+			failure: {
+				kind: "argument_validation",
+				message: error instanceof Error ? error.message : String(error),
+			},
+		};
+	}
+
+	if (config.beforeToolCall) {
+		let beforeResult;
+		try {
+			beforeResult = await config.beforeToolCall(
 				{
 					assistantMessage,
 					toolCall,
 					args: validatedArgs,
 					context: currentContext,
+					...(options.parentToolCallId === undefined
+						? {}
+						: { parentToolCallId: options.parentToolCallId }),
+					...(options.parentDescription === undefined
+						? {}
+						: { parentDescription: options.parentDescription }),
 				},
 				signal,
 			);
-			if (signal?.aborted) {
-				return {
-					kind: "immediate",
-					result: createErrorToolResult("Operation aborted"),
-					isError: true,
-				};
-			}
-			if (beforeResult?.block) {
-				return {
-					kind: "immediate",
-					result: createErrorToolResult(beforeResult.reason || "Tool execution was blocked"),
-					isError: true,
-					terminateAgent: beforeResult.terminateAgent,
-				};
-			}
+		} catch (error) {
+			return {
+				kind: "immediate",
+				result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+				isError: true,
+				args: validatedArgs,
+				failure: {
+					kind: "before_hook",
+					message: error instanceof Error ? error.message : String(error),
+				},
+			};
 		}
 		if (signal?.aborted) {
 			return {
 				kind: "immediate",
 				result: createErrorToolResult("Operation aborted"),
 				isError: true,
+				args: validatedArgs,
+				failure: { kind: "cancelled", message: "Operation aborted" },
 			};
 		}
-		return {
-			kind: "prepared",
-			toolCall,
-			tool,
-			args: validatedArgs,
-		};
-	} catch (error) {
+		if (beforeResult?.block) {
+			const message = beforeResult.reason || "Tool execution was blocked";
+			return {
+				kind: "immediate",
+				result: createErrorToolResult(message),
+				isError: true,
+				args: validatedArgs,
+				failure: {
+					kind: "blocked",
+					message,
+					...(beforeResult.blockedBy === undefined ? {} : { blockedBy: beforeResult.blockedBy }),
+					...(beforeResult.approvalStatus === undefined
+						? {}
+						: { approvalStatus: beforeResult.approvalStatus }),
+				},
+				terminateAgent: beforeResult.terminateAgent,
+			};
+		}
+	}
+	if (signal?.aborted) {
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: createErrorToolResult("Operation aborted"),
 			isError: true,
+			args: validatedArgs,
+			failure: { kind: "cancelled", message: "Operation aborted" },
 		};
 	}
+	return {
+		kind: "prepared",
+		toolCall,
+		tool,
+		args: validatedArgs,
+	};
 }
 
-async function executePreparedToolCall(
+export async function executePreparedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
-	config: AgentLoopConfig,
+	config: ToolCallLifecycleConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	options: ToolCallExecutionOptions = {},
 ): Promise<ExecutedToolCallOutcome> {
 	const updateEvents: Promise<void>[] = [];
 
 	try {
 		config.onToolExecutionStart?.({
-			assistantMessage,
-			toolCall: prepared.toolCall,
-			args: prepared.args,
-			context: currentContext,
-		});
+				assistantMessage,
+				toolCall: prepared.toolCall,
+				args: prepared.args,
+				context: currentContext,
+				...(options.parentToolCallId === undefined
+					? {}
+					: { parentToolCallId: options.parentToolCallId }),
+				...(options.parentDescription === undefined
+					? {}
+					: { parentDescription: options.parentDescription }),
+			});
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
@@ -809,6 +912,9 @@ async function executePreparedToolCall(
 							toolName: prepared.toolCall.name,
 							args: prepared.toolCall.arguments,
 							partialResult,
+							...(options.parentToolCallId === undefined
+								? {}
+								: { parentToolCallId: options.parentToolCallId }),
 						}),
 					),
 				);
@@ -821,20 +927,27 @@ async function executePreparedToolCall(
 		return {
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,
+			failure: {
+				kind: "execution",
+				message: error instanceof Error ? error.message : String(error),
+			},
 		};
 	}
 }
 
-async function finalizeExecutedToolCall(
+export async function finalizeExecutedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
 	executed: ExecutedToolCallOutcome,
-	config: AgentLoopConfig,
+	config: ToolCallLifecycleConfig,
 	signal: AbortSignal | undefined,
+	options: ToolCallExecutionOptions = {},
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
+	let isErrorOrigin: "tool" | "hook" | undefined = executed.isError ? "tool" : undefined;
+	let failure = executed.failure;
 	let terminateAgent = false;
 
 	if (config.afterToolCall) {
@@ -847,6 +960,12 @@ async function finalizeExecutedToolCall(
 					result,
 					isError,
 					context: currentContext,
+					...(options.parentToolCallId === undefined
+						? {}
+						: { parentToolCallId: options.parentToolCallId }),
+					...(options.parentDescription === undefined
+						? {}
+						: { parentDescription: options.parentDescription }),
 				},
 				signal,
 			);
@@ -856,12 +975,21 @@ async function finalizeExecutedToolCall(
 					details: afterResult.details ?? result.details,
 					terminate: afterResult.terminate ?? result.terminate,
 				};
-				isError = afterResult.isError ?? isError;
+				if (afterResult.isError !== undefined) {
+					isError = afterResult.isError;
+					isErrorOrigin = afterResult.isError
+						? (afterResult.isErrorOrigin ?? "hook")
+						: undefined;
+				}
 				terminateAgent = afterResult.terminateAgent === true;
 			}
 		} catch (error) {
 			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
 			isError = true;
+			failure = {
+				kind: "after_hook",
+				message: error instanceof Error ? error.message : String(error),
+			};
 		}
 	}
 
@@ -869,8 +997,76 @@ async function finalizeExecutedToolCall(
 		toolCall: prepared.toolCall,
 		result,
 		isError,
+		args: prepared.args,
+		...(failure === undefined ? {} : { failure }),
+		...(isErrorOrigin === undefined ? {} : { isErrorOrigin }),
 		terminateAgent,
 	};
+}
+
+/**
+ * Execute one tool call through Pi's complete lifecycle without creating a
+ * model-history tool-result message. Hosts that execute a nested call can use
+ * this with a trusted parent id; ordinary batches keep their phased path so
+ * parallel preparation remains ordered.
+ */
+export async function executeToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	config: ToolCallLifecycleConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	options: ToolCallExecutionOptions = {},
+): Promise<FinalizedToolCallOutcome> {
+	await emit({
+		type: "tool_execution_start",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		args: toolCall.arguments,
+		...(options.parentToolCallId === undefined
+			? {}
+			: { parentToolCallId: options.parentToolCallId }),
+	});
+
+	const preparation = await prepareToolCall(
+		currentContext,
+		assistantMessage,
+		toolCall,
+		config,
+		signal,
+		options,
+	);
+	const finalized =
+		preparation.kind === "immediate"
+			? {
+					toolCall,
+					result: preparation.result,
+					isError: preparation.isError,
+					args: preparation.args,
+					...(preparation.failure === undefined ? {} : { failure: preparation.failure }),
+					terminateAgent: preparation.terminateAgent,
+				}
+			: await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					preparation,
+					await executePreparedToolCall(
+						currentContext,
+						assistantMessage,
+						preparation,
+						config,
+						signal,
+						emit,
+						options,
+					),
+					config,
+					signal,
+					options,
+				);
+
+	await emitToolExecutionEnd(finalized, emit, options);
+	return finalized;
 }
 
 function createErrorToolResult(message: string): AgentToolResult<any> {
@@ -880,13 +1076,20 @@ function createErrorToolResult(message: string): AgentToolResult<any> {
 	};
 }
 
-async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
+async function emitToolExecutionEnd(
+	finalized: FinalizedToolCallOutcome,
+	emit: AgentEventSink,
+	options: ToolCallExecutionOptions = {},
+): Promise<void> {
 	await emit({
 		type: "tool_execution_end",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
 		result: finalized.result,
 		isError: finalized.isError,
+		...(options.parentToolCallId === undefined
+			? {}
+			: { parentToolCallId: options.parentToolCallId }),
 	});
 }
 

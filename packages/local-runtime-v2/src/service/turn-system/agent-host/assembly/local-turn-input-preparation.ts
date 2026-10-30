@@ -204,18 +204,9 @@ export class LocalTurnInputPreparer {
       capabilities,
       this.options.getImageEncoding?.(),
     );
-    const systemValue = await this.options.reminders.buildSystem({
-      session: input.session,
-      agent: input.agent,
-      agentConfig: input.preparation.agentConfig,
-      promptText,
-      turnId: input.lease.turnId,
-      ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),
-      ...(input.history && messagesCarrySessionId(input.history, input.session.sessionId)
-        ? { sessionIdInContext: true }
-        : {}),
-    });
-    const system = validateSystemReminder(systemValue);
+    const system = validateSystemReminder(
+      await this.options.reminders.buildSystem(systemReminderInput(input, promptText)),
+    );
     const systemBlock = optionalReminderBlock('system', system.content);
     system.finalizeTelemetry?.({
       content: systemBlock,
@@ -600,6 +591,24 @@ function backgroundTaskOrigin(
       ],
       ...(observedCounts.length > 0 ? { observedTerminalCount: Math.max(...observedCounts) } : {}),
     }),
+  };
+}
+
+/** Turn facts the system reminder owner needs; optional facts are omitted, not undefined. */
+function systemReminderInput(
+  input: LocalTurnInputPreparationRequest,
+  promptText: string,
+): Parameters<LocalTurnReminderFacts['buildSystem']>[0] {
+  return {
+    session: input.session,
+    agent: input.agent,
+    agentConfig: input.preparation.agentConfig,
+    promptText,
+    turnId: input.lease.turnId,
+    ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),
+    ...(input.history && messagesCarrySessionId(input.history, input.session.sessionId)
+      ? { sessionIdInContext: true }
+      : {}),
   };
 }
 

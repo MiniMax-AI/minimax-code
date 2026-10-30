@@ -30,6 +30,7 @@ import { isTaskSession } from '../repo/drizzle/normalization.js';
 import { AgentServiceError } from '../../../agent/errors.js';
 import { SessionServiceError } from '../errors.js';
 import { isDefaultProjectWorkspace } from '../../shared/project-workspace.js';
+import type { SessionToolCallModePolicy } from '../support/tool-call-mode.js';
 import type {
   SessionMutationFields,
   SessionMetadataCreateInput,
@@ -101,6 +102,8 @@ export interface InternalSessionCreateInput {
   readonly originCronId?: string;
   readonly runLocation?: SessionRecord['runLocation'];
   readonly appMode?: SessionAppMode;
+  /** Set by creators that copy a source's history (Fork); everyone else gets the policy mode. */
+  readonly toolCallMode?: SessionRecord['toolCallMode'];
   readonly effectiveModel?: string | null;
   readonly effectiveModelVariant?: string | null;
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
@@ -216,6 +219,8 @@ export interface SessionRecordServiceDeps {
   };
   readonly facts: SessionFactSink;
   readonly workspace?: { initialize(workspaceDir: string): Promise<void> };
+  /** Mode written to Sessions that do not copy a source's history; absent writes nothing. */
+  readonly toolCallMode?: SessionToolCallModePolicy;
   /**
    * Optional best-effort diagnostic sink for the startup full-Session-definition
    * backfill. Missing or test-only compositions may omit it; production wires
@@ -862,7 +867,11 @@ export class SessionRecordService
   }
 
   private async createRecord(input: SessionMetadataCreateInput): Promise<SessionRecord> {
-    const created = await this.deps.metadata.create(input);
+    const toolCallMode = input.toolCallMode ?? this.deps.toolCallMode?.current();
+    const created = await this.deps.metadata.create({
+      ...input,
+      ...(toolCallMode ? { toolCallMode } : {}),
+    });
     try {
       await this.deps.artifacts?.initialize(created.sessionId);
     } catch (error) {
@@ -996,6 +1005,7 @@ function toInternalMetadataCreateInput(
     ...internalModelFields(context.input, context.taskCapture, context.forkedAgentDefinition),
     ...internalBindingFields(context.taskCapture, context.forkedAgentDefinition),
     origin: context.input.origin ?? 'user',
+    ...whenPresent('toolCallMode', context.input.toolCallMode),
   };
 }
 

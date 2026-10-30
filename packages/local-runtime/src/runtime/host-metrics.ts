@@ -63,6 +63,10 @@ const SESSION_REPLAYED_EVENTS_BUCKETS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 
 // Count buckets (not milliseconds): Pi inner-loop steps completed by one turn.
 const PI_LOOP_STEPS_BUCKETS = [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 100];
 
+// Count buckets: run_code programs per PTC turn, and child calls per program.
+const PTC_TURN_PROGRAMS_BUCKETS = [0, 1, 2, 5, 10, 20, 50, 100, 200];
+const PTC_RUN_CODE_CHILD_CALLS_BUCKETS = [0, 1, 2, 3, 5, 10, 20, 50, 100];
+
 // Token counts for Review admission can legitimately extend into the model's
 // full context window. Keep the common 8k-256k range distinguishable while
 // retaining headroom for larger-context providers.
@@ -95,6 +99,10 @@ const HISTOGRAM_BUCKETS_BY_NAME: Record<string, number[]> = {
   review_context_input_budget_tokens: REVIEW_TOKEN_HISTOGRAM_BUCKETS,
   review_context_overflow_excess_tokens: REVIEW_TOKEN_HISTOGRAM_BUCKETS,
   review_context_tokens_removed: REVIEW_TOKEN_HISTOGRAM_BUCKETS,
+  // PTC-mode Session Turns only; see local-runtime-v2 runner/ptc/ptc-observability.ts.
+  ptc_turn_programs: PTC_TURN_PROGRAMS_BUCKETS,
+  ptc_run_code_duration_ms: LONG_TAIL_HISTOGRAM_BUCKETS,
+  ptc_run_code_child_calls: PTC_RUN_CODE_CHILD_CALLS_BUCKETS,
 };
 
 /**

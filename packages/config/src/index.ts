@@ -1,5 +1,6 @@
 export { isTelemetryChannelEnabled, type TelemetryChannel } from './telemetry-policy.js';
 export { isLocalSourceProvenanceEnabled } from './source-provenance.js';
+export { isPtcTurnEnabled, type PtcTurnFacts } from './ptc-turn.js';
 export { writeTuiStatusLineSetting } from './tui-status-line-write.js';
 export { parseRunawayGuardOverride, resolveRunawayGuardConfig } from './runaway-guard-config.js';
 export type { RunawayGuardSettings, RunawayGuardOverride } from './runaway-guard-config.js';
@@ -27,6 +28,7 @@ export {
   allowsManagedMinimaxProviderOverride,
   isBetaFeatureProdReady,
   resolveBetaFeature,
+  currentBetaResolutionContext,
   isInternalBuild,
   isManagedRuntime,
   getRuntimePresetKey,

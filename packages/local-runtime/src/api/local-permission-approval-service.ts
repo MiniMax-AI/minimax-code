@@ -79,6 +79,7 @@ export class LocalPermissionApprovalService {
         : {}),
       ...(input.toolInput ? { toolInput: input.toolInput } : {}),
       toolDescription: input.toolDescription ?? input.toolName,
+      ...ptcRequestFields(input),
       reason: input.reason,
       createdAt: this.deps.nowMs(),
       waiters: new Set<LocalPermissionRequestWaiter>(),
@@ -284,9 +285,9 @@ export class LocalPermissionApprovalService {
           sessionId: record.sessionId,
           agentName: record.agentName,
           toolName: record.toolName,
-          ...(record.toolDescription ? { toolDescription: record.toolDescription } : {}),
+          ...channelToolDescription(record),
           ...(record.toolInput ? { toolInput: record.toolInput } : {}),
-          reason: record.reason,
+          reason: record.parentToolCallId ? `来自 PTC：${record.reason}` : record.reason,
           ruleContents: record.ruleContents,
           createdAt: record.createdAt,
         },
@@ -355,4 +356,23 @@ function cloneRuleMatcher<T extends NonNullable<LocalPermissionRequest['ruleMatc
     ...matcher,
     ...(matcher.kind === 'path' && matcher.actions ? { actions: [...matcher.actions] } : {}),
   } as T;
+}
+
+/** Fields present only when the ask comes from a trusted PTC child call. */
+function ptcRequestFields(
+  input: LocalPermissionRequestInput,
+): Pick<LocalPermissionRequest, 'parentToolCallId' | 'parentToolDescription' | 'stopPtcOnDeny'> {
+  return {
+    ...(input.parentToolCallId ? { parentToolCallId: input.parentToolCallId } : {}),
+    ...(input.parentToolDescription ? { parentToolDescription: input.parentToolDescription } : {}),
+    ...(input.stopPtcOnDeny ? { stopPtcOnDeny: true } : {}),
+  };
+}
+
+/** A PTC child ask names its run_code program on the channel card. */
+function channelToolDescription(record: LocalPermissionRequest): { toolDescription?: string } {
+  if (record.parentToolDescription) {
+    return { toolDescription: `PTC: ${record.parentToolDescription}` };
+  }
+  return record.toolDescription ? { toolDescription: record.toolDescription } : {};
 }

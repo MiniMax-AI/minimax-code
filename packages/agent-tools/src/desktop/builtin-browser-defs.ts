@@ -862,6 +862,64 @@ const BrowserActionName = Type.String({
 const BROWSER_POST_ACTION_VISUAL_GUIDANCE =
   'Selected navigation and interaction results may include `visualObservation.available: true` plus one compressed image, with at most four automatic images per turn. Inspect that image before another read, and do not call `screenshot` solely to repeat visual evidence that already answers the next question. The image is supplemental evidence only: it does not change the action success, authorize a sensitive action, or make an unverified click runtime-verified. Native input and textarea writes normally skip automatic visuals because their structured effect verification is cheaper. ';
 
+/** Actions whose page effect `observe` reads back in the same call. */
+export const BROWSER_OBSERVABLE_ACTIONS = [
+  'navigate',
+  'back',
+  'forward',
+  'reload',
+  'click',
+  'click_and_wait_for_navigation',
+  'double_click',
+  'fill',
+  'type',
+  'paste',
+  'press_key',
+  'check',
+  'uncheck',
+  'select_option',
+  'scroll',
+] as const;
+
+/**
+ * The read folded into a page-changing action. Declared only by the Browser
+ * definition a PTC Turn lists inside run_code (`withLocalBrowserObserve`), so
+ * a program can act and verify in one call instead of returning to the model
+ * for a separate inspect. `LocalBrowserToolDef` does not declare it: a Turn
+ * that lists Browser as a top-level tool keeps its definition unchanged, and
+ * its `additionalProperties: false` still rejects `observe`.
+ */
+export const LocalBrowserObserveInput = Type.Object(
+  {
+    kind: Type.Union([Type.Literal('inspect'), Type.Literal('text')], {
+      description:
+        'inspect returns the actionable elements with fresh refs (same shape as action="inspect"); text returns visible text (same as query kind="text").',
+    }),
+    selector: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description:
+          'For kind="text": CSS selector to read instead of the whole page, e.g. "[role=dialog]".',
+      }),
+    ),
+    waitForText: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 500,
+        description:
+          'Wait until this text is visible before reading, e.g. a search suggestion or a confirmation toast. A timeout is reported in observation.waitTimedOut and the page is read anyway.',
+      }),
+    ),
+    timeout: Type.Optional(Type.Number({ minimum: 0, maximum: 15_000 })),
+    maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 20_000 })),
+  },
+  {
+    additionalProperties: false,
+    description:
+      'Read the page after a successful action in the same call and return it as observation. Skipped when the action fails or needs user takeover. It never makes an unverified click verified: judge the effect from the observation yourself.',
+  },
+);
+
 export const LocalBrowserToolDef = {
   name: 'browser',
   executionMode: 'sequential',

@@ -297,6 +297,8 @@ export interface ConversationToolCall {
   readonly tool_call_args?: string;
   readonly tool_call_result_data?: string;
   readonly tool_call_duration_ms?: number;
+  /** Optional outer run_code ToolCall id for a PTC child invocation. */
+  readonly parent_tool_call_id?: string;
 }
 
 export interface ConversationCommittedMessage {

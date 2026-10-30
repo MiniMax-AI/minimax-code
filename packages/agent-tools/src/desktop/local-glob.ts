@@ -34,6 +34,7 @@ import { LocalGlobToolDef, type LocalGlobToolInput } from './builtin-defs.js';
 import { resolveSearchRoot, runRg, type RunRgOptions, textResult } from './local-rg-runner.js';
 import { isSensitiveSearchRoot, sensitiveExcludeArgs } from './local-sensitive.js';
 import { createDesktopOutputContinuation } from './output-limit.js';
+import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 import type { LocalRuntimeToolContext } from './types.js';
 
 const DEFAULT_GLOB_LIMIT = 200;
@@ -174,13 +175,16 @@ export class LocalGlobTool implements ToolImpl<
       throw new Error(`glob path does not exist: ${input.path ?? searchRoot}`);
     }
     if (await isSensitiveSearchRoot(searchRoot)) {
-      return withCompatibleGlobToolResponse(textResult(LocalGlobToolDef.name, 'No files matched'), {
-        durationMs: Date.now() - startedAt,
-        filenames: [],
-        truncated: false,
-        totalMatches: 0,
-        countIsComplete: true,
-      });
+      return reportGlob(
+        withCompatibleGlobToolResponse(textResult(LocalGlobToolDef.name, 'No files matched'), {
+          durationMs: Date.now() - startedAt,
+          filenames: [],
+          truncated: false,
+          totalMatches: 0,
+          countIsComplete: true,
+        }),
+        [],
+      );
     }
     const requestedRoot = resolveGlobStaticSearchRoot(effectivePattern, searchRoot);
     const narrowSearchRoot = await isNarrowSearchRoot(requestedRoot, this.workspaceRoot);
@@ -265,20 +269,30 @@ export class LocalGlobTool implements ToolImpl<
           'Refine path/pattern or reduce offset]';
       }
     }
-    return withCompatibleGlobToolResponse(
-      {
-        tool_name: LocalGlobToolDef.name,
-        text,
-        content: [{ type: 'text', text }],
-        details,
-      },
-      {
-        durationMs: Date.now() - startedAt,
-        filenames: lines,
-        truncated,
-        totalMatches: allLines.length,
-        countIsComplete: !result.stdoutTruncated,
-      },
+    return reportGlob(
+      withCompatibleGlobToolResponse(
+        {
+          tool_name: LocalGlobToolDef.name,
+          text,
+          content: [{ type: 'text', text }],
+          details,
+        },
+        {
+          durationMs: Date.now() - startedAt,
+          filenames: lines,
+          truncated,
+          totalMatches: allLines.length,
+          countIsComplete: !result.stdoutTruncated,
+        },
+      ),
+      lines,
     );
   }
+}
+
+/** PTC data is exactly the page of paths the text lists, plus the completeness statement. */
+function reportGlob(result: ToolResult, paths: readonly string[]): ToolResult {
+  return withDesktopCompletenessReport(LocalGlobToolDef.name, result, {
+    data: { paths: [...paths] },
+  });
 }

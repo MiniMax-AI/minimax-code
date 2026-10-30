@@ -99,6 +99,8 @@ export async function callMatrixTool(opts: CallMatrixToolOptions): Promise<ToolR
     text,
     content: [{ type: 'text', text }],
     details: { ok: true, path },
+    // The object the text serializes, for PTC programs; model calls drop it.
+    programmatic: { data: payload },
   };
 }
 

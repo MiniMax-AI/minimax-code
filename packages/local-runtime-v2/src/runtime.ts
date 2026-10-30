@@ -443,7 +443,7 @@ function createStartedHost(
     ...(ownerRuntime ? { application: ownerRuntime.services.application } : {}),
     ...(cliService ? { cliService } : {}),
     apiHost: v1.apiHost,
-    ready,
+    ready: v1.ready,
     ...(ownerRuntime
       ? {
           notifyAuthContextChanged: (authState) =>
@@ -764,6 +764,7 @@ function configureV1HostOptions(
   void promptConfigKey;
   void promptMode;
   void systemPromptOverrides;
+  delete v1Options.cliPtcEntrypoint;
   // V2 owns the channel startup point: the V1 shell must build stores, APIs,
   // runner and registries without restoring a single transport.
   if (compatibility) {

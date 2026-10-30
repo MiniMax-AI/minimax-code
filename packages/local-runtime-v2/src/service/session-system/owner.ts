@@ -65,6 +65,7 @@ import {
   type NativeSessionAgentDirectory,
 } from './sessions/support/native-record-factory.js';
 import type { SessionBackfillDiagnostics } from './sessions/lifecycle/record-service.js';
+import type { SessionToolCallModePolicy } from './sessions/support/tool-call-mode.js';
 import { SessionArtifactService } from './sessions/support/artifact-service.js';
 import { createPlanDocumentOwner } from './sessions/support/plan-document.js';
 import { SessionDeletionGate } from './sessions/lifecycle/deletion-gate.js';
@@ -109,6 +110,8 @@ export interface InitializeSessionSystemOptions {
   readonly defaultWorkspaceDir: () => string;
   readonly titlePolicy: SessionRecordServiceDeps['titlePolicy'];
   readonly resolveRequestedModel?: SessionRecordServiceDeps['resolveRequestedModel'];
+  /** Tool call mode for new Sessions and for Sessions after a committed compaction. */
+  readonly toolCallMode?: SessionToolCallModePolicy;
   readonly facts: SessionFactSink;
   readonly conversationFacts: SessionConversationFactSink;
   readonly compactionFacts?: SessionCompactionFactSink;
@@ -401,6 +404,7 @@ function createSessionRecordService(input: {
       path.join(options.dataDir, 'sessions', sessionId, 'workspace'),
     ...(options.makeSessionId ? { makeSessionId: options.makeSessionId } : {}),
     ...(options.backfillDiagnostics ? { backfillDiagnostics: options.backfillDiagnostics } : {}),
+    ...(options.toolCallMode ? { toolCallMode: options.toolCallMode } : {}),
     nowMs,
   });
 }
@@ -662,6 +666,9 @@ function createAgentCapabilities(input: {
     compactionFacts: composeCompactionFactSink(input.llmCalls, input.options.compactionFacts),
     ...(input.options.compactionMetrics
       ? { compactionMetrics: input.options.compactionMetrics }
+      : {}),
+    ...(input.options.toolCallMode
+      ? { toolCallMode: { policy: input.options.toolCallMode, sessions: input.sessions } }
       : {}),
     nowMs: input.nowMs,
   });

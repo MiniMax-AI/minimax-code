@@ -56,6 +56,10 @@ import type {
   DirectSendDelivery,
   DirectSendInput,
 } from "./direct-send-delivery.js";
+import {
+  type ConversationRequestContext,
+  resolvePtcEligibility,
+} from "./ptc-admission.js";
 import type { TurnContinuationDelivery } from "./turn-continuation-delivery.js";
 import { ApplicationError, turnAdmissionError } from "./errors.js";
 import type { QueueSteerWorkflow } from "./queue-steer-workflow.js";
@@ -107,6 +111,9 @@ export interface ConversationApplicationOptions {
           readonly status: SessionStatus;
           /** Read only to gate Slash Review, which is coding-mode only. */
           readonly appMode?: "coding" | "work";
+          readonly sessionType?: "root" | "branch";
+          readonly sessionKind?: string;
+          readonly parentSessionId?: string | null;
         }
       | undefined
     >;
@@ -154,7 +161,7 @@ export class ConversationApplication {
   }
 
   async sendMessage(
-    _ctx: ProcessLocalContext,
+    ctx: ConversationRequestContext & ProcessLocalContext,
     req: ConversationSendMessageRequest,
     options: ConversationSendOptions = {},
   ): Promise<
@@ -164,10 +171,8 @@ export class ConversationApplication {
     if (gateError) return gateError;
     let prepared: PreparedDirectSendInput;
     try {
-      prepared = await toDirectSendInput(
-        req,
-        this.options.attachmentRegistration,
-      );
+      const ptcEligible = await resolvePtcEligibility(ctx, req, this.options.sessionReader);
+      prepared = await toDirectSendInput(req, this.options.attachmentRegistration, ptcEligible);
     } catch (error) {
       const mapped = sendMessagePreparationError(error);
       if (mapped) {
@@ -386,7 +391,7 @@ export class ConversationApplication {
   }
 
   async enqueueMessage(
-    _ctx: ProcessLocalContext,
+    ctx: ConversationRequestContext,
     req: EnqueueMessageReq,
   ): Promise<EnqueueMessageResp> {
     const reviewAdmissionError = await this.reviewAdmissionError(req);
@@ -399,11 +404,12 @@ export class ConversationApplication {
         this.options.attachmentRegistration,
       );
       discardCreated = input.discardCreated;
+      const ptcEligible = await resolvePtcEligibility(ctx, req, this.options.sessionReader);
       result = await this.options.turn.submit({
         sessionId: input.sessionId,
         allowQueue: true,
         input: input.input,
-        provenance: enqueueMessageProvenance(req),
+        provenance: enqueueMessageProvenance(req, ptcEligible),
         ...enqueueSubmissionMetadata(input),
       });
     } catch (error) {
@@ -546,6 +552,7 @@ function requireNonEmpty(value: string | undefined): string | undefined {
 async function toDirectSendInput(
   req: ConversationSendMessageRequest,
   registration: LocalAttachmentRegistrationPort,
+  ptcEligible = false,
 ): Promise<PreparedDirectSendInput> {
   const executionOptions = directExecutionOptions(req);
   const materialized = await materializeLocalAttachmentInputs(registration, {
@@ -576,7 +583,7 @@ async function toDirectSendInput(
       sessionId: req.id,
       input: toAgentHostUserInput(req, text, attachments),
       ...executionOptions,
-      provenance: messageProvenance(req),
+      provenance: messageProvenance(req, ptcEligible),
       ...(req.displayContent !== undefined
         ? { displayContent: req.displayContent }
         : {}),
@@ -818,6 +825,7 @@ function messageProvenance(
     ConversationSendMessageRequest,
     "id" | "reviewRequest" | "clientIntent" | "executionDiagnostics"
   >,
+  ptcEligible = false,
 ): DirectSendInput["provenance"] {
   if (req.clientIntent === "cloud-handoff") {
     return {
@@ -830,8 +838,13 @@ function messageProvenance(
     return {
       source: "api",
       routingFingerprint: `api:${req.id}`,
-      ...(req.executionDiagnostics === true
-        ? { sourceContext: { executionDiagnostics: true } }
+      ...(req.executionDiagnostics === true || ptcEligible
+        ? {
+            sourceContext: {
+              ...(req.executionDiagnostics === true ? { executionDiagnostics: true } : {}),
+              ...(ptcEligible ? { ptcEligible: true } : {}),
+            },
+          }
         : {}),
     };
   }
@@ -852,12 +865,14 @@ function messageProvenance(
 
 function enqueueMessageProvenance(
   req: EnqueueMessageReq,
+  ptcEligible = false,
 ): DirectSendInput["provenance"] {
   if (req.reviewRequest || req.clientIntent === "cloud-handoff")
     return messageProvenance(req);
   return {
     source: "api",
     routingFingerprint: `api:${req.id}:${req.clientRequestId ?? "queue"}`,
+    ...(ptcEligible ? { sourceContext: { ptcEligible: true } } : {}),
   };
 }
 

@@ -19,6 +19,7 @@ import {
   type TaskSessionBindingCapability,
 } from './config/local-agent-config-builder.js';
 import type { SessionModelRepairCapability } from './config/session-model-selection.js';
+import { isDesktopPtcTurnRequest } from '../assembly-context.js';
 
 export interface LocalAgentPreparationServiceOptions {
   readonly configBuilder: LocalAgentConfigBuilder;
@@ -55,6 +56,9 @@ export class LocalAgentPreparationService
       ...(model ? { model } : {}),
       ...(input.request.clientIntent ? { clientIntent: input.request.clientIntent } : {}),
       ...(input.promptRead ? { promptRead: input.promptRead } : {}),
+      // Only ordinary Turns may render the PTC prompt section; compaction,
+      // title and Context Debug never set it and keep the native prompt.
+      ...(isDesktopPtcTurnRequest(input.request.provenance) ? { ptcEntry: true } : {}),
     });
   }
 
@@ -96,6 +100,7 @@ export class LocalAgentPreparationService
     readonly desktopCapabilities?: LocalTurnPreparationInput['desktopCapabilities'];
     readonly clientIntent?: string;
     readonly promptRead?: LocalTurnPreparationInput['promptRead'];
+    readonly ptcEntry?: boolean;
   }): Promise<LocalTurnPreparation> {
     const built = await this.options.configBuilder.buildPrepared(input);
     const builtAgentConfig = built.agentConfig;

@@ -51,6 +51,7 @@ import {
   createApplicationFactPorts,
   createCommittedModelProviderSessionPort,
 } from './fact-ports.js';
+import { createSessionToolCallModePolicy } from './session-tool-call-mode-policy.js';
 import { ModelProviderApplication } from './model-provider-application.js';
 import { createRuntimeCompactionFactSink } from './runtime-compaction-facts.js';
 import { describeError } from './turn-message-delivery.js';
@@ -138,11 +139,7 @@ export function createProductionSessionComposition(
     ...(tuiProductPolicy ? { implicitCustomProviderThinking: true } : {}),
   });
   input.agentService.bindBuiltinModelGroupResolver(async ({ previous, bundled }) =>
-    resolveBuiltinAgentModelGroup({
-      config: input.modelConfig.read(),
-      previous,
-      bundled,
-    }),
+    resolveBuiltinAgentModelGroup({ config: input.modelConfig.read(), previous, bundled }),
   );
   bindAgentConfigModelPorts({
     agentService: input.agentService,
@@ -174,6 +171,7 @@ export function createProductionSessionComposition(
         sessionSystem.repositories.sessions.getSessionAgentDefinition(sessionId),
     }),
     resolveRequestedModel: (model) => resolveRequestedSessionModel(input.modelConfig.read(), model),
+    toolCallMode: createSessionToolCallModePolicy(input.modelConfig.read, input.logger),
     backfillDiagnostics: createSessionBackfillDiagnostics({
       logger: input.logger,
       reportFailure: product.executor.reportFailure,

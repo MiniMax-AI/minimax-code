@@ -18,11 +18,13 @@ export function queueRoutingFingerprint(item: QueueItem): string {
     ['chatType', readRoutingValue(context, ['chatType', 'chat_type'])],
     ['sender', readRoutingValue(context, ['senderId', 'sender_id'])],
   ] as const;
-  return `queue-routing/v1:${JSON.stringify(fields)}`;
+  const trustedFields = queuePtcEligible(item) ? [...fields, ['ptcEligible', true]] : fields;
+  return `queue-routing/v1:${JSON.stringify(trustedFields)}`;
 }
 
 export function queueRoutingProvenance(item: QueueItem): QueueRoutingProvenance {
-  const sourceContext = routingContext(item);
+  const context = routingContext(item);
+  const sourceContext = queuePtcEligible(item) ? { ...context, ptcEligible: true } : context;
   return {
     source: queueExecutionSource(item),
     routingFingerprint: queueRoutingFingerprint(item),
@@ -30,8 +32,24 @@ export function queueRoutingProvenance(item: QueueItem): QueueRoutingProvenance 
   };
 }
 
+/** A composite execution keeps PTC only when every original member was trusted. */
+export function queuePtcEligible(
+  item: Pick<QueueItem, 'source' | 'message' | 'ptcEligible' | 'immediateSendBatch'>,
+): boolean {
+  if (item.source !== 'api' || item.message.source === 'code_review' || item.ptcEligible !== true) {
+    return false;
+  }
+  return (
+    item.immediateSendBatch === undefined ||
+    item.immediateSendBatch.members.every(
+      (member) =>
+        member.provenance.source === 'api' && member.provenance.sourceContext?.ptcEligible === true,
+    )
+  );
+}
+
 function routingContext(item: QueueItem): Readonly<Record<string, unknown>> | undefined {
-  const channelContext = item.message.channelContext ?? item.channelContext;
+  const channelContext = withoutPtcEligibility(item.message.channelContext ?? item.channelContext);
   if (item.message.clientIntent === 'cloud-handoff') {
     return {
       ...(channelContext ?? {}),
@@ -46,6 +64,15 @@ function routingContext(item: QueueItem): Readonly<Record<string, unknown>> | un
       scope: 'local_changes',
     },
   };
+}
+
+function withoutPtcEligibility(
+  context: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, unknown>> | undefined {
+  if (!context) return undefined;
+  const { ptcEligible, ...rest } = context;
+  void ptcEligible;
+  return rest;
 }
 
 export function queueExecutionSource(item: QueueItem): QueueItem['source'] {

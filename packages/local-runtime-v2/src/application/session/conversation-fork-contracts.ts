@@ -116,6 +116,7 @@ export interface ForkSessionPort {
     readonly isDefaultWorkspace?: SessionRecord['isDefaultWorkspace'];
     readonly title: string;
     readonly appMode?: SessionRecord['appMode'];
+    readonly toolCallMode?: SessionRecord['toolCallMode'];
     readonly runLocation?: SessionRecord['runLocation'];
     readonly effectiveModel?: SessionRecord['effectiveModel'];
     readonly effectiveModelVariant?: SessionRecord['effectiveModelVariant'];

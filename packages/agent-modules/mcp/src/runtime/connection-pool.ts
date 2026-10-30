@@ -27,7 +27,7 @@ import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ErrorCode, ListRootsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { createTransport } from './transport/factory.js';
 import {
   MCP_DEFAULTS,
@@ -67,6 +67,36 @@ export interface McpConnectionPoolOptions {
    * the user-defined server name (see `McpPoolMetrics`).
    */
   metrics?: McpPoolMetrics;
+}
+
+/**
+ * The call provably never reached the server (aborted before or while waiting for a permit).
+ * Callers decide "safe to retry" with `instanceof`, never by matching the message.
+ */
+export class McpToolCallNotDispatchedError extends Error {
+  constructor(serverName: string, toolName: string) {
+    super(`MCP tool call aborted before dispatch: ${serverName}/${toolName}`);
+    this.name = 'McpToolCallNotDispatchedError';
+  }
+}
+
+/**
+ * The call was dispatched and the server did not answer within its timeout (the pool's own bound
+ * or the SDK request timeout), while the caller's signal was not aborted. The tool may have run.
+ */
+export class McpToolCallTimeoutError extends Error {
+  constructor(
+    serverName: string,
+    toolName: string,
+    readonly timeoutMs: number,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `MCP tool call failed: MCP tool call "${toolName}" on "${serverName}" timed out after ${timeoutMs}ms`,
+      options,
+    );
+    this.name = 'McpToolCallTimeoutError';
+  }
 }
 
 class Semaphore {
@@ -315,8 +345,15 @@ export class McpConnectionPool {
         this.metrics?.latency('mcp_tool_call_duration_ms', Date.now() - startMs);
         return shaped;
       } catch (err) {
+        // Keep the SDK error as `cause`: its JSON-RPC `code`/`data` (McpError)
+        // or connection `code` is the only machine-readable reason, and
+        // programmatic callers hand it to scripts as a raw error.
+        if (!options?.signal?.aborted && isToolCallTimeout(err)) {
+          throw new McpToolCallTimeoutError(serverName, toolName, timeoutMs, { cause: err });
+        }
         throw new Error(
           `MCP tool call failed: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
         );
       }
     } catch (err) {
@@ -891,11 +928,22 @@ async function closeConnectionSafely(
   }
 }
 
+/** Raised by `withTimeout` when the pool's own bound fires. */
+class PoolTimeoutError extends Error {}
+
+/** True for a dispatched call that timed out, whether the pool bound or the SDK request bound fired. */
+function isToolCallTimeout(error: unknown): boolean {
+  return (
+    error instanceof PoolTimeoutError ||
+    (error instanceof McpError && error.code === ErrorCode.RequestTimeout)
+  );
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   if (ms <= 0 || !Number.isFinite(ms)) return promise;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(message));
+      reject(new PoolTimeoutError(message));
     }, ms);
     promise.then(
       (value) => {

@@ -173,6 +173,7 @@ function createDisplayProjection(session: SessionRecord) {
     },
     sessions: { update: vi.fn(async () => session) },
     messages: {
+      get: vi.fn(async () => undefined),
       upsert: vi.fn(async (input: MessageUpsertInput): Promise<NormalizedDisplayMessage> => {
         upserts.push(input);
         return normalizeDisplayMessage(input, upserts.length);
