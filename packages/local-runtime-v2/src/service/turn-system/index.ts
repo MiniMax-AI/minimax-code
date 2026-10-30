@@ -150,10 +150,3 @@ export {
   type PromptSuggestionPolicyDecision,
   type PromptSuggestionPolicyRefusal,
 } from './agent-host/runner/prompt-suggestion/prompt-suggestion-policy.js';
-export {
-  createPromptSuggestionEligibility,
-  isEligibleMembership,
-  type MembershipFacts,
-  type PromptSuggestionEligibilityPort,
-  type PromptSuggestionIneligibility,
-} from './agent-host/runner/prompt-suggestion/prompt-suggestion-eligibility.js';

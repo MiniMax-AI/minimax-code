@@ -29,26 +29,8 @@ const answer = (text = '补充两个测试案例'): AssistantMessage => ({
   stopReason: 'stop',
   timestamp: 1,
 });
-function fixture(
-  result = async () => answer(),
-  eligibility?: {
-    check(signal: AbortSignal): Promise<'not_signed_in' | 'no_plan' | 'unknown' | undefined>;
-  },
-) {
-  // The Runtime's stream wrapper is a real event-stream pump, so the fake
-  // provider has to emit stream events rather than only expose `result()`.
-  const stream = vi.fn().mockImplementation(() => {
-    const events = createAssistantMessageEventStream();
-    void result().then((message) => {
-      events.push(
-        message.stopReason === 'error' || message.stopReason === 'aborted'
-          ? { type: 'error', reason: message.stopReason, error: message }
-          : { type: 'done', reason: 'stop', message },
-      );
-      events.end();
-    });
-    return events;
-  });
+function fixture(result = async () => answer()) {
+  const stream = vi.fn().mockImplementation(() => ({ result }));
   const model = {
     id: 'test',
     api: 'anthropic-messages',
@@ -79,7 +61,6 @@ function fixture(
   const publish = vi.fn();
   const review = vi.fn().mockResolvedValue(true);
   const log = vi.fn();
-  const check = vi.fn(eligibility?.check ?? (async () => undefined));
   let enabled = true;
   let identity: string | undefined = 'account-a';
   let policy: PromptSuggestionPolicy = {
@@ -93,7 +74,6 @@ function fixture(
     publish,
     review,
     log,
-    eligibility: { check },
     hasPendingInput,
     policy: () => policy,
     identity: { identity: () => identity },
@@ -105,7 +85,6 @@ function fixture(
     publish,
     review,
     log,
-    check,
     hasPendingInput,
     service,
     setPolicy: (next: PromptSuggestionPolicy) => {
@@ -206,7 +185,7 @@ describe('live prompt suggestions', () => {
   });
 });
 
-describe('prompt suggestions cancellation and eligibility', () => {
+describe('prompt suggestions cancellation', () => {
   it('cancels exactly one turn and never lets a stale turn cancel a newer one', async () => {
     const f = fixture(() => new Promise(() => {}));
     f.service.schedule('s', 't-old', f.capture);
@@ -268,13 +247,12 @@ describe('prompt suggestions cancellation and eligibility', () => {
     expect(f.stream).not.toHaveBeenCalled();
   });
 
-  it('settles a subscription-refused turn as cancelled, not unavailable', async () => {
-    const f = fixture(() => new Promise(() => {}), {
-      check: async () => {
-        // A cancel that lands while the membership read is in flight.
-        f.service.cancelTurn('s', 't');
-        return 'no_plan';
-      },
+  it('settles a turn cancelled during the queue read as cancelled, not unavailable', async () => {
+    const f = fixture(() => new Promise(() => {}));
+    f.hasPendingInput.mockImplementation(async () => {
+      // A cancel that lands while the queue read is in flight.
+      f.service.cancelTurn('s', 't');
+      return true;
     });
     f.service.schedule('s', 't', f.capture);
     await vi.waitFor(() =>
@@ -293,52 +271,21 @@ describe('prompt suggestions cancellation and eligibility', () => {
     );
   });
 
-  it.each(['not_signed_in', 'no_plan', 'unknown'] as const)(
-    'spends no quota when the account is %s',
-    async (reason) => {
-      const f = fixture(undefined, { check: async () => reason });
-      f.service.schedule('s', 't', f.capture);
-      await vi.waitFor(() =>
-        expect(f.publish).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'turn.prompt_suggestion.status',
-            payload: expect.objectContaining({ status: 'unavailable' }),
-          }),
-        ),
-      );
-      expect(f.check).toHaveBeenCalledTimes(1);
-      expect(f.stream).not.toHaveBeenCalled();
-      expect(f.publish).not.toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'turn.prompt_suggestion.generated' }),
-      );
-      expect(f.log).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'skipped_ineligible', reason }),
-      );
-    },
-  );
-
   it('starts no provider work when the turn is already cancelled', async () => {
-    const f = fixture(undefined, {
-      check: async () => {
-        f.service.cancelTurn('s', 't');
-        return undefined;
-      },
+    const f = fixture();
+    f.hasPendingInput.mockImplementation(async () => {
+      f.service.cancelTurn('s', 't');
+      return false;
     });
     f.service.schedule('s', 't', f.capture);
-    await vi.waitFor(() => expect(f.check).toHaveBeenCalled());
+    await vi.waitFor(() => expect(f.hasPendingInput).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(f.stream).not.toHaveBeenCalled();
-  });
-
-  it('still generates for an eligible account', async () => {
-    const f = fixture();
-    f.service.schedule('s', 't', f.capture);
-    await vi.waitFor(() => expect(f.stream).toHaveBeenCalledOnce());
-    expect(f.check).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('input already waiting for the next turn', () => {
-  it('reads nothing and issues no request when input is already queued', async () => {
+  it('issues no request when input is already queued', async () => {
     const f = fixture();
     f.hasPendingInput.mockResolvedValue(true);
     f.service.schedule('s', 't', f.capture);
@@ -348,23 +295,10 @@ describe('input already waiting for the next turn', () => {
       ),
     );
     expect(f.hasPendingInput).toHaveBeenCalledWith('s');
-    expect(f.check).not.toHaveBeenCalled();
     expect(f.stream).not.toHaveBeenCalled();
     expect(f.publish).toHaveBeenCalledWith(
       expect.objectContaining({ payload: expect.objectContaining({ status: 'unavailable' }) }),
     );
-  });
-  it('checks again after the membership read, for steering requeued at the turn exit', async () => {
-    const f = fixture();
-    f.hasPendingInput.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    f.service.schedule('s', 't', f.capture);
-    await vi.waitFor(() =>
-      expect(f.log).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'skipped_pending_input' }),
-      ),
-    );
-    expect(f.check).toHaveBeenCalledOnce();
-    expect(f.stream).not.toHaveBeenCalled();
   });
   it('proceeds when the queue cannot be read', async () => {
     const f = fixture();
@@ -406,7 +340,7 @@ describe('prompt suggestions validation and deadlines', () => {
     vi.useFakeTimers();
     const f = fixture(() => new Promise(() => {}));
     f.service.schedule('s', 't', f.capture);
-    // The membership gate settles before the provider request exists.
+    // The queue read settles before the provider request exists.
     await vi.advanceTimersByTimeAsync(0);
     expect(f.stream).toHaveBeenCalledTimes(1);
     f.disable();
@@ -744,16 +678,17 @@ describe('policy changes invalidate optional work', () => {
     f.setPolicy({ killSwitch: false, sampleRate: 1 });
     expect(f.service.read('s', 't').suggestion).toBeUndefined();
   });
-  it('does not call the provider after policy changes during membership verification', async () => {
+  it('does not call the provider after policy changes during the queue read', async () => {
     let release!: () => void;
-    const f = fixture(undefined, {
-      check: () =>
+    const f = fixture();
+    f.hasPendingInput.mockImplementation(
+      () =>
         new Promise((resolve) => {
-          release = () => resolve(undefined);
+          release = () => resolve(false);
         }),
-    });
+    );
     f.service.schedule('s', 't', f.capture);
-    await vi.waitFor(() => expect(f.check).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(f.hasPendingInput).toHaveBeenCalledOnce());
     f.setPolicy({ killSwitch: true, sampleRate: 1 });
     release();
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -878,7 +813,6 @@ function recentFixture(result: () => Promise<AssistantMessage>, mainInputTokens 
     publish,
     review: async () => true,
     log,
-    eligibility: { check: async () => undefined },
     policy: () => ({ killSwitch: false, sampleRate: 1 }),
     identity: { identity: () => 'acct' },
   });
@@ -984,5 +918,112 @@ describe('abstention written as text', () => {
     );
     f.service.schedule('s', 't', f.capture);
     await vi.waitFor(() => expect(publishedSuggestions(f.publish)).toHaveLength(1));
+  });
+});
+
+describe('terminal facts carried for analytics', () => {
+  const terminals = (publish: ReturnType<typeof vi.fn>) =>
+    publish.mock.calls
+      .map(([event]) => event)
+      .filter(
+        (event) =>
+          event.type === 'turn.prompt_suggestion.status' && event.payload.status !== 'generating',
+      )
+      .map((event) => event.payload);
+  const attempt = { promptVersion: PROMPT_SUGGESTION_VERSION, model: 'test', msgId: 'reply-1' };
+
+  it('stamps a generated suggestion with its version, model, reply and usage', async () => {
+    const f = fixture();
+    f.service.schedule('s', 't', f.capture, 'reply-1');
+    await vi.waitFor(() => expect(publishedSuggestions(f.publish)).toHaveLength(1));
+    expect(publishedSuggestions(f.publish)[0]![0].payload).toMatchObject({
+      ...attempt,
+      elapsedMs: expect.any(Number),
+      usage: { inputTokens: 1520, outputTokens: 12 },
+    });
+    expect(terminals(f.publish)).toEqual([]);
+  });
+
+  it.each([
+    ['abstained', () => answer('(empty)'), true],
+    ['rejected_validation', () => answer('不需要了'), true],
+    ['rejected_safety', () => answer(), false],
+  ] as const)('reports %s with the request usage and no text', async (reason, reply, passes) => {
+    const f = fixture(async () => reply());
+    f.review.mockResolvedValue(passes);
+    f.service.schedule('s', 't', f.capture, 'reply-1');
+    await vi.waitFor(() => expect(terminals(f.publish)).toHaveLength(1));
+    expect(terminals(f.publish)[0]).toEqual({
+      ...attempt,
+      sessionId: 's',
+      turnId: 't',
+      status: 'unavailable',
+      reason,
+      requested: true,
+      elapsedMs: expect.any(Number),
+      usage: { inputTokens: 1520, outputTokens: 12 },
+    });
+    expect(JSON.stringify(f.publish.mock.calls)).not.toContain('补充两个测试案例');
+  });
+
+  it.each([
+    ['not_sampled', { killSwitch: false, sampleRate: 0 }],
+    ['kill_switch', { killSwitch: true, sampleRate: 1 }],
+  ] as const)('reports a %s policy refusal as never requested', async (reason, policy) => {
+    const f = fixture();
+    f.setPolicy(policy);
+    f.service.schedule('s', 't', f.capture, 'reply-1');
+    expect(terminals(f.publish)).toEqual([
+      { ...attempt, sessionId: 's', turnId: 't', status: 'unavailable', reason, requested: false },
+    ]);
+    expect(f.stream).not.toHaveBeenCalled();
+  });
+
+  it('reports the concurrency limit and queued input as never requested', async () => {
+    const busy = fixture(() => new Promise<AssistantMessage>(() => undefined));
+    busy.service.schedule('a', 't', busy.capture);
+    busy.service.schedule('b', 't', busy.capture);
+    busy.service.schedule('c', 't', busy.capture);
+    expect(terminals(busy.publish)).toEqual([
+      expect.objectContaining({ sessionId: 'c', reason: 'concurrency_limit', requested: false }),
+    ]);
+
+    const queued = fixture();
+    queued.hasPendingInput.mockResolvedValue(true);
+    queued.service.schedule('s', 't', queued.capture);
+    await vi.waitFor(() => expect(terminals(queued.publish)).toHaveLength(1));
+    expect(terminals(queued.publish)[0]).toMatchObject({
+      reason: 'skipped_pending_input',
+      requested: false,
+    });
+    expect(terminals(queued.publish)[0]).not.toHaveProperty('elapsedMs');
+    expect(queued.stream).not.toHaveBeenCalled();
+  });
+
+  it('reports a cancelled request and a failed request after they were issued', async () => {
+    const cancelled = fixture(() => new Promise<AssistantMessage>(() => undefined));
+    cancelled.service.schedule('s', 't', cancelled.capture, 'reply-1');
+    await vi.waitFor(() => expect(cancelled.stream).toHaveBeenCalledOnce());
+    cancelled.service.cancel('s');
+    await vi.waitFor(() => expect(terminals(cancelled.publish)).toHaveLength(1));
+    expect(terminals(cancelled.publish)[0]).toMatchObject({
+      ...attempt,
+      status: 'cancelled',
+      reason: 'cancelled',
+      requested: true,
+      elapsedMs: expect.any(Number),
+    });
+
+    const failed = fixture(async () => {
+      throw new Error('provider down');
+    });
+    failed.service.schedule('s', 't', failed.capture);
+    await vi.waitFor(() => expect(terminals(failed.publish)).toHaveLength(1));
+    expect(terminals(failed.publish)[0]).toMatchObject({
+      status: 'unavailable',
+      reason: 'error',
+      requested: true,
+    });
+    expect(terminals(failed.publish)[0]).not.toHaveProperty('msgId');
   });
 });

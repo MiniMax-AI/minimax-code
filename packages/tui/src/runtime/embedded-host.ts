@@ -58,9 +58,9 @@ export function projectEmbeddedRuntimeConfig(
     // The TUI offers next-message suggestions by default in every build; an
     // explicit `promptSuggestion.enabled` in config.yaml still wins.
     promptSuggestion:
-      config.promptSuggestion?.enabledSource === 'explicit'
+      typeof config.promptSuggestion?.enabled === 'boolean'
         ? config.promptSuggestion
-        : { ...config.promptSuggestion, enabled: true, enabledSource: 'default' },
+        : { ...config.promptSuggestion, enabled: true },
   };
 }
 

@@ -6,8 +6,11 @@ import {
 } from '@mavis/agent-core/pi-turn-runner';
 import type { AssistantMessage, Context, SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { buildRecentConversationPrompt, latestUserText } from './recent-context.js';
-import type { GlobalEventInput } from '@mavis/shared/global-events';
-import type { PromptSuggestionEligibilityPort } from './prompt-suggestion-eligibility.js';
+import type {
+  GlobalEventInput,
+  PromptSuggestionAttempt,
+  PromptSuggestionUnavailableReason,
+} from '@mavis/shared/global-events';
 import {
   evaluatePromptSuggestionPolicy,
   PROMPT_SUGGESTION_VERSION,
@@ -88,13 +91,6 @@ type PayloadFactory = (signal: AbortSignal) => NonNullable<SimpleStreamOptions['
 export interface PromptSuggestionTurnPort {
   /** Read once per admitted Turn. `false` means the Turn collects no context. */
   enabled(): boolean;
-  /**
-   * Beta scope: by default only platform-billed (managed) models collect
-   * context, because a BYOK or OAuth model bills the user's own key. Internal
-   * builds and hosts that set `promptSuggestionUngated` (the interactive TUI)
-   * set this to cover every model.
-   */
-  readonly allowUnmanagedModels?: boolean;
   /** A new Turn of this Session supersedes any suggestion still generating. */
   turnStarted(sessionId: string): void;
   /**
@@ -107,10 +103,25 @@ export interface PromptSuggestionTurnPort {
       readonly turnId: string;
       readonly caller: string;
       readonly session: { readonly parentSessionId?: string; readonly interactionMode?: string };
+      /** msg_id of the reply the suggestion follows, when the Turn produced one. */
+      readonly messageId?: string;
     },
     capture: PromptSuggestionCapture,
   ): void;
 }
+
+/** What a terminal `unavailable` or `cancelled` status reports about the attempt. */
+type PromptSuggestionTerminal = PromptSuggestionAttempt & {
+  readonly reason: PromptSuggestionUnavailableReason;
+  readonly requested: boolean;
+};
+
+type PublishStatus = (
+  sessionId: string,
+  turnId: string,
+  value: 'generating' | 'unavailable' | 'cancelled',
+  terminal?: PromptSuggestionTerminal,
+) => void;
 export interface PromptSuggestionCapture {
   readonly resolved: LLMModelConfig;
   readonly prepared: PiLlmCallPreparedHookInput;
@@ -146,12 +157,6 @@ interface PromptSuggestionServiceOptions {
   enabled(): boolean;
   publish(event: GlobalEventInput): void;
   review(text: string): Promise<boolean>;
-  /**
-   * Advisory subscription gate, consulted once per suggestion before any model
-   * request. A non-`undefined` result means the account is not confirmed
-   * eligible and the suggestion is abandoned without spending quota.
-   */
-  eligibility?: PromptSuggestionEligibilityPort;
   /**
    * True when the Session already holds input that will start the next Turn
    * (a queued message, or user steering requeued at the Turn's exit). That
@@ -204,15 +209,11 @@ export function createPromptSuggestionService(options: PromptSuggestionServiceOp
       /* Diagnostics cannot affect either turn. */
     }
   };
-  const status = (
-    sessionId: string,
-    turnId: string,
-    value: 'generating' | 'unavailable' | 'cancelled',
-  ) => {
+  const status: PublishStatus = (sessionId, turnId, value, terminal) => {
     try {
       options.publish({
         type: 'turn.prompt_suggestion.status',
-        payload: { sessionId, turnId, status: value },
+        payload: { ...terminal, sessionId, turnId, status: value },
       });
     } catch {
       /* Advisory. */
@@ -345,7 +346,12 @@ export function createPromptSuggestionService(options: PromptSuggestionServiceOp
       clearResults();
       for (const sessionId of [...pending.keys()]) cancel(sessionId);
     },
-    schedule(sessionId: string, turnId: string, capture: PromptSuggestionCapture): void {
+    schedule(
+      sessionId: string,
+      turnId: string,
+      capture: PromptSuggestionCapture,
+      replyMessageId?: string,
+    ): void {
       syncPolicy();
       if (closed || !options.enabled() || capture.finalAssistant.stopReason !== 'stop') return;
       // Dedupe runs before any cancel: a repeated schedule for the same Turn
@@ -358,6 +364,7 @@ export function createPromptSuggestionService(options: PromptSuggestionServiceOp
       // Policy is evaluated before the capture is used, so a kill switch or an
       // unsampled Session costs no request at all. The user switch cannot
       // re-enable what the policy refused.
+      const attempt = describeAttempt(capture, replyMessageId);
       const decision = evaluatePromptSuggestionPolicy(options.policy(), { sessionId });
       if (!decision.allowed) {
         log({
@@ -366,12 +373,20 @@ export function createPromptSuggestionService(options: PromptSuggestionServiceOp
           status: `skipped_policy_${decision.reason}`,
           promptVersion: PROMPT_SUGGESTION_VERSION,
         });
-        status(sessionId, turnId, 'unavailable');
+        status(sessionId, turnId, 'unavailable', {
+          ...attempt,
+          reason: decision.reason ?? 'not_sampled',
+          requested: false,
+        });
         return;
       }
       if (pending.size >= PROMPT_SUGGESTION_MAX_CONCURRENT) {
         log({ sessionId, turnId, status: 'skipped_concurrency_limit' });
-        status(sessionId, turnId, 'unavailable');
+        status(sessionId, turnId, 'unavailable', {
+          ...attempt,
+          reason: 'concurrency_limit',
+          requested: false,
+        });
         return;
       }
       rememberTurn(scheduledTurns, key);
@@ -399,6 +414,7 @@ export function createPromptSuggestionService(options: PromptSuggestionServiceOp
           sessionId,
           turnId,
           capture,
+          attempt,
           controller,
           stillCurrent,
           storeResult,
@@ -419,6 +435,7 @@ async function runScheduledSuggestion({
   sessionId,
   turnId,
   capture,
+  attempt,
   controller,
   stillCurrent,
   storeResult,
@@ -431,19 +448,18 @@ async function runScheduledSuggestion({
   sessionId: string;
   turnId: string;
   capture: PromptSuggestionCapture;
+  attempt: PromptSuggestionAttempt;
   controller: AbortController;
   stillCurrent(): boolean;
   storeResult(result: PromptSuggestionResult): void;
   log(fields: Record<string, unknown>): void;
-  status(
-    sessionId: string,
-    turnId: string,
-    value: 'generating' | 'unavailable' | 'cancelled',
-  ): void;
+  status: PublishStatus;
   now(): number;
   finish(): void;
 }): Promise<void> {
   const started = Date.now();
+  /** Set right before the model request: from then on the attempt can cost quota. */
+  let requested = false;
   const disabled = setInterval(() => {
     if (!stillCurrent()) controller.abort();
   }, 250);
@@ -468,31 +484,24 @@ async function runScheduledSuggestion({
     if (controller.signal.aborted) throw new Error('suggestion_cancelled');
     if (!pendingInput) return false;
     log({ sessionId, turnId, status: 'skipped_pending_input' });
-    status(sessionId, turnId, 'unavailable');
+    status(sessionId, turnId, 'unavailable', {
+      ...attempt,
+      reason: 'skipped_pending_input',
+      requested: false,
+    });
     return true;
   };
   const canGenerate = async (): Promise<boolean> => {
     // Cancelled between the schedule and the first await: start nothing, and
     // report the cancellation instead of leaving the status on `generating`.
     if (controller.signal.aborted) throw new Error('suggestion_cancelled');
-    // Checked before the membership read and again right before the model
-    // request: input requeued at the Turn's exit is committed asynchronously.
-    if (await supersededByPendingInput()) return false;
-    if (options.eligibility) {
-      const ineligible = await options.eligibility.check(controller.signal);
-      if (controller.signal.aborted) throw new Error('suggestion_cancelled');
-      if (ineligible) {
-        log({ sessionId, turnId, status: 'skipped_ineligible', reason: ineligible });
-        status(sessionId, turnId, 'unavailable');
-        return false;
-      }
-    }
-    if (controller.signal.aborted) throw new Error('suggestion_cancelled');
+    // Input already queued for the next Turn supersedes this suggestion.
     if (await supersededByPendingInput()) return false;
     return stillCurrent();
   };
   const work = async () => {
     if (!(await canGenerate())) return;
+    requested = true;
     const message = await generatePromptSuggestion(capture, controller.signal);
     const elapsedMs = Date.now() - started;
     const usage = readUsage(message.usage);
@@ -520,7 +529,13 @@ async function runScheduledSuggestion({
         elapsedMs,
         promptVersion: PROMPT_SUGGESTION_VERSION,
       });
-      status(sessionId, turnId, 'unavailable');
+      status(sessionId, turnId, 'unavailable', {
+        ...attempt,
+        reason: verdict.abstained ? 'abstained' : 'rejected_validation',
+        requested: true,
+        elapsedMs,
+        usage,
+      });
       return;
     }
     const text = verdict;
@@ -532,7 +547,13 @@ async function runScheduledSuggestion({
         elapsedMs,
         promptVersion: PROMPT_SUGGESTION_VERSION,
       });
-      status(sessionId, turnId, 'unavailable');
+      status(sessionId, turnId, 'unavailable', {
+        ...attempt,
+        reason: 'rejected_safety',
+        requested: true,
+        elapsedMs,
+        usage,
+      });
       return;
     }
     if (!stillCurrent()) return;
@@ -557,10 +578,10 @@ async function runScheduledSuggestion({
     options.publish({
       type: 'turn.prompt_suggestion.generated',
       payload: {
+        ...attempt,
         sessionId,
         turnId,
         suggestion: text,
-        promptVersion: PROMPT_SUGGESTION_VERSION,
         elapsedMs,
         usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
       },
@@ -570,7 +591,12 @@ async function runScheduledSuggestion({
     try {
       await Promise.race([work(), aborted]);
     } catch {
-      status(sessionId, turnId, controller.signal.aborted ? 'cancelled' : 'unavailable');
+      status(sessionId, turnId, controller.signal.aborted ? 'cancelled' : 'unavailable', {
+        ...attempt,
+        reason: controller.signal.aborted ? 'cancelled' : 'error',
+        requested,
+        ...(requested ? { elapsedMs: Date.now() - started } : {}),
+      });
       log({
         sessionId,
         turnId,
@@ -587,6 +613,18 @@ async function runScheduledSuggestion({
     }
   };
   await settle();
+}
+
+/** The analytics facts every terminal event of this attempt carries. */
+function describeAttempt(
+  capture: PromptSuggestionCapture,
+  replyMessageId: string | undefined,
+): PromptSuggestionAttempt {
+  return {
+    promptVersion: PROMPT_SUGGESTION_VERSION,
+    model: capture.prepared.model.id,
+    ...(replyMessageId ? { msgId: replyMessageId } : {}),
+  };
 }
 
 /**

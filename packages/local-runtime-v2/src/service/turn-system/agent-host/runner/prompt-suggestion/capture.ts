@@ -23,9 +23,6 @@ export function createTurnPromptSuggestionCapture(
   if (
     !port ||
     !port.enabled() ||
-    // Beta: offered only on the platform-billed (subscription) model path,
-    // unless the port opts every model in (internal builds).
-    (input.preparation.llm.managedProvider !== true && port.allowUnmanagedModels !== true) ||
     prepared.caller !== 'chat' ||
     input.session.parentSessionId ||
     (input.session.interactionMode ?? 'default') !== 'default' ||
@@ -52,6 +49,7 @@ export function readPromptSuggestionScope(
   input: LocalTurnExecutionInput,
   prepared: { readonly llm: LLMModelConfig; readonly caller: RunTurnCaller },
   capture: ReturnType<typeof createPromptSuggestionCapture> | undefined,
+  replyMessageId?: string,
 ): PromptSuggestionScope | undefined {
   if (
     !capture ||
@@ -69,6 +67,7 @@ export function readPromptSuggestionScope(
       interactionMode: input.session.interactionMode,
     },
     capture: capture.read(),
+    ...(replyMessageId ? { messageId: replyMessageId } : {}),
   };
 }
 
@@ -81,6 +80,8 @@ export interface PromptSuggestionScope {
     readonly interactionMode?: string;
   };
   readonly capture: PromptSuggestionCapture | undefined;
+  /** The reply this suggestion follows; see `replyMessageId`. */
+  readonly messageId?: string;
 }
 
 type PromptSuggestionHookCapture = ReturnType<typeof createPromptSuggestionCapture>;
@@ -149,6 +150,7 @@ export class PromptSuggestionCommitRelay {
           turnId: scope.turnId,
           caller: scope.caller,
           session: scope.session,
+          ...(scope.messageId ? { messageId: scope.messageId } : {}),
         },
         scope.capture,
       );

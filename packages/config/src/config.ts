@@ -799,19 +799,13 @@ export interface SessionTitleConfig {
 // ── Next Prompt Suggestion ───────────────────────────────────────
 
 /**
- * Explicit opt-in for one extra post-turn model request. Default off, except in
- * internal builds, where an unset value defaults on. The rollout policy (kill
- * switch, sampling) is remote-only; see `PromptSuggestionRemotePolicy`.
+ * The user's own choice for one extra post-turn model request. Absent means
+ * the user never chose; `resolvePromptSuggestionEnabled` turns that into the
+ * effective value (the remote default, on when absent). The rollout policy is
+ * remote-only; see `PromptSuggestionRemotePolicy`.
  */
 export interface PromptSuggestionConfig {
-  enabled: boolean;
-  /**
-   * Set at parse time, never read from the file: whether `enabled` came from
-   * config.yaml or from the product default. Lets a surface such as the TUI
-   * pick its own default without overriding a user's explicit choice. See
-   * `DataContributionConfig.enabledSource`.
-   */
-  enabledSource?: 'default' | 'explicit';
+  enabled?: boolean;
 }
 
 // ── CLI Feature Flags ─────────────────────────────────────────────
@@ -1786,8 +1780,7 @@ const DEFAULTS: Omit<
     enabled: true,
   },
   promptSuggestion: {
-    // Explicit opt-in because this performs one additional model request.
-    enabled: false,
+    // Unset: the effective default is resolved with the remote policy.
   },
   cli: {
     spawn: {
@@ -2522,12 +2515,9 @@ function parsePromptSuggestionConfig(raw: Record<string, unknown>): PromptSugges
     value != null && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>).enabled
       : undefined;
-  // Internal builds dogfood the feature, so an unset value means on there; an
-  // explicit `false` still wins. Resolved at parse time, like `promptConfig`.
-  const defaultEnabled = DEFAULTS.promptSuggestion.enabled || isInternalBuild();
-  return typeof enabled === 'boolean'
-    ? { enabled, enabledSource: 'explicit' }
-    : { enabled: defaultEnabled, enabledSource: 'default' };
+  // Keep "never chose" distinct from an explicit `false`: the effective default
+  // depends on the remote policy, which parsing cannot see.
+  return typeof enabled === 'boolean' ? { enabled } : {};
 }
 
 // ── CLI config parsing ──────────────────────────────────────────

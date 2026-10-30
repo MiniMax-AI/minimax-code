@@ -175,6 +175,12 @@ export interface LocalRuntimeTurnRuntimeOutcome {
   readonly errorDetail?: string;
   readonly errorProviderId?: string;
   readonly messageId?: string;
+  /**
+   * The last assistant message that carried visible text: the reply the user
+   * reads, copies and rates. Unlike `messageId`, tool-call-only frames, user
+   * frames and system events never count.
+   */
+  readonly replyMessageId?: string;
   readonly waitingForUser?: boolean;
 }
 

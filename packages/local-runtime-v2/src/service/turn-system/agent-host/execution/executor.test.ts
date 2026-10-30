@@ -2073,7 +2073,7 @@ describe("LocalRuntimeTurnExecutor context publication", () => {
   });
 });
 
-/** Prompt suggestions are offered only on the platform-billed (subscription) path. */
+/** Builds a Turn input on a platform (managed) or custom (BYOK) model. */
 function suggestionInput(
   managedProvider: boolean,
   overrides: Parameters<typeof executionInput>[0] = {},

@@ -1,6 +1,7 @@
 import type { LocalSandboxBashExecutionPort } from '@mavis/agent-tools/desktop';
 import type { RuntimeConversation } from '@mavis/conversation-contract';
 import type { PromptSnapshotSource } from '@mavis/agent-core';
+import type { PromptSuggestionRemotePolicy } from '@mavis/config';
 
 import type { AgentReferenceResolver } from '../agent/port.js';
 import type { LocalAgentRuntimePort } from '../agent/runtime-port.js';
@@ -83,6 +84,8 @@ export interface LocalRuntimeProductHostOptions {
   /** Optional fail-open eval capture transport supplied by packaged Electron builds. */
   evalCapture?: LocalEvalReporterFactoryOptions;
   configUpdater?: (body: Record<string, unknown>) => Promise<LocalConfigUpdateResult>;
+  /** Live remote policy whose default fills `promptSuggestion.enabled` when the user has not chosen. */
+  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
   hostDiagnosticsProvider?: LocalHostDiagnosticsProvider;
   skillRegistryDiagnostics?: LocalRuntimeApiHostOptions['skillRegistryDiagnostics'];
   skillEnabledState?: LocalRuntimeApiHostOptions['skillEnabledState'];

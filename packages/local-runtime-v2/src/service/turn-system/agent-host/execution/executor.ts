@@ -452,7 +452,12 @@ export class LocalRuntimeTurnExecutor<
       prepared,
       readTaskOutputTaskIds,
       runnerResult,
-      promptSuggestion: readPromptSuggestionScope(input, prepared, promptSuggestion?.capture),
+      promptSuggestion: readPromptSuggestionScope(
+        input,
+        prepared,
+        promptSuggestion?.capture,
+        runnerResult?.outcome?.replyMessageId,
+      ),
     };
   }
 

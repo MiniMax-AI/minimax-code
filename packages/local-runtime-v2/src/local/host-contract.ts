@@ -62,13 +62,6 @@ interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOption
    * interactive TUI opts in explicitly. Other owners keep the default `true`.
    */
   readonly promptSuggestionSurface?: boolean;
-  /**
-   * Lifts the beta billing gates (confirmed subscription, platform-billed
-   * models only) so every model may produce a suggestion, billed to whichever
-   * account or key runs the Turn. The user's `promptSuggestion.enabled` switch
-   * still applies. Internal builds are always ungated.
-   */
-  readonly promptSuggestionUngated?: boolean;
   getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */

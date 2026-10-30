@@ -326,8 +326,6 @@ export interface CreateRuntimeServicesOptions
   readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
   /** See `CreateLocalRuntimeHostOptions.promptSuggestionSurface`. */
   readonly promptSuggestionSurface?: boolean;
-  /** See `CreateLocalRuntimeHostOptions.promptSuggestionUngated`. */
-  readonly promptSuggestionUngated?: boolean;
   /** Live ToolResult compaction thresholds injected by the owning product. */
   readonly getToolResultCompactionConfig?: () =>
     | ToolResultCompactionConfig

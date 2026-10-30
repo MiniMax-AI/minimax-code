@@ -39,7 +39,10 @@ export interface McodeBusinessEventMap {
     readonly duration_bucket: McodeDurationBucket;
     readonly exit_reason: '' | 'ctrl_c' | 'ctrl_d' | 'navigation' | 'replaced';
   };
-  /** Same shape as the Desktop `prompt_suggestion` metric; the text is never reported. */
+  /**
+   * TUI-only metric, in the shape Desktop used before it moved to the
+   * `prompt_suggestion_*` events. The text is never reported.
+   */
   readonly prompt_suggestion: {
     readonly session_id: string;
     readonly turn_id: string;

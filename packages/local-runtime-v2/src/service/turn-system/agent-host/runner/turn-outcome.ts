@@ -1,4 +1,9 @@
-import { RespDataType, Role, ToolCallStatus } from '@mavis/agent-core/protocol/agent-message';
+import {
+  MsgType,
+  RespDataType,
+  Role,
+  ToolCallStatus,
+} from '@mavis/agent-core/protocol/agent-message';
 import { RuntimeEventStatus, RuntimeEventType, type IRuntimeEvent } from '@mavis/protocol';
 
 import type { LocalRuntimeTurnRuntimeOutcome } from '../execution/executor.js';
@@ -37,6 +42,7 @@ function snapshotOutcome(state: MutableOutcome): LocalRuntimeTurnRuntimeOutcome 
     ...(state.errorDetail ? { errorDetail: state.errorDetail } : {}),
     ...(state.errorProviderId ? { errorProviderId: state.errorProviderId } : {}),
     ...(state.messageId ? { messageId: state.messageId } : {}),
+    ...(state.replyMessageId ? { replyMessageId: state.replyMessageId } : {}),
     ...(state.waitingForUser ? { waitingForUser: true } : {}),
   };
 }
@@ -49,6 +55,7 @@ interface MutableOutcome {
   errorDetail?: string;
   errorProviderId?: string;
   messageId?: string;
+  replyMessageId?: string;
   waitingForUser: boolean;
   /** Assistant msg_id that carried the latest waiting-for-user tool result. */
   waitingForUserMessageId?: string;
@@ -100,6 +107,7 @@ function updateOutcome(state: MutableOutcome, event: IRuntimeEvent): void {
   if (event.type === RuntimeEventType.STREAM_RESP) {
     const eventMessageId = readAssistantMessageId(event);
     state.messageId = eventMessageId ?? state.messageId;
+    state.replyMessageId = readReplyMessageId(event) ?? state.replyMessageId;
     updateWaitingForUser(state, event, eventMessageId);
     return;
   }
@@ -263,6 +271,21 @@ function readAssistantMessageId(event: IRuntimeEvent): string | undefined {
   return undefined;
 }
 
+/** msg_id of an assistant frame with visible text; see `replyMessageId`. */
+function readReplyMessageId(event: IRuntimeEvent): string | undefined {
+  const message = readParsedAgentMessage(parseStreamResponse(event));
+  if (
+    !message ||
+    message.role !== Role.Assistant ||
+    message.msg_type === MsgType.SystemEvent ||
+    !isNonEmptyString(message.msg_content) ||
+    typeof message.msg_id !== 'string' ||
+    !message.msg_id
+  )
+    return undefined;
+  return message.msg_id;
+}
+
 function hasWaitingForUserToolResult(parsed: ReturnType<typeof parseStreamResponse>): boolean {
   const calls = readToolCalls(parsed);
   if (!Array.isArray(calls)) return false;
@@ -310,6 +333,7 @@ function parseToolCallResult(value: unknown):
 
 interface StreamMessageFields {
   readonly msg_id?: unknown;
+  readonly msg_type?: unknown;
   readonly role?: unknown;
   readonly msg_content?: unknown;
   readonly thinking_content?: unknown;

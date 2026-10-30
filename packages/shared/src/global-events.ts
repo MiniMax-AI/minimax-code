@@ -163,6 +163,41 @@ export type GlobalThreadGoal = {
 };
 
 /** Closed catalog of product events exchanged between the runtime and its frontends. */
+/** Why a settled Turn produced no next-message suggestion. */
+export type PromptSuggestionUnavailableReason =
+  | 'kill_switch'
+  | 'not_sampled'
+  | 'concurrency_limit'
+  | 'skipped_pending_input'
+  | 'abstained'
+  | 'rejected_validation'
+  | 'rejected_safety'
+  | 'cancelled'
+  | 'error';
+
+/** Usage of the suggestion request alone, never of the main Turn. */
+export type PromptSuggestionUsage = {
+  /** The whole prompt, including any provider-cached prefix. */
+  inputTokens?: number;
+  outputTokens?: number;
+};
+
+/**
+ * Facts about one suggestion attempt that a terminal event carries for
+ * analytics. Never the suggestion text, the prompt or any conversation.
+ */
+export type PromptSuggestionAttempt = {
+  /** Binds this attempt to the exact prompt that drove it. */
+  promptVersion?: string;
+  /** Model id of the suggestion request; the main Turn's model. */
+  model?: string;
+  /** msg_id of the reply this suggestion follows. */
+  msgId?: string;
+  /** Present once a model request was issued. */
+  elapsedMs?: number;
+  usage?: PromptSuggestionUsage;
+};
+
 export type GlobalEventPayloadMap = {
   "agent.created": { agentName: string };
   "agent.updated": {
@@ -325,24 +360,20 @@ export type GlobalEventPayloadMap = {
     keepRequestId: string;
     supersededAt: number;
   };
-  "message.rewind": { sessionId: string; contextReset?: boolean };
-  "turn.prompt_suggestion.status": {
+  'message.rewind': { sessionId: string; contextReset?: boolean };
+  'turn.prompt_suggestion.status': PromptSuggestionAttempt & {
     sessionId: string;
     turnId: string;
-    status: "generating" | "unavailable" | "cancelled";
+    status: 'generating' | 'unavailable' | 'cancelled';
+    /** Set on a terminal status: why this Turn ended without a suggestion. */
+    reason?: PromptSuggestionUnavailableReason;
+    /** Set on a terminal status: whether a model request was issued. */
+    requested?: boolean;
   };
-  "turn.prompt_suggestion.generated": {
+  'turn.prompt_suggestion.generated': PromptSuggestionAttempt & {
     sessionId: string;
     turnId: string;
     suggestion: string;
-    /** Binds this text to the exact prompt that produced it. */
-    promptVersion?: string;
-    elapsedMs?: number;
-    usage?: {
-      /** The whole prompt, including any provider-cached prefix. */
-      inputTokens?: number;
-      outputTokens?: number;
-    };
   };
   "notification.read": {
     notification_id: string;
