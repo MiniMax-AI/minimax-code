@@ -429,8 +429,16 @@ function captureInitialCurrentUser(
 ): AgentMessage | undefined {
   if (phase !== 'initial') return undefined;
   const candidate = messages.at(-1);
-  if (candidate?.role !== 'user') return undefined;
+  if (candidate?.role !== 'user' || isInternalUserMessage(candidate)) return undefined;
   return messages.filter((message) => message === candidate).length === 1 ? candidate : undefined;
+}
+
+function isInternalUserMessage(message: AgentMessage): boolean {
+  const hostMetadata = Reflect.get(message, 'hostMetadata');
+  if (typeof hostMetadata !== 'object' || hostMetadata === null || Array.isArray(hostMetadata)) {
+    return false;
+  }
+  return Object.hasOwn(hostMetadata, 'backgroundTaskOrigin');
 }
 
 function placeBeforeCurrentUser(input: {
@@ -458,10 +466,11 @@ function placeBeforeCurrentUser(input: {
   if (!input.durableReplacement) return { type: 'defer' };
   const currentUser = input.initialCurrentUser;
   if (!currentUser) {
-    // Continuation re-enters from history that can end with a tool round; with
-    // no real user at the tail there is nothing to precede. Aborting here would
-    // discard the durable replacement (e.g. a finished compaction) every retry.
-    if (input.initialMessages.at(-1)?.role !== 'user') return { type: 'tail' };
+    const tail = input.initialMessages.at(-1);
+    // A continuation or an explicitly internal user at the tail has no real
+    // user to precede. The ordinary tail path keeps the durable replacement
+    // (e.g. a finished compaction) while still appending the marker.
+    if (tail?.role !== 'user' || isInternalUserMessage(tail)) return { type: 'tail' };
     return 'before-current-user could not locate one current real user';
   }
   const sourceIndex = input.initialMessages.length - 1;
