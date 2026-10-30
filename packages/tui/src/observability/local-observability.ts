@@ -1,6 +1,10 @@
 import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { redactTuiSensitiveText } from '../user-facing-failure.js';
+import type {
+  TuiClipboardImageDiagnostic,
+  TuiClipboardImageErrorCode,
+} from '../host/clipboard-image.js';
 
 export type TuiObservabilitySurface = 'tui' | 'headless' | 'acp' | 'inspection';
 export type TuiRuntimeAccessSource = 'process-local';
@@ -154,6 +158,14 @@ export interface TuiSideSessionFailureObservation {
   readonly error: unknown;
 }
 
+export interface TuiClipboardReadObservation {
+  readonly sessionId?: string;
+  readonly outcome: 'succeeded' | 'failed' | 'empty' | 'cancelled';
+  readonly durationMs: number;
+  readonly errorCode?: TuiClipboardImageErrorCode;
+  readonly diagnostic?: TuiClipboardImageDiagnostic;
+}
+
 /**
  * What Esc decided about delegated agents, and why: the `conversation.stopSubAgent`
  * value it read from config.yaml and where that value came from.
@@ -169,6 +181,7 @@ export interface TuiStopPolicyObservation {
 }
 
 export interface TuiObservability {
+  recordClipboardRead?(observation: TuiClipboardReadObservation): void;
   recordSideSessionFailure?(observation: TuiSideSessionFailureObservation): void;
   recordStopPolicy?(observation: TuiStopPolicyObservation): void;
   recordStartup(observation: TuiStartupObservation): void;
@@ -283,6 +296,10 @@ class LocalTuiObservability implements TuiObservability {
     this.ready = ensureDirectory(directory)
       .then(() => prune(directory, startedAtMs - OBSERVABILITY_RETENTION_MS))
       .catch(() => undefined);
+  }
+
+  recordClipboardRead(observation: TuiClipboardReadObservation): void {
+    this.record('clipboard.read', observation);
   }
 
   recordSideSessionFailure(observation: TuiSideSessionFailureObservation): void {

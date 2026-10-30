@@ -43,6 +43,13 @@ describe('Minimax Code observability', () => {
       retryDelayMs: 250,
       errorKind: 'Error',
     });
+    observability.recordClipboardRead?.({
+      sessionId: 'session-clipboard',
+      outcome: 'failed',
+      durationMs: 5_002,
+      errorCode: 'unavailable',
+      diagnostic: { stage: 'windows-clipboard', reason: 'timeout', signal: 'SIGTERM' },
+    });
     observability.recordProcessStop({
       source: 'terminal.write.sync',
       terminalDead: true,
@@ -110,6 +117,13 @@ describe('Minimax Code observability', () => {
         attempt: 1,
         retryDelayMs: 250,
         errorKind: 'Error',
+      }),
+      expect.objectContaining({
+        type: 'clipboard.read',
+        sessionId: 'session-clipboard',
+        outcome: 'failed',
+        durationMs: 5_002,
+        diagnostic: { stage: 'windows-clipboard', reason: 'timeout', signal: 'SIGTERM' },
       }),
       expect.objectContaining({
         type: 'process.stop',

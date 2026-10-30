@@ -14,6 +14,7 @@ import { TuiActivityLine } from '../../src/tui/shell/activity-line.js';
 import { isQuestionnaireTool } from '../../src/tui/controller/projection/turn-tool-projection.js';
 import type { TuiQuestionnaireRequest } from '../../src/runtime/port.js';
 import { TuiUserProjection } from '../../src/tui/controller/projection/turn-user-projection.js';
+import { TuiSessionAccess } from '../../src/runtime/adapters/session-access.js';
 
 function pendingQuestionnaire(
   sessionId: string,
@@ -580,7 +581,7 @@ describe('TuiChatController', () => {
     await submission;
 
     await vi.waitFor(() =>
-      expect(runtime.getMessages).toHaveBeenCalledWith('session-history-deferred'),
+      expect(runtime.getMessages).toHaveBeenCalledWith('session-history-deferred', 0),
     );
   });
 
@@ -2542,6 +2543,249 @@ describe('TuiChatController', () => {
       }),
     );
   });
+
+  it('retains the displayed history and warning position across paged refreshes and respects rewind', async () => {
+    const createMessage = (index: number) => ({
+      id: `message-${index}`,
+      turnId: `turn-${Math.ceil(index / 10)}`,
+      role: index % 10 === 1 ? 'user' : 'assistant',
+      content: `Message ${index}`,
+      timestamp: index,
+    });
+    let messages = Array.from({ length: 150 }, (_, index) => createMessage(index + 1));
+    let failOlderPage = false;
+    const access = new TuiSessionAccess(
+      {
+        getMessages: async ({ limit, before }: { limit: number; before?: string }) => {
+          if (before && failOlderPage) throw new Error('History unavailable');
+          const end = before
+            ? messages.findIndex((message) => message.id === before)
+            : messages.length;
+          const start = Math.max(0, end - limit);
+          return {
+            messages: messages.slice(start, end),
+            hasMore: start > 0,
+            nextCursor: messages[start]?.id,
+          };
+        },
+      } as never,
+      'test',
+    );
+    const transcript = new TranscriptStore();
+    const controller = new ProductionTuiChatController({
+      runtime: {
+        getSession: async (sessionId: string) => ({ sessionId }),
+        getMessages: access.getMessages.bind(access),
+        listMessagePage: access.listMessagePage.bind(access),
+      } as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+    await controller.loadSessionProjection('long-session');
+    expect(transcript.snapshot()[0]?.content).toBe('Message 71');
+    transcript.upsert({
+      id: 'local:warning',
+      kind: 'warning',
+      status: 'succeeded',
+      content: 'Clipboard unavailable',
+      ephemeral: true,
+      createdAtMs: 150.5,
+    });
+    for (const end of [250, 350]) {
+      const newMessages = Array.from({ length: 100 }, (_, index) => createMessage(end - 99 + index));
+      messages.push(...newMessages);
+      for (const message of newMessages)
+        controller.applyRuntimeTurnEvent(message.turnId, {
+          type: 'message',
+          message: { ...message, role: message.role as 'user' | 'assistant' },
+        });
+      await controller.reconcileOwnerHistory(false);
+      const cells = transcript.snapshot();
+      expect(cells[0]?.content).toBe('Message 71');
+      expect(cells.filter((cell) => cell.kind === 'user')).toHaveLength((end - 70) / 10);
+      expect(cells.filter((cell) => cell.kind === 'warning')).toHaveLength(1);
+      const warningIndex = cells.findIndex((cell) => cell.id === 'local:warning');
+      expect(cells[warningIndex - 1]?.content).toBe('Message 150');
+      expect(cells[warningIndex + 1]?.content).toBe('Message 151');
+      expect(cells.at(-1)?.content).toBe(`Message ${end}`);
+    }
+    const beforeFailure = transcript.snapshot();
+    failOlderPage = true;
+    await expect(controller.reconcileOwnerHistory(false)).rejects.toThrow('History unavailable');
+    expect(transcript.snapshot()).toEqual(beforeFailure);
+    failOlderPage = false;
+    messages = messages.slice(0, 120);
+    await controller.reconcileOwnerHistory(true);
+    expect(transcript.snapshot()).toHaveLength(50);
+    expect(transcript.snapshot().at(-1)?.content).toBe('Message 120');
+    expect(transcript.get('local:warning')).toBeUndefined();
+    messages = messages.slice(0, 40);
+    await controller.reconcileOwnerHistory(true);
+    expect(transcript.snapshot()).toHaveLength(40);
+    expect(transcript.snapshot()[0]?.content).toBe('Message 1');
+  });
+
+  it.each(['anchor', 'displayed-history'] as const)(
+    'recovers the visible range after deleting %s without repeated full-session reads',
+    async (deleted) => {
+      const createMessage = (index: number) => ({
+        id: `message-${index}`,
+        turnId: `turn-${index}`,
+        role: 'assistant',
+        content: `Message ${index}`,
+      });
+      let messages = Array.from({ length: 5_000 }, (_, index) => createMessage(index + 1));
+      const getMessages = vi.fn(async ({ limit, before }: { limit: number; before?: string }) => {
+        const cursorIndex = before ? messages.findIndex((message) => message.id === before) : -1;
+        const end = cursorIndex >= 0 ? cursorIndex : messages.length;
+        const start = Math.max(0, end - limit);
+        return {
+          messages: messages.slice(start, end),
+          hasMore: start > 0,
+          nextCursor: messages[start]?.id,
+        };
+      });
+      const access = new TuiSessionAccess({ getMessages } as never, 'test');
+      const transcript = new TranscriptStore();
+      const controller = new ProductionTuiChatController({
+        runtime: {
+          getSession: async (sessionId: string) => ({ sessionId }),
+          getMessages: access.getMessages.bind(access),
+          listMessagePage: access.listMessagePage.bind(access),
+        } as never,
+        transcript,
+        workspaceDir: '/workspace',
+      });
+      await controller.loadSessionProjection('long-session');
+      messages.push(...Array.from({ length: 160 }, (_, index) => createMessage(5_001 + index)));
+      await controller.reconcileOwnerHistory(false);
+      expect(transcript.snapshot()).toHaveLength(240);
+      messages =
+        deleted === 'anchor'
+          ? messages.filter((message) => message.id !== 'message-4921')
+          : messages.slice(0, 4_920);
+      await controller.reconcileOwnerHistory(true);
+      const expected = deleted === 'anchor' ? messages.slice(4_920) : messages.slice(-80);
+      expect(transcript.snapshot().map((cell) => cell.content)).toEqual(
+        expected.map((message) => message.content),
+      );
+      getMessages.mockClear();
+      await controller.reconcileOwnerHistory(false);
+      expect(getMessages).toHaveBeenCalledTimes(deleted === 'anchor' ? 3 : 1);
+      expect(transcript.snapshot().map((cell) => cell.content)).toEqual(
+        expected.map((message) => message.content),
+      );
+      messages = [];
+      await controller.reconcileOwnerHistory(true);
+      expect(transcript.snapshot()).toEqual([]);
+    },
+  );
+
+  it('keeps the current transcript when old-session or incomplete history pages arrive', async () => {
+    let releasePage!: (page: { messages: []; hasMore: boolean; nextCursor: string }) => void;
+    const listMessagePage = vi.fn(
+      async () =>
+        await new Promise<{ messages: []; hasMore: boolean; nextCursor: string }>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    const transcript = new TranscriptStore();
+    const controller = new ProductionTuiChatController({
+      runtime: {
+        getSession: async (sessionId: string) => ({ sessionId }),
+        getMessages: async (sessionId: string) => [
+          { id: `${sessionId}-message`, role: 'user', content: sessionId },
+        ],
+        listMessagePage,
+      } as never,
+      transcript,
+      workspaceDir: '/workspace',
+    });
+    await controller.loadSessionProjection('old-session');
+    const refresh = controller.refreshCurrentSessionHistory();
+    await controller.loadSessionProjection('new-session');
+    const current = transcript.snapshot();
+    releasePage({ messages: [], hasMore: true, nextCursor: 'old-page' });
+    await refresh;
+    expect(listMessagePage).toHaveBeenCalledOnce();
+    expect(transcript.snapshot()).toEqual(current);
+    for (const nextCursor of ['', 'loop']) {
+      listMessagePage.mockResolvedValue({ messages: [], hasMore: true, nextCursor });
+      await expect(controller.refreshCurrentSessionHistory()).rejects.toThrow(
+        'incomplete history page',
+      );
+      expect(transcript.snapshot()).toEqual(current);
+    }
+  });
+
+  it.each(['submitted', 'runtime'] as const)(
+    'keeps a new %s turn when an older history refresh finishes',
+    async (owner) => {
+      const older = {
+        id: 'old-message',
+        turnId: 'old-turn',
+        role: 'user' as const,
+        content: 'Older prompt',
+      };
+      const newer = {
+        id: 'new-message',
+        turnId: 'new-turn',
+        role: 'assistant' as const,
+        content: 'New answer',
+      };
+      let releasePage!: () => void;
+      let finishTurn!: () => void;
+      const pageGate = new Promise<void>((resolve) => {
+        releasePage = resolve;
+      });
+      const turnGate = new Promise<void>((resolve) => {
+        finishTurn = resolve;
+      });
+      const listMessagePage = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await pageGate;
+          return { messages: [older], hasMore: false };
+        })
+        .mockResolvedValue({ messages: [older, newer], hasMore: false });
+      const transcript = new TranscriptStore();
+      const controller = new ProductionTuiChatController({
+        runtime: {
+          getSession: async (sessionId: string) => ({ sessionId }),
+          getMessages: async () => [older],
+          listMessagePage,
+          async *sendMessage() {
+            yield { type: 'message', message: newer };
+            await turnGate;
+            yield { type: 'done' };
+          },
+        } as never,
+        transcript,
+        workspaceDir: '/workspace',
+        createTurnId: () => 'new-turn',
+      });
+      await controller.loadSessionProjection('session');
+      const refresh = controller.refreshCurrentSessionHistory();
+      let submission: Promise<unknown> | undefined;
+      if (owner === 'submitted') submission = controller.submit('New prompt');
+      else {
+        controller.beginRuntimeTurn('new-turn', 20);
+        controller.applyRuntimeTurnEvent('new-turn', { type: 'message', message: newer });
+      }
+      await vi.waitFor(() =>
+        expect(transcript.snapshot().some((cell) => cell.content === 'New answer')).toBe(true),
+      );
+      releasePage();
+      await refresh;
+      expect(transcript.snapshot().some((cell) => cell.content === 'New answer')).toBe(true);
+      finishTurn();
+      if (submission) await submission;
+      else await controller.refreshCurrentSessionHistory();
+      expect(transcript.snapshot().map((cell) => cell.content)).toEqual(
+        expect.arrayContaining(['Older prompt', 'New answer']),
+      );
+    },
+  );
 
   it('preserves ephemeral local cells in place during same-Session history reconciliation', async () => {
     let messages = [

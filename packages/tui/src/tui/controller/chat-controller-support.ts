@@ -15,7 +15,12 @@ export type TuiChatRuntimeLike = Pick<TuiSessionPort, 'createSession'> &
   Partial<
     Pick<
       TuiSessionPort,
-      'listSessions' | 'getSession' | 'getMessages' | 'renameSession' | 'archiveSession'
+      | 'listSessions'
+      | 'getSession'
+      | 'getMessages'
+      | 'listMessagePage'
+      | 'renameSession'
+      | 'archiveSession'
     >
   > &
   Partial<Pick<TuiConfigurationPort, 'getAccountStatus'>> &

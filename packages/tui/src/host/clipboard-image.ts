@@ -19,6 +19,7 @@ const SUPPORTED_CLIPBOARD_IMAGE_MIME_TYPES = [
 const CLIPBOARD_COMMAND_LIST_TIMEOUT_MS = 1_000;
 const CLIPBOARD_COMMAND_READ_TIMEOUT_MS = 3_000;
 const CLIPBOARD_COMMAND_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
+const WINDOWS_CLIPBOARD_BUSY_HRESULT = -2147221040; // CLIPBRD_E_CANT_OPEN (0x800401D0).
 
 export type TuiClipboardImageErrorCode =
   | 'cancelled'
@@ -29,13 +30,37 @@ export type TuiClipboardImageErrorCode =
   | 'unavailable'
   | 'unsupported-platform';
 
+export type TuiClipboardImageStage =
+  | 'native-reader'
+  | 'native-image'
+  | 'temporary-directory'
+  | 'wsl-path'
+  | 'windows-clipboard'
+  | 'image-file-read'
+  | 'image-file-write';
+
+export interface TuiClipboardImageDiagnostic {
+  readonly stage: TuiClipboardImageStage;
+  readonly reason: 'busy' | 'command-not-found' | 'timeout' | 'permission-denied' | 'failed';
+  readonly systemCode?: string;
+  readonly exitCode?: number;
+  readonly signal?: string;
+  readonly powershellErrorId?: string;
+}
+
 export class TuiClipboardImageError extends Error {
   readonly code: TuiClipboardImageErrorCode;
+  readonly diagnostic?: TuiClipboardImageDiagnostic;
 
-  constructor(code: TuiClipboardImageErrorCode, message: string, options?: ErrorOptions) {
+  constructor(
+    code: TuiClipboardImageErrorCode,
+    message: string,
+    options?: ErrorOptions & { diagnostic?: TuiClipboardImageDiagnostic },
+  ) {
     super(message, options);
     this.name = 'TuiClipboardImageError';
     this.code = code;
+    this.diagnostic = options?.diagnostic;
   }
 }
 
@@ -117,7 +142,7 @@ export async function readTuiClipboardImage(
   try {
     clipboard = options.clipboard ?? (await (options.loadClipboard ?? loadNativeClipboard)());
   } catch (error) {
-    if (!localWsl) throw classifyClipboardImageError(error, 'unavailable');
+    if (!localWsl) throw classifyClipboardImageError(error, 'native-reader');
   }
 
   const clipboardFilePaths = await (
@@ -148,12 +173,7 @@ export async function readTuiClipboardImage(
   }
 
   if (localWsl) {
-    let bytes: Buffer | undefined;
-    try {
-      bytes = await readWslClipboardImageViaPowerShell(options);
-    } catch (error) {
-      throw classifyClipboardImageError(error, 'unavailable');
-    }
+    const bytes = await readWslClipboardImageViaPowerShell(options);
     throwIfAborted(options.signal);
     if (!bytes?.length) {
       throw new TuiClipboardImageError(
@@ -175,7 +195,7 @@ export async function readTuiClipboardImage(
   try {
     hasImage = await retryWindowsClipboardRead(() => clipboard.hasImage(), platform, options);
   } catch (error) {
-    throw classifyClipboardImageError(error, 'unavailable');
+    throw classifyClipboardImageError(error, 'native-image');
   }
   throwIfAborted(options.signal);
   if (!hasImage) {
@@ -191,7 +211,7 @@ export async function readTuiClipboardImage(
       await retryWindowsClipboardRead(() => clipboard.getImageBinary(), platform, options),
     );
   } catch (error) {
-    throw classifyClipboardImageError(error, 'unavailable');
+    throw classifyClipboardImageError(error, 'native-image');
   }
   throwIfAborted(options.signal);
   if (bytes.length === 0) {
@@ -222,7 +242,7 @@ async function persistClipboardImageBytes(
   const directory = await mkdtemp(
     join(options.tempRoot ?? tmpdir(), 'minimax-code-clipboard-'),
   ).catch((error: unknown) => {
-    throw classifyClipboardImageError(error, 'unavailable');
+    throw classifyClipboardImageError(error, 'temporary-directory');
   });
   const extension = extensionForClipboardImageMimeType(mimeType) ?? 'png';
   const fileName = `clipboard-${(options.now ?? Date.now)()}.${extension}`;
@@ -240,7 +260,7 @@ async function persistClipboardImageBytes(
   } catch (error) {
     await dispose().catch(() => undefined);
     if (error instanceof TuiClipboardImageError) throw error;
-    throw classifyClipboardImageError(error, 'unavailable');
+    throw classifyClipboardImageError(error, 'image-file-write');
   }
 
   return {
@@ -374,10 +394,8 @@ function isLocalWsl(
 async function readWslClipboardImageViaPowerShell(
   options: ReadTuiClipboardImageOptions,
 ): Promise<Buffer | undefined> {
-  const directory = await mkdtemp(
-    join(options.tempRoot ?? tmpdir(), 'minimax-code-wsl-clipboard-'),
-  );
-  const filePath = join(directory, 'clipboard.png');
+  let directory: string | undefined;
+  let stage: TuiClipboardImageStage = 'temporary-directory';
   const executeFile = options.executeFile ?? executeClipboardFile;
   const executionOptions = (
     timeout: number,
@@ -390,6 +408,9 @@ async function readWslClipboardImageViaPowerShell(
   });
 
   try {
+    directory = await mkdtemp(join(options.tempRoot ?? tmpdir(), 'minimax-code-wsl-clipboard-'));
+    const filePath = join(directory, 'clipboard.png');
+    stage = 'wsl-path';
     const mappedPath = (
       await executeFile('wslpath', ['-w', filePath], executionOptions(1_000, 64 * 1024))
     ).stdout.trim();
@@ -400,22 +421,45 @@ async function readWslClipboardImageViaPowerShell(
       "$ErrorActionPreference = 'Stop'",
       'Add-Type -AssemblyName System.Windows.Forms',
       'Add-Type -AssemblyName System.Drawing',
-      '$image = [System.Windows.Forms.Clipboard]::GetImage()',
+      `try { $image = [System.Windows.Forms.Clipboard]::GetImage() } catch { if ($_.Exception.GetBaseException().HResult -eq ${WINDOWS_CLIPBOARD_BUSY_HRESULT}) { Write-Output 'clipboard-busy'; exit 0 }; throw }`,
       `if ($null -eq $image) { Write-Output 'empty' } else { try { $image.Save('${quotedPath}', [System.Drawing.Imaging.ImageFormat]::Png); Write-Output 'ok' } finally { $image.Dispose() } }`,
     ].join('; ');
-    const output = (
-      await executeFile(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-Command', script],
-        executionOptions(5_000, 64 * 1024),
-      )
-    ).stdout.trim();
+    stage = 'windows-clipboard';
+    // Slow clipboard-lock retries share one process-execution budget.
+    const deadline = performance.now() + 5_000;
+    const output = await retryWindowsClipboardRead(
+      async () => {
+        const timeout = Math.ceil(deadline - performance.now());
+        if (timeout <= 0) {
+          throw Object.assign(new Error('Windows clipboard reading timed out.'), { code: 'ETIMEDOUT' });
+        }
+        const result = (
+          await executeFile(
+            'powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-Command', script],
+            executionOptions(timeout, 64 * 1024),
+          )
+        ).stdout.trim();
+        if (result === 'clipboard-busy') {
+          throw Object.assign(new Error('The Windows clipboard is busy.'), { code: 'EBUSY' });
+        }
+        return result;
+      },
+      'win32',
+      options,
+      (error) => error instanceof Error && 'code' in error && error.code === 'EBUSY',
+    );
     if (output === 'empty') return undefined;
     if (output !== 'ok')
-      throw new Error(`PowerShell returned an unexpected clipboard result: ${output}`);
+      throw Object.assign(new Error('PowerShell returned an unexpected clipboard result.'), {
+        code: 'UNEXPECTED_RESPONSE',
+      });
+    stage = 'image-file-read';
     return await readFile(filePath);
+  } catch (error) {
+    throw classifyClipboardImageError(error, stage);
   } finally {
-    await rm(directory, { force: true, recursive: true }).catch(() => undefined);
+    if (directory) await rm(directory, { force: true, recursive: true }).catch(() => undefined);
   }
 }
 
@@ -536,6 +580,7 @@ async function retryWindowsClipboardRead<T>(
   operation: () => T | Promise<T>,
   platform: NodeJS.Platform,
   options: Pick<ReadTuiClipboardImageOptions, 'signal' | 'retryClipboardDelay'>,
+  shouldRetry: (error: unknown) => boolean = isTransientWindowsClipboardError,
 ): Promise<T> {
   const retries = platform === 'win32' ? 2 : 0;
   const delay =
@@ -546,13 +591,14 @@ async function retryWindowsClipboardRead<T>(
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= retries || !isTransientWindowsClipboardError(error)) throw error;
+      if (attempt >= retries || !shouldRetry(error)) throw error;
       await delay(25 * (attempt + 1));
     }
   }
 }
 
 function isTransientWindowsClipboardError(error: unknown): boolean {
+  if (error instanceof TuiClipboardImageError) return error.diagnostic?.reason === 'busy';
   const code =
     error && typeof error === 'object' && 'code' in error
       ? String((error as { code?: unknown }).code)
@@ -633,31 +679,80 @@ const CLIPBOARD_IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
 
 function classifyClipboardImageError(
   error: unknown,
-  fallback: 'unavailable',
+  stage: TuiClipboardImageStage,
 ): TuiClipboardImageError {
   if (error instanceof TuiClipboardImageError) return error;
-  const code =
-    error && typeof error === 'object' && 'code' in error
-      ? String((error as { code?: unknown }).code)
-      : '';
+  const field = (key: string): unknown =>
+    error && typeof error === 'object' ? Reflect.get(error, key) : undefined;
+  const rawCode = field('code');
+  const code = rawCode === undefined ? '' : String(rawCode);
   const message = error instanceof Error ? error.message : String(error);
-  if (
+  const permissionDenied =
     code === 'EACCES' ||
     code === 'EPERM' ||
-    /access denied|not permitted|permission/iu.test(message)
-  ) {
-    return new TuiClipboardImageError(
-      'permission-denied',
-      'Minimax Code cannot read the system clipboard. Allow clipboard access, then try again.',
-      { cause: error },
-    );
-  }
+    /access denied|not permitted|permission/iu.test(message);
+  const commandNotFound =
+    code === 'ENOENT' && (stage === 'wsl-path' || stage === 'windows-clipboard');
+  const timedOut = code === 'ETIMEDOUT' || field('killed') === true;
+  const busy =
+    stage === 'windows-clipboard'
+      ? code === 'EBUSY'
+      : stage === 'native-image' && isTransientWindowsClipboardError(error);
+  const reason = busy
+    ? 'busy'
+    : permissionDenied
+      ? 'permission-denied'
+      : commandNotFound
+        ? 'command-not-found'
+        : timedOut
+          ? 'timeout'
+          : 'failed';
+  const signal = field('signal');
+  const stderr = field('stderr');
+  const powershellErrorId =
+    stage === 'windows-clipboard' && typeof stderr === 'string'
+      ? /FullyQualifiedErrorId\s*:\s*([A-Za-z][A-Za-z0-9_.,]{0,159})\s*$/mu.exec(stderr)?.[1]
+      : undefined;
+  const diagnostic: TuiClipboardImageDiagnostic = {
+    stage,
+    reason,
+    ...(/^[A-Z][A-Z0-9_]{0,63}$/u.test(code) ? { systemCode: code } : {}),
+    ...(typeof rawCode === 'number' ? { exitCode: rawCode } : {}),
+    ...(typeof signal === 'string' && /^SIG[A-Z0-9]+$/u.test(signal) ? { signal } : {}),
+    ...(powershellErrorId ? { powershellErrorId } : {}),
+  };
+  const operation = CLIPBOARD_IMAGE_OPERATIONS[stage];
+  const detail = busy
+    ? 'The clipboard is busy. Wait a moment and try again.'
+    : commandNotFound
+      ? `${stage === 'wsl-path' ? 'wslpath' : 'powershell.exe'} could not be found in PATH.`
+      : permissionDenied
+        ? 'Access was denied.'
+        : timedOut
+          ? 'The operation timed out.'
+          : powershellErrorId
+            ? `Windows reported ${powershellErrorId}.`
+            : code === 'ENOENT' && stage === 'image-file-read'
+              ? 'The image file was not found.'
+              : code === 'UNEXPECTED_RESPONSE'
+                ? 'PowerShell returned an unexpected response.'
+                : 'The operation failed.';
   return new TuiClipboardImageError(
-    fallback,
-    'The system clipboard image reader is unavailable. Save the image and reference it in the prompt with @.',
-    { cause: error },
+    permissionDenied ? 'permission-denied' : 'unavailable',
+    `${operation} ${detail}`,
+    { cause: error, diagnostic },
   );
 }
+
+const CLIPBOARD_IMAGE_OPERATIONS: Readonly<Record<TuiClipboardImageStage, string>> = {
+  'native-reader': 'Could not load the native clipboard image reader.',
+  'native-image': 'Could not read the image from the native clipboard.',
+  'temporary-directory': 'Could not create the temporary clipboard directory.',
+  'wsl-path': 'Could not convert the WSL clipboard image path to a Windows path.',
+  'windows-clipboard': 'Could not read and save the Windows clipboard image through PowerShell.',
+  'image-file-read': 'Could not read the clipboard image file from WSL.',
+  'image-file-write': 'Could not save the clipboard image attachment.',
+};
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;

@@ -221,8 +221,8 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
       return [
         {
           cell,
-          previousDurableId: findDurableId(current, index, -1),
-          nextDurableId: findDurableId(current, index, 1),
+          previousDurable: findDurableCell(current, index, -1),
+          nextDurable: findDurableCell(current, index, 1),
           durableBefore,
         },
       ];
@@ -243,6 +243,18 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
           return turnId ? [turnId] : [];
         }),
       );
+      const firstByMessage = new Map<string, number>();
+      const lastByMessage = new Map<string, number>();
+      const firstByTurn = new Map<string, number>();
+      projectedDurableIds.forEach((id, index) => {
+        const cell = this.cells.get(id);
+        if (cell?.sourceMessageId) {
+          if (!firstByMessage.has(cell.sourceMessageId))
+            firstByMessage.set(cell.sourceMessageId, index);
+          lastByMessage.set(cell.sourceMessageId, index);
+        }
+        if (cell?.turnId && !firstByTurn.has(cell.turnId)) firstByTurn.set(cell.turnId, index);
+      });
       // Turn ids are comparable when at least one earlier turn is still projected.
       const comparableTurns = [...previousTurns].some((turnId) => projectedTurns.has(turnId));
       // An edit removes later turns from history. One-time feedback of a removed turn
@@ -264,7 +276,9 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
         return turnEnds;
       };
       const anchors = retained.map(
-        ({ cell, previousDurableId, nextDurableId, durableBefore: durableCountBefore }) => {
+        ({ cell, previousDurable, nextDurable, durableBefore: durableCountBefore }) => {
+          const previousDurableId = previousDurable?.id;
+          const nextDurableId = nextDurable?.id;
           if (nextDurableId && this.cells.has(nextDurableId)) return nextDurableId;
           if (previousDurableId) {
             const previousIndex = this.indexById.get(previousDurableId);
@@ -275,11 +289,37 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
           // so notes kept in history do not drift or stack up (#426).
           const turnEnd = cell.turnId ? lastIndexOfTurn().get(cell.turnId) : undefined;
           if (turnEnd !== undefined) return this.orderedIds[turnEnd + 1];
+          const nextMessage = nextDurable?.sourceMessageId
+            ? firstByMessage.get(nextDurable.sourceMessageId)
+            : undefined;
+          if (nextMessage !== undefined) return projectedDurableIds[nextMessage];
+          const previousMessage = previousDurable?.sourceMessageId
+            ? lastByMessage.get(previousDurable.sourceMessageId)
+            : undefined;
+          if (previousMessage !== undefined) return projectedDurableIds[previousMessage + 1];
+          // Local notices have no turn of their own. Keep them beside the same
+          // surrounding turn when live cells collapse into a different history shape.
+          const previousTurnEnd = previousDurable?.turnId
+            ? lastIndexOfTurn().get(previousDurable.turnId)
+            : undefined;
+          if (previousTurnEnd !== undefined) return this.orderedIds[previousTurnEnd + 1];
+          const nextTurnStart = nextDurable?.turnId
+            ? firstByTurn.get(nextDurable.turnId)
+            : undefined;
+          if (nextTurnStart !== undefined) return projectedDurableIds[nextTurnStart];
           return projectedDurableIds[durableCountBefore];
         },
       );
-      retained.forEach(({ cell }, index) => {
+      retained.forEach(({ cell, previousDurable, nextDurable }, index) => {
         if (this.cells.has(cell.id) || removedTurn(cell)) return;
+        if (
+          cell.kind === 'warning' &&
+          (comparableTurns || projectedDurableIds.length === 0) &&
+          (previousDurable?.turnId || nextDurable?.turnId) &&
+          !projectedTurns.has(previousDurable?.turnId ?? '') &&
+          !projectedTurns.has(nextDurable?.turnId ?? '')
+        )
+          return;
         this.upsert(cell);
         const anchor = anchors[index];
         if (anchor) this.moveBefore(cell.id, anchor);
@@ -313,14 +353,14 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
   }
 }
 
-function findDurableId(
+function findDurableCell(
   cells: readonly TranscriptCell[],
   startIndex: number,
   direction: -1 | 1,
-): string | undefined {
+): TranscriptCell | undefined {
   for (let index = startIndex + direction; index >= 0 && index < cells.length; index += direction) {
     const cell = cells[index];
-    if (cell && !cell.ephemeral) return cell.id;
+    if (cell && !cell.ephemeral) return cell;
   }
   return undefined;
 }

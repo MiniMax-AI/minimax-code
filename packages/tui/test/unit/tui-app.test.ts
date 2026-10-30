@@ -50,6 +50,7 @@ import { VirtualTerminalScreen } from "../helpers/virtual-terminal.js";
 import { VirtualTerminal } from "../pi-084-upstream/virtual-terminal.js";
 import { TuiFailure } from "../../src/failure.js";
 import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
+import { TuiClipboardImageError } from "../../src/host/clipboard-image.js";
 import { readConversationStopConfig } from "@mavis/config";
 
 // Keep every case off the developer's real config: the cases below were written
@@ -273,7 +274,9 @@ function createRuntime(): TuiRuntime {
           },
     ),
     getMessages: vi.fn(async () => []),
-    listMessagePage: vi.fn(async () => ({ messages: [], hasMore: false })),
+    listMessagePage: vi.fn(async (sessionId, input) => ({
+      messages: await runtime.getMessages(sessionId, input?.limit), hasMore: false,
+    })),
     getSessionForkOptions: vi.fn(async () => ({
       canFork: true,
       worktreeVisible: false,
@@ -7993,7 +7996,7 @@ describe("createTuiApp", () => {
     expect(editingFrame).toContain("Older prompt");
     expect(editingFrame).not.toContain("Latest response");
 
-    const historyRefreshCount = vi.mocked(runtime.getMessages).mock.calls
+    const historyRefreshCount = vi.mocked(runtime.listMessagePage).mock.calls
       .length;
     app.editor.setText("Edited latest prompt");
     app.editor.handleInput("\r");
@@ -8001,9 +8004,9 @@ describe("createTuiApp", () => {
       expect(runtime.editSessionMessage).toHaveBeenCalledTimes(1),
     );
     await vi.waitFor(() =>
-      expect(vi.mocked(runtime.getMessages).mock.calls.length).toBeGreaterThan(
-        historyRefreshCount,
-      ),
+      expect(
+        vi.mocked(runtime.listMessagePage).mock.calls.length,
+      ).toBeGreaterThan(historyRefreshCount),
     );
     expect(
       app.transcript
@@ -11554,6 +11557,7 @@ describe("createTuiApp", () => {
     await app.ready;
     terminal.input?.("\u001bv");
     await vi.waitFor(() => expect(readClipboardImage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(app.editor.getText()).toContain("[Image #1]"));
     await app.submit("Inspect the diagram");
 
     expect(runtime.sendMessage).toHaveBeenCalledWith(
@@ -11579,6 +11583,7 @@ describe("createTuiApp", () => {
     );
     terminal.input?.("\x16");
     await vi.waitFor(() => expect(readClipboardImage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(app.editor.getText()).toContain("[Image #1]"));
     app.editor.setText("Try again");
     app.editor.handleInput("\r");
     await vi.waitFor(() => expect(app.editor.getText()).toContain("Try again"));
@@ -11760,6 +11765,7 @@ describe("createTuiApp", () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
     const dispose = vi.fn(async () => undefined);
+    const observability = { ...createObservability(), recordClipboardRead: vi.fn() };
     const readClipboardImage = vi
       .fn()
       .mockResolvedValueOnce({
@@ -11772,12 +11778,15 @@ describe("createTuiApp", () => {
         },
         dispose,
       })
-      .mockRejectedValueOnce(new Error("clipboard has no image"));
-    vi.mocked(runtime.sendMessage).mockImplementationOnce(
-      async function* sendMessage() {
-        yield { type: "error", message: "provider unavailable" };
-      },
-    );
+      .mockRejectedValueOnce(
+        new TuiClipboardImageError("unavailable", "PowerShell timed out.", {
+          cause: new Error("private clipboard diagnostic"),
+          diagnostic: { stage: "windows-clipboard", reason: "timeout", signal: "SIGTERM" },
+        }),
+      );
+    vi.mocked(runtime.sendMessage).mockImplementationOnce(async function* sendMessage() {
+      yield { type: 'error', message: 'provider unavailable' };
+    });
     const app = createTuiApp({
       runtime,
       terminal,
@@ -11785,6 +11794,7 @@ describe("createTuiApp", () => {
       workspaceDir: "/workspace",
       readClipboardImage,
       readClipboardText: async () => null,
+      observability,
     });
 
     app.start();
@@ -11792,8 +11802,20 @@ describe("createTuiApp", () => {
     app.editor.setText("Do not clear me");
     terminal.input?.("\x16");
     await vi.waitFor(() => expect(readClipboardImage).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(app.editor.getText()).toBe("Do not clear me [Image #1] "),
+    );
     terminal.input?.("\x16");
     await vi.waitFor(() => expect(readClipboardImage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(observability.recordClipboardRead).toHaveBeenCalledTimes(2));
+    expect(observability.recordClipboardRead).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outcome: "failed",
+        errorCode: "unavailable",
+        diagnostic: { stage: "windows-clipboard", reason: "timeout", signal: "SIGTERM" },
+      }),
+    );
+    expect(JSON.stringify(observability.recordClipboardRead.mock.calls)).not.toContain("private");
 
     expect(app.editor.getText()).toBe("Do not clear me [Image #1] ");
     await app.submit("Try the image");
@@ -12488,6 +12510,10 @@ describe("createTuiApp", () => {
         vi.mocked(runtime.getMessages).mockResolvedValue([
           { ...originalMessage, id: "msg-user-edited", content: "Edited query" },
         ]);
+        vi.mocked(runtime.listMessagePage).mockResolvedValue({
+          messages: [{ ...originalMessage, id: "msg-user-edited", content: "Edited query" }],
+          hasMore: false,
+        });
         if (action === "early-rewind") {
           busEvents.push(
             runtimeEvent({
@@ -14555,10 +14581,7 @@ describe("createTuiApp", () => {
     );
     const historyProjectionCalls = vi
       .mocked(runtime.getMessages)
-      .mock.calls.filter(
-        ([sessionId, limit]) =>
-          sessionId === "session-existing" && limit === undefined,
-      );
+      .mock.calls.filter(([sessionId]) => sessionId === "session-existing");
     expect(historyProjectionCalls).toHaveLength(2);
     await app.stop();
   });
