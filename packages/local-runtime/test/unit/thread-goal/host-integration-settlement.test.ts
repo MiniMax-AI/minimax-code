@@ -223,7 +223,7 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
 
     expect(updateBreaker).toHaveBeenCalledWith(active.goalId, {
       expectedEpoch: accounted.updatedAt,
-      fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      fingerprint: expect.stringMatching(/^[a-f0-9]{64}:[a-f0-9]{64}$/u),
       toolActivity: "unknown",
       limit: 3,
       pauseReason: "paused(no_progress_after_completion_claim)",
@@ -709,7 +709,7 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
 
     expect(updateBreaker).toHaveBeenCalledWith(admitted.goalId, {
       expectedEpoch: admitted.updatedAt,
-      fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      fingerprint: expect.stringMatching(/^[a-f0-9]{64}:[a-f0-9]{64}$/u),
       toolActivity: "unknown",
       limit: 4,
     });
@@ -818,7 +818,7 @@ describe("LocalThreadGoalIntegration injected v2 Turn settlement", () => {
     });
     expect(updateBreaker).toHaveBeenCalledWith(active.goalId, {
       expectedEpoch: active.updatedAt,
-      fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      fingerprint: expect.stringMatching(/^[a-f0-9]{64}:[a-f0-9]{64}$/u),
       toolActivity: "unknown",
       limit: 3,
       pauseReason: "paused(no_progress_after_completion_claim)",
