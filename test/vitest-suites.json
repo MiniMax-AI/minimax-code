@@ -264,7 +264,8 @@
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/session-readable-grants.test.ts",
       "packages/tui/test/unit/tui-stdin-buffer-blocked-loop.test.ts",
       "packages/tui/test/unit/tui-account-status-inspection.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/contracts.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/contracts.test.ts",
+      "packages/local-runtime-v2/src/service/session-system/messages/history/mutation/canonical-history-scanner.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

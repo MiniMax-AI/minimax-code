@@ -32,8 +32,9 @@ const REWIND_STAGING_PREFIX = '.history-mutation-';
 const LLM_CALL_REPORT_TEMP_PREFIX = '.llm-call-report-';
 const IGNORED_FILE_NAMES = new Set(['.DS_Store']);
 const IGNORED_DIRECTORY_NAMES = new Set(['llm-call', 'llm-context-inspector']);
-// Publication intermediates owned by jsonl/materializer/tool-output writers,
-// canonical-history-index (including rollback), and session-history-paths.
+// Publication intermediates owned by jsonl/materializer/tool-output writers and
+// session-history-paths, plus leftovers (including rollback) of the removed
+// canonical history index that older session directories may still contain.
 const ATOMIC_PUBLICATION_TEMP_FILES = [
   /\.\d+[.-][0-9a-f-]{36}\.tmp$/u,
   /^(?:history-catalog\.json|user-message-locators\.jsonl)\.\d+\.\d+\.[0-9a-f]*\.(?:tmp|restore)$/u,

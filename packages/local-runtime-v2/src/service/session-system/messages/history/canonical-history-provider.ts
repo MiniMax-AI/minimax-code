@@ -22,13 +22,7 @@ import {
   type CanonicalHistoryLegacyMigration,
 } from './canonical-history-materializer.js';
 import {
-  CanonicalHistoryIndexWriteError,
-  createCanonicalHistoryIndexAdapter,
-  type CanonicalHistoryIndexAdapter,
-} from './mutation/canonical-history-index.js';
-import {
   HistoryScannerError,
-  createCanonicalHistoryScanner,
   scanCanonicalHistoryArtifacts,
 } from './mutation/canonical-history-scanner.js';
 import { isUserMessageId } from '../../shared/user-message-id.js';
@@ -221,8 +215,6 @@ export function createSessionSystemCanonicalHistoryProvider(
   const locations =
     options.locations ??
     createSessionHistoryLocationResolver({ dataDir: options.dataDir, sessions: options.sessions });
-  const indexes = new Map<string, CanonicalHistoryIndexAdapter>();
-  const scanHistory = createCanonicalHistoryScanner();
   const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
 
   return view();
@@ -237,8 +229,7 @@ export function createSessionSystemCanonicalHistoryProvider(
       inspectActive: (sessionId) => inLane(sessionId, () => inspectActiveSnapshot(sessionId)),
       initialize: (sessionId) =>
         inLane(sessionId, async () => {
-          const paths = await ensureInitialized(sessionId, 'allocate');
-          await syncIndex(sessionId, paths);
+          await ensureInitialized(sessionId, 'allocate');
         }),
       delete: (sessionId) =>
         inLane(sessionId, async () => {
@@ -322,7 +313,6 @@ export function createSessionSystemCanonicalHistoryProvider(
               `Canonical compaction generation verification failed: ${change.sessionId}`,
             );
           }
-          await syncIndex(change.sessionId, paths, true, committed);
           const result = {
             ...historySnapshot(committed, true, transform),
             generation: committedGeneration,
@@ -364,7 +354,6 @@ export function createSessionSystemCanonicalHistoryProvider(
         records = recovery.records;
       }
     }
-    await syncIndex(sessionId, paths, true, records);
     return historySnapshot(records, allowPendingToolCallTail, transform);
   }
 
@@ -397,35 +386,6 @@ export function createSessionSystemCanonicalHistoryProvider(
     return paths;
   }
 
-  async function syncIndex(
-    sessionId: string,
-    paths: SessionHistoryPaths,
-    allowMissingParent = false,
-    verifiedRecords?: readonly CanonicalHistoryEnvelope[],
-  ): Promise<void> {
-    const active = verifiedRecords ?? (await files.readActiveStrict(paths.messages));
-    const adapter = indexes.get(sessionId) ?? createCanonicalHistoryIndexAdapter(paths.sessionDir);
-    indexes.set(sessionId, adapter);
-    try {
-      await adapter.loadOrRebuild(
-        {
-          sessionId,
-          activeGeneration: activeGeneration(active),
-          activeRevision: canonicalActiveHistoryRevision(active),
-        },
-        // Only the default reader owns reusable immutable records. Preserve the
-        // independent on-disk scanner for externally supplied adapters.
-        (scannerPaths) => options.files
-          ? scanCanonicalHistoryArtifacts(scannerPaths)
-          : scanHistory(scannerPaths, files),
-        { activePath: paths.messages, snapshotsPath: paths.snapshots, sessionId },
-      );
-    } catch (error) {
-      if (error instanceof CanonicalHistoryIndexWriteError) return;
-      if (allowMissingParent && isMissingParentScannerError(error)) return;
-      throw error;
-    }
-  }
   async function inLane<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     return ioLane.run(sessionId, operation);
   }
