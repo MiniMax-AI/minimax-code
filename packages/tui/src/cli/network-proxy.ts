@@ -90,21 +90,30 @@ export function resolveTuiProxyConfiguration(
   };
 }
 
+/**
+ * Installs the process-wide fetch dispatcher before any command runs.
+ *
+ * Direct connections are configured too: the default dispatcher of Undici 8
+ * (bundled by Node 26) negotiates HTTP/2, and Node's HTTP/2 session can spin in
+ * its native send loop with unbounded memory growth while the event loop, and
+ * with it SIGTERM handlers and timeouts, stays blocked.
+ */
 export function configureTuiNetworkProxy(
   options: ConfigureTuiNetworkProxyOptions = {},
 ): TuiProxyConfiguration {
   const configuration = resolveTuiProxyConfiguration(options.environment, {
     writeWarning: options.writeWarning ?? writeStderrWarning,
   });
-  if (configuration.mode === 'direct') return configuration;
-
   const createProxyDispatcher =
     options.createProxyDispatcher ?? ((proxyOptions) => new TuiProxyDispatcher(proxyOptions));
-  const dispatcher = createProxyDispatcher({
-    httpProxy: configuration.httpProxy,
-    httpsProxy: configuration.httpsProxy,
-    noProxy: configuration.noProxy,
-  });
+  const dispatcher =
+    configuration.mode === 'direct'
+      ? new Agent({ allowH2: false })
+      : createProxyDispatcher({
+          httpProxy: configuration.httpProxy,
+          httpsProxy: configuration.httpsProxy,
+          noProxy: configuration.noProxy,
+        });
   (options.setGlobalDispatcher ?? undici.setGlobalDispatcher)(dispatcher);
   (options.installFetch ?? installUndiciFetch)();
   return configuration;
