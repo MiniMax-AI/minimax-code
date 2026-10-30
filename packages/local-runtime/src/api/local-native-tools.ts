@@ -75,6 +75,13 @@ export function buildLocalNativeRuntimeTools(input: {
   bashAdapter?: LocalBashAdapter;
   sandboxOperationsFactory?: LocalSandboxBashOperationsFactory;
   authContext?: LocalRuntimeAuthContext;
+  /** Live host auth read per request; preferred over the `authContext` snapshot. */
+  authContextGetter?: () => LocalRuntimeAuthContext | undefined;
+  /** Host recovery for a rejected managed access token; enables one retry after a 401. */
+  authContextInvalidator?: (
+    rejectedAccessToken?: string,
+    loginEpoch?: string,
+  ) => void | Promise<void>;
   routingContextGetter?: () => LocalRuntimeRoutingContext | undefined;
   fetchImpl?: typeof fetch;
   webFetchAdapter?: LocalWebFetchAdapter;

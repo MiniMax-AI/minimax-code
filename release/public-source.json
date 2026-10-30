@@ -2864,6 +2864,7 @@
     "packages/local-runtime/test/unit/local-background-task-delivery-user-stop-admission.test.ts",
     "packages/local-runtime/test/unit/local-background-task-task-output-polling-reminder.test.ts",
     "packages/local-runtime/test/unit/local-background-task-user-stop-cascade.test.ts",
+    "packages/local-runtime/test/unit/local-matrix-client-401-recovery.test.ts",
     "packages/local-runtime/test/unit/local-memory-edit-literal.test.ts",
     "packages/local-runtime/test/unit/local-native-tools.test.ts",
     "packages/local-runtime/test/unit/local-output-safety-writer-v2-guide-review.test.ts",
