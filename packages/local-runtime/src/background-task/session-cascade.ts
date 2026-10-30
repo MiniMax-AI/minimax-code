@@ -89,7 +89,7 @@ export interface StopSessionBackgroundWorkInput {
   /**
    * Root sweep only: which kinds of the stopped conversation's OWN work this stop
    * may touch (the user-stop switches). Omitted = every kind: direct callers, and
-   * the future `owner_close` (proposal §4.6), which will pass the same switches.
+   * the future `owner_close`, which will pass the same switches.
    * Never forwarded to a child sweep, see `sweepChildSession`.
    */
   readonly rootPolicy?: CascadeKindPolicy;

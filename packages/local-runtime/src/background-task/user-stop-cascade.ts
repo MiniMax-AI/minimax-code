@@ -294,7 +294,7 @@ function createCascadeHandle(
       // Turn has not released, so no newer Turn can start yet and the boundary is
       // taken now. A release reported later cannot move it: the first one wins.
       const boundaryMs = (boundary ?? fixBoundary('complete', result.status)).ms;
-      // Known limit, accepted 2026-09-25 (ADR "User stop cascade"): on
+      // Known limit: on
       // `abort-timeout` the stopped Turn has NOT released yet, so the boundary
       // above can precede the end of its wind-down. Anything it creates after
       // this point is neither stopped nor suppressed — it runs and is delivered

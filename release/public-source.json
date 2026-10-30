@@ -702,6 +702,7 @@
     "packages/local-runtime-v2/src/application/queue/contract.ts",
     "packages/local-runtime-v2/src/application/queue/queue-application.ts",
     "packages/local-runtime-v2/src/application/queue/wire.ts",
+    "packages/local-runtime-v2/src/application/session/background-task-user-stop-cascade.ts",
     "packages/local-runtime-v2/src/application/session/content-application.ts",
     "packages/local-runtime-v2/src/application/session/content-timing.test.ts",
     "packages/local-runtime-v2/src/application/session/conversation-fork-contracts.ts",
