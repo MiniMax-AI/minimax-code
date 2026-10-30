@@ -616,34 +616,42 @@ describe("withLLMRetry", () => {
     expect(error?.type === "error" ? error.error.errorMessage : undefined).toBe(message);
   });
 
-  // A request that is too large (HTTP 413, request_too_large, the local
-  // pre-send body check, or a context-window overflow) is rejected again on
-  // every resend; the BYOK retry-all budget used to send it six times.
+  // A gateway that relays Bedrock through Anthropic Messages opens the stream
+  // with HTTP 200 and only then reports the rejection as an SSE `error` event.
+  // The 200 is not the failure's status, so it must not veto the size check.
   it.each([
-    ["minimax_api", "413 Request Entity Too Large"],
-    ["minimax_api", '413 {"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}'],
-    ["custom_provider:work", "413 Payload Too Large"],
-    ["custom_provider:work", "413 status code (no body)"],
-    ["minimax_api", "Request body too large: 70000000 bytes exceeds client limit 67108864 bytes."],
-    ["minimax_api", "400 invalid params, context window exceeds limit (2013)"],
-    ["custom_provider:work", '400 {"error":{"message":"prompt is too long: 600000 tokens > 512000 maximum"}}'],
-    ["minimax", "413 Request Entity Too Large"],
-    ["minimax", "Request body too large: 70000000 bytes exceeds client limit 67108864 bytes."],
-  ])("sends an oversized request from %s only once: %s", async (provider, message) => {
+    '{"type":"error","error":{"type":"api_error","message":"Input is too long."}}',
+    '{"type":"error","error":{"type":"api_error","message":"413 Request too large (request id: 99e6cc4a)"}}',
+  ])('does not retry a size rejection reported inside an HTTP 200 stream: %s', async (message) => {
     let attempts = 0;
     const sleep = vi.fn(async () => {});
-    const inner = (async () => {
+    const inner = (async (model, _context, options) => {
       attempts += 1;
+      await options?.onResponse?.({ status: 200, headers: {} }, model);
       return errorStream(message);
     }) as StreamFn;
     const wrapped = withLLMRetry(inner, retryOptions({ sleep }));
 
-    const events = await collectEvents(await wrapped(fakeModel(provider), CONTEXT, {}));
+    const events = await collectEvents(await wrapped(fakeModel('custom_provider:work'), CONTEXT, {}));
 
     expect(attempts).toBe(1);
     expect(sleep).not.toHaveBeenCalled();
-    const error = events.find((event) => event.type === "error");
-    expect(error?.type === "error" ? error.error.errorMessage : undefined).toBe(message);
+    const error = events.find((event) => event.type === 'error');
+    expect(error?.type === 'error' ? error.error.errorMessage : undefined).toBe(message);
+  });
+
+  it('keeps retrying a transient error reported inside an HTTP 200 stream', async () => {
+    let attempts = 0;
+    const inner = (async (model, _context, options) => {
+      attempts += 1;
+      await options?.onResponse?.({ status: 200, headers: {} }, model);
+      return errorStream('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}');
+    }) as StreamFn;
+    const wrapped = withLLMRetry(inner, retryOptions({ sleep: vi.fn(async () => {}) }));
+
+    await collectEvents(await wrapped(fakeModel('custom_provider:work'), CONTEXT, {}));
+
+    expect(attempts).toBe(6);
   });
 
   it.each([
@@ -1278,5 +1286,38 @@ describe("deterministic request rejection classification", () => {
     expect(rejection(byok("413 Payload Too Large"))).toBe(true);
     expect(rejection(byok("400 invalid params, context window exceeds limit (2013)"))).toBe(true);
     expect(rejection(byok("503 Service Unavailable"))).toBe(false);
+  });
+});
+
+
+describe('oversized request retry regression', () => {
+  // A request that is too large (HTTP 413, request_too_large, the local
+  // pre-send body check, or a context-window overflow) is rejected again on
+  // every resend; the BYOK retry-all budget used to send it six times.
+  it.each([
+    ["minimax_api", "413 Request Entity Too Large"],
+    ["minimax_api", '413 {"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}'],
+    ["custom_provider:work", "413 Payload Too Large"],
+    ["custom_provider:work", "413 status code (no body)"],
+    ["minimax_api", "Request body too large: 70000000 bytes exceeds client limit 67108864 bytes."],
+    ["minimax_api", "400 invalid params, context window exceeds limit (2013)"],
+    ["custom_provider:work", '400 {"error":{"message":"prompt is too long: 600000 tokens > 512000 maximum"}}'],
+    ["minimax", "413 Request Entity Too Large"],
+    ["minimax", "Request body too large: 70000000 bytes exceeds client limit 67108864 bytes."],
+  ])("sends an oversized request from %s only once: %s", async (provider, message) => {
+    let attempts = 0;
+    const sleep = vi.fn(async () => {});
+    const inner = (async () => {
+      attempts += 1;
+      return errorStream(message);
+    }) as StreamFn;
+    const wrapped = withLLMRetry(inner, retryOptions({ sleep }));
+
+    const events = await collectEvents(await wrapped(fakeModel(provider), CONTEXT, {}));
+
+    expect(attempts).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" ? error.error.errorMessage : undefined).toBe(message);
   });
 });

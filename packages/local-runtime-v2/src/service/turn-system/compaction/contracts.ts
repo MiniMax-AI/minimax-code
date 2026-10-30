@@ -12,6 +12,16 @@ export type ContextCompactionStage = 'tool_trim' | 'llm_checkpoint' | 'post_admi
 export type CheckpointResponseContentKind = 'text' | 'thinking' | 'toolCall' | 'unknown';
 type CheckpointStopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted';
 
+/**
+ * `shared_prefix` repeats the main request's system prompt, tools and history
+ * so the Provider prompt cache is read; `isolated` sends the checkpoint
+ * protocol as its own system prompt without tools.
+ */
+export type CheckpointRequestShape = 'shared_prefix' | 'isolated';
+
+/** Why a shared-prefix attempt was re-sent in the isolated shape. */
+export type CheckpointSharedPrefixFallbackReason = 'tool_call' | 'input_overflow';
+
 export interface SubagentCheckpointStateSource {
   captureSubagents(input: {
     readonly sessionId: string;
@@ -40,12 +50,19 @@ export interface ToolResultCompactionConfig {
   readonly minCandidateBytes?: number;
   /** Positive count of recent complete tool rounds excluded from archive and trim. */
   readonly keepRecentRounds?: number;
+  /**
+   * Rides the same remote compaction document: whether non-managed Providers
+   * send the cache-sharing checkpoint request. Only `false` turns it off.
+   */
+  readonly checkpointSharedPrefix?: boolean;
 }
 
 export interface CheckpointGenerationMetadata {
   readonly responseContentKinds: readonly CheckpointResponseContentKind[];
   readonly stopReason: CheckpointStopReason;
   readonly outputTokens: number;
+  /** Present only when the invocation offered a shared prefix. */
+  readonly requestShape?: CheckpointRequestShape;
 }
 
 /**

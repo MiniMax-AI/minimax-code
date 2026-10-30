@@ -75,6 +75,7 @@ export {
 } from './outbound-message-normalizer.js';
 export {
   DEFAULT_MAX_IMAGES_PER_REQUEST,
+  keepsRequestImages,
   limitRequestImages,
   listRequestImages,
   knownMaxImagesPerRequestForBaseUrl,

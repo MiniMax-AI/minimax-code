@@ -22,15 +22,11 @@ import {
 /** Strictest known per-image provider limit, in base64 bytes. */
 export const PROVIDER_IMAGE_MAX_BASE64_BYTES = 5 * 1024 * 1024;
 
-// Request body budget assumed when the host declares none.
-const DEFAULT_REQUEST_BODY_BYTES = 18 * 1024 * 1024;
+// Request body budget assumed when the host declares none; matches the
+// client default for endpoints it does not recognize.
+const DEFAULT_REQUEST_BODY_BYTES = 64 * 1024 * 1024;
 // Text, tools and the system prompt need the rest of the request body.
 const IMAGE_SHARE_OF_REQUEST_BODY = 2 / 3;
-// A rejected request drops at least this many images, so recovery is not
-// repeated one image at a time.
-const RECOVERY_MIN_EVICTED_IMAGES = 4;
-/** A rejected request keeps 1/divisor of its images and their bytes. */
-export const DEFAULT_RECOVERY_DIVISOR = 2;
 
 /** Images one provider request may carry. */
 export interface RequestMediaBudget {
@@ -114,108 +110,7 @@ export function boundRequestMedia<T extends AgentMessage>(
 }
 
 /**
- * Image budget once `messages` exceed the automatic compaction trigger because
- * of their images: they may then use half of what the trigger leaves to the
- * rest of the context, keeping at least the newest one. Archiving the older
- * images is enough to fall back below the trigger, so the history is not
- * summarized away together with images the model has only just received.
- * `undefined` when the context is within the trigger, has fewer than two
- * images, or exceeds the trigger without them.
- */
-export function tokenRequestMediaBudget(
-  messages: readonly AgentMessage[],
-  tokens: {
-    readonly inputTokens: number;
-    readonly triggerAt: number;
-    /** Tokens the context estimate counts for one image. */
-    readonly perImage: number;
-  },
-  budget: RequestMediaBudget,
-): RequestMediaBudget | undefined {
-  if (tokens.inputTokens <= tokens.triggerAt || tokens.perImage <= 0) return undefined;
-  const images = listRequestImages(messages).length;
-  if (images < 2) return undefined;
-  const otherTokens = Math.max(0, tokens.inputTokens - images * tokens.perImage);
-  if (otherTokens >= tokens.triggerAt) return undefined;
-  const maxImages = Math.max(1, Math.floor((tokens.triggerAt - otherTokens) / tokens.perImage / 2));
-  return maxImages < images ? { maxImages, maxImageBytes: budget.maxImageBytes } : undefined;
-}
-
-/**
- * Budget the repeated request must fall to after the provider rejected
- * `rejected`, a request that carried N images: the rejection shows the real
- * limit is below N, so keep 1/`divisor` of them and of their bytes, dropping at
- * least `RECOVERY_MIN_EVICTED_IMAGES` and never the newest. `undefined` when
- * the request had fewer than two images, so images are not what can be removed.
- * A `divisor` that is not a finite number above 1 falls back to the default.
- */
-export function recoveryRequestMediaBudget(
-  rejected: readonly AgentMessage[],
-  budget: RequestMediaBudget,
-  divisor: number = DEFAULT_RECOVERY_DIVISOR,
-): RequestMediaBudget | undefined {
-  const { kept } = selectRequestImages(rejected, budget);
-  const sent = kept.length;
-  if (sent < 2) return undefined;
-  const share = Number.isFinite(divisor) && divisor > 1 ? divisor : DEFAULT_RECOVERY_DIVISOR;
-  const evicted = Math.min(
-    sent - 1,
-    Math.max(sent - Math.floor(sent / share), RECOVERY_MIN_EVICTED_IMAGES),
-  );
-  const sentBytes = kept.reduce((total, image) => total + countedBytes(image), 0);
-  return { maxImages: sent - evicted, maxImageBytes: Math.floor(sentBytes / share) };
-}
-
-/**
- * Images to archive out of history so the newest ones within `target` stay,
- * oldest first. Images `canArchive` rejects stay in history (and in the count).
- */
-export function selectImagesToArchive(
-  messages: readonly AgentMessage[],
-  target: RequestMediaBudget,
-  canArchive: (image: RequestImage) => boolean,
-): RequestImage[] {
-  const images = listRequestImages(messages);
-  const kept = new Set<string>();
-  let keptBytes = 0;
-  for (let index = images.length - 1; index >= 0; index -= 1) {
-    const image = images[index]!;
-    const bytes = countedBytes(image);
-    if (bytes > PROVIDER_IMAGE_MAX_BASE64_BYTES) continue;
-    if (
-      kept.size > 0 &&
-      (kept.size + 1 > target.maxImages || keptBytes + bytes > target.maxImageBytes)
-    ) {
-      break;
-    }
-    kept.add(image.key);
-    keptBytes += bytes;
-  }
-  return images.filter((image) => !kept.has(image.key) && canArchive(image));
-}
-
-/**
- * The request copy holding only the newest images within `target`, whoever
- * sent them; canonical history is untouched.
- */
-export function fitRequestMedia<T extends AgentMessage>(
-  messages: readonly T[],
-  target: RequestMediaBudget,
-): { readonly messages: T[]; readonly omittedCount: number } {
-  const dropped = new Set(
-    selectImagesToArchive(messages, target, () => true).map(({ key }) => key),
-  );
-  if (dropped.size === 0) return { messages: [...messages], omittedCount: 0 };
-  return {
-    messages: replaceRequestImages(messages, (image) =>
-      dropped.has(image.key) ? omittedRequestImageText(image.path) : undefined,
-    ),
-    omittedCount: dropped.size,
-  };
-}
-
-/**
- * A provider rejection that fewer request images can fix: a context overflow
+ * A provider rejection that compacting the history can fix: a context overflow
  * by tokens or request bytes, or an image count or size limit. The retry layer
  * reads the same classifier, so such a rejection is not resent unchanged first.
  */
@@ -229,22 +124,19 @@ export function isRequestMediaRejection(message: AssistantMessage): boolean {
 }
 
 /**
- * Only tool result images may leave history: user attachments are the user's
- * own payload and stay, limited per request only.
+ * Thinking signatures of prefix-cached models are bound to the exact system
+ * prompt, tools and history they were produced on. A compaction changes them
+ * (its summary request has its own system prompt and no tools; an archive
+ * rewrites earlier messages), so every thinking block (redacted ones included)
+ * is removed while the other blocks of each turn stay. Messages without
+ * thinking keep their identity.
  */
-export function isArchivableRequestImage(image: RequestImage): boolean {
-  return image.role === 'toolResult';
-}
-
-/**
- * `failed` is a media rejection and the next request can carry half of the
- * images, so dropping the response and repeating the request may succeed.
- */
-export function canRecoverByDroppingImages(
-  failed: AssistantMessage,
-  messages: readonly AgentMessage[],
-): boolean {
-  return isRequestMediaRejection(failed) && listRequestImages(messages).length >= 2;
+export function withoutThinking<T extends AgentMessage>(messages: readonly T[]): T[] {
+  return messages.map((message) => {
+    if (message.role !== 'assistant') return message;
+    if (!message.content.some((block) => block.type === 'thinking')) return message;
+    return { ...message, content: message.content.filter((block) => block.type !== 'thinking') };
+  });
 }
 
 /** Placeholder for an image a request leaves out; history still has it. */
@@ -255,12 +147,11 @@ export function omittedRequestImageText(path: string | undefined): string {
     : `[Earlier image omitted ${scope}. Capture it again if the current visual state is needed.]`;
 }
 
-/** Receipt for an image archived out of history. */
+/** Receipt for an image compaction moved out of history. */
 export function archivedImageText(path: string | undefined): string {
-  const scope = 'to keep requests within their size limit';
   return path
-    ? `[Earlier image archived ${scope}. File: ${path}]`
-    : `[Earlier image removed ${scope}. Capture it again if the current visual state is needed.]`;
+    ? `[Earlier image removed by context compaction. File: ${path}]`
+    : '[Earlier image removed by context compaction. Capture it again if the current visual state is needed.]';
 }
 
 /** Stands in for an image a checkpoint summary request does not carry. */
@@ -285,11 +176,11 @@ export interface RequestImageEncoding {
   readonly maxBase64Bytes: number;
 }
 
-/** Default `requestMedia.image`: the limits Pi's Read tool applies on its own. */
+/** Default `requestMedia.image`. */
 export const DEFAULT_REQUEST_IMAGE_ENCODING: Readonly<RequestImageEncoding> = {
   maxWidth: 2_000,
   maxHeight: 2_000,
-  maxBase64Bytes: 4.5 * 1024 * 1024,
+  maxBase64Bytes: 3.5 * 1024 * 1024,
 };
 
 /**

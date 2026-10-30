@@ -8,12 +8,8 @@ import {
   isRequestMediaRejection,
   omittedRequestImageText,
   PROVIDER_IMAGE_MAX_BASE64_BYTES,
-  recoveryRequestMediaBudget,
   resolveRequestMediaBudget,
-  fitRequestMedia,
-  selectImagesToArchive,
   selectRequestImages,
-  tokenRequestMediaBudget,
 } from '../src/index.js';
 
 function image(bytes = 10) {
@@ -57,6 +53,13 @@ describe('resolveRequestMediaBudget', () => {
       maxSerializedInputBytes: 3_000,
     });
     expect(budget).toEqual({ maxImages: 8, maxImageBytes: 2_000 });
+  });
+
+  it('assumes 64 MiB of request body when the host declares none', () => {
+    const budget = resolveRequestMediaBudget({
+      model: { maxImagesPerRequest: 8 } as unknown as Model<Api>,
+    });
+    expect(budget.maxImageBytes).toBe(Math.floor((64 * 1024 * 1024 * 2) / 3));
   });
 });
 
@@ -107,112 +110,6 @@ describe('boundRequestMedia', () => {
       content: [{ type: 'text', text: omittedRequestImageText('/shots/s0.png') }],
     });
     expect(result.messages[5]).toMatchObject({ content: [image()] });
-  });
-});
-
-describe('recoveryRequestMediaBudget', () => {
-  const budget = { maxImages: 100, maxImageBytes: 1_000_000 };
-
-  it('halves the images and bytes the rejected request carried', () => {
-    expect(recoveryRequestMediaBudget(history(10, 100), budget)).toEqual({
-      maxImages: 5,
-      maxImageBytes: 500,
-    });
-  });
-
-  it('evicts at least four images but never the newest', () => {
-    expect(recoveryRequestMediaBudget(history(6), budget)?.maxImages).toBe(2);
-    expect(recoveryRequestMediaBudget(history(3), budget)?.maxImages).toBe(1);
-  });
-
-  it('gives no target when the request had fewer than two images', () => {
-    expect(recoveryRequestMediaBudget(history(1), budget)).toBeUndefined();
-  });
-
-  it('keeps 1/divisor of the rejected request, ignoring divisors that do not shrink', () => {
-    expect(recoveryRequestMediaBudget(history(12, 100), budget, 3)).toEqual({
-      maxImages: 4,
-      maxImageBytes: 400,
-    });
-    expect(recoveryRequestMediaBudget(history(10, 100), budget, 1)).toEqual({
-      maxImages: 5,
-      maxImageBytes: 500,
-    });
-  });
-});
-
-describe('tokenRequestMediaBudget', () => {
-  const budget = { maxImages: 100, maxImageBytes: 1_000_000 };
-
-  it('gives the images half of what the trigger leaves to the rest of the context', () => {
-    // 10 images × 1_000 + 2_000 other tokens; trigger 11_000 leaves 9_000 → 4 images.
-    expect(
-      tokenRequestMediaBudget(
-        history(10),
-        { inputTokens: 12_000, triggerAt: 11_000, perImage: 1_000 },
-        budget,
-      ),
-    ).toEqual({ maxImages: 4, maxImageBytes: 1_000_000 });
-  });
-
-  it('keeps the newest image when the rest of the context nearly fills the trigger', () => {
-    expect(
-      tokenRequestMediaBudget(
-        history(3),
-        { inputTokens: 12_500, triggerAt: 10_000, perImage: 1_000 },
-        budget,
-      )?.maxImages,
-    ).toBe(1);
-  });
-
-  it('gives no target within the trigger, without images to spare, or when text alone exceeds it', () => {
-    const tokens = { inputTokens: 12_000, triggerAt: 11_000, perImage: 1_000 };
-    expect(
-      tokenRequestMediaBudget(history(10), { ...tokens, inputTokens: 11_000 }, budget),
-    ).toBeUndefined();
-    expect(tokenRequestMediaBudget(history(1), tokens, budget)).toBeUndefined();
-    expect(
-      tokenRequestMediaBudget(history(2), { ...tokens, inputTokens: 13_000 }, budget),
-    ).toBeUndefined();
-  });
-});
-
-describe('selectImagesToArchive', () => {
-  it('archives everything older than the newest images within the target', () => {
-    const archived = selectImagesToArchive(
-      history(5),
-      { maxImages: 2, maxImageBytes: 1_000 },
-      () => true,
-    );
-    expect(archived.map((entry) => entry.path)).toEqual([
-      '/shots/s0.png',
-      '/shots/s1.png',
-      '/shots/s2.png',
-    ]);
-  });
-
-  it('leaves images the caller cannot archive in place', () => {
-    const archived = selectImagesToArchive(
-      history(3),
-      { maxImages: 1, maxImageBytes: 1_000 },
-      (entry) => entry.path !== '/shots/s0.png',
-    );
-    expect(archived.map((entry) => entry.path)).toEqual(['/shots/s1.png']);
-  });
-});
-
-describe('fitRequestMedia', () => {
-  it('drops user and tool images alike outside the target, newest kept', () => {
-    const attachment = { role: 'user', content: [image()], timestamp: 0 } as AgentMessage;
-    const messages = [attachment, ...history(2)];
-    const { messages: fitted, omittedCount } = fitRequestMedia(messages, {
-      maxImages: 1,
-      maxImageBytes: 1_000,
-    });
-    expect(omittedCount).toBe(2);
-    expect(JSON.stringify(fitted[0])).toContain('Earlier image omitted');
-    expect(JSON.stringify(fitted.at(-1))).toContain('"type":"image"');
-    expect(JSON.stringify(messages[0])).toContain('"type":"image"');
   });
 });
 

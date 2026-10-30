@@ -74,7 +74,7 @@ import type {
   RequiredAgentEventProjector,
   RequiredAgentRuntimeProjector,
 } from './agent-host/events/required-agent-event-delivery.js';
-import { readCompactionCommitMetadata } from './agent-host/compaction/context-compaction.js';
+import { readCompactionCommitMetadata } from './agent-host/compaction/compaction-commit-metadata.js';
 import { LocalContextCompactor } from './compaction/local-context-compactor.js';
 import {
   AutomaticContextCompactor,
@@ -358,8 +358,8 @@ export async function createLocalAgentHost<
   const toolOutputArtifacts = createToolOutputArtifactRepository(options);
   const getToolResultCompactionConfig = createToolResultCompactionConfigGetter(options);
   const getRequestMediaConfig = createRequestMediaConfigGetter(options);
-  const getRecoveryDivisor = () => getRequestMediaConfig().recoveryDivisor;
   const getImageEncoding = () => requestImageEncoding(getRequestMediaConfig().image);
+  const getRecoveryDivisor = () => getRequestMediaConfig().recoveryDivisor;
   const toolResultArchiver = new ToolResultArchiver({
     writeArtifact: (input) => toolOutputArtifacts.write(input),
     writeImageArtifact: (input) => toolOutputArtifacts.writeImage(input),
@@ -462,7 +462,7 @@ export async function createLocalAgentHost<
       activatePluginHookSessionOwnership: options.pluginHookSessionOwnership.activate,
       afterCompactionBeforeLlmCallHooks: [
         createAutomaticContextRequestFilterHook(),
-        createRequestMediaGuardHook(getRecoveryDivisor),
+        createRequestMediaGuardHook(),
         createSessionIdentityReminderHook(contextUsageAnchor),
         createTodoCadenceReminderHook(contextUsageAnchor),
       ],
@@ -499,6 +499,7 @@ export async function createLocalAgentHost<
       control: options.turnControl,
       lifecycle: options.sessions.agentProjection.compactionLifecycle,
       observer: options.sessions.agentProjection.compactionObserver,
+      checkpointSharedPrefixEnabled: createCheckpointSharedPrefixSwitch(options),
       ...(options.product.runner.metricsClient
         ? { metricsClient: options.product.runner.metricsClient }
         : {}),
@@ -724,11 +725,20 @@ function requestImageEncoding(image: RequestImageSettings) {
   };
 }
 
+/** Remote kill switch: only an explicit Apollo `false` restores the isolated checkpoint request. */
+function createCheckpointSharedPrefixSwitch<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): () => boolean {
+  return () =>
+    readToolResultCompactionOverride(options.getToolResultCompactionConfig)
+      ?.checkpointSharedPrefix !== false;
+}
+
 function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
 ): () => ToolResultCompactionConfig {
   const fileConfig = parseToolResultCompactionConfig(readToolResultCompactionFileConfig(options));
-  const base: Required<ToolResultCompactionConfig> = {
+  const base: Required<Omit<ToolResultCompactionConfig, 'checkpointSharedPrefix'>> = {
     enabled: fileConfig.enabled,
     maxInlineBytes: fileConfig.maxInlineKiB * 1_024,
     mcpDetailsMaxInlineBytes: fileConfig.mcpDetailsMaxInlineKiB * 1_024,

@@ -260,6 +260,15 @@ describe("projectAgentMessagesForModel image ceiling", () => {
     expect(projected.omittedImageCount).toBe(23);
   });
 
+  it("sends every image to a prefix-cached model, whatever its declared ceiling", () => {
+    const projected = projectAgentMessagesForModel(
+      imageHistory(31),
+      model({ id: "\x63\x6c\x61\x75\x64\x65-5-5", maxImagesPerRequest: 8 }),
+    );
+    expect(imageCount(projected.messages)).toBe(31);
+    expect(projected.omittedImageCount).toBe(0);
+  });
+
   it("does not count images already replaced for being undersized", () => {
     const history = imageHistory(3);
     (history[0] as UserMessage).content = [

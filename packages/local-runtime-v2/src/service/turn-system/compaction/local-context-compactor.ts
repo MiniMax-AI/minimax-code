@@ -17,7 +17,12 @@ import {
   type CompactContextInput,
 } from './algorithm/compact-context.js';
 import type { ToolResultArchiver } from './algorithm/tool-result-archiver.js';
-import { createCheckpointSession } from './execution/checkpoint-provider.js';
+import {
+  checkpointGenerationObservers,
+  createCheckpointSession,
+  type CheckpointRequestProjection,
+} from './execution/checkpoint-provider.js';
+import { resolveCheckpointSharedPrefix } from './execution/checkpoint-shared-prefix.js';
 import { checkpointMaxOutputTokens } from './execution/checkpoint-prompt.js';
 import { createLocalContextFootprintMeasurer } from './execution/local-context-footprint.js';
 import type { EarlierFilesResolver, SubagentCheckpointStateSource } from './contracts.js';
@@ -183,16 +188,17 @@ function manualCheckpoint({
         ...(hooks?.onProviderRequestSettled
           ? { onRequestSettled: hooks.onProviderRequestSettled }
           : {}),
-        onGenerated: (generation) =>
-          hooks?.onCheckpointGenerated?.({
-            responseContentKinds: generation.responseContentKinds,
-            stopReason: generation.stopReason,
-            outputTokens: generation.outputTokens,
-          }),
+        ...manualSharedPrefixOption(input),
+        ...checkpointGenerationObservers(hooks),
         ...(promptSnapshots ? { promptSnapshots } : {}),
       });
     },
   };
+}
+
+function manualSharedPrefixOption(input: ManualContextCompactionInput) {
+  const sharedPrefix = resolveCheckpointSharedPrefix(input);
+  return sharedPrefix ? { sharedPrefix } : {};
 }
 
 function manualSubagentCapture(

@@ -54,6 +54,11 @@ export interface CompactContextInput {
   /** Direct-module compatibility only; production disables the legacy 30% trim policy. */
   readonly allowLegacyToolTrim?: boolean;
   /**
+   * Skips the tool-result admission and always generates a checkpoint. The
+   * tool-result candidate still serves as a smaller checkpoint input.
+   */
+  readonly checkpointRequired?: boolean;
+  /**
    * Final-request admission for the generated checkpoint. Automatic callers
    * enforce it; the manual caller bypasses it because an explicit user request
    * always commits a validly generated checkpoint. A replacement can outgrow a
@@ -129,16 +134,7 @@ export async function compactContext(input: CompactContextInput): Promise<Compac
   validateInput(input);
   input.signal?.throwIfAborted();
   const instructions = input.instructions?.trim() || undefined;
-  let planning;
-  if (input.allowLegacyToolTrim === false) {
-    planning = instructions
-      ? { candidate: input.toolResultCompactionCandidate }
-      : await planDirectToolResultCompaction(input, input.toolResultCompactionCandidate);
-  } else {
-    planning = instructions
-      ? { candidate: captureToolTrimCandidate(input.history) }
-      : await planDirectTrim(input);
-  }
+  const planning = await planCompaction(input, instructions);
   input.signal?.throwIfAborted();
   if (planning.decision) return planning.decision;
 
@@ -206,6 +202,29 @@ function buildCheckpointReplacement(
       ...(earlierFiles ? { earlierFiles } : {}),
     }),
   ];
+}
+
+/**
+ * Tool-result admission may decide the compaction without a checkpoint, unless
+ * the user gave instructions or the caller requires a checkpoint; the
+ * candidate then only serves as smaller checkpoint input.
+ */
+async function planCompaction(
+  input: CompactContextInput,
+  instructions: string | undefined,
+): Promise<{
+  readonly candidate?: ToolResultCompactionCandidate | ToolTrimCandidate;
+  readonly decision?: CompactContextDecision;
+}> {
+  const directAllowed = !instructions && input.checkpointRequired !== true;
+  if (input.allowLegacyToolTrim === false) {
+    return directAllowed
+      ? await planDirectToolResultCompaction(input, input.toolResultCompactionCandidate)
+      : { candidate: input.toolResultCompactionCandidate };
+  }
+  return directAllowed
+    ? await planDirectTrim(input)
+    : { candidate: captureToolTrimCandidate(input.history) };
 }
 
 async function captureSubagents(

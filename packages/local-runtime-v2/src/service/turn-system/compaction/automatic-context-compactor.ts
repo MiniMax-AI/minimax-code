@@ -2,21 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { DEFAULT_COMPACTION_SETTINGS } from '@earendil-works/pi-coding-agent/compaction';
-import type { PiBeforeLlmCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
 import {
-  boundRequestMedia,
-  createDefaultTokenEstimator,
-  fitRequestMedia,
-  halfRequestMediaBudget,
-  isArchivableRequestImage,
-  recoveryRequestMediaBudget,
-  resolveCompactionTokenBudget,
-  resolveRequestMediaBudget,
-  selectImagesToArchive,
-  selectRequestImages,
-  tokenRequestMediaBudget,
-  type RequestMediaBudget,
-} from '@mavis/context-manager';
+  keepsRequestImages,
+  listRequestImages,
+  type PiBeforeLlmCallHook,
+  type PiTurnRunnerLogger,
+} from '@mavis/agent-core/pi-turn-runner';
+import { resolveCompactionTokenBudget, withoutThinking } from '@mavis/context-manager';
 
 import type {
   AutomaticContextCompactionInput,
@@ -37,8 +29,13 @@ import {
   type ToolResultCompactionCandidate,
   type ToolResultImageArchive,
 } from './algorithm/tool-result-archiver.js';
-import { createCheckpointSession } from './execution/checkpoint-provider.js';
+import {
+  checkpointGenerationObservers,
+  createCheckpointSession,
+} from './execution/checkpoint-provider.js';
+import { resolveCheckpointSharedPrefix } from './execution/checkpoint-shared-prefix.js';
 import { checkpointMaxOutputTokens } from './execution/checkpoint-prompt.js';
+import { projectRequestMedia } from './execution/request-media-projection.js';
 import { createLocalContextFootprintMeasurer } from './execution/local-context-footprint.js';
 import { ContextUsageAnchorState } from './execution/usage-anchor.js';
 import type { EarlierFilesResolver, SubagentCheckpointStateSource } from './contracts.js';
@@ -124,7 +121,7 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
       resolveEarlierFiles: this.resolveEarlierFiles,
     });
     this.usageAnchor?.invalidate(input.sessionId);
-    return completedAutomaticCompaction(input.messages, decision);
+    return completedAutomaticCompaction(input, decision);
   }
 
   /** A failing config read degrades to the built-in trigger. */
@@ -137,6 +134,21 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
   }
 }
 
+/**
+ * A repeated request after a provider rejection always compacts, whatever the
+ * measured footprint: the rejection proves the request is over a limit the
+ * host could not measure, and it is the only compaction that moves images out
+ * of history (all of them, user attachments and tool results alike, leaving a
+ * line naming each file). Trigger-based compaction leaves images in place.
+ * After the images and older tool outputs leave, the recovery always ends in
+ * an LLM checkpoint, so a rejected request is never repeated on a history that
+ * merely fits the local estimate.
+ * Prefix-cached models have no request-byte trigger: their requests keep every
+ * image, so a byte estimate would rewrite the prefix before any rejection; an
+ * oversized request is rejected and recovered instead. Past the token trigger
+ * they checkpoint directly instead of archiving tool outputs first, so the
+ * prefix is rewritten once by the summary.
+ */
 function prepareAutomaticCompaction(
   input: AutomaticContextCompactionInput,
   usageAnchor: ContextUsageAnchorState | undefined,
@@ -155,67 +167,34 @@ function prepareAutomaticCompaction(
     sessionId: input.sessionId,
     messages: input.messages,
   });
-  const serializedBytesExceeded =
-    input.maxSerializedInputBytes !== undefined &&
-    footprint.serializedBytes > input.maxSerializedInputBytes;
+  const recovering = input.recovery !== undefined;
+  const prefixCached = keepsRequestImages(input.model);
+  const tokenTriggerMatched = footprint.inputTokens > automaticTriggerAt;
   const normalTriggerMatched =
-    footprint.inputTokens > automaticTriggerAt || serializedBytesExceeded;
-  const imageArchiveTarget = archiver
-    ? resolveImageArchiveTarget(input, recoveryDivisor, {
-        inputTokens: footprint.inputTokens,
-        triggerAt: automaticTriggerAt,
-        perImage: createDefaultTokenEstimator().estimateVisualTokens(),
-      })
-    : undefined;
+    recovering ||
+    tokenTriggerMatched ||
+    (!prefixCached && serializedBytesExceed(input, footprint.serializedBytes));
   return {
     measurer,
     footprint,
     toolResultCompactionPlan,
-    imageArchiveTarget,
+    archivesImages:
+      archiver !== undefined && recovering && listRequestImages(input.messages).length > 0,
+    checkpointRequired: recovering || (tokenTriggerMatched && prefixCached),
     canReadArchivedToolResults: hasReadTool(input.tools),
     normalTriggerMatched,
-    shouldStart:
-      toolResultCompactionPlan !== undefined ||
-      imageArchiveTarget !== undefined ||
-      normalTriggerMatched,
+    shouldStart: toolResultCompactionPlan !== undefined || normalTriggerMatched,
     providerInputLimit,
   };
 }
 
-/**
- * Image budget the history is archived down to: 1/`recoveryDivisor` of what a
- * rejected request carried when repeating it, or the request guard's low
- * watermark once the guard would drop a tool result image, so tool images
- * leave the history instead of being dropped again on every request. When the
- * images alone push the context over the automatic trigger, the stricter
- * `tokenRequestMediaBudget` applies, so archiving them replaces a checkpoint.
- * `undefined` when no tool result image falls outside it.
- */
-function resolveImageArchiveTarget(
+function serializedBytesExceed(
   input: AutomaticContextCompactionInput,
-  recoveryDivisor: number | undefined,
-  tokens: Parameters<typeof tokenRequestMediaBudget>[1],
-): RequestMediaBudget | undefined {
-  const budget = resolveRequestMediaBudget(input);
-  let target: RequestMediaBudget | undefined;
-  if (input.recovery) {
-    target = recoveryRequestMediaBudget(input.recovery.requestMessages, budget, recoveryDivisor);
-  } else if (selectRequestImages(input.messages, budget).dropped.some(isArchivableRequestImage)) {
-    target = halfRequestMediaBudget(budget);
-  }
-  const tokenTarget = tokenRequestMediaBudget(input.messages, tokens, budget);
-  if (tokenTarget) {
-    target = target
-      ? {
-          maxImages: Math.min(target.maxImages, tokenTarget.maxImages),
-          maxImageBytes: Math.min(target.maxImageBytes, tokenTarget.maxImageBytes),
-        }
-      : tokenTarget;
-  }
-  if (!target) return undefined;
-  return selectImagesToArchive(input.messages, target, isArchivableRequestImage).length > 0
-    ? target
-    : undefined;
+  serializedBytes: number,
+): boolean {
+  return (
+    input.maxSerializedInputBytes !== undefined && serializedBytes > input.maxSerializedInputBytes
+  );
 }
 
 async function runAutomaticPolicy(options: {
@@ -241,6 +220,7 @@ async function runAutomaticPolicy(options: {
       ? { toolResultCompactionCandidate: options.toolResultCompactionCandidate }
       : {}),
     allowLegacyToolTrim: archiver === undefined,
+    checkpointRequired: preparation.checkpointRequired,
     ...(archiver
       ? {
           writeImageFile: (messages, image) =>
@@ -323,13 +303,9 @@ async function openAutomaticCheckpoint(
     ...(hooks?.onProviderRequestSettled
       ? { onRequestSettled: hooks.onProviderRequestSettled }
       : {}),
-    onGenerated: (generation) =>
-      hooks?.onCheckpointGenerated?.({
-        responseContentKinds: generation.responseContentKinds,
-        stopReason: generation.stopReason,
-        outputTokens: generation.outputTokens,
-      }),
+    ...checkpointGenerationObservers(hooks),
     ...(promptSnapshots ? { promptSnapshots } : {}),
+    ...sharedPrefixOption(input),
   });
   const measure = session.measure;
   return {
@@ -356,6 +332,11 @@ async function openAutomaticCheckpoint(
   };
 }
 
+function sharedPrefixOption(input: AutomaticContextCompactionInput) {
+  const sharedPrefix = resolveCheckpointSharedPrefix(input);
+  return sharedPrefix ? { sharedPrefix } : {};
+}
+
 function automaticSubagentCapture(
   sessionId: string,
   checkpointState: SubagentCheckpointStateSource | undefined,
@@ -376,17 +357,25 @@ function automaticSubagentCapture(
 }
 
 function completedAutomaticCompaction(
-  messages: readonly AgentMessage[],
+  input: AutomaticContextCompactionInput,
   decision: CompactContextDecision,
 ): ContextCompactionResult {
+  const { messages } = input;
+  // tool_archive and tool_trim keep the earlier assistant turns but rewrite
+  // messages between them, so their thinking signatures no longer match the
+  // prefix. llm_checkpoint replaces the history with a summary and keeps no turn.
+  const replacementMessages =
+    decision.method !== 'llm_checkpoint' && keepsRequestImages(input.model)
+      ? withoutThinking(decision.replacementMessages)
+      : [...decision.replacementMessages];
   const completed = {
     status: 'completed' as const,
     compactionId: `ctx_${randomUUID()}`,
     strategyVersion: 'local-context-compaction-v3',
     method: decision.method,
-    replacementMessages: [...decision.replacementMessages],
+    replacementMessages,
     messagesBefore: messages.length,
-    messagesAfter: decision.replacementMessages.length,
+    messagesAfter: replacementMessages.length,
     tokensBefore: decision.measurement.before.inputTokens,
     tokensAfter: decision.measurement.after.inputTokens,
     serializedBytesBefore: decision.measurement.before.serializedBytes,
@@ -431,12 +420,8 @@ async function materializeToolResultCompactionBestEffort(
         ? await archiver.materialize({ sessionId, plan })
         : await archiver.materializeTrim({ sessionId, plan });
     }
-    const images = preparation.imageArchiveTarget
-      ? await archiver.archiveImages({
-          sessionId,
-          messages: text?.messages ?? input.messages,
-          target: preparation.imageArchiveTarget,
-        })
+    const images = preparation.archivesImages
+      ? await archiver.archiveImages({ sessionId, messages: text?.messages ?? input.messages })
       : undefined;
     return images ? withArchivedImages(text, images) : text;
   } catch {
@@ -464,24 +449,17 @@ function withArchivedImages(
 }
 
 /**
- * Request-only image limit for every image, user or tool. Runs after
- * compaction, so its placeholders never reach durable history. Compaction has
- * already archived the tool result images outside the same target, so what
- * this drops is what history cannot lose: user attachments, and images kept
- * for a model with a higher limit. A repeated request is fitted to the
- * recovery target of the rejected one, cut by `getRecoveryDivisor()`.
+ * Request-only image limit for every image, user or tool, on models that do
+ * not cache by prefix. Runs after compaction, so its placeholders never reach
+ * durable history. A repeated request needs nothing more: compaction has
+ * already moved every image out of history. Prefix-cached models skip it, so
+ * their requests stay byte-identical until a compaction replaces the history.
+ * The projection itself is `projectRequestMedia`, shared with the shared-prefix
+ * checkpoint request.
  */
-export function createRequestMediaGuardHook(
-  getRecoveryDivisor?: () => number,
-): PiBeforeLlmCallHook {
+export function createRequestMediaGuardHook(): PiBeforeLlmCallHook {
   return (input) => {
-    const budget = resolveRequestMediaBudget(input);
-    const target = input.recovery
-      ? recoveryRequestMediaBudget(input.recovery.requestMessages, budget, getRecoveryDivisor?.())
-      : undefined;
-    const { messages, omittedCount } = target
-      ? fitRequestMedia(input.messages, target)
-      : boundRequestMedia(input.messages, budget);
+    const { messages, omittedCount } = projectRequestMedia(input);
     return omittedCount === 0
       ? { type: 'continue' }
       : { type: 'replaceRequestMessages', messages, reason: 'request-media-guard' };

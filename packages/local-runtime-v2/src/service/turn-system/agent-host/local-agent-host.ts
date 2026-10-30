@@ -25,6 +25,7 @@ import {
   ContextCompactionAttemptFactory,
   createAutomaticContextCompactionHook,
 } from './compaction/context-compaction.js';
+import { resolveCheckpointRequestShape } from './compaction/checkpoint-request-shape.js';
 import {
   assertAgentHostCapabilityAvailable,
   assertAgentHostCompactionDependenciesReady,
@@ -596,6 +597,10 @@ export class LocalAgentHost<
       input.lease.leaseId,
       {
         maxSerializedInputBytes: preflight.preparation.llm.maxRequestBodyBytes,
+        checkpointRequestShape: resolveCheckpointRequestShape(
+          preflight.preparation.llm,
+          this.dependencies.compaction.checkpointSharedPrefixEnabled,
+        ),
         attempts: this.compactionAttempts,
         logger: this.dependencies.logger,
         ...(pluginHooks.length

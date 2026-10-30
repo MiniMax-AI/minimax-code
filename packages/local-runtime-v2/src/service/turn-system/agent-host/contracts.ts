@@ -203,6 +203,12 @@ export interface AgentHostCompactionDependencies<
   readonly control: AgentHostCompactionControl;
   readonly lifecycle: ContextCompactionLifecycle;
   readonly observer?: ContextCompactionObserver;
+  /**
+   * Remote switch for the cache-sharing checkpoint request on non-managed
+   * Providers, read once per Turn and per manual compaction. Absent: every
+   * checkpoint request keeps the isolated shape.
+   */
+  readonly checkpointSharedPrefixEnabled?: () => boolean;
   readonly metricsClient?: {
     counter(name: string, value: number, labels?: Record<string, string>): void;
     histogram(name: string, value: number, labels?: Record<string, string>): void;

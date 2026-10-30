@@ -53,6 +53,10 @@ import {
   recordCheckpointAttemptBestEffort,
 } from './context-compaction.js';
 import {
+  recordSharedPrefixFallbackBestEffort,
+  resolveCheckpointRequestShape,
+} from './checkpoint-request-shape.js';
+import {
   createCompactionLifecycleMetadata,
   createManualCompactionChange,
 } from './compaction-history.js';
@@ -191,6 +195,9 @@ interface ManualCompactionRequestPlan {
   readonly payloadTransform: ManualContextCompactionInput['payloadTransform'];
   readonly systemPrompt: ManualContextCompactionInput['systemPrompt'];
   readonly tools: ManualContextCompactionInput['tools'];
+  readonly checkpointRequestShape: NonNullable<
+    ManualContextCompactionInput['checkpointRequestShape']
+  >;
 }
 
 async function preCompactHookRejection(
@@ -537,6 +544,10 @@ export class AgentHostCompactionExecutor<
             payloadTransform,
             systemPrompt: providerContext.systemPrompt,
             tools: [...providerContext.tools],
+            checkpointRequestShape: resolveCheckpointRequestShape(
+              preparation.llm,
+              compactionDependencies.checkpointSharedPrefixEnabled,
+            ),
           }),
           {
             onStarted: () =>
@@ -565,6 +576,18 @@ export class AgentHostCompactionExecutor<
                   phase: 'manual',
                   thinkingLevel,
                   checkpoint: metadata,
+                },
+              ),
+            onCheckpointSharedPrefixFallback: (reason) =>
+              recordSharedPrefixFallbackBestEffort(
+                this.dependencies.logger,
+                compactionDependencies.metricsClient,
+                {
+                  context,
+                  attemptId,
+                  phase: 'manual',
+                  api: preparation.llm.model.api,
+                  reason,
                 },
               ),
             onProviderRequestSettled: state.tokenUsage.observe,
@@ -710,6 +733,9 @@ function createManualCompactionRequest(
     ...(input.customInstructions ? { customInstructions: input.customInstructions } : {}),
     systemPrompt,
     tools: plan.tools,
+    ...(plan.checkpointRequestShape === 'isolated'
+      ? {}
+      : { checkpointRequestShape: plan.checkpointRequestShape }),
   };
 }
 

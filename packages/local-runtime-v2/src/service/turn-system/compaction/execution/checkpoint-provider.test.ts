@@ -459,6 +459,41 @@ describe('checkpoint Provider overflow normalization', () => {
     ).rejects.toMatchObject({ name: 'CheckpointCandidateTooLargeError', reason: 'input_overflow' });
   });
 
+  // Gateway rewrites that Pi's overflow patterns miss: the summary request must
+  // still move to a smaller candidate instead of resending the same one.
+  it.each([
+    '{"type":"error","error":{"type":"api_error","message":"Input is too long."}}',
+    '{"type":"error","error":{"type":"api_error","message":"413 Request too large (request id: 99e6cc4a)"}}',
+  ])('maps a gateway size rejection result to an oversized candidate: %s', async (errorMessage) => {
+    const session = await createCheckpointSession({
+      model: model(),
+      streamFn: vi.fn(() => completedStream(assistant({ stopReason: 'error', errorMessage }))),
+      thinkingLevel: 'off',
+      maxOutputTokens: 20,
+      providerInputLimit: 128_000,
+    });
+
+    await expect(session.generate({ messages: [user('context', 1)] })).rejects.toBeInstanceOf(
+      CheckpointCandidateTooLargeError,
+    );
+  });
+
+  it('maps a thrown gateway size rejection to an oversized candidate', async () => {
+    const session = await createCheckpointSession({
+      model: model(),
+      streamFn: vi.fn(() => {
+        throw new Error('Input is too long.');
+      }),
+      thinkingLevel: 'off',
+      maxOutputTokens: 20,
+      providerInputLimit: 128_000,
+    });
+
+    await expect(session.generate({ messages: [user('context', 1)] })).rejects.toBeInstanceOf(
+      CheckpointCandidateTooLargeError,
+    );
+  });
+
   it('maps explicit thrown overflow codes and preserves auth, cancel, and ordinary errors', async () => {
     const overflows = [
       Object.assign(new Error('request rejected'), { code: 'context_length_exceeded' }),

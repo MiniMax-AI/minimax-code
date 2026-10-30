@@ -239,7 +239,9 @@
       "packages/agent-modules/context-manager/test/output-limit.test.ts",
       "packages/browser-core/test/browser-run-script.test.ts",
       "packages/browser-core/test/browser-selector-diagnostics.test.ts",
-      "packages/agent-tools/test/desktop/local-browser-run-script.test.ts"
+      "packages/agent-tools/test/desktop/local-browser-run-script.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/compaction/execution/checkpoint-shared-prefix.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/compaction/checkpoint-request-shape.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

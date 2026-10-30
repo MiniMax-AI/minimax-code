@@ -17,6 +17,7 @@ import type {
   CompletedContextCompaction,
   CompactionTokenUsage,
   CheckpointGenerationMetadata,
+  CheckpointRequestShape,
   CheckpointResponseContentKind,
   CheckpointStopReason,
   AutomaticContextCompactionInput,
@@ -32,6 +33,7 @@ import {
   validateCanonicalHistoryMessages,
 } from '../history/canonical-history-validation.js';
 import { captureSemanticSnapshot } from '../history/semantic-identity.js';
+import { recordSharedPrefixFallbackBestEffort } from './checkpoint-request-shape.js';
 import {
   compactionTokenUsageMetadata,
   createCompactionTokenUsageAccumulator,
@@ -82,6 +84,8 @@ export function createAutomaticContextCompactionHook(
   leaseId: string,
   options: {
     readonly maxSerializedInputBytes?: number;
+    /** Host-selected checkpoint request shape for this Turn; absent means `isolated`. */
+    readonly checkpointRequestShape?: CheckpointRequestShape;
     readonly attempts?: ContextCompactionAttemptFactory;
     readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'> | undefined;
     /** Runs only after the automatic trigger matches, immediately before compaction starts. */
@@ -103,6 +107,7 @@ export function createAutomaticContextCompactionHook(
       const automaticInput = automaticContextCompactionInput(
         input,
         options.maxSerializedInputBytes,
+        options.checkpointRequestShape,
       );
       const probe = dependencies.automatic.probeBeforeLlm?.(automaticInput);
       if (probe?.shouldStart === false) {
@@ -153,6 +158,14 @@ export function createAutomaticContextCompactionHook(
                 phase: input.phase,
                 thinkingLevel: input.thinkingLevel,
                 checkpoint: metadata,
+              }),
+            onCheckpointSharedPrefixFallback: (reason) =>
+              recordSharedPrefixFallbackBestEffort(options.logger, dependencies.metricsClient, {
+                context: trustedContext,
+                attemptId,
+                phase: input.phase,
+                api: input.model.api,
+                reason,
               }),
             onProviderRequestSettled: providerTokenUsage.observe,
             getProviderTokenUsage: providerTokenUsage.snapshot,
@@ -221,6 +234,7 @@ export function createAutomaticContextCompactionHook(
 function automaticContextCompactionInput(
   input: PiBeforeLlmCallHookInput,
   maxSerializedInputBytes: number | undefined,
+  checkpointRequestShape: CheckpointRequestShape | undefined,
 ): AutomaticContextCompactionInput {
   return {
     sessionId: input.sessionId,
@@ -229,6 +243,7 @@ function automaticContextCompactionInput(
     messages: input.messages,
     model: input.model,
     ...(maxSerializedInputBytes === undefined ? {} : { maxSerializedInputBytes }),
+    ...(checkpointRequestShape === 'shared_prefix' ? { checkpointRequestShape } : {}),
     streamFn: input.streamFn,
     apiKey: input.apiKey,
     headers: input.headers,
@@ -296,6 +311,9 @@ function captureCheckpointGenerationMetadata(
     responseContentKinds: Object.freeze(responseContentKinds),
     stopReason: value.stopReason,
     outputTokens: value.outputTokens,
+    ...(value.requestShape === 'shared_prefix' || value.requestShape === 'isolated'
+      ? { requestShape: value.requestShape }
+      : {}),
   });
 }
 
@@ -325,6 +343,7 @@ export function logCheckpointGeneratedBestEffort(
         response_content_kinds: [...checkpoint.responseContentKinds],
         stop_reason: checkpoint.stopReason,
         output_tokens: checkpoint.outputTokens,
+        ...(checkpoint.requestShape ? { request_shape: checkpoint.requestShape } : {}),
       },
       '[local-runtime-v2] context compaction checkpoint generated',
     );
@@ -886,95 +905,6 @@ export function readPostCompactionContextUsage(
   };
 }
 
-type CompactionCommitMetadata =
-  | {
-      readonly compactionId: string;
-      readonly method: 'tool_archive' | 'tool_trim';
-      readonly summary: string;
-      readonly replacementSourceIndexes: readonly number[];
-      readonly currentUserSourceIndex?: number;
-    }
-  | {
-      readonly compactionId: string;
-      readonly method: 'llm_checkpoint';
-      readonly summary: string;
-      readonly currentUserSourceIndex?: number;
-    };
-
-export function readCompactionCommitMetadata(value: unknown): CompactionCommitMetadata | undefined {
-  const lifecycle = readCompactionLifecycleMetadata(value);
-  if (!lifecycle || !isRecord(value)) return undefined;
-  const summary = Reflect.get(value, 'summary');
-  if (typeof summary !== 'string') return undefined;
-  const currentUserSourceIndex = readOptionalCurrentUserSourceIndex(value, lifecycle);
-  if (currentUserSourceIndex === null) return undefined;
-  return lifecycle.method === 'llm_checkpoint'
-    ? readCheckpointCommitMetadata(lifecycle, summary, currentUserSourceIndex)
-    : readToolResultCommitMetadata(value, lifecycle, summary, currentUserSourceIndex);
-}
-
-function readCheckpointCommitMetadata(
-  lifecycle: ContextCompactionLifecycleMetadata,
-  summary: string,
-  currentUserSourceIndex: number | undefined,
-): CompactionCommitMetadata | undefined {
-  if (currentUserSourceIndex !== undefined && lifecycle.messagesAfter !== 3) return undefined;
-  return Object.freeze({
-    compactionId: lifecycle.compactionId,
-    method: 'llm_checkpoint',
-    summary,
-    ...(currentUserSourceIndex === undefined ? {} : { currentUserSourceIndex }),
-  });
-}
-
-function readToolResultCommitMetadata(
-  value: Readonly<Record<PropertyKey, unknown>>,
-  lifecycle: ContextCompactionLifecycleMetadata,
-  summary: string,
-  currentUserSourceIndex: number | undefined,
-): CompactionCommitMetadata | undefined {
-  if (lifecycle.method === 'llm_checkpoint') return undefined;
-  const replacementSourceIndexes = Reflect.get(value, 'replacementSourceIndexes');
-  const expectedSourceCount =
-    currentUserSourceIndex === undefined ? lifecycle.messagesAfter : lifecycle.messagesAfter - 2;
-  if (
-    !Array.isArray(replacementSourceIndexes) ||
-    expectedSourceCount < 0 ||
-    replacementSourceIndexes.length !== expectedSourceCount ||
-    !replacementSourceIndexes.every(
-      (index, position) =>
-        Number.isSafeInteger(index) &&
-        index >= 0 &&
-        index < lifecycle.messagesBefore &&
-        index !== currentUserSourceIndex &&
-        (position === 0 || index > replacementSourceIndexes[position - 1]),
-    )
-  ) {
-    return undefined;
-  }
-  return Object.freeze({
-    compactionId: lifecycle.compactionId,
-    method: lifecycle.method,
-    summary,
-    replacementSourceIndexes: Object.freeze([...replacementSourceIndexes]) as readonly number[],
-    ...(currentUserSourceIndex === undefined ? {} : { currentUserSourceIndex }),
-  });
-}
-
-function readOptionalCurrentUserSourceIndex(
-  value: Readonly<Record<PropertyKey, unknown>>,
-  lifecycle: { readonly messagesBefore: number },
-): number | undefined | null {
-  if (!Object.hasOwn(value, 'currentUserSourceIndex')) return undefined;
-  const index = Reflect.get(value, 'currentUserSourceIndex');
-  return typeof index === 'number' &&
-    Number.isSafeInteger(index) &&
-    index >= 0 &&
-    index < lifecycle.messagesBefore
-    ? index
-    : null;
-}
-
 export function readCompactionAttemptId(value: unknown): string | undefined {
   return isRecord(value) ? readNonEmpty(value, 'compactionAttemptId') : undefined;
 }
@@ -1118,6 +1048,6 @@ function isCompactionPhase(value: unknown): value is ContextCompactionPhase {
   return value === 'initial' || value === 'iteration' || value === 'manual';
 }
 
-function isRecord(value: unknown): value is Readonly<Record<PropertyKey, unknown>> {
+export function isRecord(value: unknown): value is Readonly<Record<PropertyKey, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

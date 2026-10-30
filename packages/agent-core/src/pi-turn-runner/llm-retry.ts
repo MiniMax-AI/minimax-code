@@ -573,11 +573,20 @@ function failureResult(input: {
   nowMs: () => number;
   retryAllErrors?: boolean;
 }): PreflightResult {
+  // A 2xx response status only says the stream opened; a gateway that reports
+  // the rejection inside the stream (an SSE `error` event after HTTP 200) has
+  // no HTTP status for it. Classify such a failure by its own payload, so a
+  // wrapped size rejection is not vetoed as "status 200" and resent.
+  const responseStatus = input.response?.status;
+  const failureStatus =
+    responseStatus !== undefined && (responseStatus < 200 || responseStatus >= 300)
+      ? responseStatus
+      : undefined;
   const normalized = normalizeLLMError({
     ...(input.thrown !== undefined ? { raw: input.thrown } : {}),
     ...(input.final?.stopReason ? { finishReason: input.final.stopReason } : {}),
     ...(input.final?.errorMessage ? { errorMessage: input.final.errorMessage } : {}),
-    ...(input.response ? { statusCode: input.response.status } : {}),
+    ...(failureStatus !== undefined ? { statusCode: failureStatus } : {}),
     explicitAbort: input.final?.stopReason === 'aborted',
   });
   // BYOK retries every pre-output failure because custom gateways report errors
