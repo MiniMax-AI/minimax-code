@@ -55,7 +55,7 @@ describe('isPtcChildCall', () => {
 });
 
 describe('mavis child calls', () => {
-  // MCT-202610-WU32LQU4: 100 messages over 16,000 tokens; the cut data kept only { ok, command }.
+  // A reported Session: 100 messages over 16,000 tokens; the cut data kept only { ok, command }.
   // Message text is returned in full, so these stay over the cap after the session messages projection.
   const messages = Array.from({ length: 100 }, (_, index) => ({
     msg_id: `msg-${index}`,

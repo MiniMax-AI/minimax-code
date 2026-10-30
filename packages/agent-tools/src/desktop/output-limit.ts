@@ -18,7 +18,7 @@ export const DESKTOP_BASH_PREVIEW_BYTES = DESKTOP_BASH_MAX_BYTES - 2048;
  * model, and that is cut at 64 KiB (local-runtime-v2 runner/ptc
  * run-code-tool.ts). So child calls skip these caps and the program gets the
  * whole result; with a cut copy it had to page the same data in many small
- * calls (MCT-202610-WU32LQU4: 92 reads of one session). The size of a child
+ * calls (one reported Session needed 92 reads of the same file). The size of a child
  * result is bounded by the PTC bridge instead (16 MiB per result,
  * local-runtime-v2 execution/ptc/contracts.ts). Without `parentToolCallId`
  * every tool keeps its caps, text and details unchanged.
