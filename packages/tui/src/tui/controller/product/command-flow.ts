@@ -78,6 +78,14 @@ export interface TuiCommandFlowOptions {
   readonly goalFlow?: Pick<TuiGoalFlow, 'execute' | 'resumeBlocked'>;
   readonly planModeFlow?: TuiPlanModeFlow;
   readonly permissionModeFlow?: TuiPermissionModeFlow;
+  /**
+   * Global next-message suggestion switch; absent, or resolving undefined, when
+   * the Runtime cannot read or persist it.
+   */
+  readonly promptSuggestionSetting?: {
+    read(): Promise<boolean | undefined>;
+    write(enabled: boolean): Promise<boolean | undefined>;
+  };
   readonly auth?: McodeAuthPort;
   readonly openExternalTarget?: TuiExternalTargetOpener;
   readonly interactionFlow: TuiInteractionFlow;
@@ -1266,6 +1274,45 @@ export class TuiCommandFlow {
           return 'retained';
         }
         await this.options.permissionModeFlow.set(mode);
+      },
+      suggestions: async ({ args }) => {
+        const setting = this.options.promptSuggestionSetting;
+        const reportUnavailable = () =>
+          this.options.append('Next-message suggestions are unavailable in this host.', 'warning');
+        if (!setting) {
+          reportUnavailable();
+          return;
+        }
+        const action = args.trim().toLocaleLowerCase();
+        if (action && action !== 'on' && action !== 'off') {
+          this.options.append('Usage: /suggestions [on | off]', 'warning');
+          return 'retained';
+        }
+        let enabled: boolean | undefined;
+        try {
+          enabled = action ? await setting.write(action === 'on') : await setting.read();
+        } catch (error) {
+          this.options.append(
+            formatTuiActionFailure(error, {
+              summary: action
+                ? "Couldn't save the next-message suggestion setting."
+                : "Couldn't read the next-message suggestion setting.",
+              nextStep: 'Check config.yaml syntax and permissions, then retry.',
+            }),
+            'error',
+          );
+          return 'retained';
+        }
+        if (enabled === undefined) {
+          reportUnavailable();
+          return;
+        }
+        this.options.setHint(
+          enabled
+            ? 'Next-message suggestions on · shown after each turn · /suggestions off to stop'
+            : 'Next-message suggestions off · /suggestions on to resume',
+        );
+        this.options.onChanged();
       },
       login: () => {
         this.pendingLoginContinuation = undefined;

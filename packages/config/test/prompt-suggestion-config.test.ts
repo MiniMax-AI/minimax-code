@@ -23,7 +23,15 @@ describe('prompt suggestion opt-in', () => {
   it('keeps rollout policy out of the local config', () => {
     expect(
       resolveConfigFromRaw({ promptSuggestion: { enabled: true, killSwitch: true, sampleRate: 0 } }, '/tmp/suggestion-config').promptSuggestion,
-    ).toEqual({ enabled: true });
+    ).toEqual({ enabled: true, enabledSource: 'explicit' });
+  });
+  it.each([
+    [undefined, 'default'],
+    [{ enabled: 'true' }, 'default'],
+    [{ enabled: false }, 'explicit'],
+    [{ enabled: true }, 'explicit'],
+  ] as const)('records whether %j was an explicit choice', (value, source) => {
+    expect(resolveConfigFromRaw({ promptSuggestion: value }, '/tmp/suggestion-config').promptSuggestion.enabledSource).toBe(source);
   });
 });
 

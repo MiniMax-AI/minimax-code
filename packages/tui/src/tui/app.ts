@@ -41,6 +41,7 @@ import { resolveTuiEffortChoice } from './features/model/effort.js';
 import { TuiSessionFlow } from './controller/session-flow.js';
 import { TuiCommandFlow } from './controller/product/command-flow.js';
 import { TuiInputFlow } from './controller/interaction/input-flow.js';
+import { TuiPromptSuggestionStore } from './features/composer/prompt-suggestion.js';
 import { TuiPermissionModeFlow } from './controller/interaction/permission-mode-flow.js';
 import { TuiPlanModeFlow } from './controller/interaction/plan-mode-flow.js';
 import { createTuiAbortLiveTurn } from './controller/run/abort-live-turn.js';
@@ -324,6 +325,12 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     stateStore,
     transcript,
   });
+  const promptSuggestions = new TuiPromptSuggestionStore((metric) =>
+    businessEventTracker?.trackPromptSuggestion(metric),
+  );
+  let pendingSuggestionSend:
+    | { readonly submissionToken: string; readonly reportSent: () => void }
+    | undefined;
   editor.onAutocompleteView = (suggestions) =>
     businessEventTracker?.trackAutocompleteView(suggestions);
   editor.onAutocompleteSelect = (suggestions, item) =>
@@ -642,6 +649,19 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     goalFlow,
     planModeFlow,
     permissionModeFlow,
+    ...(options.runtime.getPromptSuggestionEnabled && options.runtime.setPromptSuggestionEnabled
+      ? {
+          promptSuggestionSetting: {
+            read: () => options.runtime.getPromptSuggestionEnabled!(),
+            write: async (enabled: boolean) => {
+              const effective = await options.runtime.setPromptSuggestionEnabled!(enabled);
+              // Generation already stops in the Runtime; hide what is on screen too.
+              if (effective === false) promptSuggestions.clear();
+              return effective;
+            },
+          },
+        }
+      : {}),
     ...(options.auth ? { auth: options.auth } : {}),
     openExternalTarget: options.openExternalTarget,
     interactionFlow,
@@ -722,6 +742,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onRetryAvailabilityChanged: (sessionId, retryable) =>
       commandFlow.setSessionRetryable(sessionId, retryable),
     goalFlow,
+    promptSuggestions,
     updateFollowUpPanel: () => queueFlow.updatePanel(),
     onChanged: updateChromeAndRequestRender,
     append: appendLocalCell,
@@ -809,10 +830,35 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       updateChrome(controller.snapshot());
       tui.requestRender();
     },
-    onSubmissionStarted: (input, seed) => draftLifecycle?.suspendForSubmission(input, seed),
+    onSubmissionStarted: (input, seed) => {
+      const reportSent = promptSuggestions.submitted(
+        controller.snapshot().session?.sessionId,
+        input ?? '',
+      );
+      const submissionToken = draftLifecycle?.suspendForSubmission(input, seed);
+      // Only the latest send reports. A failed send never does, and the store keeps
+      // the acceptance, so the restored draft still counts when it is resent.
+      pendingSuggestionSend =
+        reportSent && submissionToken ? { submissionToken, reportSent } : undefined;
+      return submissionToken;
+    },
+    acceptPromptSuggestion: () => {
+      const text = composer.visiblePromptSuggestion();
+      const suggestion = promptSuggestions.candidate(controller.snapshot().session?.sessionId);
+      if (!text || !suggestion || suggestion.text !== text) return false;
+      editor.setText(text);
+      promptSuggestions.accept(suggestion);
+      return true;
+    },
     onSubmissionPrepared: (submissionToken, submission) =>
       draftLifecycle?.updatePendingSubmission(submissionToken, submission),
-    onSubmissionAdmitted: (submissionToken) => draftLifecycle?.settleSubmission(submissionToken),
+    onSubmissionAdmitted: (submissionToken) => {
+      if (submissionToken && pendingSuggestionSend?.submissionToken === submissionToken) {
+        pendingSuggestionSend.reportSent();
+        pendingSuggestionSend = undefined;
+      }
+      draftLifecycle?.settleSubmission(submissionToken);
+    },
     onSubmissionSettled: (submissionToken) => draftLifecycle?.settleSubmission(submissionToken),
     requestInteractionRender,
   });
@@ -854,6 +900,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     sideConversation: () => sessionFlow.sideConversationSnapshot(),
     sessionState: () => stateStore.snapshot(),
     turnStartedAtMs: (turnId) => controller.turnStartedAtMs(turnId),
+    promptSuggestion: promptSuggestions,
     welcome,
     status,
     activity,

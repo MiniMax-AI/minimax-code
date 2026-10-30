@@ -374,6 +374,16 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
     category: 'Application',
   },
   {
+    name: 'suggestions',
+    description: 'Turn next-message suggestions on or off',
+    category: 'Application',
+    argumentHint: '[on | off]',
+    getArgumentCompletions: argumentCompleter([
+      ['on', 'Suggest a next message after each turn'],
+      ['off', 'Stop suggesting next messages'],
+    ]),
+  },
+  {
     name: 'statusline',
     description: 'Choose, reorder, and preview status line items',
     category: 'Application',

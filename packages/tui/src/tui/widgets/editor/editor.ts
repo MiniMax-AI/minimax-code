@@ -474,6 +474,11 @@ export class Editor implements Component, Focusable {
     return this.engine.render(width, placeholder);
   }
 
+  /** Horizontal padding inside each rendered editor line. */
+  getPaddingX(): number {
+    return this.engine.getPaddingX();
+  }
+
   handleInput(data: string): void {
     this.freshAttachmentPreview = undefined;
     this.dismissedAttachmentPreview = undefined;

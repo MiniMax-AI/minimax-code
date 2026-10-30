@@ -54,6 +54,21 @@ interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOption
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
   /** Optional live remote rollout policy for the next-message suggestion. */
   readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
+  /**
+   * Whether this host renders the next-message suggestion in an interactive
+   * composer. Command-line owners (`cli`, `tui`) default to `false`: headless
+   * exec, ACP and provider commands share the `tui` owner but have no
+   * composer, so a suggestion would cost a request nobody can see. The
+   * interactive TUI opts in explicitly. Other owners keep the default `true`.
+   */
+  readonly promptSuggestionSurface?: boolean;
+  /**
+   * Lifts the beta billing gates (confirmed subscription, platform-billed
+   * models only) so every model may produce a suggestion, billed to whichever
+   * account or key runs the Turn. The user's `promptSuggestion.enabled` switch
+   * still applies. Internal builds are always ungated.
+   */
+  readonly promptSuggestionUngated?: boolean;
   getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */
@@ -74,6 +89,21 @@ interface CreateLocalRuntimeHostOptions extends V1CreateLocalRuntimeHostOptions 
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
   /** Optional live remote rollout policy for the next-message suggestion. */
   readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
+  /**
+   * Whether this host renders the next-message suggestion in an interactive
+   * composer. Command-line owners (`cli`, `tui`) default to `false`: headless
+   * exec, ACP and provider commands share the `tui` owner but have no
+   * composer, so a suggestion would cost a request nobody can see. The
+   * interactive TUI opts in explicitly. Other owners keep the default `true`.
+   */
+  readonly promptSuggestionSurface?: boolean;
+  /**
+   * Lifts the beta billing gates (confirmed subscription, platform-billed
+   * models only) so every model may produce a suggestion, billed to whichever
+   * account or key runs the Turn. The user's `promptSuggestion.enabled` switch
+   * still applies. Internal builds are always ungated.
+   */
+  readonly promptSuggestionUngated?: boolean;
   getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */

@@ -448,6 +448,14 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode> {
     return this.productAccess.setPermissionMode(mode);
   }
+
+  getPromptSuggestionEnabled(): Promise<boolean | undefined> {
+    return this.productAccess.getPromptSuggestionEnabled();
+  }
+
+  setPromptSuggestionEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.productAccess.setPromptSuggestionEnabled(enabled);
+  }
   listModels(sessionId?: string): Promise<TuiModel[]> {
     return this.productAccess.listModels(sessionId);
   }

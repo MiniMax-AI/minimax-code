@@ -292,6 +292,25 @@ describe("TuiRuntimeAdapter product access", () => {
     });
   });
 
+  it("reports the next-message suggestion switch, or that the Runtime has none", async () => {
+    const setPromptSuggestionEnabled = vi.fn(async (enabled: boolean) => enabled);
+    const supported = new TuiRuntimeAdapter({
+      getPromptSuggestionEnabled: vi.fn(async () => true),
+      setPromptSuggestionEnabled,
+    } as never);
+    await expect(supported.getPromptSuggestionEnabled()).resolves.toBe(true);
+    await expect(supported.setPromptSuggestionEnabled(false)).resolves.toBe(false);
+    expect(setPromptSuggestionEnabled).toHaveBeenCalledWith(false);
+
+    // CliService answers undefined when its host cannot read or persist the switch.
+    const unsupported = new TuiRuntimeAdapter({
+      getPromptSuggestionEnabled: vi.fn(() => undefined),
+      setPromptSuggestionEnabled: vi.fn(() => undefined),
+    } as never);
+    await expect(unsupported.getPromptSuggestionEnabled()).resolves.toBeUndefined();
+    await expect(unsupported.setPromptSuggestionEnabled(true)).resolves.toBeUndefined();
+  });
+
   it("routes peripheral product capabilities through CliService", async () => {
     const adapter = new TuiRuntimeAdapter(cliServiceFixture());
 

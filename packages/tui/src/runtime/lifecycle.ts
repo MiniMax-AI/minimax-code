@@ -464,6 +464,12 @@ export async function createTuiRuntime(
     (dependencies.getDataEnvironment ?? resolveMcodeDataEnvironment)() === 'test'
       ? { startupExecutionPolicy: 'quarantined' }
       : {}),
+    // Only the interactive composer can show a next-message suggestion; headless
+    // exec, ACP and inspection runs would pay for an unseen request.
+    promptSuggestionSurface: options.surface === 'tui',
+    // The TUI offers suggestions on every model, BYOK and OAuth included; the
+    // user turns the feature off globally with `promptSuggestion.enabled: false`.
+    promptSuggestionUngated: options.surface === 'tui',
   };
   const startupStartedAt = performance.now();
   if (ownsObservability) {

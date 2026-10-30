@@ -790,6 +790,13 @@ export interface SessionTitleConfig {
  */
 export interface PromptSuggestionConfig {
   enabled: boolean;
+  /**
+   * Set at parse time, never read from the file: whether `enabled` came from
+   * config.yaml or from the product default. Lets a surface such as the TUI
+   * pick its own default without overriding a user's explicit choice. See
+   * `DataContributionConfig.enabledSource`.
+   */
+  enabledSource?: 'default' | 'explicit';
 }
 
 // ── CLI Feature Flags ─────────────────────────────────────────────
@@ -2494,7 +2501,9 @@ function parsePromptSuggestionConfig(raw: Record<string, unknown>): PromptSugges
   // Internal builds dogfood the feature, so an unset value means on there; an
   // explicit `false` still wins. Resolved at parse time, like `promptConfig`.
   const defaultEnabled = DEFAULTS.promptSuggestion.enabled || isInternalBuild();
-  return { enabled: typeof enabled === 'boolean' ? enabled : defaultEnabled };
+  return typeof enabled === 'boolean'
+    ? { enabled, enabledSource: 'explicit' }
+    : { enabled: defaultEnabled, enabledSource: 'default' };
 }
 
 // ── CLI config parsing ──────────────────────────────────────────

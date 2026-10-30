@@ -324,6 +324,10 @@ export interface CreateRuntimeServicesOptions
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
   /** Live remote rollout policy for the next-message suggestion. */
   readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
+  /** See `CreateLocalRuntimeHostOptions.promptSuggestionSurface`. */
+  readonly promptSuggestionSurface?: boolean;
+  /** See `CreateLocalRuntimeHostOptions.promptSuggestionUngated`. */
+  readonly promptSuggestionUngated?: boolean;
   /** Live ToolResult compaction thresholds injected by the owning product. */
   readonly getToolResultCompactionConfig?: () =>
     | ToolResultCompactionConfig

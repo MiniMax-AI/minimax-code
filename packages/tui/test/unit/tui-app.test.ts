@@ -15942,3 +15942,244 @@ describe("regular-mode native history during a live run", () => {
     }
   });
 });
+
+describe('TUI next-message suggestion', () => {
+  function startWithEventFeed(
+    options: {
+      readonly businessTelemetry?: McodeBusinessTelemetry;
+      readonly configure?: (runtime: TuiRuntime) => void;
+    } = {},
+  ) {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    options.configure?.(runtime);
+    const pending: TuiRuntimeEvent[] = [];
+    let wake: (() => void) | undefined;
+    const emit = (raw: RawTuiRuntimeEvent) => {
+      pending.push(runtimeEvent(raw));
+      wake?.();
+    };
+    vi.mocked(runtime.listSessions).mockResolvedValue([
+      { sessionId: 'session-1', title: 'Fix the bug', workspaceDir: '/workspace' },
+    ]);
+    vi.mocked(runtime.watchEvents).mockImplementation(async function* watchEvents(signal) {
+      while (!signal.aborted) {
+        const next = pending.shift();
+        if (next) {
+          yield next;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      }
+    });
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      terminalCapabilities: TERMINAL_CAPABILITIES,
+      version: '0.1.0',
+      workspaceDir: '/workspace',
+      ...(options.businessTelemetry ? { businessTelemetry: options.businessTelemetry } : {}),
+    });
+    return { app, terminal, emit };
+  }
+
+  function recordSuggestionMetrics() {
+    const events: McodeBusinessEvent[] = [];
+    const businessTelemetry: McodeBusinessTelemetry = {
+      track: (event, properties) => events.push({ event, properties } as McodeBusinessEvent),
+      flush: async () => undefined,
+    };
+    const actions = () =>
+      events
+        .filter((item) => item.event === 'prompt_suggestion')
+        .map((item) => {
+          const properties = item.properties as { action: string; edited?: boolean };
+          return properties.edited === undefined
+            ? properties.action
+            : `${properties.action}:${properties.edited ? 'edited' : 'as-is'}`;
+        });
+    return { businessTelemetry, actions };
+  }
+
+  const generated = (turnId: string, suggestion: string): RawTuiRuntimeEvent => ({
+    type: 'turn.prompt_suggestion.generated',
+    timestamp: Date.now(),
+    source: 'runtime',
+    payload: { sessionId: 'session-1', turnId, suggestion, promptVersion: 'task-next-action-v2' },
+  });
+
+  it('shows the suggestion in the empty composer after a turn and fills it on Tab', async () => {
+    const { app, terminal, emit } = startWithEventFeed();
+    app.start();
+    await app.ready;
+    await app.submit('Fix the failing parser');
+
+    emit(generated('turn-1', 'Run the parser tests and fix any failures'));
+
+    await vi.waitFor(() =>
+      expect(renderTerminalViewport(app, terminal)).toContain(
+        'Run the parser tests and fix any failures',
+      ),
+    );
+    expect(renderTerminalViewport(app, terminal)).toContain('Tab accept');
+    expect(app.editor.getText()).toBe('');
+
+    terminal.input?.('\t');
+
+    await vi.waitFor(() =>
+      expect(app.editor.getText()).toBe('Run the parser tests and fix any failures'),
+    );
+    expect(renderTerminalViewport(app, terminal)).not.toContain('Tab accept');
+    await app.stop();
+  });
+
+  it('drops a suggestion once a newer turn starts in the session', async () => {
+    const { app, terminal, emit } = startWithEventFeed();
+    app.start();
+    await app.ready;
+    await app.submit('Fix the failing parser');
+    emit(generated('turn-1', 'Run the parser tests and fix any failures'));
+    await vi.waitFor(() => expect(renderTerminalViewport(app, terminal)).toContain('Tab accept'));
+
+    emit({
+      type: 'session.start',
+      timestamp: Date.now(),
+      source: 'runtime',
+      payload: { sessionId: 'session-1', turnId: 'turn-2' },
+    });
+    emit({
+      type: 'session.finish',
+      timestamp: Date.now(),
+      source: 'runtime',
+      payload: { sessionId: 'session-1', turnId: 'turn-2' },
+    });
+    // A late result for the superseded turn must not come back either; the
+    // following turn-2 result proves the late one was already processed.
+    emit(generated('turn-1', 'Run the parser tests and fix any failures'));
+    emit(generated('turn-2', 'Commit the parser fix'));
+
+    await vi.waitFor(() =>
+      expect(renderTerminalViewport(app, terminal)).toContain('Commit the parser fix'),
+    );
+    expect(renderTerminalViewport(app, terminal)).not.toContain(
+      'Run the parser tests and fix any failures',
+    );
+    terminal.input?.('\t');
+    await vi.waitFor(() => expect(app.editor.getText()).toBe('Commit the parser fix'));
+    await app.stop();
+  });
+
+  it('counts an accepted suggestion as sent only after the Runtime admits it', async () => {
+    const metrics = recordSuggestionMetrics();
+    let rejectNextSend = false;
+    const { app, terminal, emit } = startWithEventFeed({
+      businessTelemetry: metrics.businessTelemetry,
+      configure: (runtime) => {
+        const send = vi.mocked(runtime.sendMessage).getMockImplementation()!;
+        vi.mocked(runtime.sendMessage).mockImplementation((request, signal, options) => {
+          if (rejectNextSend) {
+            rejectNextSend = false;
+            throw new Error('runtime unavailable');
+          }
+          return send(request, signal, options);
+        });
+      },
+    });
+    app.start();
+    await app.ready;
+    await app.submit('Fix the failing parser');
+
+    emit(generated('turn-1', 'Run the parser tests'));
+    await vi.waitFor(() => expect(renderTerminalViewport(app, terminal)).toContain('Tab accept'));
+    terminal.input?.('\t');
+    await vi.waitFor(() => expect(app.editor.getText()).toBe('Run the parser tests'));
+    rejectNextSend = true;
+    terminal.input?.('\r');
+    await vi.waitFor(() => expect(app.editor.getText()).toBe('Run the parser tests'));
+    expect(metrics.actions()).toEqual(['shown', 'accepted']);
+
+    emit(generated('turn-2', 'Commit the parser fix'));
+    app.editor.setText('');
+    await vi.waitFor(() =>
+      expect(renderTerminalViewport(app, terminal)).toContain('Commit the parser fix'),
+    );
+    terminal.input?.('\t');
+    await vi.waitFor(() => expect(app.editor.getText()).toBe('Commit the parser fix'));
+    terminal.input?.('\r');
+
+    await vi.waitFor(() =>
+      expect(metrics.actions()).toEqual(['shown', 'accepted', 'shown', 'accepted', 'sent:as-is']),
+    );
+    await app.stop();
+  });
+
+  it('turns suggestions off globally with /suggestions and hides the visible one', async () => {
+    let enabled = true;
+    const setPromptSuggestionEnabled = vi.fn(async (next: boolean) => {
+      enabled = next;
+      return enabled;
+    });
+    const { app, terminal, emit } = startWithEventFeed({
+      configure: (runtime) => {
+        runtime.getPromptSuggestionEnabled = vi.fn(async () => enabled);
+        runtime.setPromptSuggestionEnabled = setPromptSuggestionEnabled;
+      },
+    });
+    app.start();
+    await app.ready;
+    await app.submit('Fix the failing parser');
+    emit(generated('turn-1', 'Run the parser tests'));
+    await vi.waitFor(() => expect(renderTerminalViewport(app, terminal)).toContain('Tab accept'));
+
+    await app.submit('/suggestions');
+    expect(renderTerminalViewport(app, terminal)).toContain('Next-message suggestions on');
+
+    await app.submit('/suggestions off');
+
+    expect(setPromptSuggestionEnabled).toHaveBeenCalledWith(false);
+    const screen = renderTerminalViewport(app, terminal);
+    expect(screen).toContain('Next-message suggestions off');
+    expect(screen).not.toContain('Run the parser tests');
+
+    await app.submit('/suggestions maybe');
+    expect(setPromptSuggestionEnabled).toHaveBeenCalledTimes(1);
+    expect(renderTerminalViewport(app, terminal)).toContain('Usage: /suggestions [on | off]');
+
+    await app.submit('/suggestions on');
+    expect(setPromptSuggestionEnabled).toHaveBeenLastCalledWith(true);
+    expect(renderTerminalViewport(app, terminal)).toContain('Next-message suggestions on');
+
+    setPromptSuggestionEnabled.mockRejectedValueOnce(new Error('config.yaml is locked'));
+    await app.submit('/suggestions off');
+    expect(renderTerminalViewport(app, terminal)).toContain(
+      "Couldn't save the next-message suggestion setting",
+    );
+    expect(enabled).toBe(true);
+    await app.stop();
+  });
+
+  it('says /suggestions is unavailable when the Runtime cannot read or persist the switch', async () => {
+    const setPromptSuggestionEnabled = vi.fn(async () => undefined);
+    const { app, terminal } = startWithEventFeed({
+      configure: (runtime) => {
+        runtime.getPromptSuggestionEnabled = vi.fn(async () => undefined);
+        runtime.setPromptSuggestionEnabled = setPromptSuggestionEnabled;
+      },
+    });
+    app.start();
+    await app.ready;
+
+    await app.submit('/suggestions');
+    expect(renderTerminalViewport(app, terminal)).toContain(
+      'Next-message suggestions are unavailable in this host.',
+    );
+    await app.submit('/suggestions off');
+    expect(setPromptSuggestionEnabled).toHaveBeenCalledWith(false);
+    const screen = renderTerminalViewport(app, terminal);
+    expect(screen).not.toContain('Next-message suggestions off');
+    await app.stop();
+  });
+});

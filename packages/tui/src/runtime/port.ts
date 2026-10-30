@@ -270,6 +270,13 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   ): Promise<TuiAccountStatus>;
   getPermissionMode(): Promise<TuiPermissionMode | undefined>;
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode>;
+  /** Effective next-message suggestion switch; undefined when the Runtime has none. */
+  getPromptSuggestionEnabled?(): Promise<boolean | undefined>;
+  /**
+   * Persists `promptSuggestion.enabled`; resolves the effective value, or
+   * undefined when the Runtime cannot persist it.
+   */
+  setPromptSuggestionEnabled?(enabled: boolean): Promise<boolean | undefined>;
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;

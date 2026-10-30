@@ -853,6 +853,17 @@ function createPeripheralApplication(
         readLocalPermissionMode(host.apiHost.configGetter().permissionMode),
       setPermissionMode: ({ mode }) =>
         host.apiHost.setProcessLocalPermissionMode(mode),
+      getPromptSuggestionEnabled: async () =>
+        host.apiHost.configGetter().promptSuggestion?.enabled === true,
+      setPromptSuggestionEnabled: async ({ enabled }) => {
+        // The same validated, lock-protected writer as the Desktop setting; an
+        // explicit value then wins over every surface's default.
+        await host.apiHost.updateConfig({
+          field: "promptSuggestion.enabled",
+          set: enabled,
+        });
+        return host.apiHost.configGetter().promptSuggestion?.enabled === true;
+      },
     },
     backgroundTasks: {
       list: async ({

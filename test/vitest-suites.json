@@ -256,7 +256,8 @@
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/prompt-suggestion-eligibility.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/prompt-suggestion-policy.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/prompt-suggestion-service.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/recent-context.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/recent-context.test.ts",
+      "packages/tui/test/unit/tui/features/composer/prompt-suggestion.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

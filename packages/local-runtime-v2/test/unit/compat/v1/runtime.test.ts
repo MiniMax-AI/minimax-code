@@ -245,6 +245,34 @@ describe("v1 runtime compatibility", () => {
   });
 });
 
+describe("v1 prompt suggestion setting compatibility", () => {
+  beforeEach(resetRuntimeCompatibilityMocks);
+
+  it("persists the next-message suggestion switch through the validated config writer", async () => {
+    let config: { promptSuggestion?: { enabled: boolean } } = {
+      promptSuggestion: { enabled: true },
+    };
+    const updateConfig = vi.fn(async (body: { field: string; set: boolean }) => {
+      config = { promptSuggestion: { enabled: body.set } };
+      return { config };
+    });
+    const configuration = createCompatibility().createServiceCompatibility(
+      createdHost({ configGetter: () => config, updateConfig }),
+      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+    ).peripherals.configuration;
+    if (!configuration?.setPromptSuggestionEnabled || !configuration.getPromptSuggestionEnabled) {
+      throw new Error("Prompt suggestion setting is unavailable");
+    }
+
+    await expect(configuration.getPromptSuggestionEnabled()).resolves.toBe(true);
+    await expect(configuration.setPromptSuggestionEnabled({ enabled: false })).resolves.toBe(false);
+    expect(updateConfig).toHaveBeenCalledWith({ field: "promptSuggestion.enabled", set: false });
+    await expect(configuration.getPromptSuggestionEnabled()).resolves.toBe(false);
+  });
+});
+
+describe("v1 Agent reference compatibility", () => {
+  function resolver(overrides: Partial<AgentReferenceResolver> = {}): AgentReferenceResolver {
 describe("v1 Agent reference compatibility", () => {
   function resolver(
     overrides: Partial<AgentReferenceResolver> = {},

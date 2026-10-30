@@ -255,6 +255,10 @@ export interface LocalRuntimeApplication {
     setPermissionMode(input: {
       mode: "default" | "acceptEdits" | "bypassPermissions" | "auto" | "off";
     }): Promise<unknown>;
+    /** Effective next-message suggestion switch, as this host's config projection sees it. */
+    getPromptSuggestionEnabled?(): Promise<boolean>;
+    /** Persists `promptSuggestion.enabled` in config.yaml and returns the effective value. */
+    setPromptSuggestionEnabled?(input: { enabled: boolean }): Promise<boolean>;
   };
   readonly models?: {
     list(input?: { sessionId?: string }): Promise<readonly unknown[]>;

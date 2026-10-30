@@ -188,6 +188,22 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       });
     }
   }
+  if (event.type === 'turn.prompt_suggestion.generated') {
+    const turnId = readString(payload, ['turnId', 'turn_id']);
+    const suggestion = readString(payload, ['suggestion'])?.trim();
+    if (sessionId && turnId && suggestion) {
+      const elapsedMs = payload.elapsedMs ?? payload.elapsed_ms;
+      return compact({
+        ...base,
+        type: event.type,
+        sessionId,
+        turnId,
+        suggestion,
+        promptVersion: readString(payload, ['promptVersion', 'prompt_version']),
+        elapsedMs: isFiniteNumber(elapsedMs) ? elapsedMs : undefined,
+      });
+    }
+  }
   if (event.type === 'rotation.completed') {
     const agentName = readString(payload, ['agentName', 'agent_name']);
     const oldSessionId = readString(payload, ['oldSessionId', 'old_session_id']);

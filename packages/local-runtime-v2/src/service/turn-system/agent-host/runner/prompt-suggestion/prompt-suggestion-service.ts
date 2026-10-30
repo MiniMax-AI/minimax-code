@@ -91,7 +91,8 @@ export interface PromptSuggestionTurnPort {
   /**
    * Beta scope: by default only platform-billed (managed) models collect
    * context, because a BYOK or OAuth model bills the user's own key. Internal
-   * builds set this to exercise every model.
+   * builds and hosts that set `promptSuggestionUngated` (the interactive TUI)
+   * set this to cover every model.
    */
   readonly allowUnmanagedModels?: boolean;
   /** A new Turn of this Session supersedes any suggestion still generating. */

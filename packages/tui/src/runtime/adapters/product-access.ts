@@ -90,6 +90,18 @@ export class TuiProductAccess {
     );
   }
 
+  /** Undefined when this Runtime cannot read the switch. */
+  async getPromptSuggestionEnabled(): Promise<boolean | undefined> {
+    return this.context.service('config.prompt-suggestion.read').getPromptSuggestionEnabled();
+  }
+
+  /** Undefined when this Runtime cannot persist the switch. */
+  async setPromptSuggestionEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.context
+      .service('config.prompt-suggestion.write')
+      .setPromptSuggestionEnabled(enabled);
+  }
+
   async listModels(sessionId?: string): Promise<TuiModel[]> {
     const service = this.context.service("model.list");
     const request = { ...(sessionId ? { sessionId } : {}) };
