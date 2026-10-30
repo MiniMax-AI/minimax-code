@@ -39,6 +39,7 @@ import {
   configurePermissionHost,
   AUTO_CLASSIFIER_TIMEOUT_MS_DEFAULT,
   type PermissionHostUtils,
+  type ShellFamily,
 } from '@mavis/permission';
 import type { AgentMessageProtocol } from '@mavis/agent-core/protocol/agent-message';
 import type { RuntimeConversation } from '@mavis/conversation-contract';
@@ -94,7 +95,7 @@ export interface LocalPermissionServiceDeps {
   messageStore?: LocalPermissionMessageSource;
   configUpdater: (body: Record<string, unknown>) => Promise<unknown>;
   /** Explicit shell family from the host executor; never inferred from command text. */
-  shellFamily?: 'cmd' | 'powershell';
+  shellFamily?: ShellFamily;
   metricsClient?: MetricsClient;
 }
 
@@ -271,7 +272,7 @@ export interface LocalPermissionHostHandle {
   runtimeConversation?: Pick<RuntimeConversation, 'query'>;
   messageStore?: LocalPermissionMessageSource;
   configUpdater: (body: Record<string, unknown>) => Promise<unknown>;
-  shellFamily?: 'cmd' | 'powershell';
+  shellFamily?: ShellFamily;
   metricsClient?: MetricsClient;
 }
 

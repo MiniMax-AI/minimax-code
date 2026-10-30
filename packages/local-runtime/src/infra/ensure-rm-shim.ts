@@ -75,16 +75,20 @@ export function resolveRmShimDir(dataDir: string): string {
  * missing or lost its execute bit (cache cleaner, restored backup, chmod), the
  * preflight first re-seeds it in place — `ensureRmShim` is idempotent — and
  * only refuses the spawn when that repair also fails (e.g. read-only dataDir).
- * A silent fall-through to `/bin/rm` is never possible. Without a dataDir
- * there is no shim to install, and Windows never uses the shim (see
- * `ensureRmShim`), so both return the shared resolver unchanged.
+ * Native deletion removes this profile's inherited shim path and skips the
+ * preflight entirely; the recoverable scripts on disk are left unchanged.
+ * Without a dataDir there is no shim to install, and Windows never injects
+ * the shim (see `ensureRmShim`).
  */
 export function resolveAgentBashEnvPolicy(
   dataDir?: string,
   platform: NodeJS.Platform = process.platform,
+  nativeDelete = false,
 ): BashEnvPolicy {
-  if (!dataDir || platform === 'win32') return resolveBashEnvPolicy({});
+  if (!dataDir) return resolveBashEnvPolicy({});
   const shimDir = resolveRmShimDir(dataDir);
+  if (nativeDelete) return resolveBashEnvPolicy({ removePath: [shimDir] });
+  if (platform === 'win32') return resolveBashEnvPolicy({});
   const shimPath = path.join(shimDir, 'rm');
   return resolveBashEnvPolicy({
     prependPath: [shimDir],

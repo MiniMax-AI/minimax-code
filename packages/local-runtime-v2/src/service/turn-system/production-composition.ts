@@ -427,6 +427,8 @@ export async function createLocalAgentHost<
     ...optionalToolPolicyGuard(options.toolPolicyGuard),
     executor: {
       ...options.product.executor,
+      nativeDelete: () =>
+        options.product.preparation.configBuilder.config().permission?.nativeDelete === true,
       logger: options.product.runner.logger,
       backgroundCadenceReminder: createBackgroundCadenceReminder(contextUsageAnchor),
       canAppendExecutionBudgetReminder: (input, marker) =>

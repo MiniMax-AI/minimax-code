@@ -45,6 +45,7 @@ export function createHostedAgentPermissionCapabilities(
         readonly toolInput: Readonly<Record<string, unknown>>;
         readonly permissionMode?: 'default' | 'auto' | 'bypassPermissions' | 'off';
         readonly trustedExactWritePaths?: readonly string[];
+        readonly nativeDeleteSnapshot?: boolean;
       }) => {
         const ctx = host.permissionRouteContext();
         const decision = await ctx.permissionService.checkPermission({
@@ -55,6 +56,9 @@ export function createHostedAgentPermissionCapabilities(
           permissionModeOverride:
             input.permissionMode ?? readLocalPermissionMode(ctx.configGetter().permissionMode),
           trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
+          ...(input.nativeDeleteSnapshot !== undefined
+            ? { nativeDeleteSnapshot: input.nativeDeleteSnapshot }
+            : {}),
         });
         if (decision.behavior === 'deny') {
           return { behavior: 'deny' as const, reason: decision.reason };

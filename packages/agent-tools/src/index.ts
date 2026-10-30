@@ -37,6 +37,7 @@ export {
   type MultimodalAttachmentKind,
 } from "./shared/multimodal-attachments.js";
 export { inferReadVideoMimeType } from "./shared/read-video.js";
+export { withPermissionExecutionPlan } from "./desktop/permission-execution.js";
 export {
   filterCanonicalBuiltinMcpEntries,
   filterCanonicalNativeToolCeiling,

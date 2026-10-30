@@ -74,6 +74,7 @@ export { PermissionEngine } from './engine.js';
 export { registerDefaultCheckers } from './tools/index.js';
 export { unwrapCommandWrappers } from './tools/bash-wrapper-unwrap.js';
 export { isRmCommand, parseRmTargets, splitCommand } from './tools/bash-permission.js';
+export { splitShellSourceSegments } from './tools/bash-split.js';
 export {
   parseScriptPlainCommands,
   parseShellLcPlainCommands,

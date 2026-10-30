@@ -330,7 +330,11 @@ function applyLocalConfigUpdate(raw: Record<string, unknown>, body: Record<strin
       return;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'put')) {
-      if (field === 'review.mode' || field === 'worktreeRefreshBeforeCreate') {
+      if (
+        field === 'review.mode' ||
+        field === 'permission.nativeDelete' ||
+        field === 'worktreeRefreshBeforeCreate'
+      ) {
         throw new LocalConfigValidationError(`Unsupported config update operation for ${field}`);
       }
       const [target, key] = resolvePath(raw, field);

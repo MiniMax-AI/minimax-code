@@ -1,6 +1,7 @@
 import {
   CloudSessionReader,
   managedBackendRoutingHeaders,
+  resolveLocalBashShell,
 } from "@mavis/agent-tools/desktop";
 import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 import type {
@@ -466,7 +467,16 @@ export class LocalRuntimeApiHost {
     );
     this.surfaces = buildLocalRuntimeSurfaceCapabilities(this.runtimeMode);
     this.configGetter = options.configGetter ?? (() => getConfig());
-    this.shellFamily = options.shellFamily;
+    // Use the executor's shell selection when the product entrypoint supplies no override.
+    // Keep POSIX provenance on Windows (Git Bash / sh) as well as native shells.
+    this.shellFamily =
+      options.shellFamily ??
+      (() => {
+        const shell = resolveLocalBashShell();
+        if (shell === 'powershell' || shell === 'pwsh') return 'powershell';
+        if (shell === 'bash' || shell === 'sh') return 'posix';
+        return undefined;
+      })();
     this.skipWindowsHardSafetyChecks =
       options.runtimeOwnerKind === 'tui' &&
       this.configGetter().skipWindowsHardSafetyChecks === true;
@@ -511,12 +521,13 @@ export class LocalRuntimeApiHost {
         this.metricsReporter,
       );
     }
-    const runtimeDataDir = this.configGetter().dataDir;
+    const runtimeConfig = this.configGetter();
+    const runtimeDataDir = runtimeConfig.dataDir;
+    const nativeDelete = runtimeConfig.permission?.nativeDelete === true;
     try {
+      // Keep explicit mavis-trash available in either mode.
       ensureTrashScript(runtimeDataDir);
-      // Seeded alongside the trash script: the shim is the execution-layer
-      // entry point that makes `rm` recoverable regardless of how it is reached.
-      ensureRmShim(runtimeDataDir);
+      if (!nativeDelete) ensureRmShim(runtimeDataDir);
     } catch (error) {
       const nodeError =
         error instanceof Error ? (error as NodeJS.ErrnoException) : undefined;
@@ -541,12 +552,14 @@ export class LocalRuntimeApiHost {
         // PATH integration remains best-effort; deletion safety is gated separately above.
       }
     }
-    const trashRuntime = inspectTrashRuntime(runtimeDataDir);
-    if (!trashRuntime.available) {
-      logger.error(
-        { reason: trashRuntime.reason, ...trashRuntime.diagnostics },
-        "local_runtime.trash_unavailable",
-      );
+    if (!nativeDelete) {
+      const trashRuntime = inspectTrashRuntime(runtimeDataDir);
+      if (!trashRuntime.available) {
+        logger.error(
+          { reason: trashRuntime.reason, ...trashRuntime.diagnostics },
+          "local_runtime.trash_unavailable",
+        );
+      }
     }
     this.messageStore = options.messageStore;
     const sessionStoreOptions = {

@@ -126,13 +126,17 @@ async function createLocalRuntimeHostV2Internal(
   let v1: V1CreatedLocalRuntimeHost | undefined;
   let legacyClose: (() => Promise<void>) | undefined;
   let ownerRuntime: InitializedOwnerRuntime | undefined;
-  const agentRuntimePort: DeferredLocalAgentRuntimePort =
-    createDeferredLocalAgentRuntimePort();
-  const sandboxOperationsFactory =
-    createDeferredLocalSandboxBashOperationsFactory(
-      () => options.configGetter?.().sandbox?.enabled ?? false,
-      resolveAgentBashEnvPolicy(options.dataDir),
-    );
+  const agentRuntimePort: DeferredLocalAgentRuntimePort = createDeferredLocalAgentRuntimePort();
+  const getConfig = () => v1?.apiHost.configGetter() ?? options.configGetter?.();
+  const sandboxOperationsFactory = createDeferredLocalSandboxBashOperationsFactory(
+    () => options.configGetter?.().sandbox?.enabled ?? false,
+    (plan) =>
+      resolveAgentBashEnvPolicy(
+        options.dataDir,
+        process.platform,
+        plan?.nativeDelete ?? getConfig()?.permission?.nativeDelete === true,
+      ),
+  );
   const agentTelemetry = createDeferredAgentRuntimeTelemetry();
   let database: DatabaseClient | undefined;
   let preparedServices: PreparedRuntimeServices | undefined;

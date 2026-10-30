@@ -124,6 +124,7 @@ export interface LocalRuntimeConfig {
 
 /** Conversation-owned read model of the process config. */
 export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
+  readonly permission?: Partial<Pick<Config['permission'], 'nativeDelete'>>;
   readonly defaultLightModel?: string;
   /** Goal verifier policy consumed by process-local auxiliary model calls. */
   readonly goal?: Config['goal'];

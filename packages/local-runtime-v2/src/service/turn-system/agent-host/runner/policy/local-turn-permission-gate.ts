@@ -1,5 +1,6 @@
 import type { PiBeforeToolCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
 import type { PluginHookPermissionUpdate } from '@mavis/plugin-hooks';
+import { withPermissionExecutionPlan } from '@mavis/agent-tools';
 
 import type { AgentHostChannelContext } from '../../preparation/contracts.js';
 import { assertAgentHostCapabilityAvailable } from '../../empty-dependencies.js';
@@ -15,6 +16,7 @@ interface LocalTurnPermissionExecutionPlan {
   readonly effectiveInput: Readonly<Record<string, unknown>>;
   readonly intents: readonly unknown[];
   readonly transforms: readonly unknown[];
+  readonly nativeDelete?: boolean;
 }
 
 type LocalTurnPermissionRuleMatcher =
@@ -59,6 +61,8 @@ export interface LocalTurnPermissionDecisionSource {
     readonly signal?: AbortSignal;
     readonly channelContext?: AgentHostChannelContext;
     readonly trustedExactWritePaths: readonly string[];
+    /** First validated plan's setting; recheck input/rules while keeping this call's policy. */
+    readonly nativeDeleteSnapshot?: boolean;
   }): Promise<LocalTurnPermissionDecision>;
 }
 
@@ -372,7 +376,7 @@ export class LocalTurnPermissionGate {
       }
     }
     if (pluginDecision.updatedInput || pluginDecision.updatedPermissions?.length) {
-      return this.resolveRewrittenPermission(input, pluginDecision);
+      return this.resolveRewrittenPermission(input, pluginDecision, executionPlan);
     }
     return this.resolveApproval({
       input,
@@ -425,13 +429,19 @@ export class LocalTurnPermissionGate {
   private async resolveRewrittenPermission(
     input: BeforeToolCallInput,
     pluginDecision: PluginPermissionDecision,
+    previousPlan: Readonly<LocalTurnPermissionExecutionPlan> | undefined,
   ): Promise<{ readonly block: true; readonly reason: string } | undefined> {
     applyHookUpdatedInput(input.toolContext, pluginDecision.updatedInput);
     const request = readPermissionToolRequest(
       input.toolContext,
       this.options.executionPlans?.snapshotInput,
     );
-    const policyDecision = await checkPermissionDecision(this.options.decisions, input, request);
+    const policyDecision = await checkPermissionDecision(
+      this.options.decisions,
+      input,
+      request,
+      previousPlan?.nativeDelete,
+    );
     const executionPlan = readDecisionExecutionPlan(
       policyDecision,
       request.toolInput,
@@ -585,6 +595,7 @@ async function checkPermissionDecision(
   source: LocalTurnPermissionDecisionSource,
   input: BeforeToolCallInput,
   request: PermissionToolRequest,
+  nativeDeleteSnapshot?: boolean,
 ): Promise<LocalTurnPermissionDecision> {
   return validatePermissionDecision(
     await source.check({
@@ -595,6 +606,7 @@ async function checkPermissionDecision(
       toolName: request.toolName,
       toolInput: request.toolInput,
       trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
+      ...(nativeDeleteSnapshot !== undefined ? { nativeDeleteSnapshot } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.channelContext ? { channelContext: input.channelContext } : {}),
     }),
@@ -835,6 +847,7 @@ function applyExecutionPlan(
     }
   }
   Object.assign(target, plan.effectiveInput);
+  withPermissionExecutionPlan(target, plan);
   if (context.args !== target) Object.assign(context, { args: target });
 }
 

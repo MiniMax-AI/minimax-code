@@ -16,6 +16,8 @@ import type { PermissionRule } from '../types.js';
  * scripts can pass through.
  */
 export type BashCheckContext = {
+  /** Keep native delete commands unchanged and apply ordinary permission policy. */
+  nativeDelete?: boolean;
   /** Host platform; required before platform-specific delete transforms are enabled. */
   platform?: NodeJS.Platform;
   /** Actual shell family used for the command; unknown keeps Windows delete fail-closed. */

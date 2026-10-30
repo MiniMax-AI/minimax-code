@@ -112,8 +112,6 @@ export const LocalBashToolDef = {
     '- Each call starts in the session workspace. Changes to the working directory and shell state (variables and functions) do not persist between calls. If a command requires a different working directory, change directories within the same call.',
     '- Use dedicated `read`, `write`, `edit`, `grep`, and `glob` tools for file operations. Do not use shell commands for file reading, searching, or modification unless the user explicitly requests it or you have verified that the dedicated tools cannot perform the required operation. Use `bash` for processes, git, package managers, builds, tests, and pipelines.',
     '- The shell is non-interactive: no TTY or stdin prompts. For commands that require interaction, check `--help` for non-interactive options before asking the user to run them. Leave physical authorization (OAuth consent, MFA, hardware keys) to the user.',
-    '- For file or directory deletion, use one top-level `rm -- <path> ...`; the local runtime routes it through recoverable deletion.',
-    '- Do not bypass recoverable deletion with absolute paths to deletion commands or inline scripts. If it fails, report the failure instead of falling back to permanent deletion. Permission checks still apply.',
     '',
     '# Git',
     '- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.',

@@ -12,6 +12,8 @@ import type { AskUserToolInput } from '@mavis/shared/questionnaire';
 import type { BashOperations } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from '@sinclair/typebox';
 
+import type { LocalPermissionExecutionPlan } from './permission-execution.js';
+
 import type {
   LocalBashToolInput,
   LocalTaskToolInput,
@@ -310,6 +312,8 @@ export interface LocalSandboxBashOperationsFactory {
   create(input: {
     identity: LocalSandboxInvocationIdentity;
     workspaceRoot: string;
+    /** Permission decision snapshot carried across the execution boundary. */
+    permissionExecutionPlan?: LocalPermissionExecutionPlan;
     /**
      * Runs once the invocation is admitted and wrapped, immediately before the
      * native spawn. Background callers persist `running`/`startedAt` here, so
@@ -330,6 +334,7 @@ export interface LocalBackgroundBashExecutor {
     identity: LocalSandboxInvocationIdentity;
     workspaceRoot: string;
     command: string;
+    permissionExecutionPlan?: LocalPermissionExecutionPlan;
     timeout?: number;
     signal: AbortSignal;
     onPreflightComplete?: () => void | Promise<void>;

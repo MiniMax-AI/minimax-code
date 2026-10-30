@@ -27,13 +27,18 @@ import type {
   LocalAgentExecutionProfile,
 } from '../preparation/contracts.js';
 
-export function prepareBashTurnTools(admittedTools: readonly RuntimeTool[], background: boolean) {
+export function prepareBashTurnTools(
+  admittedTools: readonly RuntimeTool[],
+  background: boolean,
+  nativeDelete = false,
+) {
   const hasNativeBash = admittedTools.some(
     (tool) => tool.def.name === 'bash' && (tool.source === undefined || tool.source === 'builtin'),
   );
   const bashCapabilities = {
     background,
     shell: hasNativeBash ? resolveLocalBashShell() : ('unavailable' as const),
+    nativeDelete,
   };
   return admittedTools.map((tool) => {
     if (tool.def.name !== 'bash' || (tool.source !== undefined && tool.source !== 'builtin'))

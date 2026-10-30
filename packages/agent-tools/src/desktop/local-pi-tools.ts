@@ -4,10 +4,7 @@ import {
   type ToolResult,
   type ToolResultContent,
 } from '@mavis/agent-core/tools';
-import {
-  sanitizeBashSubprocessEnv,
-  type BashEnvPolicy,
-} from '@mavis/agent-core/bash-subprocess-env';
+import { sanitizeBashSubprocessEnv } from '@mavis/agent-core/bash-subprocess-env';
 import {
   createBashTool,
   createEditTool,
@@ -55,6 +52,12 @@ import {
   executeLocalHostTrashIfRequested,
   type LocalHostTrashRuntime,
 } from './host-trash-executor.js';
+import {
+  copyWithPermissionExecutionPlan,
+  readPermissionExecutionPlan,
+  resolvePermissionBashEnvPolicy,
+  type LocalBashEnvPolicySource,
+} from './permission-execution.js';
 import { inferReadVideoMimeType, readVideoAsToolResult } from '../shared/read-video.js';
 import { buildReplaceAllEdit, ReplaceAllError } from '../shared/replace-all-edit.js';
 import {
@@ -368,8 +371,7 @@ export class LocalBashTool implements ToolImpl<
   typeof LocalBashToolDef.schema,
   LocalRuntimeToolContext
 > {
-  private readonly tool: AgentTool;
-  private readonly envPolicy: BashEnvPolicy;
+  private readonly envPolicy: LocalBashEnvPolicySource;
   /** Names stripped by the sanitizer at the most recent spawn (never values). */
   private lastEnvRemoved: string[] = [];
   /** One-shot hint gate: report stripped names once per tool instance. */
@@ -378,27 +380,11 @@ export class LocalBashTool implements ToolImpl<
   constructor(
     private readonly workspaceRoot: string,
     private readonly backgroundAdapter: LocalBashAdapter | undefined,
-    envPolicy: BashEnvPolicy,
+    envPolicy: LocalBashEnvPolicySource,
     private readonly hostTrashRuntime?: LocalHostTrashRuntime,
     private readonly sandboxOperationsFactory?: LocalSandboxBashOperationsFactory,
   ) {
     this.envPolicy = envPolicy;
-    // Env sanitizer (design: bash-tool-optimization.md §2.2). Layer A boundary
-    // strip is always on; Layer B secret scrub follows the resolved policy.
-    // The background executor and the pi-turn-runner fallback apply the same
-    // hook — keep the three spawn sites in sync.
-    this.tool = createBashTool(workspaceRoot, {
-      output: {
-        strategy: 'head_tail',
-        maxBytes: DESKTOP_BASH_PREVIEW_BYTES,
-        maxLines: Number.MAX_SAFE_INTEGER,
-      },
-      spawnHook: (ctx) => {
-        const { env, removed } = sanitizeBashSubprocessEnv(ctx.env, this.envPolicy);
-        this.lastEnvRemoved = removed;
-        return { ...ctx, env };
-      },
-    });
   }
 
   async execute(
@@ -433,7 +419,17 @@ export class LocalBashTool implements ToolImpl<
       };
     }
     try {
-      const result = await this.executeValidated(ctx, { ...input, description }, timing, signal);
+      const result = await this.executeValidated(
+        ctx,
+        readPermissionExecutionPlan(input)
+          ? copyWithPermissionExecutionPlan(
+              { ...input, description },
+              readPermissionExecutionPlan(input),
+            )
+          : { ...input, description },
+        timing,
+        signal,
+      );
       return { ...result, details: { ...result.details, description } };
     } catch (error) {
       if (error instanceof Error) {
@@ -453,11 +449,13 @@ export class LocalBashTool implements ToolImpl<
     if (input.run_in_background === true && ctx.canConsumeBackgroundBashOutput !== true) {
       return unavailableBackgroundBashOutputResult();
     }
+    const permissionExecutionPlan = readPermissionExecutionPlan(input);
+    const envPolicy = () => resolvePermissionBashEnvPolicy(this.envPolicy, permissionExecutionPlan);
     const hostTrashResult = await executeLocalHostTrashIfRequested({
       toolInput: input,
       workspaceRoot: this.workspaceRoot,
       runtime: this.hostTrashRuntime,
-      envPolicy: this.envPolicy,
+      envPolicy,
       timeoutSeconds: resolveForegroundTimeout({ timeout: timing.commandTimeoutSeconds }),
       ...(signal ? { signal } : {}),
     });
@@ -499,7 +497,12 @@ export class LocalBashTool implements ToolImpl<
     }
 
     const { run_in_background: _runInBackground, ...rest } = input;
-    const foregroundInput = { ...rest, timeout: timing.commandTimeoutSeconds };
+    const foregroundInput = permissionExecutionPlan
+      ? copyWithPermissionExecutionPlan(
+          { ...rest, timeout: timing.commandTimeoutSeconds },
+          permissionExecutionPlan,
+        )
+      : { ...rest, timeout: timing.commandTimeoutSeconds };
     if (
       ctx.canConsumeBackgroundBashOutput === true &&
       ctx.allowBashAutoPromotion !== false &&
@@ -559,24 +562,28 @@ export class LocalBashTool implements ToolImpl<
     }
     let result: ToolResult;
     try {
-      const tool = this.sandboxOperationsFactory
-        ? createBashTool(this.workspaceRoot, {
-            output: {
-              strategy: 'head_tail',
-              maxBytes: DESKTOP_BASH_PREVIEW_BYTES,
-              maxLines: Number.MAX_SAFE_INTEGER,
-            },
-            operations: this.sandboxOperationsFactory.create({
-              identity: directForegroundIdentity(ctx),
-              workspaceRoot: this.workspaceRoot,
-            }),
-            spawnHook: (spawnContext) => {
-              const { env, removed } = sanitizeBashSubprocessEnv(spawnContext.env, this.envPolicy);
-              this.lastEnvRemoved = removed;
-              return { ...spawnContext, env };
-            },
-          })
-        : this.tool;
+      const tool = createBashTool(this.workspaceRoot, {
+        output: {
+          strategy: 'head_tail',
+          maxBytes: DESKTOP_BASH_PREVIEW_BYTES,
+          maxLines: Number.MAX_SAFE_INTEGER,
+        },
+        ...(this.sandboxOperationsFactory
+          ? {
+              operations: this.sandboxOperationsFactory.create({
+                identity: directForegroundIdentity(ctx),
+                workspaceRoot: this.workspaceRoot,
+                ...(permissionExecutionPlan ? { permissionExecutionPlan } : {}),
+              }),
+            }
+          : {}),
+        // Bind the approved policy to this invocation, including its spawn hook.
+        spawnHook: (spawnContext) => {
+          const { env, removed } = sanitizeBashSubprocessEnv(spawnContext.env, envPolicy);
+          this.lastEnvRemoved = removed;
+          return { ...spawnContext, env };
+        },
+      });
       const res = await tool.execute('', foregroundInput, signal);
       const completed = localBashResultFromPi(res);
       result = withCompatibleBashToolResponseFromPiDetails({

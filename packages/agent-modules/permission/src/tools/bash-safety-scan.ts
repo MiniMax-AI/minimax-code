@@ -514,7 +514,10 @@ export function bashCommandIsSafe(command: string): string | null {
  * - macOS irrecoverable deletion (srm, diskutil erase*, etc.)
  * - Storage/disk-level destructive operations (wipefs, sgdisk, zfs destroy, etc.)
  */
-export function checkDangerousPatterns(command: string): string | null {
+export function checkDangerousPatterns(
+  command: string,
+  options: { nativeDelete?: boolean } = {},
+): string | null {
   const permissionSurface = getShellPermissionCheckSurface(command);
 
   // Direct `rm` is normally rewritten by the bash permission layer before this
@@ -522,7 +525,7 @@ export function checkDangerousPatterns(command: string): string | null {
   // such as heredoc payloads piped to bash, where the rewrite cannot apply.
   // Quote-aware: `rm` inside a quoted argument (regex pattern passed to
   // rg/grep/sed/awk) is data, not an executed command — do NOT match.
-  if (hasUnquotedRmAtCommandStart(permissionSurface)) {
+  if (!options.nativeDelete && hasUnquotedRmAtCommandStart(permissionSurface)) {
     return 'Dangerous deletion command';
   }
 
@@ -536,7 +539,8 @@ export function checkDangerousPatterns(command: string): string | null {
     return null;
   }
 
-  for (const { pattern, category } of ALL_DANGEROUS_COMMAND_PATTERNS) {
+  for (const { pattern, category, recoverableDeleteOnly } of ALL_DANGEROUS_COMMAND_PATTERNS) {
+    if (options.nativeDelete && recoverableDeleteOnly) continue;
     if (pattern.test(permissionSurface)) {
       return category;
     }

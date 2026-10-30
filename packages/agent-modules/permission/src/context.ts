@@ -51,6 +51,9 @@ export interface ToolPermissionContext {
   /** Current permission mode. */
   readonly mode: PermissionMode;
 
+  /** Opt out of permission-layer recoverable deletion; ordinary permission rules still apply. */
+  readonly nativeDelete?: boolean;
+
   /** Merged rules from all sources (global + agent + session). */
   readonly rules: readonly PermissionRule[];
 
@@ -110,6 +113,7 @@ export interface ToolPermissionContext {
 /** Input configuration used to construct a ToolPermissionContext. */
 export interface ToolPermissionContextConfig {
   mode?: PermissionMode;
+  nativeDelete?: boolean;
   rules?: PermissionRule[];
   sandboxEnabled?: boolean;
   autoAllowBashIfSandboxed?: boolean;
@@ -143,6 +147,7 @@ export function createToolPermissionContext(
 ): ToolPermissionContext {
   const ctx: ToolPermissionContext = Object.freeze({
     mode: config.mode ?? 'default',
+    nativeDelete: config.nativeDelete ?? false,
     rules: Object.freeze([...(config.rules ?? [])]),
     sandboxEnabled: config.sandboxEnabled ?? false,
     autoAllowBashIfSandboxed: config.autoAllowBashIfSandboxed ?? false,
@@ -213,6 +218,7 @@ function cloneContextWith(
 ): ToolPermissionContext {
   return Object.freeze({
     mode: patch.mode ?? ctx.mode,
+    nativeDelete: ctx.nativeDelete,
     rules: Object.freeze([...(patch.rules ?? ctx.rules)]),
     sandboxEnabled: ctx.sandboxEnabled,
     autoAllowBashIfSandboxed: ctx.autoAllowBashIfSandboxed,

@@ -9,8 +9,8 @@ import type {
   ShellFamily,
 } from './permission-core.js';
 import { resolvePermissionPath } from './path-resolver.js';
-import { readWindowsTrashExecution } from './windows-trash-execution.js';
-import { isRmCommand, parseRmTargets } from './tools/bash-permission.js';
+import { isNonRecursiveWindowsRm, readWindowsTrashExecution } from './windows-trash-execution.js';
+import { isRmCommand, parseRmTargets, resolveRmCommandPaths } from './tools/bash-permission.js';
 import { splitCommand } from './tools/bash-split.js';
 import { shellTokenize, shellTokenizeWithMetadata } from './tools/shell-tokenize.js';
 import { parseWindowsNativeDelete } from './tools/windows-native-delete.js';
@@ -27,6 +27,8 @@ export type CreatePermissionExecutionPlanInput = Pick<
   shell?: ShellFamily;
   context?: Pick<PermissionEvaluationInput['context'], 'workingDirectory' | 'homeDir'>;
   rewrittenInput?: Readonly<Record<string, unknown>>;
+  /** Snapshot of Permission.nativeDelete at decision time. */
+  nativeDelete?: boolean;
 };
 
 /** Build the complete immutable plan consumed by production permission gates. */
@@ -41,7 +43,13 @@ export function createPermissionExecutionPlan(
   const transforms: ExecutionPlan['transforms'] =
     input.rewrittenInput && targets.length > 0 ? [{ type: 'recoverable-delete', targets }] : [];
   return validatePermissionExecutionPlan(
-    { originalInput, effectiveInput, intents, transforms },
+    {
+      originalInput,
+      effectiveInput,
+      intents,
+      transforms,
+      nativeDelete: input.nativeDelete === true,
+    },
     originalInput,
   );
 }
@@ -126,11 +134,13 @@ export function validatePermissionExecutionPlan(
 
   validateTransformConsistency(originalSnapshot, effectiveSnapshot, intents, transforms);
   const metadata = snapshotPermissionInput({ intents, transforms });
+  const nativeDelete = readDataProperty(plan, 'nativeDelete');
   return Object.freeze({
     originalInput: originalSnapshot as Record<string, unknown>,
     effectiveInput: effectiveSnapshot as Record<string, unknown>,
     intents: metadata.intents as CommandIntent[],
     transforms: metadata.transforms as ExecutionTransform[],
+    ...(nativeDelete === undefined ? {} : { nativeDelete: nativeDelete === true }),
   });
 }
 
@@ -144,24 +154,32 @@ function inferBashSegmentIntent(
     effectiveShell === 'cmd' || effectiveShell === 'powershell'
       ? parseWindowsNativeDelete(command, effectiveShell)
       : undefined;
+  const rmPaths = isRmCommand(command)
+    ? resolveRmCommandPaths(command, input.context, effectiveShell)
+    : undefined;
   if (nativeDelete && nativeDelete.shell === effectiveShell) {
     return [
       {
         kind: 'filesystem',
         action: 'delete',
-        paths: nativeDelete.targets.map((raw) => toPathValue(raw, input)),
+        // A PowerShell rm alias can also produce the recoverable rm rewrite.
+        // Its marker follows the rm parser's literal quoting contract.
+        paths:
+          rmPaths && readWindowsTrashExecution(input.rewrittenInput)
+            ? rmPaths
+            : nativeDelete.targets.map((raw) => toPathValue(raw, input)),
         ...(nativeDelete.recursive ? { recursive: true } : {}),
         ...(nativeDelete.force ? { force: true } : {}),
         shell: effectiveShell,
       },
     ];
   }
-  if (isRmCommand(command)) {
+  if (rmPaths) {
     return [
       {
         kind: 'filesystem',
         action: 'delete',
-        paths: parseRmTargets(command).map((raw) => toPathValue(raw, input)),
+        paths: rmPaths,
         shell: effectiveShell,
       },
     ];
@@ -266,9 +284,6 @@ function validateTransformConsistency(
     (intent): intent is Extract<CommandIntent, { kind: 'filesystem' }> =>
       intent.kind === 'filesystem' && intent.action === 'delete',
   );
-  if (deleteIntents.length > 0 && transforms.length === 0) {
-    throw new TypeError('Delete execution plan requires a recoverable-delete transform.');
-  }
   if (changed && transforms.length === 0) {
     throw new TypeError('Permission execution plan changed input without a declared transform.');
   }
@@ -292,7 +307,12 @@ function validateTransformConsistency(
 
   const windowsTrash = readWindowsTrashExecution(effectiveInput);
   if (windowsTrash) {
-    if (!sameStringSet(windowsTrash.targets, recoverableTargets)) {
+    if (
+      !sameStringSet(windowsTrash.targets, recoverableTargets) ||
+      (windowsTrash.allowOutsideWorkspaceFiles === true &&
+        (typeof originalInput.command !== 'string' ||
+          !isNonRecursiveWindowsRm(originalInput.command)))
+    ) {
       throw new TypeError(
         'Windows recoverable-delete plan requires the targets-only trash marker.',
       );

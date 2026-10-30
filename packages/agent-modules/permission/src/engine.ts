@@ -373,6 +373,7 @@ export class PermissionEngine {
         ruleMatchers: this.resolveRuleMatchers(toolCheckResult),
         candidateScopes: this.resolveCandidateScopes(toolCheckResult),
         bypassImmune: true,
+        rewrittenInput: toolCheckResult.rewrittenInput,
         skipAutoClassifier: toolCheckResult.skipAutoClassifier,
       };
     }

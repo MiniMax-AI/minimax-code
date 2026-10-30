@@ -232,7 +232,10 @@
       "packages/local-runtime/test/unit/local-background-task-user-stop-cascade.test.ts",
       "packages/local-runtime/test/unit/local-task-append.test.ts",
       "packages/local-runtime/test/unit/local-permission-windows-host-config.test.ts",
-      "packages/local-runtime/test/unit/local-permission-windows-opt-out.test.ts"
+      "packages/local-runtime/test/unit/local-permission-windows-opt-out.test.ts",
+      "packages/agent-modules/permission/test/unit/permission/native-delete.test.ts",
+      "packages/agent-modules/permission/test/unit/permission/tools/bash-split.test.ts",
+      "packages/local-runtime/test/unit/local-permission-host-shell.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

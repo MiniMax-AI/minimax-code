@@ -4,6 +4,8 @@ import {
   resolveLocalBashTiming,
   validateBashCommand,
   resolveBashDescription,
+  readPermissionExecutionPlan,
+  type LocalPermissionExecutionPlan,
   type LocalBashTiming,
   type LocalBashAdapter,
   type LocalBashBackgroundStartResult,
@@ -263,6 +265,7 @@ async function startAdmittedBackgroundLocalBash(
     parentSession: input.parentSession,
     taskId,
     command: input.bashInput.command,
+    permissionExecutionPlan: readPermissionExecutionPlan(input.bashInput),
     description,
     timeout: timing.commandTimeoutSeconds,
     timing,
@@ -322,6 +325,7 @@ async function runBackgroundLocalBashCommand(input: {
   parentSession: LocalSessionRecord;
   taskId: string;
   command: string;
+  permissionExecutionPlan?: LocalPermissionExecutionPlan;
   description: string;
   timeout?: number;
   timing: LocalBashTiming;
@@ -367,6 +371,9 @@ async function runBackgroundLocalBashCommand(input: {
       },
       workspaceRoot: input.parentSession.workspaceDir || input.host.resolveDefaultWorkspaceDir(),
       command: input.command,
+      ...(input.permissionExecutionPlan
+        ? { permissionExecutionPlan: input.permissionExecutionPlan }
+        : {}),
       timeout: input.timeout,
       signal: controller.signal,
       onPreflightComplete: async () => {

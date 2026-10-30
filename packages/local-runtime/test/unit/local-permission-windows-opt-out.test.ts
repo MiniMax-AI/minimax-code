@@ -1,5 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import * as os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readWindowsTrashExecution } from '@mavis/permission';
@@ -15,6 +16,10 @@ import {
   TRASH_SCRIPT_WIN_CONTENT,
 } from '../../src/infra/trash-script-win.js';
 
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+}));
+
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -28,6 +33,8 @@ function fixture(
     seedTrash?: boolean;
     shellFamily?: 'cmd' | 'powershell';
     trashAvailable?: boolean;
+    nativeDelete?: boolean;
+    workspaceDir?: string;
   } = {},
 ) {
   const dataDir = mkdtempSync(path.join(tmpdir(), 'windows-safety-opt-out-'));
@@ -38,13 +45,20 @@ function fixture(
     writeFileSync(path.join(binDir, 'mavis-trash.js'), TRASH_SCRIPT_WIN_CONTENT);
     writeFileSync(path.join(binDir, 'mavis-trash.cmd'), TRASH_CMD_LAUNCHER_CONTENT);
   }
-  const config = { dataDir, provider: {}, permissionMode: mode } as LocalRuntimeConfig;
+  const config = {
+    dataDir,
+    provider: {},
+    permissionMode: mode,
+    permission: { nativeDelete: options.nativeDelete === true },
+  } as LocalRuntimeConfig;
   const rules = new LocalPermissionRuleStore(() => dataDir);
   const facade = new LocalPermissionFacade({
     ruleStore: rules,
     configGetter: () => config,
     getSessionById: async () => undefined,
-    getLocalAgent: async () => ({ defaultWorkspaceDir: String.raw`C:\workspace` }),
+    getLocalAgent: async () => ({
+      defaultWorkspaceDir: options.workspaceDir ?? String.raw`C:\workspace`,
+    }),
     platform,
     shellFamily: options.shellFamily,
     trashRuntimeProbe: () => options.trashAvailable ?? true,
@@ -78,10 +92,70 @@ function fixture(
     if (!blocked) await execute(call.args);
     return blocked;
   }
-  return { facade, rules, dispatch, execute, begin, config };
+  return { facade, rules, dispatch, execute, begin, config, approval };
 }
 
+describe('Windows command cwd ordering', () => {
+  it.each([false, true])('allows mkdir before cd with nativeDelete=%s', async (nativeDelete) => {
+    const f = fixture(false, 'off', 'win32', { nativeDelete, shellFamily: 'cmd' });
+    const command = 'mkdir build && cd build';
+    const blocked = await f.dispatch('bash', { command });
+    expect(blocked, blocked?.reason).toBeUndefined();
+    expect(f.execute).toHaveBeenCalledWith({ command });
+    expect(f.begin).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'checks each write at its entry cwd with nativeDelete=%s',
+    async (nativeDelete) => {
+      for (const [command, denied] of [
+        ['echo ok > out.txt && cd build', false],
+        [String.raw`cmd /c "cd C:\other" && mkdir build`, false],
+        [String.raw`cd C:\other && mkdir C:\workspace\build`, false],
+        ['cd build && mkdir nested', true],
+        ['cd build && echo changed > out.txt', true],
+        [String.raw`cd C:\other && cmd /c "mkdir build"`, true],
+        [String.raw`mkdir C:\Windows\Temp\build && cd build`, true],
+      ] as const) {
+        const f = fixture(false, 'off', 'win32', { nativeDelete, shellFamily: 'cmd' });
+        const blocked = await f.dispatch('bash', { command });
+        expect(Boolean(blocked), command).toBe(denied);
+        expect(f.execute).toHaveBeenCalledTimes(denied ? 0 : 1);
+        expect(f.begin).not.toHaveBeenCalled();
+      }
+    },
+  );
+});
+
 describe('Windows hard-safety opt-out', () => {
+  it.each([false, true])(
+    'keeps recoverable deletion after corrupt-store allowOnce with path opt-out=%s',
+    async (enabled) => {
+      const f = fixture(enabled, 'default', 'win32', {
+        seedTrash: true,
+        shellFamily: 'powershell',
+      });
+      writeFileSync(path.join(f.config.dataDir, 'permission.json'), '{"version":2,"allow":[');
+      const pending = f.dispatch('bash', { command: 'Remove-Item old.txt' });
+      await vi.waitFor(() => expect(f.begin).toHaveBeenCalledOnce());
+      expect(f.begin.mock.calls[0][0].reason).toMatch(/permission rule store/i);
+      expect(f.execute).not.toHaveBeenCalled();
+      const request = f.approval.listPending()[0];
+      await f.approval.reply([request.requestId], 'allowOnce');
+      expect(await pending).toBeUndefined();
+      expect(f.execute).toHaveBeenCalledOnce();
+      const executed = f.execute.mock.calls[0][0];
+      expect(executed).toMatchObject({ command: 'mavis-trash --', run_in_background: false });
+      expect(readWindowsTrashExecution(executed)?.targets).toEqual([
+        String.raw`C:\workspace\old.txt`,
+      ]);
+      expect(JSON.parse(JSON.stringify(executed))).toEqual({
+        command: 'mavis-trash --',
+        run_in_background: false,
+      });
+    },
+  );
+
   const commands = [
     // Ambiguous drive-relative path and a Python deletion-literal false positive.
     'Set-Content w:shd example',
@@ -102,6 +176,8 @@ describe('Windows hard-safety opt-out', () => {
   it.each([
     // TUI currently leaves shellFamily unspecified; native deletes also cover explicit shells below.
     [undefined, String.raw`rm -rf C:\workspace\temporary`],
+    ['cmd', String.raw`rm -rf C:\workspace\temporary`],
+    ['powershell', String.raw`rm -rf C:\workspace\temporary`],
     ['powershell', String.raw`Remove-Item -Recurse -Force C:\workspace\temporary`],
     ['powershell', String.raw`ri C:\workspace\temporary`],
     ['cmd', String.raw`del /f /q C:\workspace\temporary`],
@@ -117,40 +193,92 @@ describe('Windows hard-safety opt-out', () => {
         expect(f.execute).toHaveBeenCalledOnce();
         const executed = f.execute.mock.calls[0][0] as Record<string, unknown>;
         expect(executed.command).not.toBe(command);
-        if (command.startsWith('rm ')) {
-          expect(executed.command).toContain(
-            path.win32.join(f.config.dataDir, 'bin', 'mavis-trash.cmd'),
-          );
-          expect(executed.command).toContain(String.raw`C:\workspace\temporary`);
-        } else {
-          expect(executed.command).toBe('mavis-trash --');
-          expect(readWindowsTrashExecution(executed)?.targets).toEqual([
-            String.raw`C:\workspace\temporary`,
-          ]);
-        }
+        expect(executed.command).toBe('mavis-trash --');
+        expect(readWindowsTrashExecution(executed)?.targets).toEqual([
+          String.raw`C:\workspace\temporary`,
+        ]);
         expect(f.begin).not.toHaveBeenCalled();
       }
     }
   });
 
-  it('preserves the rm rewrite decision with an explicit Windows shell', async () => {
-    for (const enabled of [false, true]) {
-      for (const shellFamily of ['cmd', 'powershell'] as const) {
-        const f = fixture(enabled, 'off', 'win32', { seedTrash: true, shellFamily });
-        const command = String.raw`rm -rf C:\workspace\temporary`;
-        // Existing execution-plan validation rejects this legacy rewrite with an explicit
-        // Windows shell. Check the unchanged rewrite decision without masking that failure.
-        const result = await f.facade.checkPermissionRaw({
-          toolName: 'bash',
+  it.each(['off', 'default', 'bypassPermissions'] as const)(
+    'keeps the explicit Windows path opt-out effective with native deletion in %s mode',
+    async (mode) => {
+      for (const enabled of [false, true]) {
+        const f = fixture(enabled, mode, 'win32', { nativeDelete: true });
+        const result = await f.facade.checkPermission({
+          toolName: 'write',
           agentName: 'mavis',
-          input: { command },
+          input: { file_path: String.raw`C:\Windows\Temp\example.txt`, content: 'example' },
         });
-        expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain(
-          path.win32.join(f.config.dataDir, 'bin', 'mavis-trash.cmd'),
-        );
-        expect(result.rewrittenInput?.command).toContain(String.raw`C:\workspace\temporary`);
+        expect(result.behavior === 'deny', result.reason).toBe(!enabled);
       }
+    },
+  );
+
+  it.each([
+    String.raw`Remove-Item -Recurse -Force C:/`,
+    String.raw`Remove-Item -Recurse -Force C:\Users\Alice`,
+    String.raw`Remove-Item -Recurse -Force C:\Windows\Temp\old`,
+    String.raw`Remove-Item -Recurse -Force C:\outside\old`,
+  ])('honors the startup path-policy opt-out for native deletion: %s', async (command) => {
+    for (const enabled of [false, true]) {
+      const f = fixture(enabled, 'off', 'win32', { nativeDelete: true, shellFamily: 'powershell' });
+      const blocked = await f.dispatch('bash', { command });
+      expect(Boolean(blocked), blocked?.reason).toBe(!enabled);
+      expect(f.execute).toHaveBeenCalledTimes(enabled ? 1 : 0);
+      if (enabled) expect(f.execute).toHaveBeenCalledWith({ command });
+      expect(f.begin).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    { enabled: false, target: String.raw`C:\Users\Alice`, blocked: true },
+    { enabled: false, target: String.raw`C:\Users\Alice\old`, blocked: false },
+    { enabled: true, target: String.raw`C:\Users\Alice`, blocked: false },
+  ])(
+    'checks CMD native rm home targets ($target, path opt-out=$enabled)',
+    async ({ enabled, target, blocked }) => {
+      const home = String.raw`C:\Users\Alice`;
+      const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+      try {
+        const f = fixture(enabled, 'off', 'win32', {
+          nativeDelete: true,
+          shellFamily: 'cmd',
+          workspaceDir: home,
+        });
+        const command = `rm -rf "${target}"`;
+        const result = await f.dispatch('bash', { command });
+        expect(Boolean(result), result?.reason).toBe(blocked);
+        expect(f.execute).toHaveBeenCalledTimes(blocked ? 0 : 1);
+        if (blocked) expect(result?.reason).toMatch(/root or home directory/);
+        else expect(f.execute).toHaveBeenCalledWith({ command });
+        expect(f.begin).not.toHaveBeenCalled();
+      } finally {
+        homeSpy.mockRestore();
+      }
+    },
+  );
+
+  it('keeps native deletion independent of trash health while retaining UNC protection', async () => {
+    for (const enabled of [false, true]) {
+      const f = fixture(enabled, 'off', 'win32', {
+        nativeDelete: true,
+        shellFamily: 'powershell',
+        trashAvailable: false,
+      });
+      const command = String.raw`Remove-Item -Recurse -Force C:\workspace\temporary`;
+      expect(await f.dispatch('bash', { command })).toBeUndefined();
+      expect(f.execute).toHaveBeenCalledWith({ command });
+      expect(readWindowsTrashExecution(f.execute.mock.calls[0][0])).toBeUndefined();
+      expect(
+        await f.dispatch('bash', {
+          command: String.raw`Remove-Item -Recurse -Force \\server\share\temporary`,
+        }),
+      ).toMatchObject({ block: true });
+      expect(f.execute).toHaveBeenCalledOnce();
+      expect(f.begin).not.toHaveBeenCalled();
     }
   });
 

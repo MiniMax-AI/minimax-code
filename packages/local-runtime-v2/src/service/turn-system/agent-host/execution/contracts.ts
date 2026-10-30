@@ -281,6 +281,8 @@ export interface LocalRuntimeTurnExecutorOptions<
 > {
   readonly runtime: LocalRuntimeTurnRunnerPort<TContext>;
   readonly backgroundCadenceReminder?: BackgroundCadenceReminder;
+  /** Read when preparing a new Turn's Bash guidance, not during the model loop. */
+  readonly nativeDelete?: () => boolean;
   readonly canAppendExecutionBudgetReminder?: ExecutionBudgetReminderAdmission;
   /** Exact child Turn scope; notifications join this Turn and never independently reactivate it. */
   readonly createChildBashLifecycle?: (input: {

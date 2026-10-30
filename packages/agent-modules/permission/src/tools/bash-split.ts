@@ -475,7 +475,8 @@ function consumeHeredocBody(input: string, start: number, marker: HeredocMarker)
   return input.length;
 }
 
-function splitCommandWithoutHeredoc(input: string): string[] {
+/** Preserve source text, including executable substitutions in shell headers. */
+export function splitShellSourceSegments(input: string): string[] {
   // Fold POSIX line-continuations (`\<NL>` outside single quotes) so the
   // tokenizer sees a single logical line per segment. Heredoc bodies are
   // handled before this helper is called, so body text is never folded here.
@@ -531,6 +532,13 @@ function splitCommandWithoutHeredoc(input: string): string[] {
         continue;
       }
 
+      // A lone & terminates a background command. Keep redirection operators
+      // (&>, &>>, <&, >&) attached to the command whose descriptors they affect.
+      if (ch === '&' && folded[i - 1] !== '<' && folded[i - 1] !== '>' && folded[i + 1] !== '>') {
+        flushSegment();
+        continue;
+      }
+
       // Check for ;
       if (ch === ';') {
         flushSegment();
@@ -565,7 +573,11 @@ function splitCommandWithoutHeredoc(input: string): string[] {
   }
 
   flushSegment();
+  return rawSegments;
+}
 
+function splitCommandWithoutHeredoc(input: string): string[] {
+  const rawSegments = splitShellSourceSegments(input);
   // Per-segment cleanup: drop comment-only and pure env-assignment segments
   // (they carry no command), then strip leading shell control-flow keywords.
   // Standalone keywords like `fi` / `done` evaluate to undefined here and

@@ -1,12 +1,14 @@
 import { StringDecoder } from 'node:string_decoder';
 
 import { createBashTool, type BashOperations } from '@earendil-works/pi-coding-agent/tools';
-import { createBashEnvSpawnHook, type BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
+import { createBashEnvSpawnHook } from '@mavis/agent-core/bash-subprocess-env';
 import {
   localBashResultFromError,
   localBashResultFromPi,
   DESKTOP_BASH_PREVIEW_BYTES,
   type LocalSandboxBashOperationsFactory,
+  type LocalBashEnvPolicySource,
+  resolvePermissionBashEnvPolicy,
 } from '@mavis/agent-tools/desktop';
 
 import type { LocalBackgroundBashExecutor } from './contracts.js';
@@ -18,7 +20,7 @@ export function createLocalBackgroundBashExecutor(
    * the foreground tool. REQUIRED: every caller names its policy explicitly —
    * tests pass `{ mode: 'off' }`.
    */
-  envPolicy: BashEnvPolicy,
+  envPolicy: LocalBashEnvPolicySource,
 ): LocalBackgroundBashExecutor {
   return {
     async execute(input) {
@@ -32,6 +34,9 @@ export function createLocalBackgroundBashExecutor(
       const localOperations = operationsFactory.create({
         identity: input.identity,
         workspaceRoot: input.workspaceRoot,
+        ...(input.permissionExecutionPlan
+          ? { permissionExecutionPlan: input.permissionExecutionPlan }
+          : {}),
         ...(input.onPreflightComplete ? { onPreflightComplete: input.onPreflightComplete } : {}),
       });
       const decoders = {
@@ -74,10 +79,13 @@ export function createLocalBackgroundBashExecutor(
           persistOutput: false,
         },
         operations,
-        spawnHook: createBashEnvSpawnHook(envPolicy, (removed) => {
-          envSanitized = removed;
-          if (removed.length > 0) input.onDetails?.({ envSanitized: removed });
-        }),
+        spawnHook: createBashEnvSpawnHook(
+          () => resolvePermissionBashEnvPolicy(envPolicy, input.permissionExecutionPlan),
+          (removed) => {
+            envSanitized = removed;
+            if (removed.length > 0) input.onDetails?.({ envSanitized: removed });
+          },
+        ),
       });
       try {
         const result = localBashResultFromPi(

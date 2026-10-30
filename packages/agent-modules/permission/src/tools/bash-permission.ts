@@ -43,7 +43,8 @@ import { commandHasIoRedirect, evaluateWriteTarget } from './bash-write-target.j
 import { pureReadFirstWord, formatHardBlockedBashReason } from './bash-fast-allow.js';
 import { detectSlowCommand } from './slow-command-scan.js';
 import { parseWindowsNativeDelete } from './windows-native-delete.js';
-import { resolvePermissionPath } from '../path-resolver.js';
+import { resolvePermissionPath, type PermissionPathResolutionContext } from '../path-resolver.js';
+import type { PathValue, ShellFamily } from '../permission-core.js';
 
 // ---------------------------------------------------------------------------
 // Rule parsing
@@ -400,7 +401,7 @@ export function parseRmCommand(
 
 /**
  * Resolve a shell-level HOME reference in an rm target to the runtime's
- * `os.homedir()` absolute path. Handles the three common forms an agent
+ * supplied home directory (defaults to `os.homedir()`). Handles the three common forms an agent
  * may emit — `~/foo`, bare `~`, and `$HOME/foo` / `${HOME}/foo` — before
  * the target gets single-quoted by `buildTrashCommand`.
  *
@@ -425,10 +426,11 @@ export function parseRmCommand(
  *   POSIX-style `$HOME` is already covered which is what LLMs typically
  *   generate.
  */
-export function resolveHomeInTarget(target: string): string {
-  if (target === '~') return os.homedir();
+export function resolveHomeInTarget(target: string, homeDir = os.homedir()): string {
+  const pathApi = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(homeDir) ? path.win32 : path;
+  if (target === '~') return homeDir;
   if (target.startsWith('~/')) {
-    return path.join(os.homedir(), target.slice(2));
+    return pathApi.join(homeDir, target.slice(2));
   }
   // NB: these string literals contain a literal `${...}` — the eslint
   // `no-template-curly-in-string` rule assumes any `${...}` inside a
@@ -436,16 +438,54 @@ export function resolveHomeInTarget(target: string): string {
   // matching the shell's own `${HOME}` syntax, which really is a plain
   // string on the JS side.
   // eslint-disable-next-line no-template-curly-in-string
-  if (target === '$HOME' || target === '${HOME}') return os.homedir();
+  if (target === '$HOME' || target === '${HOME}') return homeDir;
   if (target.startsWith('$HOME/')) {
-    return path.join(os.homedir(), target.slice('$HOME/'.length));
+    return pathApi.join(homeDir, target.slice('$HOME/'.length));
   }
   // eslint-disable-next-line no-template-curly-in-string
   if (target.startsWith('${HOME}/')) {
     // eslint-disable-next-line no-template-curly-in-string
-    return path.join(os.homedir(), target.slice('${HOME}/'.length));
+    return pathApi.join(homeDir, target.slice('${HOME}/'.length));
   }
   return target;
+}
+
+/** Resolve each rm operand using quote metadata from the parser that accepted it. */
+export function resolveRmCommandPaths(
+  command: string,
+  context: PermissionPathResolutionContext = {},
+  shell: ShellFamily = 'unknown',
+): PathValue[] {
+  const native = shell === 'powershell' ? parseWindowsNativeDelete(command, shell) : undefined;
+  const targets =
+    native?.targetTokens ??
+    parseRmTargetsWithMetadata(
+      command,
+      shell === 'cmd' || shell === 'powershell' ? 'win32' : undefined,
+    );
+  return targets.map((target) => resolveRmTargetPath(target, context, shell));
+}
+
+/** Resolve an rm operand without losing the parser's quote/escape contract. */
+export function resolveRmTargetPath(
+  target: { value: string; quoted: boolean },
+  context: PermissionPathResolutionContext = {},
+  shell: ShellFamily = 'unknown',
+): PathValue {
+  const expanded =
+    !target.quoted && context.homeDir
+      ? resolveHomeInTarget(target.value, context.homeDir)
+      : target.value;
+  // Prefix a shell-protected tilde with ./ so the generic path resolver sees
+  // a literal cwd-relative name. Quoted $HOME retains its conservative dynamic
+  // classification; do not evaluate it or reinterpret the parser's metadata.
+  const literal =
+    target.quoted && (expanded === '~' || expanded.startsWith('~/')) ? `./${expanded}` : expanded;
+  return {
+    ...resolvePermissionPath(literal, context, shell),
+    raw: target.value,
+    ...(expanded !== target.value ? { resolution: 'home' as const } : {}),
+  };
 }
 
 /**
@@ -856,14 +896,17 @@ export function evaluateBashStatic(
   // compound commands attribute the verdict to the right subcommand.
   // ===================================================================
   const recoverableWindowsDelete =
+    !bashCtx?.nativeDelete &&
     bashCtx?.platform === 'win32' &&
     (bashCtx.shellFamily === 'cmd' || bashCtx.shellFamily === 'powershell')
       ? parseWindowsNativeDelete(command, bashCtx.shellFamily)
       : undefined;
   for (const candidate of getUnwrappedCommandCandidates()) {
-    const hardHit = matchHardBlockedBash(getShellPermissionCheckSurface(candidate));
+    const hardHit = matchHardBlockedBash(getShellPermissionCheckSurface(candidate), {
+      nativeDelete: bashCtx?.nativeDelete,
+      recoverableWindowsDelete: Boolean(recoverableWindowsDelete),
+    });
     if (!hardHit) continue;
-    if (hardHit.category === 'windows-delete' && recoverableWindowsDelete) continue;
     if (!hardBlockedCategoryIsFinalDeny(hardHit.category)) continue;
     logWholeLayer('hard-final-deny-prescan', 'deny', hardHit.category);
     const wholeCommandKey = command.trim();
@@ -1200,6 +1243,7 @@ function evaluateSingleSubcommand(
   }
 
   const recoverableWindowsDelete =
+    !bashCtx?.nativeDelete &&
     bashCtx?.platform === 'win32' &&
     (bashCtx.shellFamily === 'cmd' || bashCtx.shellFamily === 'powershell')
       ? parseWindowsNativeDelete(command, bashCtx.shellFamily)
@@ -1211,8 +1255,10 @@ function evaluateSingleSubcommand(
   // get matched as a real read against the sensitive path. Aligned with the
   // STEP 0b whole-command HARD prescan above (line ~877).
   for (const surface of getPermissionSurfaces()) {
-    const hardHit = matchHardBlockedBash(surface);
-    if (hardHit?.category === 'windows-delete' && recoverableWindowsDelete) continue;
+    const hardHit = matchHardBlockedBash(surface, {
+      nativeDelete: bashCtx?.nativeDelete,
+      recoverableWindowsDelete: Boolean(recoverableWindowsDelete),
+    });
     if (hardHit && hardBlockedCategoryIsFinalDeny(hardHit.category)) {
       return logLayer('hard-final-deny', {
         verdict: 'deny',
@@ -1270,7 +1316,7 @@ function evaluateSingleSubcommand(
         reason: { type: 'recoverableDeleteRewrite', targets: recoverableWindowsDelete.targets },
       });
     }
-    if (isRmCommand(command)) {
+    if (!bashCtx?.nativeDelete && isRmCommand(command)) {
       return logLayer('rm-rewrite', {
         verdict: 'allow',
         reason: { type: 'rmRewrite', rewrittenCommand: command },
@@ -1300,6 +1346,7 @@ function evaluateSingleSubcommand(
     // text happens to mention a delete verb can unbypass for that call.
     const bypassSniffTargets = [command, ...unwrapCommandWrappers(command)];
     if (
+      !bashCtx?.nativeDelete &&
       !recoverableWindowsDelete &&
       bypassSniffTargets.some((s) => BYPASS_DELETE_VERB_SNIFF.test(s))
     ) {
@@ -1331,9 +1378,11 @@ function evaluateSingleSubcommand(
   // documentation example like `cat /etc/shadow` inside an MR description
   // heredoc trips sensitive-read even though the body is data, not shell.
   for (const surface of getPermissionSurfaces()) {
-    const hardHit = matchHardBlockedBash(surface);
+    const hardHit = matchHardBlockedBash(surface, {
+      nativeDelete: bashCtx?.nativeDelete,
+      recoverableWindowsDelete: Boolean(recoverableWindowsDelete),
+    });
     if (!hardHit) continue;
-    if (hardHit.category === 'windows-delete' && recoverableWindowsDelete) continue;
     // final-deny already handled in step 3; non-final-deny falls here.
     return logLayer('hard-sensitive-read', {
       verdict: mode === 'auto' ? 'undecided' : 'ask',
@@ -1437,7 +1486,7 @@ function evaluateSingleSubcommand(
 
   // Step 7: SOFT pre-scan (per-subcommand) — bashCommandIsSafe + dangerousPatterns
   // Skipped for rm commands (they get rewritten at step 8).
-  if (!isRmCommand(command) && !recoverableWindowsDelete) {
+  if (bashCtx?.nativeDelete || (!isRmCommand(command) && !recoverableWindowsDelete)) {
     const safetyIssue = bashCommandIsSafe(command);
     if (safetyIssue) {
       return logLayer('soft-prescan', {
@@ -1447,7 +1496,7 @@ function evaluateSingleSubcommand(
     }
 
     for (const candidate of getUnwrappedCandidates()) {
-      const dangerousMatch = checkDangerousPatterns(candidate);
+      const dangerousMatch = checkDangerousPatterns(candidate, bashCtx);
       if (!dangerousMatch) continue;
       return logLayer('soft-prescan', {
         verdict: mode === 'auto' ? 'undecided' : 'ask',
@@ -1477,7 +1526,7 @@ function evaluateSingleSubcommand(
   // to the runtime-managed shim, so the sandbox sees an ordinary in-cage
   // delete and enforces `unlinkAllowOnly` in the kernel. Permission therefore
   // stays a pure judgement here — no sandbox-shaped scope gate.
-  if (isRmCommand(command)) {
+  if (!bashCtx?.nativeDelete && isRmCommand(command)) {
     return logLayer('rm-rewrite', {
       verdict: 'allow',
       reason: { type: 'rmRewrite', rewrittenCommand: command },

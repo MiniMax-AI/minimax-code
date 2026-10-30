@@ -107,6 +107,8 @@ export type ExecutionPlan = {
   effectiveInput: Record<string, unknown>;
   intents: CommandIntent[];
   transforms: ExecutionTransform[];
+  /** Permission.nativeDelete captured when the decision was made. */
+  nativeDelete?: boolean;
 };
 
 export type PermissionModeProfile = {
@@ -222,6 +224,7 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
       ruleMatchers: resolveRuleMatchers(checkerResult),
       candidateScopes: resolveCandidateScopes(checkerResult),
       bypassImmune: true,
+      rewrittenInput: checkerResult.rewrittenInput,
       skipAutoClassifier: checkerResult.skipAutoClassifier,
     };
   }

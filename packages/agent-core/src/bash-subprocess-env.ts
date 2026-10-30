@@ -25,7 +25,7 @@
  * @module
  */
 
-import { isAbsolute } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
 import { stripRuntimeBoundaryKeysFrom } from '@mavis/shared/runtime-boundary-env';
 
@@ -44,6 +44,8 @@ export interface BashEnvPolicy {
    * agent-core stays agnostic about what the directories contain.
    */
   prependPath?: readonly string[];
+  /** Absolute runtime-managed directories to remove from inherited PATH. */
+  removePath?: readonly string[];
   /**
    * Host-injected gate that runs before every bash subprocess launch; throwing
    * blocks the spawn. The desktop runtime uses it to verify — and re-seed when
@@ -55,6 +57,9 @@ export interface BashEnvPolicy {
    */
   spawnPreflight?: () => void;
 }
+
+/** Dynamic sources are read for each new subprocess, never cached by the tool. */
+export type BashEnvPolicySource = BashEnvPolicy | (() => BashEnvPolicy);
 
 export interface BashEnvSanitizeResult {
   /** New env object; the input is never mutated. */
@@ -183,14 +188,16 @@ export function resolveBashEnvPolicy(
     mode,
     ...(overrides?.allowlist ? { allowlist: overrides.allowlist } : {}),
     ...(overrides?.prependPath ? { prependPath: overrides.prependPath } : {}),
+    ...(overrides?.removePath ? { removePath: overrides.removePath } : {}),
     ...(overrides?.spawnPreflight ? { spawnPreflight: overrides.spawnPreflight } : {}),
   };
 }
 
 export function sanitizeBashSubprocessEnv(
   env: NodeJS.ProcessEnv,
-  policy: BashEnvPolicy,
+  source: BashEnvPolicySource,
 ): BashEnvSanitizeResult {
+  const policy = typeof source === 'function' ? source() : source;
   policy.spawnPreflight?.();
   const out: NodeJS.ProcessEnv = { ...env };
   const removed: string[] = [];
@@ -218,8 +225,33 @@ export function sanitizeBashSubprocessEnv(
   }
 
   removed.sort();
+  removePathEntries(out, policy.removePath);
   applyPathPrefix(out, policy.prependPath);
   return { env: out, removed };
+}
+
+/** Remove only the named managed directories, preserving every other PATH entry. */
+function removePathEntries(env: NodeJS.ProcessEnv, removePath?: readonly string[]): void {
+  if (!removePath?.length) return;
+  const normalize = (entry: string) => {
+    const absolute = resolve(entry);
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  };
+  const removed = new Set(removePath.filter(isAbsolute).map(normalize));
+  const separator = process.platform === 'win32' ? ';' : ':';
+  for (const name of Object.keys(env)) {
+    const isPath =
+      process.platform === 'win32'
+        ? name.toUpperCase() === 'PATH'
+        : name === 'PATH' || name === 'Path';
+    if (!isPath) continue;
+    const current = env[name];
+    if (current === undefined) continue;
+    env[name] = current
+      .split(separator)
+      .filter((entry) => !isAbsolute(entry) || !removed.has(normalize(entry)))
+      .join(separator);
+  }
 }
 
 /**
@@ -232,12 +264,14 @@ function applyPathPrefix(env: NodeJS.ProcessEnv, prependPath?: readonly string[]
   if (!prependPath?.length) return;
   const separator = process.platform === 'win32' ? ';' : ':';
   const existing = env.PATH ?? env.Path ?? '';
-  const current = existing.split(separator).filter((entry) => entry !== '');
-  const additions = prependPath.filter(
-    (dir) => isAbsolute(dir) && !current.includes(dir),
+  const prefix = [...new Set(prependPath.filter(isAbsolute))];
+  if (prefix.length === 0) return;
+  // A shell adapter may prepend its own bin even when our shim was inherited.
+  // Move managed entries to the front on every spawn, preserving the rest.
+  const current = (existing ? existing.split(separator) : []).filter(
+    (entry) => !prefix.includes(entry),
   );
-  if (additions.length === 0) return;
-  const nextPath = [...additions, ...current].join(separator);
+  const nextPath = [...prefix, ...current].join(separator);
   // Windows env lookups are case-insensitive but the object keys are not:
   // overwrite whichever casing the inherited environment actually used.
   if (env.PATH === undefined && env.Path !== undefined) env.Path = nextPath;
@@ -263,7 +297,7 @@ export interface BashSpawnContextLike {
  * is identical — only the removed-name capture differs.
  */
 export function createBashEnvSpawnHook(
-  policy: BashEnvPolicy,
+  policy: BashEnvPolicySource,
   onSanitized?: (removed: string[]) => void,
 ): <T extends BashSpawnContextLike>(ctx: T) => T {
   return (ctx) => {

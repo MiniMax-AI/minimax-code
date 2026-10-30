@@ -14,6 +14,7 @@ import type {
 } from '@mavis/agent-tools/desktop';
 import type { AgentBuiltinSkillId, ResolvedAgentCapabilities } from '@mavis/config';
 
+import type { LocalRuntimeConfig } from '../config/types.js';
 import type { DesktopTurnCapabilityView } from '../runtime/desktop-turn-capabilities.js';
 import type { LocalRuntimeAuthContext } from '../runtime/model-resolver.js';
 import type { LocalRuntimeRoutingContext } from '../runtime/routing-headers.js';
@@ -27,6 +28,8 @@ import type { LocalRuntimeApiHostOptions } from './host-helpers.js';
 export interface LocalTurnToolSourcesInput {
   toolsDisabled: boolean;
   dataDir: string;
+  /** Read current policy when a new Bash child is started. */
+  configGetter?: () => LocalRuntimeConfig;
   workspaceRoot: string;
   agentName: string;
   excludeAgentResources?: boolean;

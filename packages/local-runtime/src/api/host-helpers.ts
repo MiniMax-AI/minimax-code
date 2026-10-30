@@ -17,7 +17,7 @@ import type { ToolDiagnosticLogger as MatrixToolLogger } from "../observability/
 import type { LocalMavisCronAdapter } from "@mavis/agent-tools/desktop";
 import type { RuntimeConversation } from "@mavis/conversation-contract";
 import type { CronStorePort } from "@mavis/cron";
-import type { PermissionRuleMatcher } from "@mavis/permission";
+import type { PermissionRuleMatcher, ShellFamily } from "@mavis/permission";
 import type { GlobalEventPayloadMap } from "@mavis/shared/global-events";
 import type { AgentReferenceResolver } from "../agent/port.js";
 import type { LocalAgentRuntimePort } from "../agent/runtime-port.js";
@@ -98,7 +98,7 @@ export interface LocalRuntimeApiHostOptions {
   capabilityProfile?: "cli";
   capabilities?: Partial<LocalRuntimeCapabilities>;
   /** Explicit shell provenance supplied by the local executor; unknown remains fail-closed on Windows native delete. */
-  shellFamily?: "cmd" | "powershell";
+  shellFamily?: ShellFamily;
   /** Composition overrides injected by the Cron v2 owner for legacy Local Mavis commands. */
   mavisCronAdapterProvider?: () => LocalMavisCronAdapter | undefined;
   /** Host boundary for cleaning up Cron definitions when an Agent is deleted. */

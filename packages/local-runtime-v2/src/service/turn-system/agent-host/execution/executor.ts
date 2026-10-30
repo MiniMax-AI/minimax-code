@@ -490,7 +490,11 @@ export class LocalRuntimeTurnExecutor<
       (tool) =>
         tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
     );
-    const standardTools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
+    const standardTools = prepareBashTurnTools(
+      admittedTools,
+      canConsumeBackgroundBashOutput,
+      this.options.nativeDelete?.() === true,
+    );
     const toolContext = {
       ...toolResolution.context,
       ...(input.pluginHooks?.length

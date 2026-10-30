@@ -1058,6 +1058,31 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
     },
   );
 
+  it('updates deletion guidance on the next Turn without mutating an active Turn', async () => {
+    let nativeDelete = false;
+    const descriptions: string[] = [];
+    const executor = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        const bash = runInput.tools?.find((tool) => tool.def.name === 'bash');
+        const description = bash?.def.description ?? '';
+        descriptions.push(description);
+        nativeDelete = !nativeDelete;
+        expect(bash?.def.description).toBe(description);
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+      }),
+      nativeDelete: () => nativeDelete,
+    });
+    const bash = toRuntimeTool(new LocalBashTool('/tmp/workspace', undefined, { mode: 'off' }));
+    for (let turn = 0; turn < 3; turn += 1) {
+      const input = executionInput();
+      await executor.execute({ ...input, assembly: { ...input.assembly, tools: [bash] } });
+    }
+    expect(descriptions[0]).toContain('falling back to permanent deletion');
+    expect(descriptions[1]).not.toMatch(/mavis-trash|deletion/i);
+    expect(descriptions[0]).toContain(descriptions[1]);
+    expect(descriptions[2]).toBe(descriptions[0]);
+  });
+
   it.each([
     { source: undefined, allowed: true },
     { source: "builtin" as const, allowed: true },
