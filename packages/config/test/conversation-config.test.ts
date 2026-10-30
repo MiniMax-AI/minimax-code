@@ -45,8 +45,8 @@ describe('parseConversationStopConfig', () => {
         policySource: DEFAULT_SOURCES,
       });
     }
-    // The documented defaults: subagents keep running, background bash stops.
-    expect(CONVERSATION_STOP_CONFIG_DEFAULTS).toEqual({ stopSubAgent: false, stopAsyncBash: true });
+    // The documented defaults: a stop cascades to both subagents and background bash.
+    expect(CONVERSATION_STOP_CONFIG_DEFAULTS).toEqual({ stopSubAgent: true, stopAsyncBash: true });
   });
 
   it('takes explicit booleans and marks them explicit', () => {
@@ -57,8 +57,9 @@ describe('parseConversationStopConfig', () => {
       stopAsyncBash: false,
       policySource: { stopSubAgent: 'explicit', stopAsyncBash: 'explicit' },
     });
+    // `stopSubAgent` is absent, so it falls back to the (on) default.
     expect(parseConversationStopConfig({ conversation: { stopAsyncBash: false } })).toEqual({
-      stopSubAgent: false,
+      stopSubAgent: true,
       stopAsyncBash: false,
       policySource: { stopSubAgent: 'default', stopAsyncBash: 'explicit' },
     });
@@ -74,7 +75,7 @@ describe('parseConversationStopConfig', () => {
     });
     // An empty value (`stopSubAgent:`) is present but not a boolean either.
     expect(parseConversationStopConfig({ conversation: { stopSubAgent: null } })).toMatchObject({
-      stopSubAgent: false,
+      stopSubAgent: true,
       ignoredKeys: ['stopSubAgent'],
     });
   });
@@ -109,7 +110,7 @@ describe('readConversationStopConfig', () => {
     );
 
     expect(readConversationStopConfig(path)).toEqual({
-      stopSubAgent: false,
+      stopSubAgent: true,
       stopAsyncBash: false,
       policySource: { stopSubAgent: 'default', stopAsyncBash: 'explicit' },
       ignoredKeys: ['stopSubAgent'],
@@ -193,7 +194,7 @@ describe('readConversationStopConfig', () => {
     await writeFile(join(dir, 'config.yaml'), 'conversation:\n  stopAsyncBash: false\n');
 
     expect(readConversationStopConfig()).toEqual({
-      stopSubAgent: false,
+      stopSubAgent: true,
       stopAsyncBash: false,
       policySource: { stopSubAgent: 'default', stopAsyncBash: 'explicit' },
       configPath: join(dir, 'config.yaml'),

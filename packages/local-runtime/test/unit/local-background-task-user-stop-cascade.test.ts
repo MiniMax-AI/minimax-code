@@ -1916,10 +1916,13 @@ describe('user stop cascade: stop policy orchestration', () => {
       fixture.admit('bash');
       const port = createUserStopCascade({ host: fixture.host });
 
-      await writeFile(join(dataDir, 'config.yaml'), 'conversation:\n  stopAsyncBash: false\n');
+      await writeFile(
+        join(dataDir, 'config.yaml'),
+        'conversation:\n  stopSubAgent: false\n  stopAsyncBash: false\n',
+      );
       const first = await port.begin(OWNER);
       first!.complete({ status: 'not-running' });
-      // Subagents off by default and bash now off too: nothing to cascade.
+      // Both switches explicitly off: nothing to cascade.
       expect(isUserStopWindowOpen(fixture.host, OWNER)).toBe(false);
       expect(fixture.stop).not.toHaveBeenCalled();
 

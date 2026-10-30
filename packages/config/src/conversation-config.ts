@@ -11,9 +11,14 @@ import { getConfigPath } from './config.js';
  *
  * ```yaml
  * conversation:
- *   stopSubAgent: false   # also stop the background subagents it started
+ *   stopSubAgent: true    # also stop the background subagents it started
  *   stopAsyncBash: true   # also stop the background bash it started
  * ```
+ *
+ * Both default to on: stopping a main conversation is taken as "I am done with
+ * this conversation", so everything it started in the background is stopped
+ * together with it and never wakes the conversation back up. Set a switch to
+ * `false` to opt that kind of background work out of the stop.
  *
  * Deliberately not part of `Config` / `getConfig()`. There is no GUI for these
  * switches, so they stay out of `GET /config` and the config write whitelist,
@@ -29,6 +34,10 @@ export interface ConversationStopConfig {
    * Also stop the background subagents the stopped conversation started
    * (including `task_append` continuations), together with everything in their
    * child Sessions.
+   *
+   * Default `true`. A subagent is owned work of the conversation that started
+   * it: when that conversation is stopped, continuing to run it would only
+   * produce a completion notification that wakes the conversation back up.
    */
   readonly stopSubAgent: boolean;
   /** Also stop the background bash the stopped conversation itself started. */
@@ -36,7 +45,7 @@ export interface ConversationStopConfig {
 }
 
 export const CONVERSATION_STOP_CONFIG_DEFAULTS: Readonly<ConversationStopConfig> = Object.freeze({
-  stopSubAgent: false,
+  stopSubAgent: true,
   stopAsyncBash: true,
 });
 

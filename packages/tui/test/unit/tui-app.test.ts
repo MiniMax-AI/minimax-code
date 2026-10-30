@@ -3397,11 +3397,11 @@ describe("createTuiApp", () => {
     const submitting = app.submit('Delegate, then keep going');
     await vi.waitFor(() => expect(app.controller.snapshot().status).toBe('running'));
     vi.mocked(readConversationStopConfig).mockClear();
-    // No `conversation` section in config.yaml: the shipped default.
+    // The switch is off: opt this install out of the (on) shipped default.
     vi.mocked(readConversationStopConfig).mockReturnValueOnce({
       stopSubAgent: false,
       stopAsyncBash: true,
-      policySource: { stopSubAgent: 'default', stopAsyncBash: 'default' },
+      policySource: { stopSubAgent: 'explicit', stopAsyncBash: 'default' },
     });
 
     await app.abortTurn();

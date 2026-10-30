@@ -1129,7 +1129,7 @@ describe('session stop cascade scope', () => {
 
 describe('session stop cascade switches: defaults', () => {
   it(
-    'G1: by default stops the owner bash and leaves a background subagent running; its completion still wakes the Session',
+    'G1: by default the stop cascades to both the owner bash and its background subagent, and the subagent never wakes the Session',
     async () => {
       dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-g1-'));
       await mkdir(join(dataDir, 'workspace'), { recursive: true });
@@ -1175,30 +1175,21 @@ describe('session stop cascade switches: defaults', () => {
       await conversation.ingress.abort(owner.sessionId, 'user_stop');
 
       await expectTasksCanceled(liveHost, [bashId]);
-      // Give a (wrong) cascade ample time to reach the subagent before asserting it did not.
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-      expect(childSignal.aborted).toBe(false);
-      await expect(liveHost.apiHost.backgroundTaskService.get(subagentId)).resolves.toMatchObject({
-        status: 'running',
-      });
+      // The subagent belongs to the stopped conversation, so the default stop
+      // reaches it and into its child Session.
+      await expectTasksCanceled(liveHost, [subagentId]);
+      expect(childSignal.aborted).toBe(true);
 
       const turnsBeforeCompletion = harness.startedTurns.length;
       childRelease.resolve();
-      // Its completion notice is delivered as usual: a delivery Turn wakes the owner.
-      await vi.waitFor(
-        () => {
-          const deliveryTurn = harness.startedTurns
-            .slice(turnsBeforeCompletion)
-            .find(
-              (turn) =>
-                turn.sessionId === owner.sessionId && turn.turnId.startsWith('turn_task_delivery'),
-            );
-          expect(deliveryTurn).toBeDefined();
-        },
-        { timeout: 30_000, interval: 100 },
-      );
+      // Nothing is left to report: a canceled subagent never wakes the owner.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      const deliveryTurns = harness.startedTurns
+        .slice(turnsBeforeCompletion)
+        .filter((turn) => turn.sessionId === owner.sessionId);
+      expect(deliveryTurns).toEqual([]);
       await expect(liveHost.apiHost.backgroundTaskService.get(subagentId)).resolves.toMatchObject({
-        status: 'succeeded',
+        status: 'canceled',
       });
     },
     HOST_TEST_TIMEOUT_MS,
