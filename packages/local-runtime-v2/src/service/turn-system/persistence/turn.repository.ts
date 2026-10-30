@@ -30,9 +30,11 @@ import type {
 } from './contracts.js';
 import { createPluginHookSessionPersistence } from './plugin-hook-session.repository.js';
 import {
+  findClientRequestBindings,
+  insertReceiptAliases,
   persistedTurnConsumesQueuePause,
   publishQueueFacts,
-} from './turn-queue-pause-persistence.js';
+} from './turn-ingress-persistence.js';
 
 const DEFAULT_LEASE_MS = 30 * 60 * 1_000;
 const LEGACY_TURN_LEASE_STALL_MS = 30_000;
@@ -221,6 +223,7 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
     findSteeringReceipt: (input) => findSteeringReceipt(options, input),
     reserveSteeringReceipt: (input) => reserveSteeringReceipt(options, input),
     releaseSteeringReceipt: (input) => releaseSteeringReceipt(options, input),
+    findClientRequestBindings: async (input) => findClientRequestBindings(options.db, input),
     revokeAdmission: (input) => revokeAdmission(options, input, nowMs()),
     isAcceptedInTransaction: (db, query) => Boolean(findAcceptedQueueTurn(db, query)),
     markAcknowledgedInTransaction: (db, query) => {
@@ -614,6 +617,7 @@ async function reserveSteeringReceipt(
           ordinal: 0,
         })
         .run();
+      insertReceiptAliases(tx, input);
       return { status: 'reserved' as const };
     },
     { behavior: 'immediate' },
@@ -630,7 +634,10 @@ async function releaseSteeringReceipt(
         .where(
           and(
             eq(turnIngressClientRequests.sessionId, input.sessionId),
-            eq(turnIngressClientRequests.clientRequestId, input.clientRequestId),
+            inArray(turnIngressClientRequests.clientRequestId, [
+              input.clientRequestId,
+              ...(input.receiptAliases ?? []),
+            ]),
             eq(turnIngressClientRequests.turnId, input.turnId),
           ),
         )
@@ -1208,6 +1215,7 @@ function insertAdmission(
         ordinal: 0,
       })
       .run();
+    insertReceiptAliases(tx, input);
   }
   return { status: 'accepted', leaseId, acceptedSequence: sequence, acceptedAtMs: nowMs };
 }

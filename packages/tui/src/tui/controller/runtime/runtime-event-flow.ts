@@ -66,10 +66,7 @@ export interface TuiRuntimeEventFlowOptions {
   readonly effectRunner: TuiEffectRunner;
   readonly stateCoordinator: TuiRuntimeStateCoordinator;
   readonly sessionFlow: Pick<TuiSessionFlow, 'reconcileRuntimeEvent'>;
-  readonly delegationFlow: Pick<
-    TuiDelegationFlow,
-    'handleRuntimeEvent' | 'handleSettledRuntimeEvent' | 'refresh'
-  >;
+  readonly delegationFlow: Pick<TuiDelegationFlow, 'handleRuntimeEvent' | 'refresh'>;
   readonly activeRunFlow: TuiActiveRunFlow;
   readonly interactionFlow: TuiInteractionFlow;
   readonly runProjection: TuiRunProjection;
@@ -595,13 +592,12 @@ export class TuiRuntimeEventFlow {
       event.type === 'session.error' ||
       event.type === 'session.abort'
     ) {
-      const terminalSettled = await this.handleRuntimeTurnFinished(
+      await this.handleRuntimeTurnFinished(
         event,
         currentSessionId,
         liveTurnDurationMs,
         interactionHandled,
       );
-      if (terminalSettled) this.options.delegationFlow.handleSettledRuntimeEvent(event);
       await this.notifyTerminalEvent(event, currentSessionId);
     }
   }

@@ -829,6 +829,9 @@ function admissionInput(
     priority: directAdmissionPriority(input, values.candidateCreatedAtMs),
     ...(input.resume ? { userInputResume: input.resume } : {}),
     ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
+    ...(input.clientRequestId && input.receiptAliases?.length
+      ? { receiptAliases: input.receiptAliases }
+      : {}),
   };
 }
 

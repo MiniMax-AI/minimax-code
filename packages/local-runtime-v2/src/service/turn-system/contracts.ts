@@ -32,6 +32,7 @@ import type {
   TurnAdmissionPolicy,
   TurnAdmissionRejectionReason,
   TurnAdmissionUserInputResume,
+  TurnClientRequestBinding,
   TurnIngressReceipt,
   TurnSessionAdmissionCapability,
 } from './admission-contracts.js';
@@ -176,6 +177,16 @@ export interface TurnActivationSubmission extends TurnMessageSubmission {
   /** Queue item identity carried onto the persisted user message. */
   readonly sourceMessageId?: string;
   readonly resume?: TurnAdmissionUserInputResume;
+  /**
+   * Stable id of the Query this submission's producer already admitted durably.
+   *
+   * Set when a delivery re-routes the same user submission to a fresh Turn, so
+   * that Turn binds the Query the user actually asked instead of admitting the
+   * same text a second time under its own id.
+   */
+  readonly admittedQueryId?: string;
+  /** Per-item receipt ids admitted with `clientRequestId` in the same ledger write. */
+  readonly receiptAliases?: readonly string[];
 }
 
 export interface ResumeUserInputSubmission extends Omit<
@@ -387,6 +398,11 @@ export interface SteerSessionInput extends TurnMessageSubmission {
   /** Queue item identity carried onto the persisted user message. */
   readonly sourceMessageId?: string;
   readonly preDelivery?: TurnSteerPreDelivery;
+  /**
+   * Per-item receipt ids bound to the Turn that admits or joins this steer. Setting them
+   * makes the producer receipt durable, like `preDelivery`.
+   */
+  readonly receiptAliases?: readonly string[];
 }
 
 export type SteerSessionResult =
@@ -766,6 +782,11 @@ export interface TurnSystemOwner {
   readonly maintenance: SessionMaintenanceGuard;
   readonly receipts: {
     findReceipt(turnId: string): Promise<TurnIngressReceipt | undefined>;
+    /** Read-only lookup of the Turn each durable client request receipt is bound to. */
+    findClientRequestBindings(input: {
+      readonly sessionId: string;
+      readonly clientRequestIds: readonly string[];
+    }): Promise<readonly TurnClientRequestBinding[]>;
   };
   readonly trustedEditSubmission: {
     submit(input: ConversationEditAdmissionInput): Promise<ConversationEditAdmissionResult>;

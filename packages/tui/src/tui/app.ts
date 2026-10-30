@@ -131,7 +131,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     version: options.version,
     defaultAgentName,
     ...automationResultDelivery,
-    onAutomationResultPublished: (result) => delegationFlow.handleAutomationResultPublished(result),
     onTodoChange: (items) => tasks.setItems(items),
     onUserSubmissionProjected: () => {
       codexHandoffFlow?.dismiss();
@@ -201,6 +200,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     setEditTranscriptBoundary: transcriptVisibility.hideFromSourceMessage,
     onAgentTeamChanged: (snapshot) => tasks.setAgentTeam(snapshot),
     onBackgroundTasksChanged: (backgroundTasks) => tasks.setBackgroundTasks(backgroundTasks),
+    machineStatus: agentStatusEnabled,
     onChanged: updateChromeAndRequestRender,
     hasLiveRun,
   });

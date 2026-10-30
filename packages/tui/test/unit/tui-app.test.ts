@@ -14746,6 +14746,9 @@ describe("createTuiApp", () => {
         wakeBus?.();
         wakeBus = undefined;
       };
+      // Both screen renders must observe the same time; keep async timers real.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(3_201);
       const app = createTuiApp({
         runtime,
         terminal,
@@ -14896,6 +14899,7 @@ describe("createTuiApp", () => {
         finishQueuedStream?.();
         await app.stop();
         screen.dispose();
+        vi.useRealTimers();
       }
     },
   );

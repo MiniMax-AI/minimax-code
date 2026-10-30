@@ -102,6 +102,7 @@ export function createV1CompatibleTurnSubmission(
             idempotencyKey: input.idempotencyKey,
             ...(input.requestedTurnId ? { requestedTurnId: input.requestedTurnId } : {}),
             preDelivery: input.preDelivery,
+            ...(input.receiptAliases?.length ? { receiptAliases: input.receiptAliases } : {}),
             delivery: toDeliveryOptions(message),
           }),
         (result) => result.delivered,

@@ -64,6 +64,7 @@ export function buildBackgroundTaskDeliveryInput(input: {
     requestedTurnId: input.requestedTurnId,
     producerId: 'background-task-delivery',
     idempotencyKey: batchDeliveryIdentity(input.batchTaskIds),
+    receiptAliases: input.tasks.map((task) => backgroundTaskNotificationReceiptId(task.taskId)),
     message: {
       content: buildBackgroundTaskDeliveryPrompt(input.tasks),
       attachments: [],
@@ -75,6 +76,15 @@ export function buildBackgroundTaskDeliveryInput(input: {
       },
     },
   };
+}
+
+/**
+ * Turn ingress receipt id of one Task's terminal notification. The runtime binds it to the
+ * exact Turn that admitted or joined the delivery, so readers can tell whether that
+ * notification has settled without trusting process memory.
+ */
+export function backgroundTaskNotificationReceiptId(taskId: string): string {
+  return `background-task-notification:${taskId}`;
 }
 
 function batchDeliveryIdentity(taskIds: readonly string[]): string {

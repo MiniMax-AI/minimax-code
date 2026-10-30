@@ -404,6 +404,12 @@ export interface ConversationSteerInput {
    * not provide this hook and keeps its existing semantics.
    */
   readonly preDelivery?: ConversationSteerPreDelivery;
+  /**
+   * Internal per-item receipt ids that the runtime durably binds to the exact
+   * Turn admitting this steer, in the same write as the producer receipt. A
+   * batching producer uses them to answer which Turn carried each item.
+   */
+  readonly receiptAliases?: readonly string[];
 }
 
 export interface ConversationSteerPreDelivery {

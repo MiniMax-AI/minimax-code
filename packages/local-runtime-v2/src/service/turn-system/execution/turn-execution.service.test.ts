@@ -291,6 +291,7 @@ function harness() {
       status: 'not-accepted',
     })),
     releaseSteeringReceipt: vi.fn<TurnRepository['releaseSteeringReceipt']>(async () => undefined),
+    findClientRequestBindings: vi.fn<TurnRepository['findClientRequestBindings']>(async () => []),
     revokeAdmission: vi.fn<TurnRepository['revokeAdmission']>(async () => true),
     beginSessionDeletion: vi.fn<TurnRepository['beginSessionDeletion']>(async () => ({
       status: 'quiescent',

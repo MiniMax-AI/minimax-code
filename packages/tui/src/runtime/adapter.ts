@@ -28,6 +28,7 @@ import type {
   TuiAccountStatusOptions,
   TuiActiveRunSnapshot,
   TuiBackgroundTask,
+  TuiBackgroundTaskListOptions,
   TuiCompactionResult,
   TuiDelegationSnapshot,
   TuiDelegationStopReceipt,
@@ -193,7 +194,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
 
   async createSession(input: CreateTuiSessionInput): Promise<TuiSession> {
     const sessionInput =
-      this.contextMode === "lightweight" && !input.parentSessionId && !input.purpose
+      this.contextMode === "lightweight" &&
+      !input.parentSessionId &&
+      !input.purpose
         ? { ...input, purpose: LIGHTWEIGHT_SESSION_PURPOSE }
         : input;
     const defaultModel = await this.productAccess
@@ -457,7 +460,10 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   ): Promise<boolean> {
     return this.productAccess.selectSessionModel(model, sessionId);
   }
-  setModelFavorite(model: TuiModelSelection, favorite: boolean): Promise<boolean> {
+  setModelFavorite(
+    model: TuiModelSelection,
+    favorite: boolean,
+  ): Promise<boolean> {
     return this.productAccess.setModelFavorite(model, favorite);
   }
   listUserModelProviders() {
@@ -703,6 +709,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
 
   async listBackgroundTasks(
     ownerSessionId: string,
+    options: TuiBackgroundTaskListOptions = {},
   ): Promise<readonly TuiBackgroundTask[]> {
     const activeStatuses = ["queued", "running", "stopping"] as const;
     const terminalStatuses = [
@@ -711,17 +718,23 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       "canceled",
       "lost",
     ] as const;
+    const query = options.machineStatus
+      ? {
+          kinds: ["bash", "subagent", "workflow", "custom"] as const,
+          includeNotification: true,
+        }
+      : { kinds: ["bash", "workflow", "custom"] as const };
     const [active, terminal] = await Promise.all([
       this.cliService.listBackgroundTasks({
         ownerSessionId,
         statuses: activeStatuses,
-        kinds: ["bash", "workflow", "custom"],
+        ...query,
         limit: 100,
       }),
       this.cliService.listBackgroundTasks({
         ownerSessionId,
         statuses: terminalStatuses,
-        kinds: ["bash", "workflow", "custom"],
+        ...query,
         limit: 100,
       }),
     ]);
@@ -729,12 +742,6 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       [...active, ...terminal].map((task) => [task.taskId, task]),
     );
     return [...tasks.values()]
-      .filter(
-        (
-          task,
-        ): task is typeof task & { readonly kind: TuiBackgroundTask["kind"] } =>
-          task.kind !== "subagent",
-      )
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .map((task) => ({
         taskId: task.taskId,
@@ -757,8 +764,23 @@ export class TuiRuntimeAdapter implements TuiRuntime {
         ...(task.lastError?.message
           ? { lastError: task.lastError.message }
           : {}),
-        ...(task.kind === 'bash' && task.metadata?.executionMode === 'managed_foreground'
+        ...(task.kind === "bash" &&
+        task.metadata?.executionMode === "managed_foreground"
           ? { foreground: true as const }
+          : {}),
+        ...(task.kind === "subagent" &&
+        typeof task.metadata?.childSessionId === "string"
+          ? { childSessionId: task.metadata.childSessionId }
+          : {}),
+        ...(task.notification
+          ? {
+              notification: {
+                state: task.notification.state,
+                ...(task.notification.turnId
+                  ? { turnId: task.notification.turnId }
+                  : {}),
+              },
+            }
           : {}),
       }));
   }

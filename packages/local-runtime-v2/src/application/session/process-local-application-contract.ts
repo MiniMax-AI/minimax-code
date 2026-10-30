@@ -77,6 +77,21 @@ interface LocalRuntimeBackgroundTaskView {
   readonly endedAt?: number;
   readonly deliveredAt?: number;
   readonly lastError?: { readonly message: string };
+  /**
+   * Terminal Tasks only: whether the root conversation still owes this Task's notification.
+   * Absent when the Runtime cannot read it; readers then treat the notification as settled.
+   */
+  readonly notification?: LocalRuntimeBackgroundTaskNotification;
+}
+
+/**
+ * `pending`: terminal, and no Turn has taken the notification yet. `settled`: it was steered into
+ * a running Turn or admitted as a new one (`turnId`), the result was read, or the user stopped
+ * the Task. Settlement does not wait for the receiving Turn to finish.
+ */
+interface LocalRuntimeBackgroundTaskNotification {
+  readonly state: 'pending' | 'settled';
+  readonly turnId?: string;
 }
 
 interface LocalRuntimeBackgroundTaskQuery {
@@ -85,6 +100,11 @@ interface LocalRuntimeBackgroundTaskQuery {
   readonly kinds?: readonly LocalRuntimeBackgroundTaskView["kind"][];
   readonly undeliveredOnly?: boolean;
   readonly limit?: number;
+  /**
+   * Read each terminal Task's root notification receipt and project `notification`. Off by
+   * default: only machine-status consumers need it, and other callers skip the ledger read.
+   */
+  readonly includeNotification?: boolean;
 }
 
 /** Internal peripheral Application surface consumed by process-local delivery. */

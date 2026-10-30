@@ -32,6 +32,7 @@ const mocked = vi.hoisted(() => ({
   closeAgentDb: vi.fn(),
   inspectCollision: vi.fn(),
   applyCollision: vi.fn(),
+  suppressedDeliveryTaskIds: new Set<string>(),
 }));
 
 vi.mock("@mavis/local-runtime", async () => {
@@ -41,6 +42,9 @@ vi.mock("@mavis/local-runtime", async () => {
   return {
     ...actual,
     closeAgentDb: mocked.closeAgentDb,
+    scanWorkspace: mocked.scanWorkspace,
+    isTaskDeliverySuppressed: (_host: unknown, taskId: string) =>
+      mocked.suppressedDeliveryTaskIds.has(taskId),
     withAgentNameConflictMigrationLock: async (
       _dataDir: string,
       operation: (scope: {
@@ -448,6 +452,150 @@ describe("v1 runtime compatibility host composition", () => {
 
     expect(mocked.cleanupBindCalls).toEqual([cron]);
     expect(mocked.deleteAgentCronTasks).toHaveBeenCalledWith("coder");
+  });
+});
+
+describe("v1 background Task notification projection", () => {
+  beforeEach(resetRuntimeCompatibilityMocks);
+
+  it("settles a terminal Task as soon as its notification is bound to a still-running Turn", async () => {
+    const tasks = [
+      {
+        taskId: "bg-done",
+        kind: "subagent" as const,
+        status: "succeeded" as const,
+        ownerSessionId: "session-1",
+        createdAt: 100,
+        updatedAt: 200,
+      },
+      {
+        taskId: "bg-running",
+        kind: "bash" as const,
+        status: "running" as const,
+        ownerSessionId: "session-1",
+        createdAt: 100,
+        updatedAt: 200,
+      },
+    ];
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({
+        backgroundTaskService: { list: async () => ({ items: tasks }) },
+      }),
+      { dataDir: "/tmp/runtime", runtimeOwnerKind: "tui" },
+    );
+    const findClientRequestBindings = vi.fn(async () => [
+      {
+        clientRequestId: "background-task-notification:bg-done",
+        turnId: "turn-delivery",
+      },
+    ]);
+    services.backgroundTasks.bindNotificationReceipts({
+      findClientRequestBindings,
+    });
+
+    await expect(
+      services.peripherals.backgroundTasks.list({
+        ownerSessionId: "session-1",
+      }),
+    ).resolves.toEqual(tasks);
+    expect(findClientRequestBindings).not.toHaveBeenCalled();
+
+    await expect(
+      services.peripherals.backgroundTasks.list({
+        ownerSessionId: "session-1",
+        includeNotification: true,
+      }),
+    ).resolves.toEqual([
+      {
+        ...tasks[0],
+        notification: { state: "settled", turnId: "turn-delivery" },
+      },
+      tasks[1],
+    ]);
+    expect(findClientRequestBindings).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      clientRequestIds: ["background-task-notification:bg-done"],
+    });
+  });
+
+  it("settles an unbound notification from a completed read or a user stop", async () => {
+    mocked.suppressedDeliveryTaskIds.clear();
+    mocked.suppressedDeliveryTaskIds.add("stopped");
+    const task = (taskId: string, overrides: Record<string, unknown> = {}) => ({
+      taskId,
+      kind: "bash" as const,
+      status: "succeeded" as const,
+      ownerSessionId: "session-1",
+      createdAt: 100,
+      updatedAt: 200,
+      ...overrides,
+    });
+    const tasks = [
+      task("read", { deliveredAt: 300 }),
+      task("stopped", { status: "canceled" }),
+      task("pending", { status: "failed" }),
+    ];
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({
+        backgroundTaskService: { list: async () => ({ items: tasks }) },
+      }),
+      { dataDir: "/tmp/runtime", runtimeOwnerKind: "tui" },
+    );
+    const query = { ownerSessionId: "session-1", includeNotification: true };
+
+    await expect(
+      services.peripherals.backgroundTasks.list(query),
+    ).resolves.toEqual(tasks);
+
+    services.backgroundTasks.bindNotificationReceipts({
+      findClientRequestBindings: async () => [],
+    });
+    const annotated = await services.peripherals.backgroundTasks.list(query);
+
+    expect(
+      annotated.map((entry) => [entry.taskId, entry.notification]),
+    ).toEqual([
+      ["read", { state: "settled" }],
+      ["stopped", { state: "settled" }],
+      ["pending", { state: "pending" }],
+    ]);
+  });
+
+  it("lists Tasks with an unknown notification state when the Turn ledger cannot be read", async () => {
+    const tasks = [
+      {
+        taskId: "bg-done",
+        kind: "bash" as const,
+        status: "succeeded" as const,
+        ownerSessionId: "session-1",
+        createdAt: 100,
+        updatedAt: 200,
+      },
+    ];
+    const warn = vi.fn();
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({
+        backgroundTaskService: { list: async () => ({ items: tasks }) },
+        matrixLogger: { info: vi.fn(), warn },
+      }),
+      { dataDir: "/tmp/runtime", runtimeOwnerKind: "tui" },
+    );
+    services.backgroundTasks.bindNotificationReceipts({
+      findClientRequestBindings: async () => {
+        throw new Error("database is locked");
+      },
+    });
+
+    await expect(
+      services.peripherals.backgroundTasks.list({
+        ownerSessionId: "session-1",
+        includeNotification: true,
+      }),
+    ).resolves.toEqual(tasks);
+    expect(warn).toHaveBeenCalledWith(
+      { sessionId: "session-1", turnId: "background-task-notification" },
+      expect.stringContaining("database is locked"),
+    );
   });
 });
 

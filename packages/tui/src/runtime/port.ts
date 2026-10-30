@@ -535,7 +535,6 @@ export interface TuiDelegatedAgent {
   agentName?: string;
   task?: string;
   status: TuiDelegatedAgentStatus;
-  backgroundTaskId?: string;
   createdAtMs?: number;
   updatedAtMs?: number;
   errorMessage?: string;
@@ -570,9 +569,18 @@ export type TuiBackgroundTaskStatus =
   | 'canceled'
   | 'lost';
 
+/**
+ * Runtime fact for a terminal Task's root notification: `pending` until a Turn takes it,
+ * `settled` once it is steered into or admitted as a Turn, read, or stopped by the user.
+ */
+export interface TuiBackgroundTaskNotification {
+  readonly state: 'pending' | 'settled';
+  readonly turnId?: string;
+}
+
 export interface TuiBackgroundTask {
   readonly taskId: string;
-  readonly kind: 'bash' | 'workflow' | 'custom';
+  readonly kind: 'bash' | 'subagent' | 'workflow' | 'custom';
   readonly status: TuiBackgroundTaskStatus;
   readonly ownerSessionId: string;
   readonly description?: string;
@@ -586,10 +594,25 @@ export interface TuiBackgroundTask {
   readonly lastError?: string;
   /** Bash still owned by its foreground tool call (not auto-promoted to the background). */
   readonly foreground?: true;
+  /** Sub-Agent Task only: the child Session that runs it. */
+  readonly childSessionId?: string;
+  /** Terminal Tasks only, when the Runtime reports it; absent means settled. */
+  readonly notification?: TuiBackgroundTaskNotification;
+}
+
+export interface TuiBackgroundTaskListOptions {
+  /**
+   * `[V]` machine status only: also list sub-Agent Tasks and ask the Runtime for each terminal
+   * Task's root notification. Without it the list holds bash/workflow/custom Tasks only.
+   */
+  readonly machineStatus?: boolean;
 }
 
 export interface TuiBackgroundTaskCapability {
-  listBackgroundTasks?(ownerSessionId: string): Promise<readonly TuiBackgroundTask[]>;
+  listBackgroundTasks?(
+    ownerSessionId: string,
+    options?: TuiBackgroundTaskListOptions,
+  ): Promise<readonly TuiBackgroundTask[]>;
 }
 
 export interface TuiActiveRunSnapshot {

@@ -64,7 +64,6 @@ export function toTuiDelegatedAgent(
     ...(session.agentName ? { agentName: session.agentName } : {}),
     ...(session.title ? { task: session.title } : {}),
     status: normalizeDelegatedAgentStatus(session.status),
-    ...backgroundTaskId(session.purpose),
     ...timestamp('createdAtMs', session.createdAt),
     ...timestamp('updatedAtMs', session.updatedAt),
     ...(session.errorMessage ? { errorMessage: session.errorMessage } : {}),
@@ -111,13 +110,6 @@ function normalizeDelegatedAgentStatus(status: string | undefined): TuiDelegated
     return 'stopped';
   }
   return 'unknown';
-}
-
-function backgroundTaskId(purpose: string | undefined): { backgroundTaskId?: string } {
-  const prefix = 'local-background-task:';
-  return purpose?.startsWith(prefix)
-    ? { backgroundTaskId: purpose.slice(prefix.length) || undefined }
-    : {};
 }
 
 function timestamp(

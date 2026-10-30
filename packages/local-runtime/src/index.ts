@@ -1,5 +1,14 @@
-export { createUserStopCascade, type UserStopCascade } from "./background-task/index.js";
-export { resolveAgentBashEnvPolicy } from "./infra/ensure-rm-shim.js";
+export {
+  backgroundTaskNotificationReceiptId,
+  createUserStopCascade,
+  isTaskDeliverySuppressed,
+  type UserStopCascade,
+} from "./background-task/index.js";
+export {
+  ensureRmShim,
+  resolveAgentBashEnvPolicy,
+  resolveRmShimDir,
+} from "./infra/ensure-rm-shim.js";
 export {
   ManagedWorktreeService,
   type ManagedWorktreeServicePort,

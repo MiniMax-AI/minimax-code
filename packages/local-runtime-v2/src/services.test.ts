@@ -3889,6 +3889,7 @@ function defaultCompatibility(
     },
     backgroundTasks: {
       bindRuntimeOwner: vi.fn(),
+      bindNotificationReceipts: vi.fn(),
       recover: vi.fn(async () => undefined),
       pollRecovery: vi.fn(async () => false),
       // No cascade in this fixture: `begin` declining keeps today's stop behaviour.
