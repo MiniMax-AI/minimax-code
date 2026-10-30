@@ -905,7 +905,18 @@ function buildWindowsPathSafetyDenyReason(input: LocalPermissionCheckerInput): s
     if (!nativeDeleteCommand || recoverableRm) continue;
     const nativeDelete = parseWindowsDeleteTargets(surfaceCommand, shellFamily);
     if (!nativeDelete) {
-      return `Local hard safety policy blocked ${input.toolName}: native delete targets cannot be verified safely. Use literal targets with supported delete options.`;
+      // An unknown executing shell stays fail-closed: without it there is no
+      // syntax to bind operands with at all.
+      if (shellFamily === 'unknown') {
+        return `Local hard safety policy blocked ${input.toolName}: native delete targets cannot be verified safely. Use literal targets with supported delete options.`;
+      }
+      // Operands this reader cannot bind confidently under a known shell
+      // (PowerShell variables, pipelines, shapes outside the supported delete
+      // syntax) are not proof that the command is dangerous. Leave them to
+      // ordinary permission approval instead of denying them outright; the
+      // drive-root, Windows system directory and recursive-home checks below
+      // still apply to every target this reader could resolve.
+      continue;
     }
     const resolved = resolveWindowsTargets(
       nativeDelete.targets,
