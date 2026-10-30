@@ -75,6 +75,7 @@ import {
   SANDBOX_CONFIG_DEFAULTS,
   type SandboxConfig,
 } from "./sandbox-config.js";
+import { parseModelSettings, type ModelSettingsConfig } from "./auto-compact-window.js";
 
 export type { TuiConfig, TuiCustomStatusLineConfig } from "./tui-config.js";
 
@@ -894,7 +895,9 @@ export interface ContextManagementConfig {
    * an integer above 1 is an absolute token count. The effective trigger is
    * the lower of this value and the built-in trigger, so it can only make
    * compaction start earlier. The runtime ignores invalid numbers (such as
-   * `1.5`) with a warning. Unset keeps the built-in behavior.
+   * `1.5`) with a warning. Unset keeps the built-in behavior. A valid
+   * `modelSettings.<provider/model>.autoCompactWindow` (including `auto`)
+   * replaces this value for that model.
    */
   compactionTriggerAt?: number;
 }
@@ -1008,6 +1011,11 @@ export interface Config {
   opencode: OpenCodeAdapterConfig;
   /** Per-model context management overrides (e.g. disable SR for low-context models). */
   contextManagement: ContextManagementConfig;
+  /**
+   * Per-model settings keyed by the source-qualified `provider/model` id, such
+   * as `autoCompactWindow`; see ./auto-compact-window.ts. Undefined when absent.
+   */
+  modelSettings?: ModelSettingsConfig;
   /** Local Runaway Guard policy; valid Apollo booleans override it on Desktop. */
   runawayGuard: RunawayGuardSettings;
   /** ToolResult archive/trim thresholds shared by TUI, CLI and managed Desktop. */
@@ -2060,6 +2068,7 @@ export function resolveConfigFromRaw(
     telemetry: parseTelemetryConfig(raw.telemetry),
     opencode: parseOpenCodeAdapterConfig(raw, DEFAULTS.opencode),
     contextManagement: parseContextManagementConfig(raw),
+    modelSettings: parseModelSettings(raw.modelSettings),
     runawayGuard: resolveRunawayGuardConfig(raw.runawayGuard),
     toolResultCompaction: parseToolResultCompactionConfig(
       raw.toolResultCompaction,

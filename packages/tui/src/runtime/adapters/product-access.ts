@@ -8,6 +8,7 @@ import type {
   TuiAccountStatusOptions,
   TuiActiveRunSnapshot,
   TuiCompactionResult,
+  TuiCompactionTrigger,
   TuiContextSnapshotResponse,
   TuiInstructionSource,
   TuiMcpServer,
@@ -88,6 +89,23 @@ export class TuiProductAccess {
           .setPermissionMode({ mode }),
       ) ?? mode
     );
+  }
+
+  /** Undefined when this Runtime cannot read the trigger. */
+  async getCompactionTrigger(sessionId: string): Promise<TuiCompactionTrigger | undefined> {
+    return this.context
+      .service("config.compaction-trigger.read")
+      .getCompactionTrigger({ sessionId });
+  }
+
+  /** Undefined when this Runtime cannot persist the trigger. */
+  async setCompactionTrigger(
+    sessionId: string,
+    value: number | 'auto',
+  ): Promise<TuiCompactionTrigger | undefined> {
+    return this.context
+      .service("config.compaction-trigger.write")
+      .setCompactionTrigger({ sessionId, value });
   }
 
   async listModels(sessionId?: string): Promise<TuiModel[]> {
@@ -317,12 +335,17 @@ export class TuiProductAccess {
 
   async getContextSnapshot(
     sessionId: string,
+    options: { readonly compactionTrigger?: boolean } = {},
   ): Promise<TuiContextSnapshotResponse> {
     const service = this.context.service("session.context-snapshot");
-    const [sessionResponse, messagesResponse, models] = await Promise.all([
+    const [sessionResponse, messagesResponse, models, compactionTrigger] = await Promise.all([
       service.getSession({ id: sessionId }),
       service.getMessages({ id: sessionId, limit: 80 }),
       service.listModels({ sessionId }) as Promise<readonly TuiModel[]>,
+      // The trigger is extra detail: a failed read keeps the rest of /context.
+      options.compactionTrigger
+        ? this.getCompactionTrigger(sessionId).catch(() => undefined)
+        : undefined,
     ]);
     const session = sessionResponse.session;
     if (!session)
@@ -334,11 +357,12 @@ export class TuiProductAccess {
         selected.modelId !== session.model?.modelId)
         ? selected
         : (session.model ?? selected);
-    return projectTuiContextSnapshot({
+    const snapshot = projectTuiContextSnapshot({
       messages: messagesResponse.messages ?? [],
       active: session.status?.statusType === 1,
       model,
     });
+    return compactionTrigger ? { ...snapshot, compactionTrigger } : snapshot;
   }
 
   async getActiveRun(sessionId: string): Promise<TuiActiveRunSnapshot> {

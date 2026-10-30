@@ -1034,6 +1034,50 @@ describe('AutomaticContextCompactor request boundaries', () => {
     ).toBe(false);
   });
 
+  it('reads the setting for the Session model selection, not the Pi provider alias', () => {
+    const messages: AgentMessage[] = [
+      { role: 'user', content: [{ type: 'text', text: 'small context' }], timestamp: 1 },
+    ];
+    // An OAuth custom provider resolves its Pi model under the bare provider
+    // key, while config.yaml and /autocompact key it by the selection id.
+    const model: Model<'anthropic-messages'> = {
+      id: 'gpt-5.4',
+      name: 'gpt-5.4',
+      api: 'anthropic-messages',
+      provider: 'acme',
+      baseUrl: 'https://example.invalid',
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+    };
+    const rawTokens = createLocalContextFootprintMeasurer({ model }).measure(messages).inputTokens;
+    const perModelTrigger: Record<string, number> = {
+      'custom_provider:acme/gpt-5.4': rawTokens - 1,
+    };
+    const compactor = automaticCompactor(undefined, undefined, undefined, {
+      getCompactionTriggerAt: ({ providerId, modelId }) =>
+        perModelTrigger[`${providerId}/${modelId}`],
+    });
+    const input = {
+      sessionId: 'session-1',
+      phase: 'initial' as const,
+      messages,
+      model,
+      thinkingLevel: 'off' as const,
+    };
+
+    expect(
+      compactor.probeBeforeLlm({
+        ...input,
+        modelSelection: { providerId: 'custom_provider:acme', modelId: 'gpt-5.4' },
+      }).shouldStart,
+    ).toBe(true);
+    // Without a Host selection the Pi identity is the only key available.
+    expect(compactor.probeBeforeLlm(input).shouldStart).toBe(false);
+  });
+
   it('uses the requested Messages API maxTokens at the trigger boundary', async () => {
     const messages: AgentMessage[] = [
       { role: 'user', content: [{ type: 'text', text: 'small context' }], timestamp: 1 },

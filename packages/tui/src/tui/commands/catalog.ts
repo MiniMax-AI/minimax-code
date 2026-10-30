@@ -349,6 +349,19 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
     unavailableReason: 'Start or resume a Session before viewing context.',
   },
   {
+    ...TUI_COMMAND_DESCRIPTORS.autocompact,
+    category: 'Runtime',
+    discoverability: 'contextual',
+    argumentHint: '[auto | <tokens>]',
+    visibleWhen: (context) => context.hasSession,
+    unavailableReason: 'Start or resume a Session before configuring auto-compact.',
+    getArgumentCompletions: argumentCompleter([
+      ['auto', 'Use the built-in trigger for this model'],
+      ['200k', 'Start compacting at 200K tokens'],
+      ['500k', 'Start compacting at 500K tokens'],
+    ]),
+  },
+  {
     name: 'steer',
     description: 'Steer current work without interrupting it',
     category: 'Runtime',

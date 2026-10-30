@@ -2,6 +2,7 @@ import type { Component } from '../rendering/component.js';
 import { truncateToWidth } from '../rendering/text.js';
 import { sanitizeTerminalText } from '../rendering/terminal-text.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../theme/runtime.js';
+import { compactionTriggerSourceLabel } from '../../application/auto-compact-command.js';
 import type {
   TranscriptContextComponent,
   TranscriptContextComponentKind,
@@ -166,7 +167,10 @@ export class ContextVisualization implements Component {
     const heading = `${chalk.bold.hex(colors.muted)('Auto-compact')}${chalk.hex(colors.dim)(
       ' · ',
     )}${paintCompaction(lifecycle, this.data.compaction)}`;
-    const detail = `Starts at ${formatCompact(threshold)} · ${thresholdPercent}% of window · ${distance} away`;
+    const source = this.data.compactionThresholdSource;
+    const detail = `Starts at ${formatCompact(threshold)} · ${thresholdPercent}% of window · ${distance} away${
+      source ? ` · ${compactionTriggerSourceLabel(source)}` : ''
+    }`;
     return [heading, paintCompaction(detail, this.data.compaction)];
   }
 }

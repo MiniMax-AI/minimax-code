@@ -1,6 +1,12 @@
 import * as acp from '@agentclientprotocol/sdk';
 
 import { TUI_COMMAND_DESCRIPTORS } from '../application/command-descriptors.js';
+import {
+  AUTO_COMPACT_USAGE,
+  formatAutoCompactSaved,
+  formatAutoCompactStatus,
+  parseAutoCompactCommand,
+} from '../application/auto-compact-command.js';
 import { sanitizeTerminalText } from '../tui/rendering/terminal-text.js';
 import type { TuiModel, TuiSkillList } from '../runtime/port.js';
 import type { TuiAcpRuntime } from './runtime.js';
@@ -39,6 +45,10 @@ export const TUI_ACP_AVAILABLE_COMMANDS = [
   {
     ...TUI_COMMAND_DESCRIPTORS.compact,
     input: { hint: '[instructions]' },
+  },
+  {
+    ...TUI_COMMAND_DESCRIPTORS.autocompact,
+    input: { hint: '[auto | <tokens>]' },
   },
 ] satisfies readonly acp.AvailableCommand[];
 
@@ -81,6 +91,7 @@ export async function executeTuiAcpCommand(options: {
   readonly runtime: Pick<
     TuiAcpRuntime,
     | 'getAccountStatus'
+    | 'getCompactionTrigger'
     | 'getContextSnapshot'
     | 'getRuntimeDiagnostics'
     | 'getSessionUsage'
@@ -89,6 +100,7 @@ export async function executeTuiAcpCommand(options: {
     | 'listSkills'
     | 'requestCompaction'
     | 'selectModel'
+    | 'setCompactionTrigger'
   >;
   readonly sessionId: string;
   readonly agentName?: string;
@@ -183,6 +195,12 @@ export async function executeTuiAcpCommand(options: {
       result.error ?? result.code ?? 'Runtime rejected the compaction request.',
     );
   }
+  if (command.name === 'autocompact') {
+    return {
+      handled: true,
+      output: await runAutoCompactCommand(options.runtime, options.sessionId, command.input),
+    };
+  }
   if (command.name !== 'model') return { handled: false };
 
   const models = await options.runtime.listModels(options.sessionId);
@@ -199,6 +217,30 @@ export async function executeTuiAcpCommand(options: {
     );
   }
   return { handled: true, output: `Model selected: ${formatModelSelection(selection)}` };
+}
+
+async function runAutoCompactCommand(
+  runtime: Pick<TuiAcpRuntime, 'getCompactionTrigger' | 'setCompactionTrigger'>,
+  sessionId: string,
+  input: string,
+): Promise<string> {
+  const command = parseAutoCompactCommand(input);
+  if (command.kind === 'invalid') {
+    throw acp.RequestError.invalidParams(undefined, AUTO_COMPACT_USAGE);
+  }
+  const trigger =
+    command.kind === 'save'
+      ? await runtime.setCompactionTrigger?.(sessionId, command.value)
+      : await runtime.getCompactionTrigger?.(sessionId);
+  if (!trigger) {
+    throw acp.RequestError.internalError(
+      undefined,
+      'Auto-compact settings are unavailable in this MiniMax Code Runtime.',
+    );
+  }
+  return command.kind === 'save'
+    ? formatAutoCompactSaved(trigger)
+    : formatAutoCompactStatus(trigger);
 }
 
 function formatCompaction(result: Awaited<ReturnType<TuiAcpRuntime['requestCompaction']>>): string {

@@ -5,6 +5,8 @@ import {
   createTuiMcpInspectionPanel,
   createTuiSkillsInspectionPanel,
 } from "../../src/tui/features/inspection/capabilities.js";
+import { createTuiContextInspection } from "../../src/tui/features/inspection/product-inspection.js";
+import { ContextVisualization } from "../../src/tui/transcript/context-visualization.js";
 
 describe("MCode capability inspection", () => {
   it("renders Skills as a grouped read-only catalog instead of transcript prose", () => {
@@ -119,5 +121,37 @@ describe("MCode capability inspection", () => {
     expect(rendered).toContain("Browser automation tools");
     expect(rendered).toContain("/mcp reload · Esc close");
     expect(rendered).not.toContain("do-not-render");
+  });
+});
+
+describe("MCode context inspection", () => {
+  it("shows when automatic compaction starts and which setting decides it", () => {
+    // /context hard-coded the threshold to null, so this line never rendered.
+    const inspection = createTuiContextInspection({
+      status: "live",
+      contextUsage: {
+        contextWindowTokens: 10_000,
+        usedTokens: 3_000,
+        totalCountSource: "PROVIDER_USAGE_ANCHORED",
+        components: [],
+      },
+      compactionTrigger: {
+        providerId: "minimax",
+        modelId: "MiniMax-M3",
+        contextWindow: 10_000,
+        builtInTriggerTokens: 7_600,
+        effectiveTriggerTokens: 6_000,
+        source: "model",
+        saved: 6_000,
+      },
+    });
+    const visualization = inspection?.visualization;
+    if (visualization?.kind !== "context") throw new Error("Expected a context visualization.");
+    const output = new ContextVisualization(visualization)
+      .render(180)
+      .map(stripVTControlCharacters)
+      .join("\n");
+
+    expect(output).toContain("Starts at 6k · 60% of window · 3k away · saved for this model");
   });
 });

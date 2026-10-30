@@ -261,6 +261,20 @@ export interface TuiSessionForkPort {
   forkSession(input: ForkTuiSessionInput): Promise<TuiSessionForkResult>;
 }
 
+/** A Session model's automatic compaction trigger, in tokens. */
+export interface TuiCompactionTrigger {
+  /** Source-qualified selection that keys `modelSettings` in config.yaml. */
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly contextWindow: number;
+  readonly builtInTriggerTokens: number;
+  /** The lower of the setting and the built-in trigger. */
+  readonly effectiveTriggerTokens: number;
+  readonly source: 'model' | 'model-auto' | 'global' | 'built-in';
+  /** This model's own valid `autoCompactWindow`. */
+  readonly saved?: number | 'auto';
+}
+
 export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   getRuntimeDiagnostics(): Promise<TuiRuntimeDiagnostics>;
   getInstructionSources(workspaceDir: string): Promise<readonly TuiInstructionSource[]>;
@@ -270,6 +284,16 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   ): Promise<TuiAccountStatus>;
   getPermissionMode(): Promise<TuiPermissionMode | undefined>;
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode>;
+  /** The Session model's automatic compaction trigger; undefined when the Runtime has none. */
+  getCompactionTrigger?(sessionId: string): Promise<TuiCompactionTrigger | undefined>;
+  /**
+   * Saves `modelSettings.<provider/model>.autoCompactWindow` for the Session's
+   * model; resolves the refreshed trigger, or undefined when the Runtime cannot.
+   */
+  setCompactionTrigger?(
+    sessionId: string,
+    value: number | 'auto',
+  ): Promise<TuiCompactionTrigger | undefined>;
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;
@@ -299,7 +323,11 @@ export interface TuiInspectionPort {
   listSkills(agentName?: string, keyword?: string, workspaceDir?: string): Promise<TuiSkillList>;
   listMcpServers(keyword?: string, sessionId?: string): Promise<TuiMcpServer[]>;
   inspectProjectMcp(sessionId: string): Promise<TuiProjectMcpPreview | undefined>;
-  getContextSnapshot(sessionId: string): Promise<TuiContextSnapshotResponse>;
+  /** `compactionTrigger` also reads the automatic compaction trigger; a failed read is omitted. */
+  getContextSnapshot(
+    sessionId: string,
+    options?: { readonly compactionTrigger?: boolean },
+  ): Promise<TuiContextSnapshotResponse>;
 }
 
 export type TuiContextComponentKind =
@@ -332,6 +360,8 @@ export interface TuiContextSnapshotResponse {
     readonly state: 'never' | 'running' | 'completed' | 'failed';
     readonly lastCompactedAtMs?: number;
   };
+  /** Present only when requested and readable. */
+  readonly compactionTrigger?: TuiCompactionTrigger;
 }
 
 export interface TuiFeedbackPort {

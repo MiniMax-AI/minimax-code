@@ -136,6 +136,8 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
   readonly toolResultCompaction?: Config['toolResultCompaction'];
   /** Context management values resolved from config.yaml. */
   readonly contextManagement?: Partial<Config['contextManagement']>;
+  /** Per-model settings keyed by `provider/model`, such as `autoCompactWindow`. */
+  readonly modelSettings?: Config['modelSettings'];
   /**
    * Widened past `Config['agents']`: the v2 Agent cutover also threads
    * already-resolved capabilities through this read model, and `default` is

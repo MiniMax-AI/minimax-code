@@ -20,6 +20,7 @@ export function composeProcessLocalApplication(input: {
   readonly planEntryEnabled: () => boolean;
   readonly sessionReports?: ProcessLocalApplicationOptions['sessionReports'];
   readonly instructions?: ProcessLocalApplicationOptions['instructions'];
+  readonly compactionTrigger?: ProcessLocalApplicationOptions['compactionTrigger'];
   readonly mcp: ProcessLocalApplicationOptions['peripherals']['mcp'];
   readonly modelProvider: ProcessLocalApplicationOptions['modelProvider'];
 }): ReturnType<typeof createProcessLocalApplication> {
@@ -36,6 +37,7 @@ export function composeProcessLocalApplication(input: {
     plan: { isEntryEnabled: input.planEntryEnabled },
     ...(input.sessionReports ? { sessionReports: input.sessionReports } : {}),
     instructions: input.instructions,
+    ...(input.compactionTrigger ? { compactionTrigger: input.compactionTrigger } : {}),
     peripherals: { ...input.compatibility.peripherals, mcp: input.mcp },
     modelProvider: input.modelProvider,
   });

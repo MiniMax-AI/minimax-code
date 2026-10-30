@@ -119,21 +119,53 @@ about 70% and 95% of the context window depending on the model. Large tool
 results and the serialized request size can also start compaction on their own;
 tool-result reduction is configured separately under `toolResultCompaction`.
 
-To compact earlier, for example to keep requests smaller, set an upper bound in
-the data directory's `config.yaml`:
+To compact earlier, for example to keep requests smaller, run `/autocompact` in a
+Session to set the trigger for the current model:
+
+```text
+/autocompact          # show the current model's trigger, its share of the window, and its source
+/autocompact 300000   # a token count; 500k and 1.5M also work, and a bare 100-1000 means thousands (200 = 200K)
+/autocompact auto     # use the built-in trigger for the current model again
+```
+
+The setting is saved under `modelSettings` in the data directory's `config.yaml`,
+in the same shape as Claude Code's `modelSettings.<model>.autoCompactWindow`. The
+key is the Session's selected `provider/model`, such as `minimax/MiniMax-M3` or
+`custom_provider:<name>/<model>`; `/autocompact` prints it:
+
+```yaml
+modelSettings:
+  "minimax/MiniMax-M3":
+    autoCompactWindow: 300000 # an integer token count above 1, or "auto"
+```
+
+A global upper bound for every model is also available:
 
 ```yaml
 contextManagement:
   compactionTriggerAt: 0.8 # ratio of the context window, or e.g. 300000 tokens
 ```
 
-A value in `(0, 1]` is a ratio of the current model's context window; an integer
-above 1 is an absolute token count. The effective trigger is the lower of this
-value and the built-in trigger, so the setting can start compaction earlier but
-never later, and has no lower bound: a value below what remains after compaction
-compacts before every request. Other values, such as `1.5`, are ignored with a
-warning in the runtime log. Automatic compaction cannot be disabled; `/compact`
-remains available at any time. Apply changes by restarting MCode.
+For `compactionTriggerAt`, a value in `(0, 1]` is a ratio of the current model's
+context window and an integer above 1 is an absolute token count.
+
+Precedence is the current model's `autoCompactWindow`, then the global
+`compactionTriggerAt`, then the built-in trigger. `autoCompactWindow: auto` uses
+the built-in trigger for that model and ignores the global value. The effective
+trigger is the lower of the selected value and the built-in trigger, so a setting
+can start compaction earlier but never later. A value above the built-in trigger
+is saved as given, the built-in trigger still applies, and `/autocompact` says so.
+There is no lower bound and, unlike Claude Code, no 100K-1M clamp: a value below
+what remains after compaction compacts before every request. Invalid values, such
+as `autoCompactWindow: 0` or `compactionTriggerAt: 1.5`, are ignored with a
+warning in the runtime log.
+
+The Auto-compact line in `/context` shows the current trigger, its share of the
+window, and its source. A value saved with `/autocompact` applies from the next
+model request. The save reserializes `config.yaml`, so comment formatting is not
+retained. After editing `config.yaml` by hand, run `/reload` or restart MCode.
+ACP clients can use `/autocompact` too. Automatic compaction cannot be disabled;
+`/compact` remains available at any time.
 
 ## Local Bash execution
 

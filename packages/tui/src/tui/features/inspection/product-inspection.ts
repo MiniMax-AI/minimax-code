@@ -659,7 +659,10 @@ export function createTuiContextInspection(
     basis:
       usage.totalCountSource === 'PROVIDER_USAGE_ANCHORED' ? 'provider-usage' : 'runtime-estimate',
     compaction: response.compaction?.state ?? 'never',
-    compactionThresholdTokens: null,
+    compactionThresholdTokens: response.compactionTrigger?.effectiveTriggerTokens ?? null,
+    ...(response.compactionTrigger
+      ? { compactionThresholdSource: response.compactionTrigger.source }
+      : {}),
     components: usage.components,
   };
   return {

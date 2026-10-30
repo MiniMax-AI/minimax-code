@@ -187,6 +187,16 @@ export interface ContextCompactionHooks {
   readonly getProviderTokenUsage?: () => CompactionTokenUsage | undefined;
 }
 
+/**
+ * The Session model selection behind a request. Per-model settings are keyed by
+ * it: a Pi `model.provider` can be a runtime alias (an OAuth custom provider
+ * resolves to its bare key), so it cannot stand in for the selection id.
+ */
+export interface ContextCompactionModelSelection {
+  readonly providerId: string;
+  readonly modelId: string;
+}
+
 export type AutomaticContextCompactionInput = Readonly<
   Pick<
     PiBeforeLlmCallHookInput,
@@ -206,6 +216,8 @@ export type AutomaticContextCompactionInput = Readonly<
     | 'signal'
   > & {
     readonly maxSerializedInputBytes?: number;
+    /** Absent when the Host has no selection; the Pi model identity is used instead. */
+    readonly modelSelection?: ContextCompactionModelSelection;
   }
 >;
 

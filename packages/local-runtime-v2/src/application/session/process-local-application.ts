@@ -33,6 +33,11 @@ export interface ProcessLocalApplicationOptions {
   readonly plan: NonNullable<LocalRuntimeApplication['plan']>;
   readonly sessionReports?: SessionReportCapability;
   readonly instructions?: LocalRuntimeApplication['instructions'];
+  /** Session-aware compaction trigger read/write, merged into `configuration`. */
+  readonly compactionTrigger?: Pick<
+    NonNullable<LocalRuntimeApplication['configuration']>,
+    'getCompactionTrigger' | 'setCompactionTrigger'
+  >;
   readonly modelProvider: {
     readonly application: Pick<ModelProviderApplication, 'list' | 'select'>;
     readonly providers: LocalModelProviderService;
@@ -127,7 +132,7 @@ export function createProcessLocalApplication(
         : {}),
     },
     ...(options.instructions ? { instructions: options.instructions } : {}),
-    configuration: options.peripherals.configuration,
+    configuration: { ...options.peripherals.configuration, ...options.compactionTrigger },
     models: createModelsApplication(options.modelProvider),
     modelProviders: {
       listProviderPresets: () => options.modelProvider.listProviderPresets(),

@@ -26,7 +26,10 @@ export {
   type AgentHostTurnSkillCapability,
   type AgentHostTurnToolMode,
 } from './assembly/turn-capability-lifecycle.js';
-export { ContextCompactionResultValidationError } from './compaction/context-compaction.js';
+export {
+  ContextCompactionResultValidationError,
+  readCompactionModelSelection,
+} from './compaction/context-compaction.js';
 export {
   AgentHostDependencyUnavailableError,
   assertAgentHostCapabilityAvailable,

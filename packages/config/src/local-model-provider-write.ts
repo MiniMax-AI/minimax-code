@@ -7,6 +7,10 @@ import lockfile from 'proper-lockfile';
 
 import { getConfig, getConfigPath, resetConfig, type Config } from './config.js';
 import { minimaxApiModels } from './byok-config.js';
+import {
+  isValidAutoCompactWindowTokens,
+  type AutoCompactWindowSetting,
+} from './auto-compact-window.js';
 import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from './model-availability.js';
 
 const LOCAL_CONFIG_FILE_MODE = 0o600;
@@ -157,6 +161,28 @@ export async function updateLocalModelSelection(
     else raw.defaultModelThinking = { effort: input.thinking.effort };
     if (input.variant === undefined) delete raw.defaultModelVariant;
     else raw.defaultModelVariant = input.variant;
+    return { write: true, value: undefined };
+  }).then(({ config }) => ({ config }));
+}
+
+/**
+ * Persist `modelSettings[modelKey].autoCompactWindow` under the shared config
+ * lock. The key is set as one path segment, so dotted model ids stay intact.
+ */
+export async function updateLocalAutoCompactWindow(input: {
+  readonly modelKey: string;
+  readonly value: AutoCompactWindowSetting;
+}): Promise<{ readonly config: Config }> {
+  const modelKey = input.modelKey.trim();
+  const slash = modelKey.indexOf('/');
+  if (slash <= 0 || slash === modelKey.length - 1) {
+    throw new LocalModelProviderConfigValidationError('Invalid model key');
+  }
+  if (input.value !== 'auto' && !isValidAutoCompactWindowTokens(input.value)) {
+    throw new LocalModelProviderConfigValidationError('Invalid autoCompactWindow');
+  }
+  return withLockedConfig(async (raw) => {
+    setNestedValue(raw, ['modelSettings', modelKey, 'autoCompactWindow'], input.value);
     return { write: true, value: undefined };
   }).then(({ config }) => ({ config }));
 }

@@ -5483,6 +5483,65 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it('shows and saves the auto-compact trigger for the Session model with /autocompact', async () => {
+    let saved: number | 'auto' | undefined;
+    const trigger = () => ({
+      providerId: 'minimax',
+      modelId: 'MiniMax-M3',
+      contextWindow: 1_000_000,
+      builtInTriggerTokens: 760_000,
+      effectiveTriggerTokens: typeof saved === 'number' ? Math.min(saved, 760_000) : 760_000,
+      source:
+        saved === undefined
+          ? ('built-in' as const)
+          : saved === 'auto'
+            ? ('model-auto' as const)
+            : ('model' as const),
+      ...(saved === undefined ? {} : { saved }),
+    });
+    const setCompactionTrigger = vi.fn(async (_sessionId: string, value: number | 'auto') => {
+      saved = value;
+      return trigger();
+    });
+    const runtime = createRuntime();
+    runtime.getCompactionTrigger = vi.fn(async () => trigger());
+    runtime.setCompactionTrigger = setCompactionTrigger;
+    const terminal = new FakeTerminal();
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: '0.1.0',
+      workspaceDir: '/workspace',
+    });
+    const screen = () => renderTerminalViewport(app, terminal).replace(/\s+/gu, ' ');
+    app.start();
+    await app.ready;
+    await app.submit('Fix the failing parser');
+
+    await app.submit('/autocompact');
+    expect(screen()).toContain(
+      'Auto-compact for minimax/MiniMax-M3 starts at 760,000 tokens (76% of window) · built-in',
+    );
+
+    await app.submit('/autocompact 400k');
+    expect(setCompactionTrigger).toHaveBeenLastCalledWith(expect.any(String), 400_000);
+    expect(screen()).toContain(
+      'set to 400,000 tokens · starts at 400,000 tokens (40% of window) from the next request',
+    );
+
+    await app.submit('/autocompact 2M');
+    expect(screen()).toContain('above the built-in trigger, which still applies');
+
+    await app.submit('/autocompact 80%');
+    expect(setCompactionTrigger).toHaveBeenCalledTimes(2);
+    expect(screen()).toContain('Usage: /autocompact [auto | <tokens>]');
+
+    await app.submit('/autocompact auto');
+    expect(setCompactionTrigger).toHaveBeenLastCalledWith(expect.any(String), 'auto');
+    expect(screen()).toContain('set to auto (built-in trigger)');
+    await app.stop();
+  });
+
   it("opens the latest settled Plan as a read-only full snapshot", async () => {
     const runtime = createRuntime();
     vi.mocked(runtime.getLatestPlanReview).mockResolvedValue(

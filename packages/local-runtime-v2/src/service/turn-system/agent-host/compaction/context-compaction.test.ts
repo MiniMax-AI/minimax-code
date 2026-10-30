@@ -17,6 +17,7 @@ import {
   logCompactionFailureBestEffort,
   readCompactionCommitMetadata,
   readCompactionLifecycleMetadata,
+  readCompactionModelSelection,
   readCompactionTokenUsage,
 } from './context-compaction.js';
 import { createManualCompactionChange } from './compaction-history.js';
@@ -273,6 +274,46 @@ describe('automatic ContextCompactor trigger probe', () => {
       attemptId: expect.any(String),
       error: root,
     });
+  });
+
+  it('hands the prepared Session model selection to the compactor beside the Pi model', async () => {
+    // Per-model settings follow the selection; the Pi model keeps its own provider id.
+    const modelSelection = readCompactionModelSelection({
+      model: { provider: ' custom_provider:acme ', model_id: 'model' },
+    });
+    expect(readCompactionModelSelection({})).toBeUndefined();
+    const probeBeforeLlm = vi.fn((_input: AutomaticContextCompactionInput) => ({
+      shouldStart: true,
+    }));
+    const compactBeforeLlm = vi.fn(async (_input: AutomaticContextCompactionInput) => ({
+      status: 'unchanged' as const,
+      reason: 'nothing-to-compact' as const,
+    }));
+    const hook = createAutomaticContextCompactionHook(
+      {
+        automatic: { probeBeforeLlm, compactBeforeLlm },
+        lifecycle: {
+          completeCommittedHistory: vi.fn(async () => undefined),
+          failCommittedHistory: vi.fn(async () => undefined),
+        },
+      },
+      context,
+      'lease-model-selection',
+      { maxSerializedInputBytes: 2_048, ...(modelSelection ? { modelSelection } : {}) },
+    );
+
+    await expect(hook(hookInput())).resolves.toEqual({ type: 'continue' });
+    const expected = expect.objectContaining({
+      phase: 'initial',
+      maxSerializedInputBytes: 2_048,
+      model: expect.objectContaining({ provider: 'test' }),
+      modelSelection: { providerId: 'custom_provider:acme', modelId: 'model' },
+    });
+    expect(probeBeforeLlm).toHaveBeenCalledWith(expected);
+    expect(compactBeforeLlm).toHaveBeenCalledWith(
+      expected,
+      expect.objectContaining({ onStarted: expect.any(Function) }),
+    );
   });
 });
 

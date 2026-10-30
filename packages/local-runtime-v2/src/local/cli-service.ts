@@ -641,6 +641,20 @@ export class CliService {
     ).setPermissionMode(input);
   }
 
+  /** Undefined when this host cannot read a Session model's automatic compaction trigger. */
+  getCompactionTrigger(
+    input: Parameters<CompactionTriggerConfiguration["getCompactionTrigger"]>[0],
+  ): ReturnType<CompactionTriggerConfiguration["getCompactionTrigger"]> | undefined {
+    return this.options.application.configuration?.getCompactionTrigger?.(input);
+  }
+
+  /** Undefined when this host cannot persist a model's automatic compaction trigger. */
+  setCompactionTrigger(
+    input: Parameters<CompactionTriggerConfiguration["setCompactionTrigger"]>[0],
+  ): ReturnType<CompactionTriggerConfiguration["setCompactionTrigger"]> | undefined {
+    return this.options.application.configuration?.setCompactionTrigger?.(input);
+  }
+
   listModels(
     input?: Parameters<
       NonNullable<LocalRuntimeApplication["models"]>["list"]
@@ -904,6 +918,13 @@ function toPermissionDecision(
       throw new Error(`Unsupported permission reply: ${String(reply)}`);
   }
 }
+
+type CompactionTriggerConfiguration = Required<
+  Pick<
+    NonNullable<LocalRuntimeApplication["configuration"]>,
+    "getCompactionTrigger" | "setCompactionTrigger"
+  >
+>;
 
 type QuestionnaireApplicationRequest = NonNullable<
   Awaited<

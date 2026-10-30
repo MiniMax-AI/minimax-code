@@ -1,6 +1,7 @@
 import type { TuiStructuredPreview } from '../../types/runtime-models.js';
 import type { TuiSessionCacheMetrics } from '../../application/session-cache-metrics.js';
 import type { TuiAgentTeamSnapshot } from '../agent-team/model.js';
+import type { TuiCompactionTrigger } from '../../runtime/port.js';
 
 export type TranscriptCellKind =
   | 'user'
@@ -96,6 +97,8 @@ export interface TranscriptContextVisualization {
   readonly basis: 'runtime-estimate' | 'provider-usage';
   readonly compaction: 'never' | 'running' | 'completed' | 'failed';
   readonly compactionThresholdTokens: number | null;
+  /** Which setting decides the threshold; absent when the threshold is unknown. */
+  readonly compactionThresholdSource?: TuiCompactionTrigger['source'];
   readonly components: readonly TranscriptContextComponent[];
 }
 

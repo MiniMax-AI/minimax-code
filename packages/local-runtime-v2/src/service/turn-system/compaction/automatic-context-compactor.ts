@@ -10,6 +10,7 @@ import type {
   AutomaticContextCompactionProbe,
   AutomaticContextCompactor as AutomaticContextCompactorPort,
   ContextCompactionHooks,
+  ContextCompactionModelSelection,
   ContextCompactionResult,
   PromptSnapshotSource,
 } from '../agent-host/contracts.js';
@@ -33,14 +34,19 @@ import type { SubagentCheckpointStateSource } from './contracts.js';
 interface AutomaticContextCompactorDependencies {
   readonly toolResultArchiver?: ToolResultArchiver;
   readonly promptSnapshots?: PromptSnapshotSource;
-  /** User `contextManagement.compactionTriggerAt`; read per call. */
-  readonly getCompactionTriggerAt?: () => number | undefined;
+  /**
+   * The `compactionTriggerAt` budget input for one request's model, from the
+   * per-model or global user setting; read per call.
+   */
+  readonly getCompactionTriggerAt?: CompactionTriggerAtGetter;
 }
+
+type CompactionTriggerAtGetter = (model: ContextCompactionModelSelection) => number | undefined;
 
 export class AutomaticContextCompactor implements AutomaticContextCompactorPort {
   private readonly toolResultArchiver?: ToolResultArchiver;
   private readonly promptSnapshots?: PromptSnapshotSource;
-  private readonly getCompactionTriggerAt?: () => number | undefined;
+  private readonly getCompactionTriggerAt?: CompactionTriggerAtGetter;
 
   constructor(
     private readonly usageAnchor: ContextUsageAnchorState | undefined,
@@ -60,7 +66,7 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
         input,
         this.usageAnchor,
         this.toolResultArchiver,
-        this.readCompactionTriggerAt(),
+        this.readCompactionTriggerAt(input),
       ).shouldStart,
     };
   }
@@ -74,7 +80,7 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
       input,
       this.usageAnchor,
       this.toolResultArchiver,
-      this.readCompactionTriggerAt(),
+      this.readCompactionTriggerAt(input),
     );
     if (!preparation.shouldStart) {
       return { status: 'unchanged', reason: 'nothing-to-compact' };
@@ -110,9 +116,11 @@ export class AutomaticContextCompactor implements AutomaticContextCompactorPort 
   }
 
   /** A failing config read degrades to the built-in trigger. */
-  private readCompactionTriggerAt(): number | undefined {
+  private readCompactionTriggerAt(input: AutomaticContextCompactionInput): number | undefined {
     try {
-      return this.getCompactionTriggerAt?.();
+      return this.getCompactionTriggerAt?.(
+        input.modelSelection ?? { providerId: input.model.provider, modelId: input.model.id },
+      );
     } catch {
       return undefined;
     }

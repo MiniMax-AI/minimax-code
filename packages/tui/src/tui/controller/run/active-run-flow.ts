@@ -346,7 +346,9 @@ export class TuiActiveRunFlow {
     });
     this.showContextInspection(session.sessionId, panel);
     try {
-      const response = await this.options.runtime.getContextSnapshot(session.sessionId);
+      const response = await this.options.runtime.getContextSnapshot(session.sessionId, {
+        compactionTrigger: true,
+      });
       if (this.isStopped()) return;
       if (this.options.controller.snapshot().session?.sessionId !== session.sessionId) {
         this.closeContextInspection(panel);

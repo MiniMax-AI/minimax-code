@@ -10,7 +10,7 @@ import {
   toolOutputBudgetExtension,
   type ToolOutputArtifactInput,
 } from '@mavis/agent-extension';
-import type { LLMRetryOptions } from '@mavis/agent-core/pi-turn-runner';
+import type { LLMRetryOptions, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
 import { describeLocalBrowserToolInput } from '@mavis/agent-tools/desktop';
 import type { IAgentConfig } from '@mavis/protocol';
 import type { GlobalEventInput } from '@mavis/shared/global-events';
@@ -20,7 +20,7 @@ import {
   type ResolvedAgentCapabilities,
   type RunawayGuardOverride,
 } from '@mavis/config';
-import { isValidCompactionTriggerSetting } from '@mavis/context-manager';
+import { resolveCompactionTokenBudget } from '@mavis/context-manager';
 import type { AppDb } from '../../infra/db/client.js';
 
 import type { ContentSafetyService } from '../content-safety/index.js';
@@ -34,6 +34,7 @@ import {
   resolveSessionHistoryPaths,
 } from '../session-system/index.js';
 import { isPeekSession } from '../session-system/sessions/repo/normalization.js';
+import { readCompactionTriggerSettings } from '../model-system/index.js';
 import {
   createNativeAgentHostProductionDependencies,
   createNativeLocalAgentPreparation,
@@ -57,7 +58,11 @@ import {
   type NativeAgentPreparationOptions,
   type NativeLocalAgentPreparationOptions,
 } from './agent-host/index.js';
-import type { AgentExecutionSnapshot, AgentHost } from './agent-host/contracts.js';
+import type {
+  AgentExecutionSnapshot,
+  AgentHost,
+  ContextCompactionModelSelection,
+} from './agent-host/contracts.js';
 import type { CanonicalHistoryCompactionChange } from './agent-host/history/contracts.js';
 import type { DurableCanonicalHistoryProvider } from './agent-host/history/durable-canonical-history-store.js';
 import { captureSemanticSnapshot } from './agent-host/history/semantic-identity.js';
@@ -469,7 +474,7 @@ export async function createLocalAgentHost<
         logger: options.product.runner.logger,
         toolResultArchiver,
         promptSnapshots: options.product.promptSnapshots,
-        getCompactionTriggerAt: createCompactionTriggerAtGetter(options),
+        trigger: readCompactionTriggerSettings(options.product.preparation.configBuilder.config),
       }),
       control: options.turnControl,
       lifecycle: options.sessions.agentProjection.compactionLifecycle,
@@ -593,14 +598,28 @@ function createToolOutputArtifactRepository<TAgent extends AgentExecutionSnapsho
   });
 }
 
-function createContextCompactors(input: {
+/** Per-model or global user trigger settings, interpreted outside the compaction algorithm. */
+interface CompactionTriggerSettings {
+  /** The `compactionTriggerAt` budget input for a model; read on every probe. */
+  readonly compactionTriggerAt: (model: ContextCompactionModelSelection) => number | undefined;
+  /** Settings the trigger ignores, reported once when the host is composed. */
+  readonly ignored: () => readonly {
+    readonly setting: string;
+    readonly model?: string;
+    readonly value: unknown;
+  }[];
+}
+
+/** Builds the automatic and manual context compactors used by the production host. */
+export function createContextCompactors(input: {
   readonly contextUsageAnchor: ContextUsageAnchorState;
   readonly checkpointState: ConstructorParameters<typeof AutomaticContextCompactor>[1];
-  readonly logger: ConstructorParameters<typeof AutomaticContextCompactor>[2];
+  readonly logger: Pick<PiTurnRunnerLogger, 'error' | 'warn'> | undefined;
   readonly toolResultArchiver: ToolResultArchiver;
   readonly promptSnapshots: ConstructorParameters<typeof LocalContextCompactor>[2];
-  readonly getCompactionTriggerAt: () => number | undefined;
+  readonly trigger: CompactionTriggerSettings;
 }) {
+  warnIgnoredTriggerSettings(input.trigger, input.logger);
   return {
     automatic: new AutomaticContextCompactor(
       input.contextUsageAnchor,
@@ -609,7 +628,7 @@ function createContextCompactors(input: {
       {
         toolResultArchiver: input.toolResultArchiver,
         promptSnapshots: input.promptSnapshots,
-        getCompactionTriggerAt: input.getCompactionTriggerAt,
+        getCompactionTriggerAt: input.trigger.compactionTriggerAt,
       },
     ),
     manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots),
@@ -617,26 +636,47 @@ function createContextCompactors(input: {
 }
 
 /**
- * Reads `contextManagement.compactionTriggerAt` per call. An invalid value is
- * reported once when the host is composed and then ignored by the budget.
+ * The trigger a request for this resolved Turn model would use, from the same
+ * budget as the automatic compactor's probe.
  */
-function createCompactionTriggerAtGetter<TAgent extends AgentExecutionSnapshot>(
-  options: CreateLocalAgentHostOptions<TAgent>,
-): () => number | undefined {
-  const read = () =>
-    options.product.preparation.configBuilder.config().contextManagement?.compactionTriggerAt;
+export function describeCompactionTrigger(input: {
+  readonly compactionTriggerAt: number | undefined;
+  readonly llm: {
+    readonly model: { readonly contextWindow: number; readonly maxTokens: number };
+    readonly maxTokens?: number;
+  };
+}): { readonly builtInTriggerTokens: number; readonly effectiveTriggerTokens: number } {
+  const { model, maxTokens } = input.llm;
+  // The Pi runner hands the probe `maxTokens` only when positive, and the probe
+  // then falls back to the model limit.
+  const limits = {
+    contextWindow: model.contextWindow,
+    configuredMaxOutputTokens:
+      maxTokens !== undefined && maxTokens > 0 ? maxTokens : model.maxTokens,
+  };
+  return {
+    builtInTriggerTokens: resolveCompactionTokenBudget(limits).automaticTriggerAt,
+    effectiveTriggerTokens: resolveCompactionTokenBudget({
+      ...limits,
+      compactionTriggerAt: input.compactionTriggerAt,
+    }).automaticTriggerAt,
+  };
+}
+
+function warnIgnoredTriggerSettings(
+  trigger: CompactionTriggerSettings,
+  logger: Pick<PiTurnRunnerLogger, 'warn'> | undefined,
+): void {
   try {
-    const initial = read();
-    if (initial !== undefined && !isValidCompactionTriggerSetting(initial)) {
-      options.product.runner.logger?.warn?.(
-        { event: 'context_compaction_trigger_config_ignored', value: initial },
-        '[local-runtime-v2] contextManagement.compactionTriggerAt must be a ratio in (0, 1] or an integer token count above 1; using the built-in trigger',
+    for (const ignored of trigger.ignored()) {
+      logger?.warn?.(
+        { event: 'context_compaction_trigger_config_ignored', ...ignored },
+        `[local-runtime-v2] ignoring invalid ${ignored.setting}; it must be an integer token count above 1 (or "auto" per model, or a window ratio in (0, 1] globally)`,
       );
     }
   } catch {
     // The compactor treats an unreadable config as unset.
   }
-  return read;
 }
 
 function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSnapshot>(
