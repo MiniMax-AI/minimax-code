@@ -377,11 +377,24 @@ function unwrap(
   }
 }
 
+const GUEST_UNSAFE_CHARS: Record<string, string> = {
+  '<': '\\u003C',
+  '>': '\\u003E',
+  '/': '\\u002F',
+  '\u2028': '\\u2028',
+  '\u2029': '\\u2029',
+};
+
+/** JSON string literal with the characters that can break out of code escaped. */
+function toGuestStringLiteral(value: string): string {
+  return JSON.stringify(value).replace(/[<>/\u2028\u2029]/gu, (char) => GUEST_UNSAFE_CHARS[char] ?? char);
+}
+
 function createToolsSetup(names: readonly string[]): string {
   const definitions = names
     .map(
       (name) =>
-        `Object.defineProperty(__ptcTools, ${JSON.stringify(name)}, { enumerable: true, value: (args) => __ptcCall(${JSON.stringify(name)}, __ptcEncodeArgs(args)) });`,
+        `Object.defineProperty(__ptcTools, ${toGuestStringLiteral(name)}, { enumerable: true, value: (args) => __ptcCall(${toGuestStringLiteral(name)}, __ptcEncodeArgs(args)) });`,
     )
     .join('\n');
   // The JSON boundary follows JSON.stringify (undefined fields dropped, array

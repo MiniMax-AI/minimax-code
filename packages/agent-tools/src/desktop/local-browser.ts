@@ -1937,7 +1937,11 @@ export function prepareCompactBrowserArguments(args: unknown, actions: readonly 
   if (!isRecord(args)) return args;
   let prepared: Record<string, unknown> = args;
   if (typeof args.action === 'string' && !actions.includes(args.action)) {
-    const repaired = args.action.trim().replace(/["'\\>\s]+$/u, '');
+    let repaired = args.action.trim();
+    // Linear trim (no backtracking regex) of stray quote/backslash/`>`/space.
+    while (repaired.length > 0 && /["'\\>\s]/u.test(repaired.at(-1) ?? '')) {
+      repaired = repaired.slice(0, -1);
+    }
     if (actions.includes(repaired)) prepared = { ...prepared, action: repaired };
   }
   const stray = Object.keys(prepared).filter((key) => key !== 'action' && key !== 'input');

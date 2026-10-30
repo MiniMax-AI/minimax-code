@@ -65,7 +65,7 @@ const KNOWN_HOST_REQUEST_BODY_BYTES: ReadonlyArray<{
   {
     matches: (hostname, api) =>
       api === 'anthropic-messages' &&
-      (hostname === 'aiplatform.googleapis.com' || hostname.endsWith('-aiplatform.googleapis.com')),
+      /^(?:[a-z0-9-]+-)?aiplatform\.googleapis\.com$/u.test(hostname),
     bytes: 26 * MIB,
   },
   { matches: (hostname) => hostname === 'api.openai.com', bytes: 64 * MIB },

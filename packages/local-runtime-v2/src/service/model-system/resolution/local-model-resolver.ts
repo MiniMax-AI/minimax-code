@@ -67,6 +67,14 @@ import { withLocalDynamicMaxTokens } from './dynamic-max-tokens.js';
 import { resolveLocalRequestBodyBytes } from './file-api-capabilities.js';
 import { resolveLocalFileApiGatewayAuth } from './file-api-gateway-auth.js';
 
+/** Strips trailing `char` repeats in linear time (no backtracking regex). */
+function trimTrailingChar(value: string, char: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === char) end -= 1;
+  return value.slice(0, end);
+}
+
+
 /**
  * Images per request for a model that declares none. The Messages API accepts
  * 100 on 200K-context models and 600 otherwise, OpenAI 1500; MiniMax M3 models
@@ -626,7 +634,7 @@ function thinkingCompatibilityFields(
 function normalizeResolvedBaseUrl(api: Api, baseUrl: string): string {
   return isModelProviderApi(api)
     ? normalizeProviderBaseUrl(api, baseUrl)
-    : baseUrl.replace(/\/+$/u, '');
+    : trimTrailingChar(baseUrl, '/');
 }
 
 function buildResolvedModel(scope: {

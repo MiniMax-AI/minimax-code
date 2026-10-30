@@ -40,6 +40,14 @@ import {
 } from '../persistence/layout/v2-paths.js';
 import { readRemoteAssetSource, type RemoteAssetTransport } from './remote-source.js';
 
+/** Strips trailing `char` repeats in linear time (no backtracking regex). */
+function trimTrailingChar(value: string, char: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === char) end -= 1;
+  return value.slice(0, end);
+}
+
+
 const DEFAULT_MAX_LOCAL_ASSET_BYTES = 100 * 1024 * 1024;
 
 export type LocalAssetKind =
@@ -836,7 +844,7 @@ function decodeDataUrl(
   const [rawMime = '', ...rawParams] = meta.split(';');
   const mimeType = (rawMime || 'application/octet-stream').toLowerCase();
   const isBase64 = rawParams.some((param) => param.toLowerCase() === 'base64');
-  const estimatedBytes = isBase64 ? Math.floor(body.replace(/=+$/, '').length * 0.75) : body.length;
+  const estimatedBytes = isBase64 ? Math.floor(trimTrailingChar(body, '=').length * 0.75) : body.length;
   if (estimatedBytes > maxBytes) return 'too_large';
   try {
     const buffer = isBase64 ? Buffer.from(body, 'base64') : Buffer.from(decodeURIComponent(body));

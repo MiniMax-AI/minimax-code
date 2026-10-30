@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, scryptSync } from 'node:crypto';
 
 import type { RemoteTokenCountContext } from './token-counter-adapters/types.js';
 
@@ -49,7 +49,7 @@ export class RemoteTokenCounterFailures {
           provider: ctx.model.provider,
           model: ctx.model.id,
           counterUrl,
-          apiKey: ctx.apiKey,
+          credential: credentialFingerprint(ctx.apiKey),
           headers: Object.entries(ctx.headers ?? {})
             .map(([key, value]): [string, string] => [key.toLowerCase(), value])
             .filter(([key]) => !REQUEST_CONTEXT_HEADERS.has(key))
@@ -110,4 +110,14 @@ function retryDelay(value: string | null | undefined, now: number): number {
   const seconds = Number(value);
   const delay = Number.isFinite(seconds) ? seconds * 1_000 : Date.parse(value) - now;
   return Number.isFinite(delay) ? Math.max(0, delay) : 0;
+}
+
+/**
+ * Credential fingerprint for the scope key: a password-grade KDF (cheap cost
+ * parameters, about a millisecond) so the key never carries a fast hash of the
+ * secret, and the secret itself is not retained.
+ */
+function credentialFingerprint(apiKey: string | undefined): string {
+  if (!apiKey) return '';
+  return scryptSync(apiKey, 'mcode-remote-token-counter', 16, { N: 1024 }).toString('hex');
 }

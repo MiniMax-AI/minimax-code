@@ -317,12 +317,16 @@ function doubledBackslashSelectorHint(selector: string): string | undefined {
   return `The selector contains a doubled backslash (${JSON.stringify(fragment)}); CSS reads "\\\\" as a literal backslash, so the next character stays unescaped. Escape special characters in class names with a single backslash (for example .hover\\:bg-gray-50), or act through an inspect ref instead.`;
 }
 
-const INVALID_SELECTOR_MESSAGE =
-  /(?:failed to execute ['"]?queryselector|not a valid selector|invalid selector|selector[^\n]*syntaxerror|syntaxerror[^\n]*selector)/iu;
+const INVALID_SELECTOR_PHRASE = /failed to execute ['"]?queryselector|not a valid selector|invalid selector/iu;
+
+function isSelectorSyntaxErrorLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  return lower.includes('selector') && lower.includes('syntaxerror');
+}
 
 /** True when a page-side error message is the browser rejecting selector syntax. */
 export function isInvalidSelectorMessage(message: string): boolean {
-  return INVALID_SELECTOR_MESSAGE.test(message);
+  return INVALID_SELECTOR_PHRASE.test(message) || message.split('\n').some(isSelectorSyntaxErrorLine);
 }
 
 /**

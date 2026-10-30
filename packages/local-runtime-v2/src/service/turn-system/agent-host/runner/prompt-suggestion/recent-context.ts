@@ -142,10 +142,27 @@ function headTail(value: string, limit: number, headShare: number): string {
  * answer (its readable Q/A follows the block), and reduces a selection-context
  * block to the user's own comments so the budget is spent on what they said.
  */
+/** Drops every `open…close` block (non-greedy, unclosed tail kept), in linear time. */
+function removeTaggedBlocks(value: string, open: string, close: string): string {
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    const start = value.indexOf(open, cursor);
+    if (start === -1) break;
+    const end = value.indexOf(close, start + open.length);
+    if (end === -1) break;
+    out += value.slice(cursor, start);
+    cursor = end + close.length;
+  }
+  return out + value.slice(cursor);
+}
+
 function cleanUserText(value: string): string {
-  let text = value
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .replace(/<questionnaire-response>[\s\S]*?<\/questionnaire-response>/g, '');
+  let text = removeTaggedBlocks(
+    removeTaggedBlocks(value, '<system-reminder>', '</system-reminder>'),
+    '<questionnaire-response>',
+    '</questionnaire-response>',
+  );
   const block = text.match(/<user-provided-context>[\s\S]*?<\/user-provided-context>/);
   if (block) {
     const comments = [

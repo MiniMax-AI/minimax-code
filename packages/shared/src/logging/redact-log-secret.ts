@@ -156,7 +156,6 @@ function normalizeKey(key: string): string {
 const MESSAGE_KEY_VALUE = /(?<![\w.-])((["']?)([\w.-]+)\2\s*[:=]\s*["']?)[^\s"',;}]+/gu;
 const CREDENTIAL_KEY_PART =
   /secret|token|passw|credential|api[-_]?key|encrypt[-_]?key|aes[-_]?key/iu;
-const STACK_FRAME = /^\s*at (?:async )?(?:(.+?) \()?(.+?):(\d+)(?::\d+)?\)?$/u;
 
 export interface RedactedErrorLogFacts {
   readonly errorName: string;
@@ -201,11 +200,43 @@ function stackTopFrames(stack: unknown, limit: number): string[] {
   if (typeof stack !== 'string') return [];
   const frames: string[] = [];
   for (const line of stack.split('\n')) {
-    const frame = STACK_FRAME.exec(line);
+    const frame = parseStackFrame(line);
     if (!frame) continue;
-    const location = `${frame[2]?.split(/[\\/]/u).pop() ?? ''}:${frame[3] ?? ''}`;
-    frames.push(frame[1] ? `${frame[1]} (${location})` : location);
+    const location = `${frame.file.split(/[\\/]/u).pop() ?? ''}:${frame.line}`;
+    frames.push(frame.fn ? `${frame.fn} (${location})` : location);
     if (frames.length >= limit) break;
   }
   return frames;
+}
+
+const DIGITS = /^\d+$/u;
+
+/**
+ * `at [async] [fn (]file:line[:col][)]` parsed with index scans (no
+ * backtracking regex over untrusted stack text).
+ */
+function parseStackFrame(raw: string): { fn?: string; file: string; line: string } | undefined {
+  let rest = raw.trim();
+  if (!rest.startsWith('at ')) return undefined;
+  rest = rest.slice(3);
+  if (rest.startsWith('async ')) rest = rest.slice(6);
+  let fn: string | undefined;
+  const open = rest.indexOf(' (');
+  if (open > 0 && rest.endsWith(')')) {
+    fn = rest.slice(0, open);
+    rest = rest.slice(open + 2, -1);
+  } else if (rest.endsWith(')')) {
+    rest = rest.slice(0, -1);
+  }
+  const colon = rest.lastIndexOf(':');
+  if (colon <= 0) return undefined;
+  let line = rest.slice(colon + 1);
+  let file = rest.slice(0, colon);
+  const inner = file.lastIndexOf(':');
+  if (inner > 0 && DIGITS.test(file.slice(inner + 1))) {
+    line = file.slice(inner + 1);
+    file = file.slice(0, inner);
+  }
+  if (!DIGITS.test(line) || !file) return undefined;
+  return fn ? { fn, file, line } : { file, line };
 }
