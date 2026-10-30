@@ -109,7 +109,16 @@ export interface TuiExecDependencies {
   signal?: AbortSignal;
   processRef?: Pick<NodeJS.Process, "once" | "off">;
   createTurnId?: () => string;
+  /** Overrides how long a stopped run waits for remaining output to drain. */
+  stopOutputGraceMs?: number;
 }
+
+/**
+ * How long a stopped run (timeout, cancellation or step limit) keeps waiting
+ * for stdout/stderr. A reader that stops reading must not keep the run from
+ * returning; the CLI entry then exits with the run's exit code.
+ */
+export const HEADLESS_STOP_OUTPUT_GRACE_MS = 2_000;
 
 export async function runTuiExec(
   input: TuiExecInput,
@@ -143,8 +152,15 @@ export async function runTuiExec(
       )
     : undefined;
   const startedAt = Date.now();
+  const stopOutput = createStopOutputRelease(
+    dependencies.stopOutputGraceMs ?? HEADLESS_STOP_OUTPUT_GRACE_MS,
+  );
+  let observations: Promise<void> | undefined;
+  let runStopped = false;
+  let finalOutputStarted = false;
   const supervisor = new ExecRunSupervisor(dependencies.runtime);
   const coordinator = new TuiRunCoordinator(supervisor.conversationPort(), {
+    releaseObserverOnStop: true,
     ...(input.diagnosticsDir
       ? {
           onAnswerSelection: (event: Readonly<Record<string, unknown>>) => {
@@ -161,6 +177,8 @@ export async function runTuiExec(
   let cancelled = dependencies.signal?.aborted ?? false;
   const cancel = () => {
     cancelled = true;
+    // Shutdown can legitimately take a while; only bound the final output wait.
+    if (finalOutputStarted) stopOutput.start();
     void coordinator.abort();
   };
   const assertNotCancelled = () => {
@@ -296,6 +314,8 @@ export async function runTuiExec(
         }
       },
     );
+    observations = execution.observations;
+    runStopped = isStoppedRunStatus(execution.outcome.status);
     if (streamOutputFailure) throw streamOutputFailure;
     let outcome = toHeadlessOutcome(execution.outcome);
     let reviewResult: ReviewResultV1 | undefined;
@@ -403,10 +423,8 @@ export async function runTuiExec(
       );
     }
   } finally {
-    dependencies.signal?.removeEventListener("abort", cancel);
-    processRef.off("SIGINT", cancel);
-    processRef.off("SIGTERM", cancel);
-    processRef.off("SIGHUP", cancel);
+    // Signal listeners stay attached until final output finishes, so a signal
+    // that arrives while stdout is blocked still bounds the remaining wait.
     let shutdownFailure: string | undefined;
     let shutdownFailurePublished = false;
     try {
@@ -419,6 +437,15 @@ export async function runTuiExec(
         nextStep: "Verify no process is still running.",
       });
     }
+
+    finalOutputStarted = true;
+    if (runStopped || cancelled) stopOutput.start();
+    // A stopped run returns without waiting for the observer; let pending event
+    // lines finish first so the terminal result stays last.
+    const eventsDelivered = await untilOutputReleased(
+      observations ?? Promise.resolve(),
+      stopOutput.signal,
+    );
 
     if (terminal) {
       if (shutdownFailure && terminal.result.status === "succeeded") {
@@ -454,7 +481,11 @@ export async function runTuiExec(
             error: terminal.result.error,
           });
         }
-        await terminal.encoder.result(terminal.result);
+        // Skip the result when earlier event lines are still stuck: it could not
+        // be delivered ahead of them, and the exit code carries the outcome.
+        if (eventsDelivered) {
+          await untilOutputReleased(terminal.encoder.result(terminal.result), stopOutput.signal);
+        }
         exitCode = exitCodeForExecResult(terminal.result);
         if (terminal.result.status !== "succeeded") {
           diagnostics.push(
@@ -501,9 +532,19 @@ export async function runTuiExec(
       recoveryReady: stoppedForRecovery && !shutdownFailure,
     });
     if (exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe) {
-      for (const diagnostic of diagnostics)
-        await writeDiagnostic(stderr, diagnostic);
+      for (const diagnostic of diagnostics) {
+        const delivered = await untilOutputReleased(
+          writeDiagnostic(stderr, diagnostic),
+          stopOutput.signal,
+        );
+        if (!delivered) break;
+      }
     }
+    stopOutput.dispose();
+    dependencies.signal?.removeEventListener("abort", cancel);
+    processRef.off("SIGINT", cancel);
+    processRef.off("SIGTERM", cancel);
+    processRef.off("SIGHUP", cancel);
   }
   return exitCode;
 }
@@ -936,6 +977,61 @@ async function writeDiagnostic(
   } catch {
     // Diagnostics are best effort and must not shadow the primary exit contract.
   }
+}
+
+function isStoppedRunStatus(status: TuiTurnRunOutcome['status']): boolean {
+  return status === 'timeout' || status === 'cancelled' || status === 'limit_exceeded';
+}
+
+interface StopOutputRelease {
+  readonly signal: AbortSignal;
+  /** Starts the grace period once; later calls keep the original deadline. */
+  start(): void;
+  dispose(): void;
+}
+
+function createStopOutputRelease(graceMs: number): StopOutputRelease {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    signal: controller.signal,
+    start() {
+      if (timer || controller.signal.aborted) return;
+      timer = setTimeout(() => controller.abort(), Math.max(0, graceMs));
+      timer.unref?.();
+    },
+    dispose() {
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
+
+/**
+ * Waits for `work` unless the stop-output grace period ends first. Returns
+ * false when the wait was released; rejections from `work` still propagate.
+ */
+function untilOutputReleased(work: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) {
+    void work.catch(() => undefined);
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((settle, fail) => {
+    const release = () => {
+      void work.catch(() => undefined);
+      settle(false);
+    };
+    signal.addEventListener('abort', release, { once: true });
+    work.then(
+      () => {
+        signal.removeEventListener('abort', release);
+        settle(true);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', release);
+        fail(error);
+      },
+    );
+  });
 }
 
 function summarizePrompt(prompt: string, attachmentCount: number): string {

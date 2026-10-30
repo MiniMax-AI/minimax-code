@@ -20,6 +20,10 @@ import {
   applyTuiRenderTheme,
   createTuiMarkdownTheme,
   getTuiThemeSnapshot,
+  highlightTuiCode,
+  MAX_HIGHLIGHT_CHARS,
+  MAX_HIGHLIGHT_LINES,
+  MAX_HIGHLIGHT_LINE_CHARS,
   renderTuiActionHint,
   tuiChalk,
   tuiColors,
@@ -696,5 +700,35 @@ describe('TuiThemeController theme selection', () => {
       await rm(dataDir, { recursive: true, force: true });
       restoreTheme();
     }
+  });
+});
+
+describe('MCode code highlighting limits', () => {
+  const plain = (code: string): string[] =>
+    code.split('\n').map((line) => tuiChalk.hex(tuiColors.text)(line));
+
+  it('skips highlighting a code block over the character limit', () => {
+    const code = `${'const x = 1;\n'.repeat(MAX_HIGHLIGHT_CHARS)}const y = 2;`;
+    expect(code.length).toBeGreaterThan(MAX_HIGHLIGHT_CHARS);
+
+    expect(highlightTuiCode(code, 'typescript')).toEqual(plain(code));
+  });
+
+  it('skips highlighting a code block over the line limit', () => {
+    const code = Array.from({ length: MAX_HIGHLIGHT_LINES + 1 }, () => 'x').join('\n');
+
+    expect(highlightTuiCode(code, 'typescript')).toEqual(plain(code));
+  });
+
+  it('skips highlighting a code block with one very long line', () => {
+    const code = 'y'.repeat(MAX_HIGHLIGHT_LINE_CHARS + 1);
+
+    expect(highlightTuiCode(code, 'typescript')).toEqual(plain(code));
+  });
+
+  it('still highlights a code block within every limit', () => {
+    const code = 'const x = 1;\nconst y = 2;';
+
+    expect(highlightTuiCode(code, 'typescript')).not.toEqual(plain(code));
   });
 });

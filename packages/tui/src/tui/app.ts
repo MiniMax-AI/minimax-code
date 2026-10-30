@@ -87,6 +87,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     displayModes: new TranscriptPresentationController(),
     workspaceDir: options.workspaceDir,
     appendOnly: () => renderer.mode === 'regular',
+    // Trailing frame for a streaming reply whose presentation is being paced.
+    requestRender: () => (started && !stopped ? tui.requestRender() : undefined),
   });
   const editor = createEditor(tui, workspaceRoots, options.runtime);
   let draftLifecycle: TuiDraftLifecycle | undefined;

@@ -38,6 +38,10 @@ import {
 } from '../theme/runtime.js';
 import { highlightTuiShellCommand } from '../theme/shell-command.js';
 import { renderShellBlock } from './shell-block.js';
+import {
+  StreamingPresentationPacer,
+  type StreamingPresentationClock,
+} from './streaming-presentation.js';
 
 const ASSISTANT_ANCHOR_WIDTH = 2;
 const ASSISTANT_ANCHOR_MARKER = '●';
@@ -70,7 +74,8 @@ export class TranscriptView implements Component {
     }
   >();
   private readonly markdownComponents = new Map<string, Markdown>();
-  private readonly markdownStreaming = new Map<string, boolean>();
+  // The theme each cached component was built with; a different theme needs a fresh component.
+  private readonly markdownThemes = new Map<string, typeof markdownTheme>();
   private frameCache:
     | {
         signature: string;
@@ -108,6 +113,10 @@ export class TranscriptView implements Component {
   /** First cell kept after trimming final rows in append-only mode. */
   private trimmedBeforeCellId: string | undefined;
   private discardedRows = 0;
+  /** Paces re-presenting streaming assistant text; absent without a way to render later. */
+  private readonly streamingPresentation: StreamingPresentationPacer | undefined;
+  /** Whether the frame being rendered re-presented a unit's earlier lines. */
+  private frameHeldStreamingUnit = false;
 
   constructor(
     private readonly cells:
@@ -127,8 +136,19 @@ export class TranscriptView implements Component {
       appendOnly?: () => boolean;
       /** Final-row bounds for trimming append-only output; defaults suit a terminal session. */
       retainedRows?: { readonly high: number; readonly low: number };
+      /**
+       * Schedules a later frame. When present, a streaming assistant unit may
+       * re-present its last lines for a short interval sized by its render cost,
+       * and this callback delivers the trailing frame with the newest text.
+       */
+      requestRender?: () => void;
+      /** Test clock for streaming presentation pacing. */
+      streamingPresentationClock?: StreamingPresentationClock;
     } = {},
   ) {
+    this.streamingPresentation = options.requestRender
+      ? new StreamingPresentationPacer(options.requestRender, options.streamingPresentationClock)
+      : undefined;
     this.appendOnly = options.appendOnly ?? (() => false);
     this.retainedRows = options.retainedRows ?? APPEND_ONLY_RETAINED_ROWS;
     this.displayModes = options.displayModes ?? new TranscriptPresentationController();
@@ -142,6 +162,7 @@ export class TranscriptView implements Component {
   }
 
   invalidate(): void {
+    this.streamingPresentation?.reset();
     this.unitCache.clear();
     for (const markdown of this.markdownComponents.values()) markdown.invalidate();
     this.frameCache = undefined;
@@ -150,9 +171,10 @@ export class TranscriptView implements Component {
   dispose(): void {
     this.trimmedBeforeCellId = undefined;
     this.discardedRows = 0;
+    this.streamingPresentation?.reset();
     this.unitCache.clear();
     this.markdownComponents.clear();
-    this.markdownStreaming.clear();
+    this.markdownThemes.clear();
     this.frameCache = undefined;
     this.projectionWindow.reset();
   }
@@ -206,6 +228,7 @@ export class TranscriptView implements Component {
     }
 
     this.resetFrameCacheMetrics();
+    this.frameHeldStreamingUnit = false;
     const activeUnitKeys = new Set<string>();
     let lines: string[] =
       projection.hiddenTurns > 0 && !trimmed
@@ -269,16 +292,20 @@ export class TranscriptView implements Component {
     }
     this.pruneUnitCaches(activeUnitKeys);
     this.stableRows = stableRows;
-    this.frameCache = {
-      signature: frameSignature,
-      width: normalizedWidth,
-      lines,
-      source,
-      sourceRevision,
-      presentationRevision,
-      appendOnly,
-      stableRows,
-    };
+    // A frame that re-presented earlier streaming lines is behind its source;
+    // the trailing render must build it again rather than reuse it.
+    this.frameCache = this.frameHeldStreamingUnit
+      ? undefined
+      : {
+          signature: frameSignature,
+          width: normalizedWidth,
+          lines,
+          source,
+          sourceRevision,
+          presentationRevision,
+          appendOnly,
+          stableRows,
+        };
     this.performanceSnapshot = {
       sourceUnits: sourceCells.length,
       projectedCells: projection.cells.length,
@@ -383,29 +410,40 @@ export class TranscriptView implements Component {
       return cached.lines;
     }
     this.frameUnitCacheMisses += 1;
-    const content =
+    if (
       unit.kind === 'cell' &&
       (unit.cell.kind === 'assistant' || unit.cell.kind === 'assistant-preamble')
-        ? this.renderAssistant(unit.cell, width)
-        : unit.kind === 'read-group'
-          ? renderReadGroup(unit.cells, width, connectedToNext, (cell) =>
-              this.resolveDisplayMode(cell),
+    ) {
+      const assistant = this.renderAssistant(unit.cell, width);
+      if (assistant.held) {
+        // Earlier lines do not match this signature; never serve them from cache.
+        this.unitCache.delete(key);
+        this.frameHeldStreamingUnit = true;
+      } else {
+        this.unitCache.set(key, { signature, width, lines: assistant.lines });
+      }
+      return assistant.lines;
+    }
+    const content =
+      unit.kind === 'read-group'
+        ? renderReadGroup(unit.cells, width, connectedToNext, (cell) =>
+            this.resolveDisplayMode(cell),
+          )
+        : unit.kind === 'ptc-group'
+          ? renderPtcGroup(
+              unit.cell,
+              unit.children,
+              width,
+              connectedToNext,
+              resolvePtcGroupMode(unit.cell, this.resolveDisplayMode(unit.cell)),
             )
-          : unit.kind === 'ptc-group'
-            ? renderPtcGroup(
-                unit.cell,
-                unit.children,
-                width,
-                connectedToNext,
-                resolvePtcGroupMode(unit.cell, this.resolveDisplayMode(unit.cell)),
-              )
-            : renderCell(
-                unit.cell,
-                width,
-                connectedToNext,
-                (cell) => this.resolveDisplayMode(cell),
-                this.workspaceDir,
-              );
+          : renderCell(
+              unit.cell,
+              width,
+              connectedToNext,
+              (cell) => this.resolveDisplayMode(cell),
+              this.workspaceDir,
+            );
     const rendered = content;
     this.unitCache.set(key, {
       signature,
@@ -415,19 +453,42 @@ export class TranscriptView implements Component {
     return rendered;
   }
 
-  private renderAssistant(cell: TranscriptCell, width: number): readonly string[] {
+  private renderAssistant(
+    cell: TranscriptCell,
+    width: number,
+  ): { lines: readonly string[]; held: boolean } {
     const key = `cell:${cell.id}`;
+    const streaming = isMutableCell(cell);
+    const normalizedWidth = Math.max(0, Math.floor(width));
+    const pacer = this.streamingPresentation;
+    if (!streaming || normalizedWidth === 0) pacer?.release(key);
+    if (normalizedWidth === 0) return { lines: [], held: false };
+    const heldLines = streaming ? pacer?.held(key, normalizedWidth) : undefined;
+    if (heldLines) return { lines: heldLines, held: true };
+    const startedAtMs = pacer?.now() ?? 0;
+    const lines = this.renderAssistantLines(cell, key, normalizedWidth);
+    if (streaming && pacer) {
+      pacer.commit(key, normalizedWidth, lines, pacer.now() - startedAtMs);
+    }
+    return { lines, held: false };
+  }
+
+  private renderAssistantLines(
+    cell: TranscriptCell,
+    key: string,
+    normalizedWidth: number,
+  ): readonly string[] {
     const theme = isMutableCell(cell) ? streamingMarkdownTheme : markdownTheme;
     const content = projectAssistantContentForTerminal(cell.content);
-    const normalizedWidth = Math.max(0, Math.floor(width));
-    if (normalizedWidth === 0) return [];
     let markdown = this.markdownComponents.get(key);
-    if (!markdown || this.markdownStreaming.get(key) !== isMutableCell(cell)) {
+    // Settling a streamed cell keeps its component when the theme is unchanged, so committed
+    // blocks are not lexed and highlighted again when the turn finishes.
+    if (!markdown || this.markdownThemes.get(key) !== theme) {
       markdown = new Markdown(content.text, 0, 0, theme, {
         color: (text) => chalk.hex(colors.text)(text),
       });
       this.markdownComponents.set(key, markdown);
-      this.markdownStreaming.set(key, isMutableCell(cell));
+      this.markdownThemes.set(key, theme);
     } else {
       markdown.setText(content.text);
     }
@@ -464,9 +525,14 @@ export class TranscriptView implements Component {
     for (const key of this.unitCache.keys()) {
       if (activeUnitKeys.has(key)) continue;
       this.unitCache.delete(key);
-      this.markdownComponents.delete(key);
-      this.markdownStreaming.delete(key);
     }
+    // A held streaming unit has no unit cache entry, so prune components separately.
+    for (const key of this.markdownComponents.keys()) {
+      if (activeUnitKeys.has(key)) continue;
+      this.markdownComponents.delete(key);
+      this.markdownThemes.delete(key);
+    }
+    this.streamingPresentation?.retain(activeUnitKeys);
   }
 }
 
