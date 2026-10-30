@@ -6,9 +6,11 @@ import type {
   PromptSnapshotSource,
 } from '@mavis/agent-runtime';
 import {
+  outputLimitRecoveryExtension,
   requestMediaExtension,
   sessionReportExtension,
   toolOutputBudgetExtension,
+  type OutputLimitRecoveryObservation,
   type RequestMediaExtensionOptions,
   type ToolOutputArtifactInput,
 } from '@mavis/agent-extension';
@@ -548,6 +550,7 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
         reportFailure: options.product.executor.reportFailure,
       }),
       createHostRunawayGuardExtension(options),
+      createHostOutputLimitRecoveryExtension(options),
       requestMediaExtension({ getImageEncoding }),
       toolOutputBudgetExtension({
         maxInlineBytes: TOOL_RESULT_COMPACTION_DEFAULTS.maxInlineKiB * 1_024,
@@ -593,6 +596,34 @@ function createHostRunawayGuardExtension<TAgent extends AgentExecutionSnapshot>(
     logger: options.product.runner.logger,
     reportEvent: (sessionId, event) =>
       options.product.runner.evalReporterFactory?.reportRuntimeEvent?.(sessionId, event),
+  });
+}
+
+function createHostOutputLimitRecoveryExtension<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): AgentExtension {
+  const log =
+    (outcome: 'retry' | 'recovered' | 'exhausted') =>
+    (observation: OutputLimitRecoveryObservation): void => {
+      options.product.runner.logger?.[outcome === 'exhausted' ? 'error' : 'info']?.(
+        {
+          event: 'output_limit_recovery',
+          outcome,
+          session_id: observation.sessionId,
+          turn_id: observation.turnId,
+          attempts: observation.attempts,
+          ...(observation.truncatedToolCall === undefined
+            ? {}
+            : { truncated_tool_call: observation.truncatedToolCall }),
+          ...(observation.model === undefined ? {} : { model: observation.model }),
+        },
+        '[local-runtime-v2] Output limit recovery',
+      );
+    };
+  return outputLimitRecoveryExtension({
+    onRetry: log('retry'),
+    onRecovered: log('recovered'),
+    onExhausted: log('exhausted'),
   });
 }
 

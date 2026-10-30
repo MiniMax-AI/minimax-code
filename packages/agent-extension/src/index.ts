@@ -53,6 +53,11 @@ export {
   type TerminalResponseRecoveryExtensionOptions,
 } from './terminal-response-recovery.js';
 export {
+  outputLimitRecoveryExtension,
+  type OutputLimitRecoveryExtensionOptions,
+  type OutputLimitRecoveryObservation,
+} from './output-limit-recovery.js';
+export {
   appSourceAdapter,
   fileSourceAdapter,
   mcpSourceAdapter,

@@ -69,3 +69,10 @@ export {
   type RequestImageEncoding,
   type RequestMediaBudget,
 } from './request-media.js';
+export {
+  decideOutputLimitRecovery,
+  DEFAULT_OUTPUT_LIMIT_MAX_RETRIES,
+  OUTPUT_LIMIT_EXHAUSTED_REASON,
+  OUTPUT_LIMIT_RETRY_REASON,
+  type OutputLimitRecoveryDecision,
+} from './output-limit.js';
