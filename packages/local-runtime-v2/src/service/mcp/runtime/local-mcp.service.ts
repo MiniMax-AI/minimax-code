@@ -752,7 +752,7 @@ export class LocalMcpService {
       transport.type === 'stdio'
         ? (this.options.turnStdioDiscoveryTimeoutMs ??
           this.options.turnDiscoveryTimeoutMs ??
-          15_000)
+          30_000)
         : turnDiscoveryTimeoutMs;
     const timeoutMs = Math.min(configuredTimeout(config), discoveryTimeoutMs);
     const controller = new AbortController();

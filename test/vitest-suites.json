@@ -235,7 +235,8 @@
       "packages/local-runtime/test/unit/local-permission-windows-opt-out.test.ts",
       "packages/agent-modules/permission/test/unit/permission/native-delete.test.ts",
       "packages/agent-modules/permission/test/unit/permission/tools/bash-split.test.ts",
-      "packages/local-runtime/test/unit/local-permission-host-shell.test.ts"
+      "packages/local-runtime/test/unit/local-permission-host-shell.test.ts",
+      "packages/agent-modules/context-manager/test/output-limit.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
