@@ -4,7 +4,7 @@ import type {
   PiBeforeLlmCallHookInput,
   LLMRequestSettledEvent,
 } from '@mavis/agent-core/pi-turn-runner';
-import type { ContextUsageSnapshot } from '@mavis/agent-core/protocol';
+import type { ContextUsagePromptRange, ContextUsageSnapshot } from '@mavis/agent-core/protocol';
 
 import type { AgentEventContext } from '../events/contracts.js';
 import type { CanonicalHistoryMessages } from '../history/contracts.js';
@@ -108,6 +108,8 @@ export interface ManualContextCompactionInput {
   readonly payloadTransform?: PiBeforeLlmCallHookInput['payloadTransform'];
   readonly systemPrompt?: PiBeforeLlmCallHookInput['systemPrompt'];
   readonly tools?: PiBeforeLlmCallHookInput['tools'];
+  /** Attribution ranges in the final system prompt, including its assembly prefix. */
+  readonly contextUsagePromptRanges?: readonly ContextUsagePromptRange[];
   /** Host-selected checkpoint request shape; absent means `isolated`. */
   readonly checkpointRequestShape?: CheckpointRequestShape;
   readonly signal?: AbortSignal;

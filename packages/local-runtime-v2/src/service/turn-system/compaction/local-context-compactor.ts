@@ -1,14 +1,24 @@
 import { randomUUID } from 'node:crypto';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
 import { DEFAULT_COMPACTION_SETTINGS } from '@earendil-works/pi-coding-agent/compaction';
-import type { PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
-import { resolveCompactionTokenBudget } from '@mavis/context-manager';
+import {
+  projectAgentMessagesForModel,
+  type PiTurnRunnerLogger,
+} from '@mavis/agent-core/pi-turn-runner';
+import {
+  createDefaultTokenEstimator,
+  estimatePreparedContextUsage,
+  readContextWindowTokens,
+  resolveCompactionTokenBudget,
+} from '@mavis/context-manager';
 
 import type {
   ContextCompactionHooks,
   ContextCompactionResult,
   ContextCompactor,
   ManualContextCompactionInput,
+  PostCompactionContextUsage,
   PromptSnapshotSource,
 } from '../agent-host/contracts.js';
 import {
@@ -66,7 +76,43 @@ export class LocalContextCompactor implements ContextCompactor {
     logManualReplacementGrowthBestEffort(this.logger, input.sessionId, decision, {
       providerInputLimit: preparation.providerInputLimit,
     });
-    return completedManualCompaction(preparation.history, decision);
+    const contextUsage = estimatePostCompactionContextUsage(input, decision.replacementMessages);
+    return {
+      ...completedManualCompaction(preparation.history, decision),
+      ...(contextUsage === undefined ? {} : { contextUsage }),
+    };
+  }
+}
+
+/** Estimate the next main request, not the Provider request that generated the summary. */
+function estimatePostCompactionContextUsage(
+  input: ManualContextCompactionInput,
+  replacementMessages: readonly AgentMessage[],
+): PostCompactionContextUsage | undefined {
+  try {
+    const contextWindowTokens = readContextWindowTokens(input.model);
+    if (contextWindowTokens === undefined || input.contextUsagePromptRanges === undefined) {
+      return undefined;
+    }
+    const messages = projectAgentMessagesForModel(replacementMessages, input.model).messages;
+    const estimate = estimatePreparedContextUsage({
+      systemPrompt: input.systemPrompt ?? '',
+      tools: input.tools ?? [],
+      // tokensAfter already includes the system prompt and tools. Count only
+      // replacement messages here so fixed context is not charged twice.
+      messagesTokens: createDefaultTokenEstimator().estimateMessages(messages),
+      promptRanges: input.contextUsagePromptRanges,
+    });
+    if (!estimate.valid) return undefined;
+    return {
+      contextWindowTokens,
+      usedTokens: estimate.usedTokens,
+      totalCountSource: 'LOCAL_ESTIMATE',
+      components: [...estimate.components],
+    };
+  } catch {
+    // Optional usage reporting must never turn a successful compaction into a failure.
+    return undefined;
   }
 }
 

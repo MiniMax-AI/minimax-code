@@ -325,6 +325,7 @@ export type {
   CompactionOutcome,
   ContextCompactionHooks,
   ManualContextCompactionInput,
+  PostCompactionContextUsage,
   ContextCompactionResult,
   ContextCompactor,
 } from './compaction/contracts.js';
