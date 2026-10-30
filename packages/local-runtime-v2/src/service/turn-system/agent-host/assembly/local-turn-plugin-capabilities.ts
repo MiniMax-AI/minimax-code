@@ -254,10 +254,20 @@ function bindingOwners(
     const plugin = plugins.get(normalizedName(binding.pluginName));
     return plugin ? [plugin] : [];
   }
-  return selectPreferredAppPluginOwners(
-    binding.source,
-    allPlugins.filter((plugin) => plugin.appProviders.includes(binding.source)),
-  );
+  return appProviderOwners(binding.source, allPlugins);
+}
+
+/**
+ * Official declarations own an App before local ones, so a user-authored Plugin cannot take an
+ * official App's attribution by naming itself after the provider.
+ */
+function appProviderOwners(
+  provider: string,
+  plugins: AgentHostTurnCapabilityView['plugins'],
+): readonly AgentHostTurnCapabilityView['plugins'][number][] {
+  const declaring = plugins.filter((plugin) => plugin.appProviders.includes(provider));
+  const official = declaring.filter((plugin) => plugin.source === 'official');
+  return selectPreferredAppPluginOwners(provider, official.length > 0 ? official : declaring);
 }
 
 function provenance(

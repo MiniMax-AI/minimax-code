@@ -329,6 +329,7 @@ function appendLocalPlugin(
 
 function hasSupportedLocalCapability(plugin: RuntimeEligibleScannedReadPluginPackage): boolean {
   return (
+    plugin.apps.length > 0 ||
     plugin.skills.length > 0 ||
     plugin.mcpServers.length > 0 ||
     (plugin.hooks?.length ?? 0) > 0 ||
@@ -550,10 +551,7 @@ function enabledProjection(plugin: ReadPluginPackage): PluginSnapshotEnabledProj
     ...(plugin.iconPath ? { iconPath: plugin.iconPath } : {}),
     ...(plugin.darkIconPath ? { darkIconPath: plugin.darkIconPath } : {}),
     source: plugin.source,
-    appProviders:
-      plugin.source === 'OFFICIAL'
-        ? freeze([...new Set(plugin.apps.map((app) => app.provider))])
-        : freeze([]),
+    appProviders: freeze([...new Set(plugin.apps.map((app) => app.provider))]),
   });
 }
 
