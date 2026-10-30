@@ -1300,12 +1300,11 @@ describe('LocalPermissionFacade', () => {
         });
 
         expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
-        // The plan still DESCRIBES a recoverable delete (telemetry only — no
-        // consumer executes it), but there is no host sentinel: the delete now
-        // runs in-cage, reaching mavis-trash through the PATH shim.
+        expect(result.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
+        // The plan validates the executable replacement while the shell retains
+        // the original operands and redirections.
         expect(result.executionPlan?.transforms).toEqual([
-          { type: 'recoverable-delete', targets: ['/workspace/old.txt'] },
+          { type: 'recoverable-shell-delete', launcher: path.join(dataDir, 'bin', 'mavis-trash') },
         ]);
         expect(readWindowsTrashExecution(result.rewrittenInput)).toBeUndefined();
       } finally {
@@ -1350,7 +1349,7 @@ describe('LocalPermissionFacade', () => {
         // not reshape the permission verdict for deletes. Compare with the
         // sandbox-disabled case below: the outcome is identical.
         expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
+        expect(result.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
         expect(readWindowsTrashExecution(result.rewrittenInput)).toBeUndefined();
       } finally {
         cleanup(dataDir);
@@ -1371,7 +1370,7 @@ describe('LocalPermissionFacade', () => {
         });
 
         expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
+        expect(result.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
         expect(readWindowsTrashExecution(result.rewrittenInput)).toBeUndefined();
       } finally {
         cleanup(dataDir);
@@ -3181,7 +3180,9 @@ describe('LocalPermissionFacade', () => {
         expect(r.executionPlan).toMatchObject({
           originalInput: { command: 'rm -rf ./tmp-build', timeout: 9 },
           effectiveInput: { command: expect.stringContaining('mavis-trash'), timeout: 9 },
-          transforms: [{ type: 'recoverable-delete' }],
+          transforms: [
+            { type: 'recoverable-shell-delete', launcher: path.join(dataDir, 'bin', 'mavis-trash') },
+          ],
         });
       } finally {
         cleanup(dataDir);
@@ -3206,27 +3207,32 @@ describe('LocalPermissionFacade', () => {
       }
     });
 
-    it('resolves tilde targets with the same home context used by the permission checker', async () => {
+    it('preserves tilde expansion for the shell and requires approval without a sandbox', async () => {
       const { facade, dataDir } = freshFacade({
         permissionMode: 'default',
         workspaceDir: '/workspace',
       });
       try {
-        const target = path.join(homedir(), 'Desktop', 'permission-plan-output.log');
         const r = await facade.checkPermission({
           toolName: 'bash',
           input: { command: 'rm ~/Desktop/permission-plan-output.log' },
         });
 
+        expect(r.behavior).toBe('ask');
         expect(r.executionPlan).toMatchObject({
+          effectiveInput: {
+            command: expect.stringContaining('--rm-compatible ~/Desktop/permission-plan-output.log'),
+          },
           intents: [
             {
-              kind: 'filesystem',
-              action: 'delete',
-              paths: [{ raw: '~/Desktop/permission-plan-output.log', resolved: target }],
+              kind: 'opaque',
+              shell: 'posix',
+              raw: 'rm ~/Desktop/permission-plan-output.log',
             },
           ],
-          transforms: [{ type: 'recoverable-delete', targets: [target] }],
+          transforms: [
+            { type: 'recoverable-shell-delete', launcher: path.join(dataDir, 'bin', 'mavis-trash') },
+          ],
         });
       } finally {
         cleanup(dataDir);

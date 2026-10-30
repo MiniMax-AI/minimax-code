@@ -100,7 +100,9 @@ export type PermissionEvidence =
   | { kind: 'legacy-reason'; value: unknown }
   | { kind: 'legacy-deny'; reason: string };
 
-export type ExecutionTransform = { type: 'recoverable-delete'; targets: string[] };
+export type ExecutionTransform =
+  | { type: 'recoverable-delete'; targets: string[] }
+  | { type: 'recoverable-shell-delete'; launcher: string };
 
 export type ExecutionPlan = {
   originalInput: Record<string, unknown>;

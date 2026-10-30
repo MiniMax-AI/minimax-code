@@ -38,6 +38,19 @@ if [ -n "\${HOME:-}" ] && [ -d "$HOME" ]; then
   START_HOME="$(cd -P "$HOME" 2>/dev/null && pwd -P)"
 fi
 
+# rm-compatible calls receive argv after the caller shell has expanded it.
+# Direct mavis-trash keeps its existing recursive, verbose interface.
+rm_compatible=false
+recursive=true
+interactive=false
+verbose=true
+if [ "\${1:-}" = "--rm-compatible" ]; then
+  shift
+  rm_compatible=true
+  recursive=false
+  verbose=false
+fi
+
 args=()
 no_preserve=false
 no_preserve_root=false
@@ -45,6 +58,33 @@ force=false
 options_ended=false
 for arg in "$@"; do
   if $options_ended; then
+    args+=("$arg")
+    continue
+  fi
+  if $rm_compatible; then
+    case "$arg" in
+      --) options_ended=true; continue ;;
+      --force) force=true; interactive=false; continue ;;
+      --recursive) recursive=true; continue ;;
+      --verbose) verbose=true; continue ;;
+      --interactive|--interactive=always) interactive=true; force=false; continue ;;
+      --interactive=never) interactive=false; continue ;;
+      --preserve-root) continue ;;
+      --*) argument_error "unsupported rm option: $arg" ;;
+      -?*)
+        flags="\${arg#-}"
+        for ((flag_index = 0; flag_index < \${#flags}; flag_index++)); do
+          case "\${flags:$flag_index:1}" in
+            f) force=true; interactive=false ;;
+            r|R) recursive=true ;;
+            i) interactive=true; force=false ;;
+            v) verbose=true ;;
+            *) argument_error "unsupported rm option: -\${flags:$flag_index:1}" ;;
+          esac
+        done
+        continue
+        ;;
+    esac
     args+=("$arg")
     continue
   fi
@@ -218,6 +258,12 @@ protected_modes=()
 preflight_failed=0
 
 for target in "\${args[@]}"; do
+  if [ -z "$target" ]; then
+    if $force; then continue; fi
+    echo "mavis-trash: '': No such file or directory" >&2
+    preflight_failed=1
+    continue
+  fi
   absolute_path="$(resolve_absolute_path "$target")" || true
   if [ -z "$absolute_path" ]; then
     if $force; then
@@ -247,6 +293,12 @@ for target in "\${args[@]}"; do
   is_directory=false
   if [ -d "$absolute_path" ]; then
     is_directory=true
+  fi
+
+  if $rm_compatible && ! $recursive && $is_directory && [ ! -L "$absolute_path" ]; then
+    echo "mavis-trash: '$target': is a directory (rm requires -r)" >&2
+    preflight_failed=1
+    continue
   fi
 
   original_paths+=("$target")
@@ -312,7 +364,10 @@ trash_file() {
 
   # The path was already validated during phase 1. Re-check only to turn a
   # race between preflight and execution into an ordinary runtime failure.
+  # With -f, duplicates and children of an already moved directory are absent
+  # by design. Only absence is ignored; backend move errors still fail.
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    if $force; then return 0; fi
     echo "mavis-trash: '$file': No such file or directory" >&2
     return 1
   fi
@@ -393,8 +448,14 @@ TRASHINFO
 # I/O failures retain the existing per-target behavior and return status 1.
 exit_code=0
 for ((i = 0; i < \${#execution_paths[@]}; i++)); do
+  if $interactive; then
+    printf "rm: move '%s' to trash? " "\${original_paths[$i]}" >&2
+    reply=""
+    read -r reply || true
+    case "$reply" in [yY]|[yY][eE][sS]) ;; *) continue ;; esac
+  fi
   if trash_file "\${execution_paths[$i]}"; then
-    echo "mavis-trash: moved to trash: '\${original_paths[$i]}'"
+    if $verbose; then echo "mavis-trash: moved to trash: '\${original_paths[$i]}'"; fi
   else
     exit_code=1
   fi

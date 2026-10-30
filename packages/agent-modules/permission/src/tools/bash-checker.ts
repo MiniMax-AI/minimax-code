@@ -50,6 +50,12 @@ import {
 } from './path-capability.js';
 import { pureReadFirstWord } from './bash-fast-allow.js';
 
+import {
+  rewritePosixRm,
+  readPosixTrashExecution,
+  withPosixTrashExecution,
+} from './rm-shell-rewrite.js';
+
 const ENV_VAR_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 function parseSingleTopLevelCommand(command: string): string[] | undefined {
@@ -799,7 +805,15 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
           rewriteEvidenceDecision,
           context,
         );
-        if (earlyRmRewrite) pendingAsk.rewrittenInput = earlyRmRewrite;
+        if (earlyRmRewrite) {
+          pendingAsk.rewrittenInput = earlyRmRewrite;
+          if (
+            readPosixTrashExecution(earlyRmRewrite)?.dynamic &&
+            !context.sandboxEnabled &&
+            context.mode !== 'bypassPermissions'
+          )
+            pendingAsk.skipAutoClassifier = true;
+        }
         return pendingAsk;
       }
 
@@ -912,6 +926,23 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     );
     if (rewrittenInput) {
       result.rewrittenInput = rewrittenInput;
+      // Static path rules cannot authorize values that only exist at execution
+      // time. Full permission mode is explicit authorization; otherwise require
+      // an active sandbox or user approval, without an LLM guessing the path.
+      if (
+        readPosixTrashExecution(rewrittenInput)?.dynamic &&
+        !context.sandboxEnabled &&
+        context.mode !== 'bypassPermissions'
+      ) {
+        result.skipAutoClassifier = true;
+        if (result.behavior === 'allow') {
+          result.behavior = 'ask';
+          result.reason = {
+            type: 'safetyCheck',
+            description: 'Dynamic rm paths require an enabled sandbox or explicit approval.',
+          };
+        }
+      }
     }
 
     return result;
@@ -929,7 +960,12 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     decision: PermissionDecision,
     context: ToolPermissionContext,
   ): Record<string, unknown> | undefined {
-    if (context.nativeDelete || decision.reason.type !== 'subcommandResults') return undefined;
+    if (
+      context.nativeDelete ||
+      decision.behavior === 'deny' ||
+      decision.reason.type !== 'subcommandResults'
+    )
+      return undefined;
 
     const originalCommand =
       typeof originalInput.command === 'string' ? originalInput.command : undefined;
@@ -1009,6 +1045,17 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         resolvedTargets,
         hasOutsideWorkspaceFile ? { allowOutsideWorkspaceFiles: true } : {},
       );
+    }
+
+    if (context.platform === 'darwin' || context.platform === 'linux') {
+      const launcher = path.join(dataDir, 'bin', 'mavis-trash');
+      const rewritten = rewritePosixRm(originalCommand, launcher);
+      if (rewritten) {
+        return withPosixTrashExecution(
+          { ...originalInput, command: rewritten.command },
+          { launcher, dynamic: rewritten.dynamic },
+        );
+      }
     }
 
     let hasRmRewrite = false;

@@ -1,3 +1,8 @@
+import {
+  POSIX_TRASH_EXECUTION,
+  readPosixTrashExecution,
+  rewritePosixRm,
+} from './tools/rm-shell-rewrite.js';
 import { snapshotPermissionEffectiveInput, snapshotPermissionInput } from './effective-input.js';
 import type {
   CommandIntent,
@@ -36,12 +41,26 @@ export function createPermissionExecutionPlan(
   input: CreatePermissionExecutionPlanInput,
 ): Readonly<ExecutionPlan> {
   const originalInput = snapshotPermissionInput(input.input);
-  const intents = inferPermissionCommandIntents(input);
+  const intents =
+    input.rewrittenInput && readPosixTrashExecution(input.rewrittenInput)
+      ? [
+          {
+            kind: 'opaque' as const,
+            shell: 'posix' as const,
+            raw: String(originalInput.command),
+            reason: 'Shell expands recoverable-delete arguments at execution time.',
+          },
+        ]
+      : inferPermissionCommandIntents(input);
   const effectiveInput =
     snapshotPermissionEffectiveInput(originalInput, input.rewrittenInput) ?? originalInput;
   const targets = collectRecoverableDeleteTargets(intents);
-  const transforms: ExecutionPlan['transforms'] =
-    input.rewrittenInput && targets.length > 0 ? [{ type: 'recoverable-delete', targets }] : [];
+  const posixTrash = readPosixTrashExecution(effectiveInput);
+  const transforms: ExecutionPlan['transforms'] = posixTrash
+    ? [{ type: 'recoverable-shell-delete', launcher: posixTrash.launcher }]
+    : input.rewrittenInput && targets.length > 0
+      ? [{ type: 'recoverable-delete', targets }]
+      : [];
   return validatePermissionExecutionPlan(
     {
       originalInput,
@@ -279,6 +298,36 @@ function validateTransformConsistency(
   intents: readonly CommandIntent[],
   transforms: readonly ExecutionTransform[],
 ): void {
+  const shellTransform = transforms.find((item) => item.type === 'recoverable-shell-delete');
+  if (shellTransform?.type === 'recoverable-shell-delete') {
+    const marker = readPosixTrashExecution(effectiveInput);
+    const originalCommand = originalInput.command;
+    const expected =
+      typeof originalCommand === 'string'
+        ? rewritePosixRm(originalCommand, shellTransform.launcher)
+        : undefined;
+    if (
+      transforms.length !== 1 ||
+      !shellTransform.launcher.endsWith('/mavis-trash') ||
+      !marker ||
+      marker.launcher !== shellTransform.launcher ||
+      !expected ||
+      expected.dynamic !== marker.dynamic ||
+      expected.command !== effectiveInput.command ||
+      intents.some((intent) => intent.shell !== 'posix')
+    ) {
+      throw new TypeError(
+        'Recoverable shell delete must preserve the original shell arguments and sequence.',
+      );
+    }
+    const originalFields = { ...originalInput, command: expected.command };
+    const effectiveFields = { ...effectiveInput };
+    Reflect.deleteProperty(effectiveFields, POSIX_TRASH_EXECUTION);
+    if (!permissionValuesEqual(originalFields, effectiveFields)) {
+      throw new TypeError('Recoverable shell delete must preserve other tool arguments.');
+    }
+    return;
+  }
   const changed = !permissionValuesEqual(originalInput, effectiveInput);
   const deleteIntents = intents.filter(
     (intent): intent is Extract<CommandIntent, { kind: 'filesystem' }> =>
@@ -289,7 +338,9 @@ function validateTransformConsistency(
   }
   if (transforms.length === 0) return;
 
-  const recoverableTargets = transforms.flatMap((transform) => transform.targets);
+  const recoverableTargets = transforms.flatMap((transform) =>
+    transform.type === 'recoverable-delete' ? transform.targets : [],
+  );
   const executedTargets = readRecoverableDeleteTargets(effectiveInput);
   if (!executedTargets) {
     throw new TypeError('Recoverable-delete execution plan must execute mavis-trash.');
@@ -381,7 +432,10 @@ function hasEveryInputField(
 }
 
 function isExecutionTransform(value: unknown): value is ExecutionTransform {
-  if (!isRecord(value) || readDataProperty(value, 'type') !== 'recoverable-delete') return false;
+  if (!isRecord(value)) return false;
+  if (readDataProperty(value, 'type') === 'recoverable-shell-delete')
+    return isNonBlankString(readDataProperty(value, 'launcher'));
+  if (readDataProperty(value, 'type') !== 'recoverable-delete') return false;
   const targets = readDataProperty(value, 'targets');
   return Array.isArray(targets) && targets.length > 0 && targets.every(isNonBlankString);
 }

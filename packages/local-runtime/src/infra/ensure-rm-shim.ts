@@ -60,7 +60,7 @@ if [ ! -x "$trash_bin" ]; then
   echo "rm: refusing to fall back to an unrecoverable delete" >&2
   exit 1
 fi
-exec "$trash_bin" "$@"
+exec "$trash_bin" --rm-compatible "$@"
 `;
 
 /** Absolute path of the directory injected at the front of the agent's PATH. */

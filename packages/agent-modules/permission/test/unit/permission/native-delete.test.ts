@@ -45,7 +45,7 @@ describe('native delete permission policy', () => {
         rules: [{ toolName: 'read' }],
       }).nativeDelete,
     ).toBe(true);
-    expect(check('rm ./old.txt')?.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
+    expect(check('rm ./old.txt')?.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
   });
 
   it.each(['default', 'auto', 'bypassPermissions'] as const)(

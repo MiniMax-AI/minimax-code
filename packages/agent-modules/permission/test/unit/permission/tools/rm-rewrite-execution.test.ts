@@ -33,6 +33,7 @@ function execute(command: string, rewrite: boolean) {
     if (rewrite) {
       const context = createToolPermissionContext({
         workingDirectory: root,
+        mode: 'bypassPermissions',
         dataDir,
         homeDir: home,
         platform: process.platform,
@@ -97,11 +98,24 @@ describe.skipIf(process.platform === 'win32')(
       String.raw`cd ./work && rm -- 2\>\&1 && echo DONE`,
       'cd ./work && rm -fi ./missing && echo DONE',
       'cd ./work && rm -if ./missing && echo DONE',
+      'cd ./work && rm -f ./*.tmp && echo DONE',
+      'cd ./work && rm -f ./*.png 2>/dev/null && echo DONE',
+      'cd ./work && rm -f "$TARGET" && echo DONE',
+      'cd ./work && rm -- ./old 2>/dev/null && echo DONE',
+      'cd ./work && rm ./old 2>/dev/null ./keep && echo DONE',
+      'cd ./work && rm -f ./old ./old && echo DONE',
+      'cd ./work && rm -f "" && echo DONE',
+      'cd ./work && rm -f ./[ab].tmp && echo DONE',
+      'cd ./work && rm -f -- -f -- && echo DONE',
+      'cd ./work && touch ./new.tmp && rm -f ./*.tmp && echo DONE',
+      'cd ./work && shopt -s nullglob && rm -f ./*.png && echo DONE',
+      'cd ./work && rm ./missing 2>/dev/null || echo AFTER',
+      'cd ./work && rm ./missing 2>/dev/null; echo AFTER',
     ])('%s', (command) => {
       expect(execute(command, true)).toEqual(execute(command, false));
     });
 
-    it.each(['./*.tmp', '"$TARGET"', '"$(rm -f ./keep; printf ./old)"'])(
+    it.each(['"$(rm -f ./keep; printf ./old)"'])(
       'keeps unsupported expansion %s literal without hiding failures',
       (target) => {
       const result = execute(`cd ./work && rm -f ${target} && echo DONE`, true);
