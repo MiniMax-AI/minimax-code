@@ -779,11 +779,10 @@ function pluginHookTranscriptCleanup(
 }
 
 /**
- * Order is load-bearing: `runBeforeLLM` ends the before-LLM decision pipeline
- * as soon as a hook returns `appendMessage`, so a request-only reminder placed
- * after an appending hook is silently skipped for that request. The budget
- * reminder is request-only and therefore always precedes the background
- * cadence reminder, which appends.
+ * `runBeforeLLM` accumulates `appendMessage` decisions, so later hooks still
+ * run. The budget reminder stays before the background cadence reminder so
+ * its request-only marker precedes the durable background marker and the
+ * reminder admission sees the request before that marker is registered.
  */
 function afterCompactionReminderHooks(
   budgetReminder: PiBeforeLlmCallHook | undefined,

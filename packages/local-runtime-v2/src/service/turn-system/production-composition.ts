@@ -1025,7 +1025,12 @@ function adaptCanonicalHistory(
         summary: metadata.summary,
         ...(metadata.currentUserSourceIndex === undefined
           ? {}
-          : { currentUserSourceIndex: metadata.currentUserSourceIndex }),
+          : {
+              currentUserSourceIndex: metadata.currentUserSourceIndex,
+              ...(metadata.placedMarkerCount === undefined
+                ? {}
+                : { placedMarkerCount: metadata.placedMarkerCount }),
+            }),
       } as const;
       if (metadata.method !== 'llm_checkpoint') {
         const committed = await provider.compact({

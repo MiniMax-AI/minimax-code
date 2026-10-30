@@ -4665,12 +4665,11 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
     }
   });
 
-  it("registers the request-only budget reminder before the appending background reminder", async () => {
-    // runBeforeLLM ends the before-LLM decision pipeline as soon as a hook
-    // returns appendMessage. The background cadence reminder appends, so a
-    // budget reminder registered after it would be silently skipped for every
-    // request where the background reminder fires. The relative order is the
-    // only thing keeping the request-only reminder observable.
+  it('registers the request-only budget reminder before the appending background reminder', async () => {
+    // runBeforeLLM now accumulates appendMessage instead of ending the
+    // pipeline, so this order is no longer what keeps the budget reminder
+    // observable. It is still locked because it fixes the request position of
+    // the request-only marker relative to the durable background marker.
     const backgroundHook = vi.fn(() => undefined);
     const executorOptions = options(async (runInput) => {
       const messages = [
@@ -4767,7 +4766,17 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
           };
         },
       });
-      const laterHook = vi.fn(replacement);
+      // runBeforeLLM accumulates appends, so this later hook now runs in every
+      // mode (it used to be skipped once the background reminder appended).
+      // It must see the registered marker; it replaces durable history only
+      // when nothing is pending, because a durable replacement after a
+      // registered append fails closed (production never orders them so).
+      const laterSawMarker: boolean[] = [];
+      const laterHook = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
+        const pending = hookInput.messages.some((message) => message === marker);
+        laterSawMarker.push(pending);
+        return pending ? { type: 'continue' as const } : replacement(hookInput);
+      });
       const canAppend = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
         // The request-only reminder runs before the appending background
         // reminder and before any post-commit callback, so it samples the
@@ -4859,7 +4868,8 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
       }
       expect(canAppend).toHaveBeenCalledOnce();
       expect(backgroundHook).toHaveBeenCalledOnce();
-      expect(laterHook).toHaveBeenCalledTimes(mode === "defer" ? 1 : 0);
+      expect(laterHook).toHaveBeenCalledOnce();
+      expect(laterSawMarker).toEqual([mode !== "defer"]);
       const historyChanges = vi.mocked(input.onHistoryChanged).mock.calls;
       expect(historyChanges.length).toBeGreaterThan(0);
       const history = historyChanges.flatMap(([change]) => change.messages);

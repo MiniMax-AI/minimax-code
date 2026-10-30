@@ -10,8 +10,8 @@ const FINAL_WINDOW_LEVEL = BUDGET_FRACTION_THRESHOLDS.length + 1;
 /**
  * Request-only context; the caller's existing cancellation timer remains
  * authoritative. `replaceRequestMessages` keeps the marker out of durable
- * history, so it must be registered before any hook that returns
- * `appendMessage` — `runBeforeLLM` ends the pipeline on a successful append.
+ * history. `runBeforeLLM` accumulates appends, so later hooks keep running;
+ * it is still registered before the appending background reminder.
  *
  * To avoid spending tokens on every model request, the reminder is emitted
  * only on the first request (announces the budget), when the remaining budget

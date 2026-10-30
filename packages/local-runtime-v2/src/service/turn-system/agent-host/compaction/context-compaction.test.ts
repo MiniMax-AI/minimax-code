@@ -1664,36 +1664,32 @@ describe("ContextCompactor result identity", () => {
   });
 });
 
+const rawHistory = [
+  { role: "user" as const, content: "SENTINEL_RAW_H0", timestamp: 1 },
+];
+const replacement = [
+  { role: "user" as const, content: "SENTINEL_REPLACEMENT_BODY", timestamp: 2 },
+];
+
+function completed(method: "tool_archive" | "tool_trim" | "llm_checkpoint") {
+  return {
+    status: "completed" as const,
+    compactionId: `${method}-1`,
+    strategyVersion: "context-compaction-v2",
+    method,
+    ...(method === "llm_checkpoint" ? { summary: "checkpoint正文" } : {}),
+    ...(method !== "llm_checkpoint" ? { replacementSourceIndexes: [0] } : {}),
+    replacementMessages: replacement,
+    messagesBefore: 1,
+    messagesAfter: 1,
+    tokensBefore: 1_000,
+    tokensAfter: 400,
+    serializedBytesBefore: 4_000,
+    serializedBytesAfter: 1_600,
+  };
+}
+
 describe("bounded compaction replacement metadata", () => {
-  const rawHistory = [
-    { role: "user" as const, content: "SENTINEL_RAW_H0", timestamp: 1 },
-  ];
-  const replacement = [
-    {
-      role: "user" as const,
-      content: "SENTINEL_REPLACEMENT_BODY",
-      timestamp: 2,
-    },
-  ];
-
-  function completed(method: "tool_archive" | "tool_trim" | "llm_checkpoint") {
-    return {
-      status: "completed" as const,
-      compactionId: `${method}-1`,
-      strategyVersion: "context-compaction-v2",
-      method,
-      ...(method === "llm_checkpoint" ? { summary: "checkpoint正文" } : {}),
-      ...(method !== "llm_checkpoint" ? { replacementSourceIndexes: [0] } : {}),
-      replacementMessages: replacement,
-      messagesBefore: 1,
-      messagesAfter: 1,
-      tokensBefore: 1_000,
-      tokensAfter: 400,
-      serializedBytesBefore: 4_000,
-      serializedBytesAfter: 1_600,
-    };
-  }
-
   it.each(["tool_archive", "tool_trim", "llm_checkpoint"] as const)(
     "maps automatic %s through Pi-compatible but body-free metadata",
     async (method) => {
@@ -1830,7 +1826,9 @@ describe("bounded compaction replacement metadata", () => {
       ).toBeUndefined();
     },
   );
+});
 
+describe("bounded compaction current-user tail metadata", () => {
   it.each(["llm_checkpoint", "tool_archive", "tool_trim"] as const)(
     "reads an exact current-user tail source for %s",
     (method) => {
@@ -1864,6 +1862,130 @@ describe("bounded compaction replacement metadata", () => {
     },
   );
 
+  it("accepts exactly one extra hidden-mode slot before the current-user tail", () => {
+    const metadata = {
+      ...createCompactionReplaceMetadata(
+        completed("llm_checkpoint") as never,
+        "initial",
+        "attempt-side",
+      ),
+      messagesBefore: 2,
+      messagesAfter: 4,
+      currentUserSourceIndex: 1,
+    };
+    expect(readCompactionCommitMetadata(metadata)).toMatchObject({
+      method: "llm_checkpoint",
+      currentUserSourceIndex: 1,
+    });
+    expect(
+      readCompactionCommitMetadata({ ...metadata, messagesAfter: 5 }),
+    ).toBeUndefined();
+  });
+
+  it.each(["tool_archive", "tool_trim"] as const)(
+    "accepts a %s commit with two placed markers before the current user",
+    (method) => {
+      const metadata = {
+        ...createCompactionReplaceMetadata(
+          completed(method) as never,
+          "initial",
+          "attempt-2m",
+        ),
+        messagesBefore: 2,
+        messagesAfter: 4,
+        currentUserSourceIndex: 1,
+        placedMarkerCount: 2,
+        replacementSourceIndexes: [0],
+      };
+
+      expect(readCompactionCommitMetadata(metadata)).toMatchObject({
+        method,
+        replacementSourceIndexes: [0],
+        currentUserSourceIndex: 1,
+        placedMarkerCount: 2,
+      });
+      // Legacy single-marker reading (count absent) does not fit two markers.
+      const { placedMarkerCount: _omitted, ...legacy } = metadata;
+      expect(readCompactionCommitMetadata(legacy)).toBeUndefined();
+      expect(
+        readCompactionCommitMetadata({ ...metadata, placedMarkerCount: 1 }),
+      ).toBeUndefined();
+      expect(
+        readCompactionCommitMetadata({ ...metadata, placedMarkerCount: 3 }),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["without owned mode", 4],
+    ["with owned mode", 5],
+  ])(
+    "accepts an llm_checkpoint commit with two placed markers %s",
+    (_label, messagesAfter) => {
+      const metadata = {
+        ...createCompactionReplaceMetadata(
+          completed("llm_checkpoint") as never,
+          "initial",
+          "attempt-2m",
+        ),
+        messagesBefore: 2,
+        messagesAfter,
+        currentUserSourceIndex: 1,
+        placedMarkerCount: 2,
+      };
+
+      expect(readCompactionCommitMetadata(metadata)).toMatchObject({
+        method: "llm_checkpoint",
+        currentUserSourceIndex: 1,
+        placedMarkerCount: 2,
+      });
+      expect(
+        readCompactionCommitMetadata({
+          ...metadata,
+          messagesAfter: messagesAfter + 2,
+        }),
+      ).toBeUndefined();
+      expect(
+        readCompactionCommitMetadata({ ...metadata, placedMarkerCount: 4 }),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["non-numeric", "2"],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+  ])("rejects a %s placedMarkerCount", (_label, placedMarkerCount) => {
+    const metadata = {
+      ...createCompactionReplaceMetadata(
+        completed("llm_checkpoint") as never,
+        "initial",
+        "attempt-bad",
+      ),
+      messagesBefore: 2,
+      messagesAfter: 3,
+      currentUserSourceIndex: 1,
+      placedMarkerCount,
+    };
+    expect(readCompactionCommitMetadata(metadata)).toBeUndefined();
+  });
+
+  it("rejects placedMarkerCount without a current-user tail source", () => {
+    const metadata = {
+      ...createCompactionReplaceMetadata(
+        completed("tool_trim") as never,
+        "initial",
+        "attempt-x",
+      ),
+      placedMarkerCount: 1,
+    };
+    expect(readCompactionCommitMetadata(metadata)).toBeUndefined();
+  });
+});
+
+describe("bounded compaction lifecycle metadata guards", () => {
   it.each([
     ["missing method", { compactionMethod: undefined }],
     ["unknown method", { compactionMethod: "recursive_reduce" }],
