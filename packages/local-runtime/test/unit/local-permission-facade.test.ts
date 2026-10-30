@@ -3112,6 +3112,56 @@ describe('LocalPermissionFacade', () => {
     });
   });
 
+  describe('host-issued Session read grant', () => {
+    it('reads only the granted Session artifact directory under runtime data', async () => {
+      const { facade, ruleStore, dataDir } = freshFacade({ permissionMode: 'default' });
+      const toolOutputs = path.join(dataDir, 'v2', 'sessions', 'own', 'reports', 'tool-outputs');
+      const artifact = path.join(toolOutputs, 'call.readable.v1.jsonl');
+      const otherArtifact = path.join(
+        dataDir,
+        'v2',
+        'sessions',
+        'other',
+        'reports',
+        'tool-outputs',
+        'call.readable.v1.jsonl',
+      );
+      mkdirSync(path.dirname(artifact), { recursive: true });
+      mkdirSync(path.dirname(otherArtifact), { recursive: true });
+      writeFileSync(artifact, '{"synthetic":true}\n');
+      writeFileSync(otherArtifact, '{"synthetic":true}\n');
+      try {
+        await expect(
+          facade.checkPermission({
+            toolName: 'read',
+            input: { path: artifact },
+            sessionId: 'session-a',
+            sessionOwnedReadablePaths: [toolOutputs],
+          }),
+        ).resolves.toMatchObject({ behavior: 'allow' });
+        // Without the grant the same artifact is private runtime data.
+        await expect(
+          facade.checkPermission({
+            toolName: 'read',
+            input: { path: artifact },
+            sessionId: 'session-a',
+          }),
+        ).resolves.not.toMatchObject({ behavior: 'allow' });
+        await expect(
+          facade.checkPermission({
+            toolName: 'read',
+            input: { path: otherArtifact },
+            sessionId: 'session-a',
+            sessionOwnedReadablePaths: [toolOutputs],
+          }),
+        ).resolves.not.toMatchObject({ behavior: 'allow' });
+        await expect(ruleStore.listRules({ sessionId: 'session-a' })).resolves.toEqual([]);
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+  });
+
   describe('localeHint', () => {
     it('returns zh reason when inline user messages are Chinese', async () => {
       const { facade, dataDir } = freshFacade({ permissionMode: 'default' });

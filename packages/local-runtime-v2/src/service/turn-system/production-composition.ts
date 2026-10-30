@@ -94,6 +94,13 @@ import { ContextUsageAnchorState } from './compaction/execution/usage-anchor.js'
 import { ToolResultArchiver } from './compaction/algorithm/tool-result-archiver.js';
 import { createFileApiUploadStoreSource } from './persistence/file-api-upload.repository.js';
 import { ToolOutputArtifactRepository } from './persistence/tool-output-artifact.repository.js';
+import {
+  compactionSnapshotGrantSource,
+  createSessionReadableGrantResolver,
+  runtimeWorkspaceGrantSource,
+  sessionAttachmentGrantSource,
+  toolOutputGrantSource,
+} from './agent-host/runner/policy/session-readable-grants.js';
 import type { MessagesFileApiPatcherLogger } from './agent-host/assembly/messages-file-api-patcher.js';
 import { isProductionRuntimeErrorRetryable } from './runtime-error-retry-policy.js';
 import { createTodoCadenceReminderHook } from './execution/reminder/todo-cadence-reminder.js';
@@ -152,6 +159,13 @@ export interface ProductionAgentProductCapabilities<
     }): Promise<unknown>;
   };
   readonly permission: LocalTurnPermissionGateOptions;
+  /**
+   * Asset files (attachments, generated media) the given Sessions registered.
+   * They become part of the Session read grant; see `session-readable-grants.ts`.
+   */
+  readonly sessionAssets?: {
+    listSessionReadablePaths(sessionIds: readonly string[]): Promise<readonly string[]>;
+  };
   readonly runner: Omit<LocalAgentTurnRunnerOptions, 'reviewContent'>;
   readonly executor: Omit<
     LocalRuntimeTurnExecutorOptions<TAgent, LocalRuntimeTurnToolContext>,
@@ -339,6 +353,7 @@ export function createProductionRootArchiveTitleModel<
 /** Desktop Peek adds mutation approval; BTW shares the ordinary runtime permission policy. */
 function createHostPermissionPolicy<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
+  toolOutputArtifacts: ToolOutputArtifactRepository,
 ) {
   return {
     ...options.product.permission,
@@ -348,6 +363,28 @@ function createHostPermissionPolicy<TAgent extends AgentExecutionSnapshot>(
         return session ? session.purpose !== 'peek_btw_session' && isPeekSession(session) : false;
       },
     },
+    // Paths the runtime hands the Agent inside its private data directory are
+    // granted by the runtime, never derived by the permission engine. Every
+    // such feature registers one source here (see session-readable-grants.ts).
+    resolveSessionOwnedReadablePaths: createSessionReadableGrantResolver({
+      loadSession: (sessionId) =>
+        options.sessions.sessions.execution.getExecutionSnapshot(sessionId),
+      sources: [
+        toolOutputGrantSource(toolOutputArtifacts),
+        compactionSnapshotGrantSource({
+          inspectSnapshotsDirectory: (sessionId) =>
+            options.sessions.artifacts.inspectSnapshotsDirectory(sessionId),
+        }),
+        runtimeWorkspaceGrantSource({
+          dataDir: () => options.product.preparation.configBuilder.config().dataDir,
+        }),
+        ...(options.product.sessionAssets
+          ? [sessionAttachmentGrantSource(options.product.sessionAssets)]
+          : []),
+      ],
+      ...(options.product.permission.logger ? { logger: options.product.permission.logger } : {}),
+    }),
+
   };
 }
 
@@ -426,7 +463,7 @@ export async function createLocalAgentHost<
       env: process.env,
     },
     inputPreparation: { ...options.product.inputPreparation, getImageEncoding },
-    permission: createHostPermissionPolicy(options),
+    permission: createHostPermissionPolicy(options, toolOutputArtifacts),
     runner: {
       ...options.product.runner,
       reviewContent: options.safety.review,
@@ -651,6 +688,8 @@ function createToolOutputArtifactRepository<TAgent extends AgentExecutionSnapsho
   return new ToolOutputArtifactRepository({
     resolveSessionReportsDirectory: (sessionId) =>
       options.sessions.artifacts.ensureReportsDirectory(sessionId),
+    inspectSessionReportsDirectory: (sessionId) =>
+      options.sessions.artifacts.inspectReportsDirectory(sessionId),
   });
 }
 

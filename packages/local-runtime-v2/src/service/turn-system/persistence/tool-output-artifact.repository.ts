@@ -23,7 +23,21 @@ interface ArtifactDescription {
 
 export interface ToolOutputArtifactRepositoryOptions {
   readonly resolveSessionReportsDirectory: (sessionId: string) => string | Promise<string>;
+  /**
+   * Read-only lookup of the Session reports directory: must not bind history,
+   * create directories or write manifests. Used to publish the Session's read
+   * grant, which runs on every tool call. Without it no grant is published.
+   */
+  readonly inspectSessionReportsDirectory?: (sessionId: string) => Promise<string | undefined>;
 }
+
+interface ReadableDirectoryLocation {
+  readonly reports: string;
+  readonly directory: string;
+}
+
+/** Located read-grant paths kept per process; each entry is a short path pair. */
+const READABLE_DIRECTORY_CACHE_LIMIT = 512;
 
 export interface ToolOutputArtifactWriteInput {
   readonly sessionId: string;
@@ -49,6 +63,8 @@ export interface ToolOutputImageWriteInput {
 
 /** Persists oversized tool text under the Session-owned reports directory. */
 export class ToolOutputArtifactRepository {
+  private readonly readableDirectories = new Map<string, ReadableDirectoryLocation>();
+
   constructor(private readonly options: ToolOutputArtifactRepositoryOptions) {}
 
   async write(input: ToolOutputArtifactWriteInput) {
@@ -119,6 +135,61 @@ export class ToolOutputArtifactRepository {
     );
   }
 
+  /**
+   * The Session's own tool-output directory, published to the permission layer
+   * as the Session's read grant. The runtime hands the Agent a path when it
+   * externalizes an oversized tool result, so the Agent must be able to read
+   * that artifact back.
+   *
+   * Side-effect free: the location comes from a read-only lookup (no history
+   * binding, no directory creation), so Sessions that never externalized a
+   * result pay nothing. `undefined` means there is nothing to grant: the
+   * Session is unknown, nothing has been written yet, or the directory fails
+   * the same safety checks the writer applies.
+   *
+   * The grant is the located (lexical) path, never its realpath. Resolving it
+   * here would erase any symlink swapped into an ancestor such as `reports/`
+   * before the permission layer could see it; the permission layer
+   * canonicalizes the lexical path itself and rejects a root reached through
+   * any symlink below the private runtime root.
+   *
+   * Only the located path is cached, bounded by count. The directory itself is
+   * re-validated on every call, so a deleted or swapped-in directory is never
+   * granted from a stale cache entry.
+   */
+  async readableDirectory(sessionId: string): Promise<string | undefined> {
+    const located = await this.locateReadableDirectory(sessionId);
+    if (!located) return undefined;
+    if (!(await isSafeExistingDirectory(located.reports, located.directory))) {
+      this.readableDirectories.delete(sessionId);
+      return undefined;
+    }
+    this.rememberReadableDirectory(sessionId, located);
+    return located.directory;
+  }
+
+  private async locateReadableDirectory(
+    sessionId: string,
+  ): Promise<ReadableDirectoryLocation | undefined> {
+    const cached = this.readableDirectories.get(sessionId);
+    if (cached) return cached;
+    const inspect = this.options.inspectSessionReportsDirectory;
+    if (!inspect) return undefined;
+    const reports = await inspect(sessionId);
+    return reports ? { reports, directory: join(reports, TOOL_OUTPUT_DIRECTORY) } : undefined;
+  }
+
+  private rememberReadableDirectory(sessionId: string, location: ReadableDirectoryLocation): void {
+    // Refresh recency, then evict the least recently used entries.
+    this.readableDirectories.delete(sessionId);
+    this.readableDirectories.set(sessionId, location);
+    while (this.readableDirectories.size > READABLE_DIRECTORY_CACHE_LIMIT) {
+      const oldest = this.readableDirectories.keys().next().value;
+      if (oldest === undefined) break;
+      this.readableDirectories.delete(oldest);
+    }
+  }
+
   private async resolveDirectory(sessionId: string): Promise<string> {
     const reportsDirectory = await this.options.resolveSessionReportsDirectory(sessionId);
     const directory = join(reportsDirectory, TOOL_OUTPUT_DIRECTORY);
@@ -156,6 +227,36 @@ function callDigest(input: { readonly toolCallId: string; readonly toolName: str
 function isPathInside(candidate: string, parent: string): boolean {
   const pathFromParent = relative(parent, candidate);
   return pathFromParent !== '' && !pathFromParent.startsWith('..') && !isAbsolute(pathFromParent);
+}
+
+/**
+ * Whether an existing tool-output directory passes the writer's safety checks,
+ * without creating anything: it must be a real directory (not a symlink) whose
+ * canonical path stays inside the canonical reports directory. Symlinks in
+ * higher ancestors are the permission layer's job (see `readableDirectory`).
+ */
+async function isSafeExistingDirectory(
+  reportsDirectory: string,
+  directory: string,
+): Promise<boolean> {
+  try {
+    const directoryInfo = await lstat(directory);
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) return false;
+    const [canonicalReportsDirectory, canonicalDirectory] = await Promise.all([
+      realpath(reportsDirectory),
+      realpath(directory),
+    ]);
+    return isPathInside(canonicalDirectory, canonicalReportsDirectory);
+  } catch (error) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code =
+    typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 function artifactIdentity(input: ToolOutputArtifactWriteInput): {

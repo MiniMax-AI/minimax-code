@@ -62,6 +62,7 @@ export type DecisionReason =
   | { type: 'safetyCheck'; description: string; classifierApprovable?: boolean; category?: string }
   | { type: 'workingDirectory'; path: string }
   | { type: 'internalWhitelist'; path: string }
+  | { type: 'sessionOwnedReadablePath'; path: string }
   | { type: 'trustedExactWrite'; path: string }
   | { type: 'tempDirectory'; path: string }
   | { type: 'sandbox' }
@@ -206,6 +207,22 @@ export type PathCheckContext = {
   homeDir?: string;
   agentName?: string;
   trustedExactWritePaths?: readonly string[];
+  /**
+   * Absolute directories or exact files the active Session owns and may READ:
+   * paths the runtime itself hands the Agent, e.g. the Session's workspace
+   * when the runtime allocated it inside its data directory, the user's
+   * attachments, recoverable tool-output artifacts and compaction snapshots.
+   *
+   * The host injects them; this engine never derives a path from a Session
+   * id, so the runtime layout stays owned by the runtime. A root only counts
+   * when it is strictly inside the private runtime tree (`dataDir` /
+   * `~/.minimax`) and reached without any symlink below that root; anything
+   * else is ignored. Everything else under the tree stays protected: another
+   * Session's artifacts, configuration and credentials are never included.
+   *
+   * Read-only. Writes inside these roots follow the ordinary write rules.
+   */
+  sessionOwnedReadablePaths?: readonly string[];
 };
 
 // ---------------------------------------------------------------------------

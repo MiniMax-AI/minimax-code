@@ -75,6 +75,7 @@ export function evaluatePathCapability(
     homeDir: context.homeDir,
     agentName: context.agentName,
     trustedExactWritePaths: [...context.trustedExactWritePaths],
+    sessionOwnedReadablePaths: [...context.sessionOwnedReadablePaths],
   };
 
   // Two-step match:

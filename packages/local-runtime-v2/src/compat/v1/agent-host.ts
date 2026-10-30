@@ -193,6 +193,7 @@ export function createV1AgentHostProductCapabilities(
       },
     },
     permission: hosted.permissions,
+    sessionAssets: { listSessionReadablePaths: hosted.attachments.listSessionReadablePaths },
     terminalMemory: hosted.terminalMemory,
     runner: {
       contextUsage: hosted.contextUsage,

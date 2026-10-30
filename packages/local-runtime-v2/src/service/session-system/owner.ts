@@ -453,9 +453,15 @@ function createSessionDirectoryOwners(
     return historyLocations.ensure(session);
   };
   return {
-    reports: { ensureDirectory: async (sessionId: string) => (await locate(sessionId)).reports },
+    reports: {
+      ensureDirectory: async (sessionId: string) => (await locate(sessionId)).reports,
+      inspectDirectory: async (sessionId: string) =>
+        (await historyLocations.inspectSession(sessionId))?.paths.reports,
+    },
     snapshots: {
       resolveDirectory: async (sessionId: string) => (await locate(sessionId)).snapshots,
+      inspectDirectory: async (sessionId: string) =>
+        (await historyLocations.inspectSession(sessionId))?.paths.snapshots,
     },
   };
 }

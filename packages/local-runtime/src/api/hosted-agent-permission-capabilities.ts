@@ -45,6 +45,7 @@ export function createHostedAgentPermissionCapabilities(
         readonly toolInput: Readonly<Record<string, unknown>>;
         readonly permissionMode?: 'default' | 'auto' | 'bypassPermissions' | 'off';
         readonly trustedExactWritePaths?: readonly string[];
+        readonly sessionOwnedReadablePaths?: readonly string[];
         readonly nativeDeleteSnapshot?: boolean;
       }) => {
         const ctx = host.permissionRouteContext();
@@ -56,6 +57,7 @@ export function createHostedAgentPermissionCapabilities(
           permissionModeOverride:
             input.permissionMode ?? readLocalPermissionMode(ctx.configGetter().permissionMode),
           trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
+          sessionOwnedReadablePaths: [...(input.sessionOwnedReadablePaths ?? [])],
           ...(input.nativeDeleteSnapshot !== undefined
             ? { nativeDeleteSnapshot: input.nativeDeleteSnapshot }
             : {}),

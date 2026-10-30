@@ -10,7 +10,17 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type {
@@ -587,6 +597,159 @@ function listRegisteredV2Assets(dataDir: DataDirInput): LocalRuntimeAssetRecord[
       return [];
     }
   });
+}
+
+/** Lists the asset files registered by the given Sessions, for read grants. */
+export interface SessionAssetPathIndex {
+  /**
+   * Lexical paths (`<dataDir>/v2/assets/...`) of valid assets whose sidecar
+   * names one of `sessionIds`. Never realpaths: the permission layer
+   * canonicalizes each grant itself and rejects one reached through a symlink.
+   */
+  listSessionAssetPaths(sessionIds: readonly string[]): Promise<readonly string[]>;
+}
+
+interface AssetDirectoryEntry {
+  readonly sessionId: string;
+  readonly filePath: string;
+}
+
+interface AssetDirectorySnapshot {
+  readonly mtimeMs: number;
+  readonly entries: readonly AssetDirectoryEntry[];
+}
+
+const SESSION_ASSET_INDEX_REFRESH_MS = 1_000;
+
+/**
+ * Per-Session view of the shared v2 asset store, cheap enough for every
+ * permission check. The store is one dated tree shared by all Sessions, and
+ * each asset's sidecar names the Session that registered it.
+ *
+ * All file-system work is asynchronous, so even the cold first scan of a large
+ * store never blocks the runtime's event loop; concurrent callers share one
+ * in-flight scan. A directory is re-read only when its mtime changes (adding
+ * or removing an asset changes it), and the tree is re-walked at most once per
+ * refresh interval.
+ */
+export function createSessionAssetPathIndex(
+  dataDir: DataDirInput,
+  options: { readonly nowMs?: () => number; readonly refreshIntervalMs?: number } = {},
+): SessionAssetPathIndex {
+  const nowMs = options.nowMs ?? Date.now;
+  const refreshIntervalMs = options.refreshIntervalMs ?? SESSION_ASSET_INDEX_REFRESH_MS;
+  let directories = new Map<string, AssetDirectorySnapshot>();
+  let refreshedAtMs: number | undefined;
+  let inFlight: Promise<void> | undefined;
+
+  const scan = async (): Promise<void> => {
+    const contract = resolveV2DirectoryContract(dataDir);
+    const assetsRoot = await realpath(contract.assets).catch(() => undefined);
+    const next = new Map<string, AssetDirectorySnapshot>();
+    if (assetsRoot) {
+      for (const { directory, mtimeMs } of await listAssetDirectories(contract.assets)) {
+        const previous = directories.get(directory);
+        next.set(
+          directory,
+          previous?.mtimeMs === mtimeMs
+            ? previous
+            : {
+                mtimeMs,
+                entries: await readAssetDirectoryEntries(contract.root, assetsRoot, directory),
+              },
+        );
+      }
+    }
+    directories = next;
+  };
+
+  const refresh = (): Promise<void> => {
+    if (inFlight) return inFlight;
+    const now = nowMs();
+    if (refreshedAtMs !== undefined && now - refreshedAtMs < refreshIntervalMs) {
+      return Promise.resolve();
+    }
+    refreshedAtMs = now;
+    inFlight = scan().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
+  };
+
+  return {
+    async listSessionAssetPaths(sessionIds) {
+      const wanted = new Set(sessionIds.map((id) => id.trim()).filter(Boolean));
+      if (wanted.size === 0) return [];
+      await refresh();
+      const paths: string[] = [];
+      for (const { entries } of directories.values()) {
+        for (const entry of entries) {
+          if (wanted.has(entry.sessionId)) paths.push(entry.filePath);
+        }
+      }
+      return paths;
+    },
+  };
+}
+
+/** Real (non-symlink) directories under the asset root, with their mtimes. */
+async function listAssetDirectories(
+  root: string,
+): Promise<{ directory: string; mtimeMs: number }[]> {
+  const found: { directory: string; mtimeMs: number }[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    const info = await lstat(directory).catch(() => undefined);
+    if (!info || info.isSymbolicLink() || !info.isDirectory()) return;
+    found.push({ directory, mtimeMs: info.mtimeMs });
+    const names = await readdir(directory).catch(() => [] as string[]);
+    for (const name of names) {
+      // Asset files and sidecars carry an extension; dated directories do not.
+      if (!name.includes('.')) await visit(path.join(directory, name));
+    }
+  };
+  await visit(root);
+  return found;
+}
+
+/**
+ * Valid Session-owned assets in one directory. Each sidecar is read once; the
+ * asset must sit next to it, be a regular file of the recorded size, and
+ * resolve inside the canonical asset root.
+ */
+async function readAssetDirectoryEntries(
+  v2Root: string,
+  assetsRoot: string,
+  directory: string,
+): Promise<AssetDirectoryEntry[]> {
+  const names = await readdir(directory).catch(() => [] as string[]);
+  const entries: AssetDirectoryEntry[] = [];
+  for (const name of names) {
+    if (!name.endsWith('.asset.json')) continue;
+    const entry = await readAssetDirectoryEntry(v2Root, assetsRoot, path.join(directory, name));
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
+async function readAssetDirectoryEntry(
+  v2Root: string,
+  assetsRoot: string,
+  sidecarPath: string,
+): Promise<AssetDirectoryEntry | undefined> {
+  try {
+    const sidecarInfo = await lstat(sidecarPath);
+    if (sidecarInfo.isSymbolicLink() || !sidecarInfo.isFile()) return undefined;
+    const parsed = JSON.parse(await readFile(sidecarPath, 'utf-8')) as unknown;
+    if (!isLocalRuntimeAssetRecord(parsed) || !parsed.sessionId) return undefined;
+    const filePath = path.join(v2Root, parsed.relativePath);
+    if (`${filePath}.asset.json` !== sidecarPath) return undefined;
+    const fileInfo = await stat(filePath);
+    if (!fileInfo.isFile() || fileInfo.size !== parsed.bytes) return undefined;
+    if (!isPathInside(assetsRoot, await realpath(filePath))) return undefined;
+    return { sessionId: parsed.sessionId, filePath };
+  } catch {
+    return undefined;
+  }
 }
 
 function isSameAssetSource(record: LocalRuntimeAssetRecord, canonicalSource: string): boolean {

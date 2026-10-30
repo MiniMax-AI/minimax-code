@@ -1,6 +1,7 @@
 import { basename, extname } from 'node:path';
 
 import {
+  createSessionAssetPathIndex,
   discardLocalAssetRegistrations,
   registerMessageAttachments,
   resolveSessionLocalAssetSource,
@@ -35,7 +36,14 @@ interface HostedAttachmentCapabilitiesHost {
 }
 
 export function createHostedAttachmentCapabilities(host: HostedAttachmentCapabilitiesHost) {
+  const sessionAssets = createSessionAssetPathIndex(() => host.configGetter().dataDir);
   return {
+    /**
+     * Asset files the given Sessions registered (attachments, generated media).
+     * The runtime hands the Agent these paths, so they become its read grant.
+     */
+    listSessionReadablePaths: async (sessionIds: readonly string[]) =>
+      sessionAssets.listSessionAssetPaths(sessionIds),
     register: (input: {
       readonly sessionId: string;
       readonly turnId?: string;

@@ -105,6 +105,7 @@ function permissionReasonLogFields(
     safetyCheck: 'safety_check',
     workingDirectory: 'working_directory_boundary',
     internalWhitelist: 'internal_whitelist',
+    sessionOwnedReadablePath: 'session_owned_readable_path',
     trustedExactWrite: 'trusted_exact_write',
     tempDirectory: 'temp_directory',
     sandbox: 'sandbox',
@@ -362,6 +363,12 @@ export interface LocalPermissionCheckParams {
   recentMessages?: AgentMessageProtocol[];
   /** Trusted owner-only capability; never populated from public HTTP input. */
   trustedExactWritePaths?: readonly string[];
+  /**
+   * Host-issued directories the active Session owns and may READ, e.g. its own
+   * recoverable tool-output artifacts. Trusted owner-only capability; never
+   * populated from public HTTP input.
+   */
+  sessionOwnedReadablePaths?: readonly string[];
   /** Validated same-call plan snapshot for Hook rechecks; never public tool/HTTP input. */
   nativeDeleteSnapshot?: boolean;
 }
@@ -676,6 +683,7 @@ export class LocalPermissionFacade {
         params.agentName,
       ),
       trustedExactWritePaths: params.trustedExactWritePaths,
+      sessionOwnedReadablePaths: params.sessionOwnedReadablePaths,
       dataDir: this.deps.configGetter().dataDir,
       homeDir: homedir(),
       isFile: (p: string) => {
@@ -690,6 +698,7 @@ export class LocalPermissionFacade {
       platform,
       shellFamily: this.deps.shellFamily ?? 'unknown',
     });
+
 
     // Local-runtime-only safety net. Splits into two kinds so we don't
     // regress "Always allow":

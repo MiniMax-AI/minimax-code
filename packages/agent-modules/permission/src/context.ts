@@ -81,6 +81,13 @@ export interface ToolPermissionContext {
   /** Turn-scoped exact write targets issued by the trusted execution owner. */
   readonly trustedExactWritePaths: readonly string[];
 
+  /**
+   * Absolute directories the active Session owns and may READ, e.g. the
+   * Session's own recoverable tool-output artifacts. Issued by the host
+   * runtime; the engine never derives them.
+   */
+  readonly sessionOwnedReadablePaths: readonly string[];
+
   /** Root data directory resolved from daemon runtime config. */
   readonly dataDir: string;
 
@@ -123,6 +130,7 @@ export interface ToolPermissionContextConfig {
   allowedWorkingPaths?: string[];
   sandboxAllowPaths?: string[];
   trustedExactWritePaths?: readonly string[];
+  sessionOwnedReadablePaths?: readonly string[];
   dataDir: string;
   homeDir: string;
   isFile?: (filePath: string) => boolean;
@@ -157,6 +165,7 @@ export function createToolPermissionContext(
     allowedWorkingPaths: Object.freeze([...(config.allowedWorkingPaths ?? [])]),
     sandboxAllowPaths: Object.freeze([...(config.sandboxAllowPaths ?? [])]),
     trustedExactWritePaths: Object.freeze([...(config.trustedExactWritePaths ?? [])]),
+    sessionOwnedReadablePaths: Object.freeze([...(config.sessionOwnedReadablePaths ?? [])]),
     dataDir: config.dataDir,
     homeDir: config.homeDir,
     isFile: config.isFile,
@@ -228,6 +237,7 @@ function cloneContextWith(
     allowedWorkingPaths: ctx.allowedWorkingPaths,
     sandboxAllowPaths: ctx.sandboxAllowPaths,
     trustedExactWritePaths: ctx.trustedExactWritePaths,
+    sessionOwnedReadablePaths: ctx.sessionOwnedReadablePaths,
     dataDir: ctx.dataDir,
     homeDir: ctx.homeDir,
     isFile: ctx.isFile,

@@ -79,6 +79,12 @@ function formatInternalWhitelistReason(fsPath: string, lang: Lang): string {
     : `Allowed: internal Mavis-managed path. Path: ${fsPath}`;
 }
 
+function formatSessionOwnedReadablePathReason(fsPath: string, lang: Lang): string {
+  return lang === 'zh'
+    ? `已允许：当前会话自有的运行时产物路径。路径：${fsPath}`
+    : `Allowed: runtime artifact path owned by the current session. Path: ${fsPath}`;
+}
+
 function formatTrustedExactWriteReason(fsPath: string, lang: Lang): string {
   return lang === 'zh'
     ? `已允许：当前 Turn 已授权写入精确路径。路径：${fsPath}`
@@ -214,6 +220,8 @@ export function formatDecisionReason(
         return formatWorkingDirectoryReason(behavior, reason.path, lang);
       case 'internalWhitelist':
         return formatInternalWhitelistReason(reason.path, lang);
+      case 'sessionOwnedReadablePath':
+        return formatSessionOwnedReadablePathReason(reason.path, lang);
       case 'trustedExactWrite':
         return formatTrustedExactWriteReason(reason.path, lang);
       case 'tempDirectory':
