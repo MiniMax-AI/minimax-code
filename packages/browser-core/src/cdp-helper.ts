@@ -16,7 +16,7 @@ import type { InteractiveElement } from './browser-core-contracts.js';
 import { browserPrintableKeyDescriptor } from './browser-keyboard.js';
 import { CDPPageScanner } from './cdp-page-scanner.js';
 import type { BrowserTransport } from './browser-transport.js';
-import { isRecord } from './browser-state.js';
+import { type CdpExceptionDetails, describeCdpException, isRecord } from './browser-state.js';
 import {
   browserInputDiagnosticLogger,
   type BufferedConsoleDiagnosticEntry,
@@ -2305,11 +2305,14 @@ export class CDPHelper {
         commandSessionId,
       )) as {
         result?: { value?: T; description?: string };
-        exceptionDetails?: { text?: string };
+        exceptionDetails?: CdpExceptionDetails;
       };
       if (response.exceptionDetails) {
         throw new Error(
-          response.exceptionDetails.text ?? response.result?.description ?? 'Element action failed',
+          describeCdpException(
+            response.exceptionDetails,
+            response.result?.description ?? 'Element action failed',
+          ),
         );
       }
       return response.result?.value as T;

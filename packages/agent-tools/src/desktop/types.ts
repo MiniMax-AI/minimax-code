@@ -197,6 +197,7 @@ export type LocalBrowserToolAction =
   | 'click'
   | 'click_and_wait_for_navigation'
   | 'double_click'
+  | 'triple_click'
   | 'drag'
   | 'fill'
   | 'type'
@@ -213,7 +214,8 @@ export type LocalBrowserToolAction =
   | 'upload_files'
   | 'paste'
   | 'verify_text'
-  | 'inspect_editable_targets';
+  | 'inspect_editable_targets'
+  | 'run_script';
 
 export interface LocalBrowserAdapter {
   getCapabilities?(): BrowserProviderCapabilities;

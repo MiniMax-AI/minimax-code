@@ -1,12 +1,18 @@
 import { DEFAULT_BROWSER_VIEWPORT } from './browser-constants.js';
 import { modifierBit } from './browser-action-helpers.js';
 import { browserKeyDescriptor } from './browser-keyboard.js';
-import { BrowserQuerySupport } from './browser-query.js';
+import {
+  BrowserQuerySupport,
+  invalidSelectorHint,
+  isInvalidSelectorMessage,
+} from './browser-query.js';
+import { diagnoseSelectorMiss, selectorMissRecovery } from './browser-selector-diagnostics.js';
 import { isBrowserOperationInterruption } from './operation-timeout.js';
 import {
   asString,
   cdp,
   clearBrowserSnapshots,
+  describeUnresolvedBrowserRef,
   evaluate,
   inputCoordinate,
   inputCoordinateScale,
@@ -19,6 +25,35 @@ import {
 } from './browser-state.js';
 
 export abstract class BrowserActionTargetSupport extends BrowserQuerySupport {
+  /** True only when the node is positively known to be disconnected from its document. */
+  protected async backendNodeIsDetached(
+    session: SessionState,
+    backendNodeId: number,
+  ): Promise<boolean> {
+    let objectId: string | undefined;
+    try {
+      const resolved = await cdp<{ object?: { objectId?: string } }>(session, 'DOM.resolveNode', {
+        backendNodeId,
+      });
+      objectId = resolved.object?.objectId;
+      if (!objectId) return false;
+      const state = await cdp<{ result?: { value?: unknown } }>(session, 'Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration: 'function () { return this.isConnected === true; }',
+        returnByValue: true,
+      });
+      return state.result?.value === false;
+    } catch (error) {
+      if (isBrowserOperationInterruption(error)) throw error;
+      // "No node with given id found": the node was collected after removal.
+      return /no node with given id/iu.test(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (objectId) {
+        await cdp(session, 'Runtime.releaseObject', { objectId }).catch(() => undefined);
+      }
+    }
+  }
+
   protected async resolveTarget(
     session: SessionState,
     input: Record<string, unknown>,
@@ -45,8 +80,7 @@ export abstract class BrowserActionTargetSupport extends BrowserQuerySupport {
       const element =
         retained?.element ??
         (allowFixtureFallback ? session.elementMap.getElementByOpaqueRef(ref) : null);
-      if (!element)
-        throw new Error('STALE_ELEMENT_REF: element ref is not from the current inspect snapshot');
+      if (!element) throw new Error(describeUnresolvedBrowserRef(session, ref));
       const elementSnapshot = retained?.snapshot ?? session.snapshot;
       const requestedFrame = asString(input.frame);
       if (requestedFrame) {
@@ -77,6 +111,15 @@ export abstract class BrowserActionTargetSupport extends BrowserQuerySupport {
         if (isBrowserOperationInterruption(error)) throw error;
         return undefined;
       });
+      // A framework re-render replaces the node but the old backendNodeId stays
+      // resolvable as a detached node, so element actions would fail later with
+      // opaque CDP errors such as "Element is not focusable". Report the stale
+      // ref at resolution time instead (checked only when the box read failed).
+      if (!measuredRect && (await this.backendNodeIsDetached(session, element.backendNodeId))) {
+        throw new Error(
+          'STALE_ELEMENT_REF: the inspected element was replaced or removed (the page re-rendered); inspect again and use the new ref',
+        );
+      }
       if (!measuredRect && requireCoordinates) {
         throw new Error(
           element.commandSessionId
@@ -126,8 +169,20 @@ export abstract class BrowserActionTargetSupport extends BrowserQuerySupport {
         }
         return { x: r.x, y: r.y, width: r.width, height: r.height };
       })()`,
-      );
-      if (!rect) throw new Error('TARGET_NOT_FOUND: selector did not match an element');
+      ).catch((error: unknown) => {
+        // Keep the original message (and therefore its error code); only
+        // append the cause-specific advice the query path already gives.
+        const message = error instanceof Error ? error.message : String(error);
+        const hint = isInvalidSelectorMessage(message) ? invalidSelectorHint(selector) : undefined;
+        if (!hint) throw error;
+        throw new Error(`${message} ${hint}`);
+      });
+      if (!rect) {
+        const diagnostics = await diagnoseSelectorMiss(session, selector);
+        throw new Error(
+          `TARGET_NOT_FOUND: selector ${JSON.stringify(selector.slice(0, 200))} did not match an element. ${selectorMissRecovery(diagnostics)}`,
+        );
+      }
       const backendNodeId = await this.resolveSelectorBackendNode(session, selector);
       return {
         x: rect.x + rect.width / 2,
@@ -163,6 +218,67 @@ export abstract class BrowserActionTargetSupport extends BrowserQuerySupport {
         return viewport;
       }
       throw new Error('VIEWPORT_UNAVAILABLE: current CSS viewport metrics are unavailable');
+    }
+  }
+
+  /**
+   * Resolve the form control under a main-Frame viewport point. Coordinate
+   * locators are accepted by every element action, so element-only actions
+   * (check/uncheck/select_option) need the DOM control the point lands on.
+   * A point on a label resolves to its associated control. `input` resolves
+   * any <input> so fill/type can route native value controls.
+   */
+  protected async resolveControlAtPoint(
+    session: SessionState,
+    point: { x: number; y: number },
+    kind: 'checkable' | 'select' | 'input',
+  ): Promise<number | undefined> {
+    const evaluated = await cdp<{ result?: { objectId?: string; subtype?: string } }>(
+      session,
+      'Runtime.evaluate',
+      {
+        expression: `(() => {
+          const kind = ${JSON.stringify(kind)};
+          const matches = (node) => {
+            if (!node) return false;
+            if (kind === 'select') return node instanceof HTMLSelectElement;
+            if (!(node instanceof HTMLInputElement)) return false;
+            if (kind === 'input') return true;
+            const type = String(node.type || '').toLowerCase();
+            return type === 'checkbox' || type === 'radio';
+          };
+          let hit = document.elementFromPoint(${point.x}, ${point.y});
+          while (hit && hit.shadowRoot) {
+            const inner = hit.shadowRoot.elementFromPoint(${point.x}, ${point.y});
+            if (!inner || inner === hit) break;
+            hit = inner;
+          }
+          if (!hit) return null;
+          if (matches(hit)) return hit;
+          const label = hit.closest('label');
+          if (label && matches(label.control)) return label.control;
+          const ancestor = kind === 'select'
+            ? hit.closest('select')
+            : kind === 'input'
+              ? hit.closest('input')
+              : hit.closest('input[type="checkbox" i], input[type="radio" i]');
+          if (matches(ancestor)) return ancestor;
+          return null;
+        })()`,
+        returnByValue: false,
+      },
+    );
+    const objectId = evaluated.result?.objectId;
+    if (!objectId) return undefined;
+    try {
+      const described = await cdp<{ node?: { backendNodeId?: number } }>(
+        session,
+        'DOM.describeNode',
+        { objectId },
+      );
+      return described.node?.backendNodeId;
+    } finally {
+      await cdp(session, 'Runtime.releaseObject', { objectId }).catch(() => undefined);
     }
   }
 
@@ -367,7 +483,11 @@ export function resolveViewportPosition(
     position.x >= viewport.width ||
     position.y >= viewport.height
   ) {
-    throw new Error('POSITION_OUT_OF_VIEWPORT: position must be inside the current viewport');
+    // Eval 777827: 8 clicks at y=757..833 / x=1306 right after a 1280x757
+    // screenshot; the bare message gave no bound, so retries stayed outside.
+    throw new Error(
+      `POSITION_OUT_OF_VIEWPORT: position (${position.x}, ${position.y}) is outside the current viewport (${viewport.width}x${viewport.height}; valid x 0-${viewport.width - 1}, y 0-${viewport.height - 1}); scroll the target into view and take a fresh screenshot, or target it by ref or selector`,
+    );
   }
   return position;
 }

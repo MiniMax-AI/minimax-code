@@ -123,6 +123,21 @@ export interface BrowserSessionState {
   commandTimeoutMs?: number;
   /** Bounded, current-generation observations retained for independent continuations. */
   snapshots?: Map<string, Snapshot>;
+  /**
+   * Snapshots evicted from the continuation window but still in the current
+   * generation. They only back opaque-ref resolution, never continuations.
+   */
+  retiredSnapshots?: Map<string, Snapshot>;
+  /**
+   * Ref id (the part after `browser-element:<generation>-`) → generation for
+   * every element this session has published, across navigations. Only used
+   * to explain unresolved refs; never consulted for resolution.
+   */
+  issuedRefIds?: Map<string, number>;
+  /** True once issuedRefIds dropped entries, so absence no longer proves a ref was never issued. */
+  issuedRefIdsTruncated?: boolean;
+  /** Consecutive text/dom selector misses on one page URL. */
+  selectorMissStreak?: { url: string; count: number };
   /** Once true, retained snapshots are the sole authority for public opaque refs. */
   snapshotAuthorityEstablished?: boolean;
   /** Most recently captured observation, used only for current-page compatibility fallbacks. */
@@ -134,6 +149,18 @@ export interface BrowserSessionState {
     frameId?: string;
     commandSessionId?: string;
   };
+  /**
+   * Input events a run_script release could not deliver. Browser Core retries
+   * them after interruption recovery and poisons the session if they still
+   * fail, so a page never keeps a key or button down across actions.
+   */
+  pendingInputRelease?: Array<{ method: string; params: Record<string, unknown> }>;
+  /**
+   * Page JavaScript started by run_script could not be stopped. Browser Core
+   * probes the page again after interruption recovery and poisons the session
+   * if it is still busy; a reconnect alone does not stop a page-side loop.
+   */
+  pageUnresponsive?: boolean;
 }
 
 export interface BrowserFrameIdentity {
@@ -142,10 +169,48 @@ export interface BrowserFrameIdentity {
 }
 
 const MAX_RETAINED_BROWSER_SNAPSHOTS = 3;
+/**
+ * Refs outlive the continuation window. Eval 769392: on unchanged pages
+ * (`urlChanged: false`, same generation) models routinely run inspect → click
+ * → inspect … and then act on a ref seen 4+ observations earlier; with only
+ * three retained snapshots that ref was already evicted and failed as
+ * STALE_ELEMENT_REF although the element was still live. Keeping a bounded
+ * pool of same-generation snapshots for ref resolution is safe because target
+ * execution still re-measures the backend node and reports a detached
+ * (re-rendered) node as stale. Navigation still revokes every ref.
+ */
+const MAX_RETIRED_BROWSER_SNAPSHOTS = 12;
 const BROWSER_SNAPSHOT_TTL_MS = 5 * 60 * 1_000;
+
+/**
+ * Bound for the issued-ref ledger. Eval 774252: ~20 of 22 "no longer retained"
+ * STALE_ELEMENT_REF errors were refs the session never published (`ref-008`,
+ * invented ids, or a real id with its generation prefix edited). Telling the
+ * model the ref was never issued points it at copying refs verbatim instead of
+ * suggesting the harness forgot them.
+ */
+const MAX_ISSUED_BROWSER_REF_IDS = 20_000;
+const BROWSER_REF_PATTERN = /^browser-element:(\d+)-(.+)$/u;
+
+function recordIssuedBrowserRefs(session: BrowserSessionState, snapshot: Snapshot): void {
+  const issued = (session.issuedRefIds ??= new Map());
+  for (const element of snapshot.elements) {
+    const match = BROWSER_REF_PATTERN.exec(element.ref);
+    if (!match?.[2]) continue;
+    issued.delete(match[2]);
+    issued.set(match[2], Number(match[1]));
+  }
+  while (issued.size > MAX_ISSUED_BROWSER_REF_IDS) {
+    const first = issued.keys().next().value;
+    if (first === undefined) break;
+    issued.delete(first);
+    session.issuedRefIdsTruncated = true;
+  }
+}
 
 export function storeBrowserSnapshot(session: BrowserSessionState, snapshot: Snapshot): void {
   session.snapshotAuthorityEstablished = true;
+  recordIssuedBrowserRefs(session, snapshot);
   const snapshots = browserSnapshotStore(session);
   pruneBrowserSnapshots(session, snapshots);
   snapshot.lastAccessedAt = Date.now();
@@ -161,8 +226,61 @@ export function storeBrowserSnapshot(session: BrowserSessionState, snapshot: Sna
     );
     if (!oldest) break;
     snapshots.delete(oldest.id);
+    retireBrowserSnapshot(session, oldest);
   }
   refreshLatestBrowserSnapshot(session, snapshots);
+}
+
+function retireBrowserSnapshot(session: BrowserSessionState, snapshot: Snapshot): void {
+  if (snapshot.generation !== session.generation) return;
+  const retired = (session.retiredSnapshots ??= new Map());
+  retired.set(snapshot.id, snapshot);
+  while (retired.size > MAX_RETIRED_BROWSER_SNAPSHOTS) {
+    const first = retired.keys().next().value;
+    if (first === undefined) break;
+    retired.delete(first);
+  }
+}
+
+function pruneRetiredBrowserSnapshots(session: BrowserSessionState): Map<string, Snapshot> {
+  const retired = (session.retiredSnapshots ??= new Map());
+  const cutoff = Date.now() - BROWSER_SNAPSHOT_TTL_MS;
+  for (const [snapshotId, snapshot] of retired) {
+    if (snapshot.generation !== session.generation || snapshotAccessTime(snapshot) < cutoff) {
+      retired.delete(snapshotId);
+    }
+  }
+  return retired;
+}
+
+/**
+ * Explain why an opaque ref no longer resolves. The generation embedded in
+ * `browser-element:<generation>-<id>` distinguishes a ref from an earlier page
+ * (navigation revoked it) from one that simply aged out of retention.
+ */
+export function describeUnresolvedBrowserRef(session: BrowserSessionState, ref: string): string {
+  const match = BROWSER_REF_PATTERN.exec(ref);
+  const generation = match?.[1];
+  // Eval 777827: `e1` / `e28` (another tool's ref dialect) were sent before
+  // the ledger existed and fell through to "no longer retained". The shape
+  // check is a pure message decision made after resolution already failed.
+  if (!match) {
+    return `STALE_ELEMENT_REF: "${ref}" is not a Browser element ref; refs have the form browser-element:<n>-<id> and must be copied exactly from the latest inspect or query output`;
+  }
+  const ledger = session.snapshotAuthorityEstablished ? session.issuedRefIds : undefined;
+  if (ledger && ledger.size > 0) {
+    const issuedGeneration = ledger.get(match[2] ?? '');
+    if (issuedGeneration !== undefined && issuedGeneration !== Number(generation)) {
+      return `STALE_ELEMENT_REF: element ref was altered: this id was issued as browser-element:${issuedGeneration}-${match[2]}, and refs must be copied verbatim (editing the number does not refresh them); inspect or query the current page and use a new ref`;
+    }
+    if (issuedGeneration === undefined && !session.issuedRefIdsTruncated) {
+      return 'STALE_ELEMENT_REF: element ref was never issued by this Browser session (a tab reset after a timeout also discards earlier refs); copy refs exactly from the latest inspect or query output instead of composing them';
+    }
+  }
+  if (generation !== undefined && Number(generation) !== session.generation) {
+    return 'STALE_ELEMENT_REF: element ref is from an earlier page state (the page navigated after it was observed); inspect or query the current page and use a new ref';
+  }
+  return 'STALE_ELEMENT_REF: element ref is not from the current inspect snapshot (it is no longer retained); inspect or query the current page and use a new ref';
 }
 
 export function getBrowserSnapshot(
@@ -196,11 +314,18 @@ export function resolveBrowserSnapshotElement(
     snapshot.lastAccessedAt = Date.now();
     return { snapshot, element };
   }
+  for (const snapshot of [...pruneRetiredBrowserSnapshots(session).values()].reverse()) {
+    const element = snapshot.elements.find((candidate) => candidate.ref === ref);
+    if (!element) continue;
+    snapshot.lastAccessedAt = Date.now();
+    return { snapshot, element };
+  }
   return undefined;
 }
 
 export function clearBrowserSnapshots(session: BrowserSessionState): void {
   session.snapshots?.clear();
+  session.retiredSnapshots?.clear();
   session.snapshot = undefined;
 }
 
@@ -230,7 +355,10 @@ export function invalidateBrowserFrame(
   const epochs = (session.frameEpochs ??= new Map());
   for (const key of keys) epochs.set(key, (epochs.get(key) ?? 0) + 1);
 
-  const snapshots = new Set<Snapshot>(session.snapshots?.values() ?? []);
+  const snapshots = new Set<Snapshot>([
+    ...(session.snapshots?.values() ?? []),
+    ...(session.retiredSnapshots?.values() ?? []),
+  ]);
   if (session.snapshot) snapshots.add(session.snapshot);
   for (const snapshot of snapshots) {
     const retained = snapshot.elements.filter(
@@ -350,6 +478,36 @@ export function inputCoordinate(
   };
 }
 
+export interface CdpExceptionDetails {
+  text?: string;
+  exception?: { description?: string; value?: unknown; className?: string };
+}
+
+/**
+ * CDP reports every thrown page exception with the generic text "Uncaught";
+ * the actual error (for example `SyntaxError: ... is not a valid selector`) is
+ * in `exception.description`. Surface the real message so callers can classify
+ * and correct it instead of seeing only "Uncaught" (eval: 17 query failures).
+ */
+export function describeCdpException(details: unknown, fallback: string): string {
+  if (!details || typeof details !== 'object') return fallback;
+  const record = details as CdpExceptionDetails;
+  const exception = record.exception;
+  const described =
+    exception && typeof exception === 'object'
+      ? typeof exception.description === 'string' && exception.description.trim()
+        ? exception.description
+        : typeof exception.value === 'string' && exception.value.trim()
+          ? exception.value
+          : ''
+      : '';
+  // description carries a stack trace after the first line; keep the message only.
+  const firstLine = described.split('\n')[0]?.trim() ?? '';
+  if (firstLine) return firstLine.slice(0, 500);
+  const text = typeof record.text === 'string' ? record.text.trim() : '';
+  return text || fallback;
+}
+
 export async function evaluate<T>(session: BrowserSessionState, expression: string): Promise<T> {
   const options = {
     ...(session.commandSignal ? { signal: session.commandSignal } : {}),
@@ -360,7 +518,7 @@ export async function evaluate<T>(session: BrowserSessionState, expression: stri
   }
   const payload = await session.transport.send<{
     result?: { value?: unknown; unserializableValue?: string; description?: string };
-    exceptionDetails?: { text?: string };
+    exceptionDetails?: CdpExceptionDetails;
   }>(
     'Runtime.evaluate',
     {
@@ -373,7 +531,7 @@ export async function evaluate<T>(session: BrowserSessionState, expression: stri
     options,
   );
   if (payload.exceptionDetails) {
-    throw new Error(payload.exceptionDetails.text ?? 'Page evaluation failed');
+    throw new Error(describeCdpException(payload.exceptionDetails, 'Page evaluation failed'));
   }
   if (payload.result && 'value' in payload.result) return payload.result.value as T;
   if (payload.result?.unserializableValue === 'undefined') return undefined as T;

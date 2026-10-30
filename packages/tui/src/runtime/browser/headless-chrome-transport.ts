@@ -13,6 +13,7 @@ import type {
   BrowserTransportEvent,
   BrowserTransportEventListener,
 } from '@mavis/browser-core';
+import { describeCdpException } from '@mavis/browser-core';
 import { CdpConnection } from './headless-cdp-connection.js';
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 900 };
@@ -520,8 +521,8 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
     ).then((payload) => {
       const exception = payload.exceptionDetails;
       if (exception && typeof exception === 'object') {
-        const details = exception as Record<string, unknown>;
-        throw new Error(String(details.text ?? 'Page evaluation failed'));
+        // CDP's details.text is always "Uncaught"; the real error is in exception.description.
+        throw new Error(describeCdpException(exception, 'Page evaluation failed'));
       }
       const result = payload.result;
       if (!result || typeof result !== 'object') return undefined as T;

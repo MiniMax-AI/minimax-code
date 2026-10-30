@@ -38,6 +38,7 @@ const HEADLESS_ACTIONS = [
   'click',
   'click_and_wait_for_navigation',
   'double_click',
+  'triple_click',
   'drag',
   'fill',
   'type',
@@ -55,6 +56,7 @@ const HEADLESS_ACTIONS = [
   'screenshot',
   'verify_text',
   'inspect_editable_targets',
+  'run_script',
 ] as const satisfies readonly LocalBrowserToolAction[];
 
 const MAX_PRESERVED_TABS_PER_SESSION = 8;
@@ -126,7 +128,12 @@ export class HeadlessChromeBrowserProvider implements LocalBrowserAdapter {
         action === 'click_and_wait_for_navigation' && isBlankTargetRef(session, actionInput);
       const coreAction = expectsRelatedPage ? 'click' : action;
       const result = await session.execute(coreAction, actionInput, signal);
-      if (action === 'click' || action === 'double_click' || expectsRelatedPage) {
+      if (
+        action === 'click' ||
+        action === 'double_click' ||
+        action === 'triple_click' ||
+        expectsRelatedPage
+      ) {
         return this.adoptRelatedPage(sessionId, session, result, expectsRelatedPage, signal);
       }
       return result;
