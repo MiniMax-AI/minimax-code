@@ -230,7 +230,9 @@
       "packages/local-runtime-v2/src/service/turn-system/execution/turn-execution.service.test.ts",
       "packages/local-runtime-v2/test/integration/session-stop-cascade.integration.test.ts",
       "packages/local-runtime/test/unit/local-background-task-user-stop-cascade.test.ts",
-      "packages/local-runtime/test/unit/local-task-append.test.ts"
+      "packages/local-runtime/test/unit/local-task-append.test.ts",
+      "packages/local-runtime/test/unit/local-permission-windows-host-config.test.ts",
+      "packages/local-runtime/test/unit/local-permission-windows-opt-out.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

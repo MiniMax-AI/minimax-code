@@ -376,6 +376,8 @@ interface WindowsHardSafetyResult {
 // ---------------------------------------------------------------------------
 
 export interface LocalPermissionFacadeDeps {
+  /** TUI host's explicit startup opt-out; false unless the user enabled it. */
+  skipWindowsHardSafetyChecks?: boolean;
   ruleStore: LocalPermissionRuleStore;
   pluginHookPermissionStore?: LocalPluginHookPermissionStore;
   configGetter: () => LocalRuntimeConfig;
@@ -538,7 +540,14 @@ export class LocalPermissionFacade {
     let workingDirectory: string | undefined;
 
     const command = readCommand(params.input);
-    const windowsHardSafety = await this.evaluateWindowsHardSafety(params, platform, command);
+    const skipWindowsHardSafetyChecks =
+      platform === 'win32' && this.deps.skipWindowsHardSafetyChecks === true;
+    const windowsHardSafety = await this.evaluateWindowsHardSafety(
+      params,
+      platform,
+      command,
+      skipWindowsHardSafetyChecks,
+    );
     if (windowsHardSafety.denial) return windowsHardSafety.denial;
     const { recoverableNativeDelete } = windowsHardSafety;
     workingDirectory = windowsHardSafety.workingDirectory;
@@ -546,7 +555,7 @@ export class LocalPermissionFacade {
     const posixTrashSafety = this.evaluatePosixTrashSafety(platform, command);
     if (posixTrashSafety) return posixTrashSafety;
 
-    // Off mode skips the whole pipeline (cloud autonomy).
+    // Off mode skips permission review, but recoverable deletion still needs the engine rewrite.
     const windowsDeleteNeedsRewrite =
       platform === 'win32' && command !== undefined && isDeleteLikeCommand(command);
     const posixDeleteNeedsRewrite =
@@ -650,6 +659,7 @@ export class LocalPermissionFacade {
       input: params.input,
       workspaceDir: workingDirectory,
       platform,
+      skipWindowsHardSafetyChecks,
     });
     if (
       localHardCheck?.behavior === 'deny' &&
@@ -1081,13 +1091,15 @@ export class LocalPermissionFacade {
 
   /**
    * Runtime-boundary Windows safety net. It runs before permission mode handling,
-   * so `off`, bypass, persisted rules and user approval cannot authorize an
-   * unrecoverable delete or a protected-path write.
+   * so `off`, bypass, persisted rules and user approval cannot bypass it.
+   * The startup opt-out skips broad command/path checks, but retains the trash
+   * health/trust checks and native-delete metadata needed for recoverable deletion.
    */
   private async evaluateWindowsHardSafety(
     params: LocalPermissionCheckParams,
     platform: NodeJS.Platform,
     command: string | undefined,
+    skipWindowsHardSafetyChecks: boolean,
   ): Promise<WindowsHardSafetyResult> {
     if (platform !== 'win32') return {};
 
@@ -1110,10 +1122,9 @@ export class LocalPermissionFacade {
       : undefined;
 
     if (command) {
-      const permanentDeleteReason = findWindowsDeleteReason(
-        command,
-        Boolean(recoverableNativeDelete),
-      );
+      const permanentDeleteReason = skipWindowsHardSafetyChecks
+        ? undefined
+        : findWindowsDeleteReason(command, Boolean(recoverableNativeDelete));
       if (permanentDeleteReason) {
         return {
           denial: {
@@ -1158,7 +1169,10 @@ export class LocalPermissionFacade {
       }
     }
 
-    if (!needsWindowsPathSafetyCheck(params.toolName, params.input, command)) {
+    if (
+      skipWindowsHardSafetyChecks ||
+      !needsWindowsPathSafetyCheck(params.toolName, params.input, command)
+    ) {
       return recoverableNativeDelete ? { recoverableNativeDelete } : {};
     }
 

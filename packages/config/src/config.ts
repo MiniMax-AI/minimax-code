@@ -965,6 +965,8 @@ export interface Config {
   defaultLightModel?: string;
   /** Permission mode for tool call authorization. */
   permissionMode: PermissionMode;
+  /** Explicit Windows TUI hard-safety opt-out; defaults to false and is read at startup. */
+  skipWindowsHardSafetyChecks: boolean;
   permission: PermissionConfig;
   /** Global SSE error event publishing controls. */
   sseErrorPush: SSEErrorPushConfig;
@@ -1693,6 +1695,7 @@ const DEFAULTS: Omit<
   logLevel: "info",
   devPort: DEFAULT_UI_PORT,
   permissionMode: "auto",
+  skipWindowsHardSafetyChecks: false,
   sseErrorPush: {
     history: true,
     stream: true,
@@ -1830,6 +1833,8 @@ function ensureConfigFile(): void {
     logLevel: DEFAULTS.logLevel,
     provider: managedPresetBaseUrlSyncEnabled ? preset.provider : undefined,
     defaultModel: preset.defaultModel,
+    // Written on first install as an editable safe default; existing files are not changed.
+    skipWindowsHardSafetyChecks: DEFAULTS.skipWindowsHardSafetyChecks,
   });
   writePrivateConfigFileSync(configPath, content, true);
 }
@@ -2022,6 +2027,7 @@ export function resolveConfigFromRaw(
       typeof raw.defaultLightModel === "string"
         ? raw.defaultLightModel
         : undefined,
+    skipWindowsHardSafetyChecks: raw.skipWindowsHardSafetyChecks === true,
     permissionMode:
       typeof raw.permissionMode === "string" &&
       ["default", "bypassPermissions", "auto", "off"].includes(

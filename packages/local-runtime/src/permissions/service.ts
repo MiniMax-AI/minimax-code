@@ -84,6 +84,8 @@ export function isLocalAgentResolverError(
 }
 
 export interface LocalPermissionServiceDeps {
+  /** Explicit host startup policy; never read from permission request input. */
+  skipWindowsHardSafetyChecks?: boolean;
   configGetter: () => LocalRuntimeConfig;
   authContextGetter?: () => LocalRuntimeAuthContext | undefined;
   ruleStore: LocalPermissionRuleStore;
@@ -174,6 +176,7 @@ export function createLocalPermissionService(
     getLocalAgent: deps.getLocalAgent,
     messageStore: deps.messageStore,
     shellFamily: deps.shellFamily,
+    skipWindowsHardSafetyChecks: deps.skipWindowsHardSafetyChecks,
     metricsClient: deps.metricsClient,
   });
   // Fire-and-forget: when the persisted permissionMode is `acceptEdits`, seed
@@ -257,6 +260,7 @@ function resolveBuildEnv(_deps: LocalPermissionServiceDeps): MavisBuildEnv {
 }
 
 export interface LocalPermissionHostHandle {
+  skipWindowsHardSafetyChecks?: boolean;
   configGetter: () => LocalRuntimeConfig;
   authContextGetter?: () => LocalRuntimeAuthContext | undefined;
   permissionRules: LocalPermissionRuleStore;
@@ -287,6 +291,7 @@ export function resolveLocalPermissionService(
       messageStore: resolvePermissionMessageSource(host),
       configUpdater: (body) => host.configUpdater(body),
       shellFamily: host.shellFamily,
+      skipWindowsHardSafetyChecks: host.skipWindowsHardSafetyChecks,
       metricsClient: host.metricsClient,
     });
     _serviceCache.set(host.permissionRules, service);

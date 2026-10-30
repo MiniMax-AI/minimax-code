@@ -2774,6 +2774,8 @@
     "packages/local-runtime/test/unit/local-native-tools.test.ts",
     "packages/local-runtime/test/unit/local-output-safety-writer-v2-guide-review.test.ts",
     "packages/local-runtime/test/unit/local-permission-facade.test.ts",
+    "packages/local-runtime/test/unit/local-permission-windows-host-config.test.ts",
+    "packages/local-runtime/test/unit/local-permission-windows-opt-out.test.ts",
     "packages/local-runtime/test/unit/local-runtime-host-input-safety-v2.test.ts",
     "packages/local-runtime/test/unit/local-runtime-host-output-safety-concurrency.test.ts",
     "packages/local-runtime/test/unit/local-task-append.test.ts",

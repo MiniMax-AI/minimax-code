@@ -39,6 +39,8 @@ export interface LocalPermissionCheckerInput {
   input: Record<string, unknown>;
   workspaceDir?: string;
   platform?: NodeJS.Platform;
+  /** Only skips Windows path policy; the remaining local checks still run. */
+  skipWindowsHardSafetyChecks?: boolean;
 }
 
 function parseDirectTrashTargets(command: string): string[] {
@@ -691,7 +693,8 @@ export function evaluateLocalPermissionCheck(
   const immune = buildLocalBypassImmuneDenyReason(input.toolName, input.input, input.workspaceDir);
   if (immune) return { behavior: 'deny', reason: immune, denyKind: 'bypass-immune' };
 
-  const windowsPathSafety = evaluateWindowsPathSafetyCheck(input);
+  const windowsPathSafety =
+    input.skipWindowsHardSafetyChecks === true ? undefined : evaluateWindowsPathSafetyCheck(input);
   if (windowsPathSafety) return windowsPathSafety;
 
   const policy = buildLocalPolicyDenyReason(input.toolName, input.input);

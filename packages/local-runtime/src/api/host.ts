@@ -314,6 +314,8 @@ export class LocalRuntimeApiHost {
   public readonly metricsClient: LocalRuntimeApiHostOptions["metricsClient"];
   public readonly configGetter: () => LocalRuntimeConfig;
   public readonly shellFamily: LocalRuntimeApiHostOptions["shellFamily"];
+  /** TUI-only opt-out, frozen at startup rather than read from tool/session input. */
+  public readonly skipWindowsHardSafetyChecks: boolean;
   public readonly authContextGetter:
     | (() => LocalRuntimeAuthContext | undefined)
     | undefined;
@@ -465,6 +467,9 @@ export class LocalRuntimeApiHost {
     this.surfaces = buildLocalRuntimeSurfaceCapabilities(this.runtimeMode);
     this.configGetter = options.configGetter ?? (() => getConfig());
     this.shellFamily = options.shellFamily;
+    this.skipWindowsHardSafetyChecks =
+      options.runtimeOwnerKind === 'tui' &&
+      this.configGetter().skipWindowsHardSafetyChecks === true;
     this.authContextGetter = options.authContextGetter;
     this.authContextInvalidator = options.authContextInvalidator;
     this.routingContextGetter = options.routingContextGetter;

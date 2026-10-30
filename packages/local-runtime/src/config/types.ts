@@ -76,6 +76,7 @@ export interface LocalRuntimeConfig {
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'auto' | 'off';
   /** Permission policy rollout; omitted local views inherit the config default. */
   permission?: Partial<Config['permission']>;
+  skipWindowsHardSafetyChecks?: Config['skipWindowsHardSafetyChecks'];
   dataDir: string;
   /**
    * Directory that startup seeds bundled builtin skills into. Defaults to
