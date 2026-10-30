@@ -217,7 +217,10 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
     completeSessionDeletion: (sessionId) =>
       completeTurnSessionDeletion(options, sessionId, isLeaseOwnerCurrent),
     findReceipt: (turnId) => findTurnReceipt(options, turnId),
-    findActiveTurn: async (sessionId) => findActiveTurn(options.db, sessionId, nowMs()),
+    findActiveTurn: async (sessionId) =>
+      findActiveTurn(options.db, sessionId, nowMs(), (ownerId) =>
+        isOwnedByOtherLiveRuntime(ownerId, { isLeaseOwnerAlive, isLeaseOwnerCurrent }),
+      ),
     findLatestTurnActivity: async (sessionId) => findLatestTurnActivity(options.db, sessionId),
     ...pluginHookSessionPersistence,
     findSteeringReceipt: (input) => findSteeringReceipt(options, input),
@@ -535,9 +538,29 @@ async function findTurnReceipt(
   };
 }
 
-function findActiveTurn(db: RepositoryDb, sessionId: string, nowMs: number) {
+/**
+ * True only for a lock positively owned by another live Runtime. Unknown or
+ * dead owners stay false so recovery and the current-process admission window
+ * keep their existing behavior.
+ */
+function isOwnedByOtherLiveRuntime(
+  ownerId: string,
+  liveness: {
+    readonly isLeaseOwnerAlive: (ownerId: string) => boolean | undefined;
+    readonly isLeaseOwnerCurrent: (ownerId: string) => boolean;
+  },
+): boolean {
+  return !liveness.isLeaseOwnerCurrent(ownerId) && liveness.isLeaseOwnerAlive(ownerId) === true;
+}
+
+function findActiveTurn(
+  db: RepositoryDb,
+  sessionId: string,
+  nowMs: number,
+  isOwnedByOtherRuntime: (ownerId: string) => boolean,
+) {
   const lock = db
-    .select({ ownerKind: sessionLocks.ownerKind })
+    .select({ ownerId: sessionLocks.ownerId, ownerKind: sessionLocks.ownerKind })
     .from(sessionLocks)
     .where(
       and(
@@ -560,7 +583,12 @@ function findActiveTurn(db: RepositoryDb, sessionId: string, nowMs: number) {
     .orderBy(desc(turnIngress.acceptedSequence))
     .get();
   const busyReason = accepted ? storedBusyReason(accepted.busyReason) : undefined;
-  return accepted && busyReason ? { turnId: accepted.turnId, busyReason } : undefined;
+  if (!accepted || !busyReason) return undefined;
+  return {
+    turnId: accepted.turnId,
+    busyReason,
+    ...(isOwnedByOtherRuntime(lock.ownerId) ? { ownedByOtherRuntime: true as const } : {}),
+  };
 }
 
 async function findSteeringReceipt(

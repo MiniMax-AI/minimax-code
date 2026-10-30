@@ -404,6 +404,7 @@ export class TuiProductAccess {
           : "idle",
       ...(turnId ? { turnId } : {}),
       actions: { steer: steerable },
+      ...(started && activeTurn?.ownedByOtherRuntime ? { runningElsewhere: true as const } : {}),
     };
   }
 

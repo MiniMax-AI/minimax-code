@@ -514,6 +514,9 @@ export class TuiCommandFlow {
         return 'consumed';
       }
     }
+    if (await this.holdSubmissionWhileRunningElsewhere()) {
+      return this.restoreSeed(seed, input);
+    }
     if (this.options.interactionFlow.hasPending()) {
       if (command && !seed) {
         this.options.editor.setText(input);
@@ -1014,6 +1017,41 @@ export class TuiCommandFlow {
       !chat.retiringTurnId &&
       !this.options.runtimeStopping(),
     );
+  }
+
+  /**
+   * Another live MCode process owns the running Turn, so this process can only
+   * watch it: messages would fail as steer or pile up behind it. Runtime events
+   * from that process never reach this one, so re-read the run on each attempt;
+   * once it has ended, refresh the transcript and keep the draft for an explicit
+   * resend instead of sending it automatically.
+   */
+  private async holdSubmissionWhileRunningElsewhere(): Promise<boolean> {
+    const activeRunFlow = this.options.activeRunFlow;
+    if (!activeRunFlow.currentSnapshot?.()?.runningElsewhere) return false;
+    const sessionId = this.options.controller.snapshot().session?.sessionId;
+    await activeRunFlow.refresh(true);
+    const current = activeRunFlow.currentSnapshot();
+    const ended =
+      current !== undefined &&
+      current.sessionId === sessionId &&
+      current.state !== 'running' &&
+      current.state !== 'decision-blocked';
+    if (!ended) {
+      if (current && !current.runningElsewhere) return false;
+      this.options.setHint(
+        'This Session is running in another MCode process and is read-only here. Your draft is preserved.',
+      );
+      this.options.onChanged();
+      return true;
+    }
+    this.options.runProjection.reconcileRuntimeTurn(undefined);
+    await this.options.controller.reconcileOwnerHistory().catch(() => undefined);
+    this.options.setHint(
+      'The other MCode process finished; Session refreshed. Press Enter to send your draft.',
+    );
+    this.options.onChanged();
+    return true;
   }
 
   private async restorePreparedSubmission(

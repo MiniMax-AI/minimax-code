@@ -653,6 +653,11 @@ export interface TuiActiveRunSnapshot {
   actions: {
     steer: boolean;
   };
+  /**
+   * Present only when another live MCode process owns the running Turn. This
+   * process can read the Session but cannot steer, queue, or stop that Turn.
+   */
+  runningElsewhere?: true;
   retryReason?: string;
 }
 

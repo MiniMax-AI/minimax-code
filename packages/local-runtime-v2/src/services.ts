@@ -1214,6 +1214,7 @@ async function initializeSessionApplications(
       rewindPreview: input.options.compatibility.sessionV2.diff.rewind,
       operations: input.sessionSystem.sessions.operationIntents,
       mutationPlanState: input.sessionSystem.conversationMutationState,
+      ...rewindEditActiveTurn(turnSystem),
       stream: input.sessionSystem.stream,
       turn: turnSystem.turns,
       trustedEditSubmission: turnSystem.trustedEditSubmission,
@@ -1254,6 +1255,14 @@ async function initializeSessionApplications(
     agentApplication,
     runtimeConversation,
   };
+}
+
+/** Lets Rewind/Edit refuse a Turn that another live Runtime owns. */
+function rewindEditActiveTurn(turnSystem: TurnSystemOwner) {
+  const inspection = turnSystem.inspection;
+  return inspection
+    ? { activeTurn: (sessionId: string) => inspection.activeTurn(sessionId) }
+    : {};
 }
 function createOptionalCronDelivery(
   cron: InitializedCronService | undefined,

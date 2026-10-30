@@ -825,6 +825,12 @@ export interface TurnSystemOwner {
           readonly turnId: string;
           readonly busyReason: 'turn' | 'compaction';
           readonly locallyOwned: boolean;
+          /**
+           * Present only when another live Runtime sharing this dataDir owns the
+           * Turn. Clients project it as read-only `running`; this Runtime cannot
+           * steer or abort it.
+           */
+          readonly ownedByOtherRuntime?: true;
         }
       | undefined
     >;

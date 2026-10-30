@@ -137,6 +137,10 @@ export interface ConversationMutationWorkflowDependencies {
   readonly mutationPlanState?: {
     readPlanState(sessionId: string): Promise<ConversationMutationPlanState>;
   };
+  /** Rejects Rewind/Edit while another live Runtime owns the active Turn. */
+  readonly activeTurn?: (
+    sessionId: string,
+  ) => Promise<{ readonly ownedByOtherRuntime?: true } | undefined>;
   readonly stream: ConversationMutationStreamPort;
   readonly turn: Pick<
     TurnService,
@@ -173,17 +177,9 @@ export function createProductionConversationMutationWorkflow(
       ),
     createSideSession: (request) => fork.forkSideSession(request),
     forkSession: (_ctx, request) => mapFork(request, fork, input),
-    getSessionRewindPreview: (_ctx, request) =>
-      mapRewindPreview(request, input),
-    rewindSession: (_ctx, request) =>
-      mapRewind(
-        request,
-        rewindEdit,
-        input.sessionFork,
-        input.mutationPlanState,
-      ),
-    editSessionMessage: (_ctx, request) =>
-      mapEdit(request, rewindEdit, input.sessionFork, input.mutationPlanState),
+    getSessionRewindPreview: (_ctx, request) => mapRewindPreview(request, input),
+    rewindSession: (_ctx, request) => mapRewind(request, rewindEdit, input.sessionFork, input),
+    editSessionMessage: (_ctx, request) => mapEdit(request, rewindEdit, input.sessionFork, input),
   };
 }
 
@@ -728,14 +724,21 @@ function toForkRequest(
   };
 }
 
+/** Preconditions shared by Rewind and Edit before history is rewritten. */
+type RewindEditGuards = Pick<
+  ConversationMutationWorkflowDependencies,
+  'mutationPlanState' | 'activeTurn'
+>;
+
 async function mapRewind(
   request: RewindSessionReq,
   service: RewindEditService,
   capability: ConversationMutationForkCapability,
-  planStateReader?: ConversationMutationWorkflowDependencies["mutationPlanState"],
+  guards: RewindEditGuards,
 ): Promise<RewindSessionResp> {
   try {
-    await requirePlanInactive(request.id, planStateReader);
+    await requirePlanInactive(request.id, guards.mutationPlanState);
+    await requireTurnNotOwnedByOtherRuntime(request.id, guards.activeTurn);
     await requireMutationEligibleSession(request.id, capability);
     const result = await service.rewind({
       sessionId: request.id,
@@ -767,10 +770,11 @@ async function mapEdit(
   request: EditSessionMessageReq,
   service: RewindEditService,
   capability: ConversationMutationForkCapability,
-  planStateReader?: ConversationMutationWorkflowDependencies["mutationPlanState"],
+  guards: RewindEditGuards,
 ): Promise<EditSessionMessageResp> {
   try {
-    await requirePlanInactive(request.id, planStateReader);
+    await requirePlanInactive(request.id, guards.mutationPlanState);
+    await requireTurnNotOwnedByOtherRuntime(request.id, guards.activeTurn);
     await requireMutationEligibleSession(request.id, capability);
     const result = await service.edit({
       sessionId: request.id,
@@ -822,6 +826,22 @@ async function requirePlanInactive(
   throw toApplicationError(
     CONVERSATION_MUTATION_BUSY,
     "Rewind and Edit are unavailable while Plan Mode or Plan lifecycle is active",
+  );
+}
+
+/**
+ * Rewind/Edit abort the active Turn before rewriting history. A Turn owned by
+ * another Runtime cannot be aborted from here, so rewriting would race its
+ * appends; reject instead of treating the remote Turn as stopped.
+ */
+async function requireTurnNotOwnedByOtherRuntime(
+  sessionId: string,
+  activeTurn?: ConversationMutationWorkflowDependencies['activeTurn'],
+): Promise<void> {
+  if (!(await activeTurn?.(sessionId))?.ownedByOtherRuntime) return;
+  throw toApplicationError(
+    CONVERSATION_MUTATION_BUSY,
+    'Rewind and Edit are unavailable while the Session is running in another MCode process',
   );
 }
 

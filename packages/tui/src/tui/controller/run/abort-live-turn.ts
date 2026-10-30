@@ -17,12 +17,17 @@ export type TuiStopPolicy = Pick<
 const DELEGATED_AGENTS_KEEP_RUNNING =
   'Delegated agents keep running in the background. To stop them with Esc, set conversation.stopSubAgent: true in config.yaml.';
 
+const RUNNING_ELSEWHERE =
+  'This Session is running in another MCode process and is read-only here. Stop it from that process.';
+
 export function createTuiAbortLiveTurn(options: {
   controller: TuiChatController;
   runProjection: TuiRunProjection;
   stopDelegation: TuiDelegationPort['stopDelegation'];
   abortSession: TuiConversationPort['abortSession'];
-  getActiveRun(sessionId: string): Promise<{ state: string; turnId?: string }>;
+  getActiveRun(
+    sessionId: string,
+  ): Promise<{ state: string; turnId?: string; runningElsewhere?: true }>;
   latestRuntimeTurnId(): string | undefined;
   setTransientHint(message: string | undefined): void;
   updateChrome(): void;
@@ -141,6 +146,15 @@ export function createTuiAbortLiveTurn(options: {
     const runtimeTurnId = options.latestRuntimeTurnId();
     if (!runtimeTurnId || !snapshot.session?.sessionId) return false;
     const sessionId = snapshot.session.sessionId;
+    // Another live MCode process owns this Turn: only that process can stop it,
+    // and stopping its delegated agents from here would cut into its work.
+    const owner = await options.getActiveRun(sessionId).catch(() => undefined);
+    if (owner?.runningElsewhere) {
+      options.append(RUNNING_ELSEWHERE, 'warning');
+      options.updateChrome();
+      options.requestRender();
+      return false;
+    }
     options.setTransientHint('Stopping the current response. Your draft is preserved.');
     options.runProjection.markRuntimeTurnStopping(runtimeTurnId);
     options.updateChrome();

@@ -286,10 +286,31 @@ describe("TuiRuntimeAdapter product access", () => {
     });
     const adapter = new TuiRuntimeAdapter(cliService);
 
+    const snapshot = await adapter.getActiveRun("session-1");
+    expect(snapshot).toMatchObject({
+      state: "running",
+      turnId: "turn-foreign",
+      actions: { steer: false },
+    });
+    // Not yet registered locally is not the same as owned elsewhere.
+    expect(snapshot).not.toHaveProperty("runningElsewhere");
+  });
+
+  it("marks a running Turn owned by another live MCode process as running elsewhere", async () => {
+    const cliService = cliServiceFixture();
+    vi.mocked(cliService.getActiveTurn).mockResolvedValueOnce({
+      turnId: "turn-foreign",
+      busyReason: "turn",
+      locallyOwned: false,
+      ownedByOtherRuntime: true,
+    });
+    const adapter = new TuiRuntimeAdapter(cliService);
+
     await expect(adapter.getActiveRun("session-1")).resolves.toMatchObject({
       state: "running",
       turnId: "turn-foreign",
       actions: { steer: false },
+      runningElsewhere: true,
     });
   });
 

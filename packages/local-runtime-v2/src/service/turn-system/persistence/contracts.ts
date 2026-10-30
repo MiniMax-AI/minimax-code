@@ -151,9 +151,15 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
     readonly terminalFacts: readonly TurnRecoveryTerminalFact[];
   }>;
   findReceipt(turnId: string): Promise<TurnIngressReceipt | undefined>;
-  findActiveTurn(
-    sessionId: string,
-  ): Promise<{ readonly turnId: string; readonly busyReason: TurnBusyReason } | undefined>;
+  findActiveTurn(sessionId: string): Promise<
+    | {
+        readonly turnId: string;
+        readonly busyReason: TurnBusyReason;
+        /** Present only when another live Runtime owns the Session lock. */
+        readonly ownedByOtherRuntime?: true;
+      }
+    | undefined
+  >;
   /** Latest durable Turn clock used to reject stale process-local idle decisions. */
   findLatestTurnActivity(sessionId: string): Promise<
     | {

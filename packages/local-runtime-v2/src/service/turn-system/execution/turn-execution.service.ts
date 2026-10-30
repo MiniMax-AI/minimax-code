@@ -146,6 +146,13 @@ export function createTurnExecutionService(
         // Goal must still be paused BEFORE the cascade stops tasks: a terminal
         // task wakes the queue, and a live Goal would otherwise start a new Turn.
         markUserStopBoundary(options, input, cascade, 'not_running');
+        if (cascade && (await isOwnedByOtherRuntime(options, input.sessionId))) {
+          // Not running here because another live Runtime runs it, and only that
+          // Runtime can stop it. Pausing its Goal or sweeping its work from here
+          // would act on a Turn this stop never reached (IM `/stop` lands here).
+          releaseUserStopCascade(cascade, 'owned_by_other_runtime');
+          return result;
+        }
         await acceptUserStopCascade(cascade, 'not_running');
       }
       // Detached on purpose: the cascade is a follow-up action and the stop
@@ -301,6 +308,18 @@ function releaseUserStopCascade(cascade: UserStopCascadeRun | undefined, reason:
     cascade?.cancel(reason);
   } catch {
     // Swallowed on purpose: the original abort failure is what must surface.
+  }
+}
+
+/** A read failure keeps today's behaviour: the stop is treated as local. */
+async function isOwnedByOtherRuntime(
+  options: TurnExecutionServiceOptions,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    return (await options.repository.findActiveTurn(sessionId))?.ownedByOtherRuntime === true;
+  } catch {
+    return false;
   }
 }
 
