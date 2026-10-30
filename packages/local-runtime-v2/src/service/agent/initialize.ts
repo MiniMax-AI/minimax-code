@@ -5,6 +5,7 @@ import {
   type LegacyCustomAgentMaterializationEvent,
 } from './application/agent.service.js';
 import type { LegacyIdentityDetachEvent } from './application/_migration-legacy-identity-detach.js';
+import type { BuiltinAgentConfigRepairReporter } from './application/config/builtin-canonical-files.js';
 import type { AgentSystemFactCallbacks } from './contracts.js';
 import { LocalPromptFileReader } from '../prompt-config/index.js';
 
@@ -26,6 +27,7 @@ export function createAgentRuntimeOwner(input: {
   readonly reportLegacyCustomMaterialization?: (
     event: LegacyCustomAgentMaterializationEvent,
   ) => void;
+  readonly reportBuiltinConfigRepair?: BuiltinAgentConfigRepairReporter;
 }): AgentRuntimeOwner {
   const promptFileReader = new LocalPromptFileReader();
   const repository = new DrizzleAgentRepository({
@@ -44,6 +46,9 @@ export function createAgentRuntimeOwner(input: {
     ...(input.reportIdentityDetach ? { reportIdentityDetach: input.reportIdentityDetach } : {}),
     ...(input.reportLegacyCustomMaterialization
       ? { reportLegacyCustomMaterialization: input.reportLegacyCustomMaterialization }
+      : {}),
+    ...(input.reportBuiltinConfigRepair
+      ? { reportBuiltinConfigRepair: input.reportBuiltinConfigRepair }
       : {}),
   });
   let closed = false;

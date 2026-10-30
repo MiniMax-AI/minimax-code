@@ -36,6 +36,8 @@ import {
 } from '../storage/canonical-agent-config.js';
 import {
   rebuildBuiltinCanonicalFiles,
+  reseedMissingBuiltinCanonicalFile,
+  type BuiltinAgentConfigRepairReporter,
   type BuiltinModelGroup,
   type BuiltinModelGroupResolver,
 } from './config/builtin-canonical-files.js';
@@ -127,6 +129,8 @@ export interface LocalAgentServiceOptions extends BuiltinCatalogOptions {
   readonly reportIdentityDetach?: (event: LegacyIdentityDetachEvent) => void;
   /** Startup migration sink; failures are deferred without exposing profile content. */
   readonly reportLegacyCustomMaterialization?: LegacyCustomAgentMaterializationReporter;
+  /** Startup Builtin source repair sink; the Agent composition binds it to the runtime logger. */
+  readonly reportBuiltinConfigRepair?: BuiltinAgentConfigRepairReporter;
   readonly promptConfig?: PromptContextSource;
 }
 
@@ -802,7 +806,15 @@ export class LocalAgentService extends AgentConfigDocuments {
       repository: this.options.repository,
       catalog: this.catalog,
       resolveContext: (input: AgentProfileRequest) => this.resolveProfileRenderContext(input),
+      reseedMissingBuiltinConfig: (name: string) => this.reseedMissingBuiltinConfig(name),
     };
+  }
+
+  /** Same template and model group as the startup seed; see renderBuiltinProfile. */
+  private async reseedMissingBuiltinConfig(name: string): Promise<void> {
+    const definition = await this.definitionFor(name);
+    if (!definition) return;
+    await reseedMissingBuiltinCanonicalFile({ ...this.builtinSeedInput(), definition });
   }
 
   listBuiltinDefinitions(): Promise<readonly BuiltinAgentDefinition[]> {
@@ -909,17 +921,23 @@ export class LocalAgentService extends AgentConfigDocuments {
   }
 
   private rebuildBuiltinDefinitions(definitions: readonly BuiltinAgentDefinition[]): Promise<void> {
-    return rebuildBuiltinCanonicalFiles({
+    return rebuildBuiltinCanonicalFiles({ ...this.builtinSeedInput(), definitions });
+  }
+
+  private builtinSeedInput() {
+    return {
       repository: this.options.repository,
       catalog: this.catalog,
-      definitions,
       ...(this.builtinModelGroupResolver
         ? { modelGroupResolver: this.builtinModelGroupResolver }
         : {}),
       ...(this.bundledBuiltinModelGroup
         ? { bundledModelGroup: this.bundledBuiltinModelGroup }
         : {}),
-    });
+      ...(this.options.reportBuiltinConfigRepair
+        ? { report: this.options.reportBuiltinConfigRepair }
+        : {}),
+    };
   }
 
   private async insertBuiltinDefinition(

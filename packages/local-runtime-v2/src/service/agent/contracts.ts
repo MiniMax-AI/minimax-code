@@ -277,6 +277,15 @@ export type LegacyCustomAgentMaterializationEvent =
       readonly receiptCompleted: boolean;
     };
 
+/**
+ * Result of a startup repair of a corrupted Builtin source. `skipped` means the
+ * file was valid or missing again when the repair took its lock, so nothing
+ * was archived or written.
+ */
+export type BuiltinCorruptedConfigRepair =
+  | { readonly archiveFile: string }
+  | { readonly skipped: 'now_valid' | 'missing' };
+
 /** Public Agent persistence port implemented by the V2 storage adapter. */
 export interface AgentStorePort {
   /**
@@ -345,10 +354,28 @@ export interface AgentStorePort {
     config: Omit<CanonicalAgentConfig, 'diagnostics'>,
   ): Promise<void>;
   getBuiltinCanonicalConfig?(name: string): Promise<CanonicalAgentConfig>;
+  /** Writes only when the file is absent; `already-exists` means nothing was written. */
   writeBuiltinCanonicalConfig?(
     name: string,
     config: BuiltinCanonicalAgentConfigForWrite,
-  ): Promise<void>;
+  ): Promise<'published' | 'already-exists' | void>;
+  /**
+   * Startup-only: replaces a valid Builtin source with `config` when it still
+   * has `expectedRevision`; identical bytes are not rewritten.
+   */
+  rewriteBuiltinCanonicalConfig?(
+    name: string,
+    config: BuiltinCanonicalAgentConfigForWrite,
+    expectedRevision: string,
+  ): Promise<'rewritten' | 'unchanged' | 'conflict'>;
+  /**
+   * Startup-only: archives a Builtin source that is still corrupted, then
+   * rewrites it from `config`.
+   */
+  replaceCorruptedBuiltinCanonicalConfig?(
+    name: string,
+    config: BuiltinCanonicalAgentConfigForWrite,
+  ): Promise<BuiltinCorruptedConfigRepair>;
   removeBuiltinCanonicalConfig?(name: string): Promise<boolean>;
   materializeLegacyCustomAgent?(
     name: string,

@@ -9,6 +9,7 @@ import {
 } from '../../../infra/legacy-db/agent-source.js';
 import { decryptIdentityField, encryptIdentityField } from './identity-codec.js';
 import { AgentFiles, type CanonicalCustomAgentFile } from './agent-files.js';
+import { BuiltinAgentFiles } from './builtin-agent-files.js';
 import {
   canonicalConfigForInsert,
   discardInitialCustomConfig,
@@ -30,7 +31,6 @@ import { resolveFrozenLegacyHistoryNotice } from './_migration-legacy-agents.js'
 import { AgentServiceError } from '../errors.js';
 import {
   AgentConfigError,
-  type BuiltinCanonicalAgentConfigForWrite,
   type CanonicalAgentConfig,
   type CanonicalAgentMavisConfig,
 } from './canonical-agent-config.js';
@@ -106,12 +106,14 @@ function primaryFamilyNormalizationValues(
 /** Agent owner persistence: shared AppDb plus the existing on-disk Agent layout. */
 export class DrizzleAgentRepository implements AgentStorePort {
   private readonly files: AgentFiles;
+  private readonly builtinFiles: BuiltinAgentFiles;
   private readonly identityReceipt: LegacyCustomAgentIdentityReceipt;
   private readonly observedRoles = new Set<string>();
   private legacySourceDisplayNames: Promise<ReadonlyMap<string, string>> | undefined;
 
   constructor(private readonly options: AgentRepositoryOptions) {
     this.files = new AgentFiles(options.dataDir);
+    this.builtinFiles = new BuiltinAgentFiles(this.files, options.dataDir);
     this.identityReceipt = new LegacyCustomAgentIdentityReceipt(options.dataDir);
   }
 
@@ -1068,11 +1070,16 @@ export class DrizzleAgentRepository implements AgentStorePort {
     return this.files.getBuiltinCanonicalConfig(name);
   }
 
-  writeBuiltinCanonicalConfig(
-    name: string,
-    config: BuiltinCanonicalAgentConfigForWrite,
-  ): Promise<void> {
-    return this.files.writeBuiltinCanonicalConfig(name, config);
+  writeBuiltinCanonicalConfig(...args: Parameters<BuiltinAgentFiles['seed']>) {
+    return this.builtinFiles.seed(...args);
+  }
+
+  rewriteBuiltinCanonicalConfig(...args: Parameters<BuiltinAgentFiles['reload']>) {
+    return this.builtinFiles.reload(...args);
+  }
+
+  replaceCorruptedBuiltinCanonicalConfig(...args: Parameters<BuiltinAgentFiles['repair']>) {
+    return this.builtinFiles.repair(...args);
   }
 
   removeBuiltinCanonicalConfig(name: string): Promise<boolean> {
