@@ -185,6 +185,17 @@ function registerCanonicalConfigParsingTests(): void {
     },
   );
 
+  it.each(['custom_provider:x/acc-loomy/qwen-3.8-max', 'openrouter/qwen/qwen3'])(
+    'keeps a model id containing a slash (%s) through serialization',
+    (model) => {
+      const markdown = serializeCanonicalAgentConfig({
+        config: { name: 'researcher', description: 'Evidence first.', model, systemPrompt: '' },
+      });
+      expect(markdown).toContain(`model: ${model}\n`);
+      expect(parseCanonicalAgentMarkdown(markdown, 'researcher').model).toBe(model);
+    },
+  );
+
   it.each([
     ["missing description", "---\nname: researcher\n---\n", "description"],
     [
@@ -205,6 +216,21 @@ function registerCanonicalConfigParsingTests(): void {
     [
       "invalid model shape",
       "---\nname: researcher\ndescription: desc\nmodel: MiniMax-M3\n---\n",
+      "model",
+    ],
+    [
+      "model without provider",
+      "---\nname: researcher\ndescription: desc\nmodel: /model\n---\n",
+      "model",
+    ],
+    [
+      "model without model id",
+      "---\nname: researcher\ndescription: desc\nmodel: provider/\n---\n",
+      "model",
+    ],
+    [
+      "model with whitespace",
+      "---\nname: researcher\ndescription: desc\nmodel: provider/model id\n---\n",
       "model",
     ],
     [
