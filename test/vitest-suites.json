@@ -250,7 +250,8 @@
       "packages/config/test/conversation-config.test.ts",
       "packages/local-runtime/test/unit/local-background-task-admission-stop.test.ts",
       "packages/local-runtime/test/unit/local-background-task-delivery-user-stop-admission.test.ts",
-      "packages/tui/test/unit/tui/features/interaction/plan-path.test.ts"
+      "packages/tui/test/unit/tui/features/interaction/plan-path.test.ts",
+      "packages/shared/test/unit/turn-message-kind.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

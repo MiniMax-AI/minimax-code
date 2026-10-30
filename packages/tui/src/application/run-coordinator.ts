@@ -1,4 +1,5 @@
 import type { CliSendMessageReq } from '@mavis/local-runtime-v2/cli-service';
+import { isTurnLifecycleMessageKind } from '@mavis/shared/turn-message-kind';
 
 import type { TuiTransportAttachment } from '../types/invocation.js';
 import { TuiFailure } from '../failure.js';
@@ -237,8 +238,15 @@ export class TuiRunCoordinator {
             await observeBestEffort(observe, event);
             break;
           }
-          if (isCompletedAssistantMessage(event)) {
+          if (
+            isCompletedAssistantMessage(event) &&
+            isTurnLifecycleMessageKind(event.message.kind)
+          ) {
+            // Lifecycle frames are runtime bookkeeping, not model responses: they
+            // never consume a step or replace the answer. Compaction still spends
+            // an auxiliary provider call whose usage is not exposed here.
             usageIncomplete ||= isTurnCompactionMessage(event.message, request.turnId);
+          } else if (isCompletedAssistantMessage(event)) {
             const responseUsage = responseUsageFromMessage(event.message, request.turnId);
             if (responseUsage) upsertResponseUsage(usageResponses, responseUsage);
             if (
