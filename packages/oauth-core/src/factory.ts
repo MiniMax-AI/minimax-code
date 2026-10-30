@@ -3,6 +3,7 @@ import { MCodeOAuthCore } from './auth-core.js';
 import { createCredentialStore } from './credential-store/factory.js';
 import { createAuthNamespace } from './namespace.js';
 import { migrateLegacyAuthNamespace } from './namespace-migration.js';
+import type { AuthDiagnosticObserver } from './diagnostics.js';
 import { HttpOAuthClient, type HttpOAuthClientOptions } from './oauth-client.js';
 import {
   createAuthManager,
@@ -13,6 +14,7 @@ import {
 
 export interface CreateMCodeLocalAuthOptions extends AuthNamespaceInput {
   fetchImpl?: typeof fetch;
+  onDiagnostic?: AuthDiagnosticObserver;
   endpoints: Pick<
     HttpOAuthClientOptions,
     | 'deviceAuthorizationEndpoint'
@@ -37,5 +39,6 @@ function createCore(options: CreateMCodeLocalAuthOptions): MCodeOAuthCore {
     credentialStore: createCredentialStore({ authHome: namespace.namespaceHome }),
     oauthClient: new HttpOAuthClient({ ...options.endpoints, fetchImpl: options.fetchImpl }),
     initialize: () => migrateLegacyAuthNamespace(namespace),
+    onDiagnostic: options.onDiagnostic,
   });
 }
