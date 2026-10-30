@@ -67,7 +67,6 @@ import {
 import { createLocalFileApiGitChangesCoordinator } from "../files/api.js";
 import { LocalHookService } from "../hooks/api.js";
 import { ensureBinInProcessPath } from "../infra/ensure-bin-in-path.js";
-import { ensurePathIntegration } from "../infra/ensure-path-integration.js";
 import { ensureRmShim } from "../infra/ensure-rm-shim.js";
 import {
   ensureTrashScript,
@@ -546,12 +545,13 @@ export class LocalRuntimeApiHost {
         "local_runtime.trash_seed_failed",
       );
     }
-    for (const ensure of [ensureBinInProcessPath, ensurePathIntegration]) {
-      try {
-        ensure(runtimeDataDir);
-      } catch {
-        // PATH integration remains best-effort; deletion safety is gated separately above.
-      }
+    // The Runtime adds its bin directory only to its own process PATH and to the
+    // PATH of its children. It never edits the user's shell profiles or the
+    // Windows user PATH; the install script and `npm i -g` own that.
+    try {
+      ensureBinInProcessPath(runtimeDataDir);
+    } catch {
+      // PATH integration remains best-effort; deletion safety is gated separately above.
     }
     if (!nativeDelete) {
       const trashRuntime = inspectTrashRuntime(runtimeDataDir);

@@ -18,9 +18,10 @@
  *
  * WHY NOT `<dataDir>/bin`
  * ----------------------
- * `ensurePathIntegration` appends `<dataDir>/bin` to the USER's `~/.zshrc` /
- * `~/.bashrc`. Dropping an `rm` in there would silently replace `rm` in the
- * user's own interactive terminal, which we must never do. `<dataDir>/shims` is
+ * `<dataDir>/bin` holds user-facing tools such as `mcode-tools` and may be on
+ * the user's own PATH (installers or older releases wrote it to `~/.zshrc` /
+ * `~/.bashrc`). Dropping an `rm` in there would silently replace `rm` in the
+ * user's interactive terminal, which we must never do. `<dataDir>/shims` is
  * injected only into the agent's bash environment (see `BashEnvPolicy.
  * prependPath`), never into a user-facing shell.
  *

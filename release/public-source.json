@@ -2536,7 +2536,6 @@
     "packages/local-runtime/src/ide/launcher.ts",
     "packages/local-runtime/src/index.ts",
     "packages/local-runtime/src/infra/ensure-bin-in-path.ts",
-    "packages/local-runtime/src/infra/ensure-path-integration.ts",
     "packages/local-runtime/src/infra/ensure-rm-shim.ts",
     "packages/local-runtime/src/infra/ensure-trash-script.ts",
     "packages/local-runtime/src/infra/trash-script-win.ts",
