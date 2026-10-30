@@ -169,6 +169,8 @@ function isAssignmentOnlySegment(seg: string): boolean {
 interface HeredocMarker {
   marker: string;
   stripTabs: boolean;
+  /** A quoted delimiter (`<<'EOF'`) makes the body literal: the shell runs no expansion in it. */
+  quoted: boolean;
 }
 
 interface SegmentHeredocMarker extends HeredocMarker {
@@ -178,6 +180,11 @@ interface SegmentHeredocMarker extends HeredocMarker {
 export interface HeredocBodyRange {
   start: number;
   end: number;
+}
+
+export interface HeredocBody extends HeredocBodyRange {
+  /** False when the shell would expand `$()`, backticks and variables inside this body. */
+  quoted: boolean;
 }
 
 interface FoldedSourceRange {
@@ -322,7 +329,11 @@ function parseHeredocMarkerAt(
   const parsedWord = parseHeredocWord(input, i);
   if (!parsedWord) return undefined;
 
-  return { marker: { marker: parsedWord.marker, stripTabs }, nextIndex: parsedWord.nextIndex };
+  const quoted = /['"\\]/.test(input.slice(i, parsedWord.nextIndex));
+  return {
+    marker: { marker: parsedWord.marker, stripTabs, quoted },
+    nextIndex: parsedWord.nextIndex,
+  };
 }
 
 function shellCommentStartsAt(input: string, index: number): boolean {
@@ -652,7 +663,7 @@ function splitCommandWithHeredoc(input: string, bodyStart: number): string[] {
   return suffix.trim().length > 0 ? [...withBodies, ...splitCommand(suffix)] : withBodies;
 }
 
-function collectHeredocBodyRanges(input: string, offset: number, ranges: HeredocBodyRange[]): void {
+function collectHeredocBodyRanges(input: string, offset: number, ranges: HeredocBody[]): void {
   const rest = input.slice(offset);
   const bodyStart = findFirstHeredocBodyStart(rest);
   if (bodyStart === undefined) return;
@@ -665,7 +676,7 @@ function collectHeredocBodyRanges(input: string, offset: number, ranges: Heredoc
   let cursor = offset + bodyStart;
   for (const marker of markers) {
     const next = consumeHeredocBody(input, cursor, marker);
-    ranges.push({ start: cursor, end: next });
+    ranges.push({ start: cursor, end: next, quoted: marker.quoted });
     cursor = next;
   }
 
@@ -678,7 +689,12 @@ function collectHeredocBodyRanges(input: string, offset: number, ranges: Heredoc
  * because heredoc split segments can be logical, not contiguous source slices.
  */
 export function findHeredocBodyRanges(input: string): HeredocBodyRange[] {
-  const ranges: HeredocBodyRange[] = [];
+  return findHeredocBodies(input).map(({ start, end }) => ({ start, end }));
+}
+
+/** Preserve each body's expansion mode for safety callers. */
+export function findHeredocBodies(input: string): HeredocBody[] {
+  const ranges: HeredocBody[] = [];
   collectHeredocBodyRanges(input, 0, ranges);
   return ranges;
 }

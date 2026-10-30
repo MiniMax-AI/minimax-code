@@ -541,7 +541,8 @@ const LocalTaskSchema = Type.Object(
   {
     description: Type.String({
       minLength: 1,
-      description: 'Short child Session title, separate from the execution prompt.',
+      description:
+        "Short child Session title shown to the user, separate from the execution prompt. Write it in the user's language, matching your replies; keep identifiers verbatim.",
     }),
     prompt: Type.String({
       description:

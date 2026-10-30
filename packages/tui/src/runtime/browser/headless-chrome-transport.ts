@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, chmod, mkdir, readFile, rm } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, rm, statfs } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { join, win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -31,6 +31,35 @@ export function resolveChromeSandboxArgs(
   // Prefer a usable native-headless provider and scope the compatibility flag
   // strictly to that platform/user combination.
   return runtimePlatform === 'linux' && effectiveUserId === 0 ? ['--no-sandbox'] : [];
+}
+
+/**
+ * Below this, ordinary content pages overflow Chrome's renderer shared memory.
+ * Docker and Kubernetes mount a 64 MB /dev/shm by default; a Linux host mounts
+ * half of physical memory, where Chrome's default placement is the fast path.
+ */
+export const MIN_DEV_SHM_BYTES = 256 * 1024 * 1024;
+
+export async function resolveChromeSharedMemoryArgs(
+  runtimePlatform: NodeJS.Platform,
+  devShmBytes: () => Promise<number | undefined> = measureDevShmBytes,
+): Promise<readonly string[]> {
+  if (runtimePlatform !== 'linux') return [];
+  // Measured in the eval sandbox: weibo/feishu pages peak at 62-63 MB, so a
+  // 64 MB mount crashes the renderer and, after a few crashes, Chrome itself.
+  // An unreadable mount is treated as small: the flag is harmless on a large
+  // one, while a missed small one takes the browser down.
+  const bytes = await devShmBytes();
+  return bytes === undefined || bytes < MIN_DEV_SHM_BYTES ? ['--disable-dev-shm-usage'] : [];
+}
+
+async function measureDevShmBytes(): Promise<number | undefined> {
+  try {
+    const stats = await statfs('/dev/shm');
+    return Number(stats.blocks) * Number(stats.bsize);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Create or repair a provider-owned Browser directory as private on POSIX hosts. */
@@ -203,6 +232,7 @@ export class HeadlessChromeBrowser {
       '--disable-sync',
       '--disable-features=Translate,MediaRouter',
       ...resolveChromeSandboxArgs(platform(), process.geteuid?.()),
+      ...(await resolveChromeSharedMemoryArgs(platform())),
       `--window-size=${viewport.width},${viewport.height}`,
       'about:blank',
       ...(options.extraArgs ?? []),
