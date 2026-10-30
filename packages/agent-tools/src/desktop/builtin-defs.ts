@@ -338,7 +338,7 @@ const LocalAskUserOptionSchema = Type.Object({
   id: Type.Optional(Type.String({ description: 'Stable option id; generated when omitted.' })),
   label: Type.String({
     description:
-      "Short, self-contained choice or action and its outcome, written in the user's language. This field is guaranteed to be visible; do not rely on the optional description for essential meaning. Mark a recommended choice with the localized equivalent of (Recommended), such as （推荐）.",
+      "Short, self-contained choice or action and its outcome, written in the user's language. This field is guaranteed to be visible; do not rely on the optional description for essential meaning. Do not write a recommendation marker such as (Recommended) or （推荐） in the label; use `recommended` instead.",
   }),
   description: Type.Optional(
     Type.String({
