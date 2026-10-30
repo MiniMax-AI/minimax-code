@@ -315,24 +315,52 @@ export function parseRmTargetsWithMetadata(
   command: string,
   platform: NodeJS.Platform = process.platform,
 ): Array<{ value: string; quoted: boolean }> {
+  return parseRmCommand(command, platform).targets;
+}
+
+/** Preserve force and literal FD redirects without evaluating shell expressions. */
+export function parseRmCommand(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): {
+  targets: Array<{ value: string; quoted: boolean }>;
+  force: boolean;
+  redirects: string[];
+} {
   const shellTokens = shellTokenizeWithMetadata(command);
   const tokens = shellTokens.map((token) => token.value);
   const rmIdx = findRmTokenIndex(tokens);
-  if (rmIdx === -1) return [];
+  if (rmIdx === -1) return { targets: [], force: false, redirects: [] };
   const targets: Array<{ value: string; quoted: boolean }> = [];
   let pastDoubleDash = false;
+  let force = false;
+  const redirects: string[] = [];
 
   // Start AFTER the rm token (wrappers + rm itself are already stripped).
   for (let i = rmIdx + 1; i < tokens.length; i++) {
     const token = tokens[i] ?? '';
     const tokenMeta = shellTokens[i];
     const quoted = tokenMeta?.quoted ?? false;
+    // -- ends option parsing, not shell redirection parsing. Only copy literal
+    // descriptor redirects; this does not re-enable variable/command expansion.
+    if (!quoted && /^(?:\d+)?[<>]&(?:\d+|-)$/.test(token)) {
+      redirects.push(token);
+      continue;
+    }
     if (!pastDoubleDash && !quoted && tokenStopsRmTargetScan(token)) break;
     if (token === '--') {
       pastDoubleDash = true;
       continue;
     }
     if (!pastDoubleDash && token.startsWith('-')) {
+      if (token === '--force') force = true;
+      else if (token === '--interactive' || token.startsWith('--interactive=')) force = false;
+      else if (!token.startsWith('--')) {
+        for (const flag of token.slice(1)) {
+          if (flag === 'f') force = true;
+          else if (flag === 'i' || flag === 'I') force = false;
+        }
+      }
       continue; // skip flags
     }
     let value = token;
@@ -359,7 +387,14 @@ export function parseRmTargetsWithMetadata(
     targets.push({ value, quoted });
   }
 
-  return targets;
+  // Dynamic operands still use the existing literal-quoting rewrite. Passing
+  // -f for them would hide failed expansion as a successful deletion.
+  const staticTargets =
+    targets.length > 0 &&
+    targets.every(
+      ({ value }) => !/[$`*?[\]{}]/.test(value) && !value.includes('<(') && !value.includes('>('),
+    );
+  return { targets, force: force && staticTargets, redirects };
 }
 
 
@@ -431,6 +466,7 @@ export function resolveHomeInTarget(target: string): string {
 export function buildTrashCommand(
   trashBinPath: string,
   targets: string[] | Array<{ value: string; quoted: boolean }>,
+  force = false,
 ): string {
   if (targets.length === 0) return trashBinPath;
   // Normalise: string[] input is treated as all-unquoted (preserves the
@@ -443,7 +479,7 @@ export function buildTrashCommand(
   );
   const shellQuoted = resolved.map((t) => shellQuote(t));
   // Always insert `--` so filenames starting with `-` are not mistaken for flags.
-  return `${trashBinPath} -- ${shellQuoted.join(' ')}`;
+  return `${trashBinPath}${force ? ' -f' : ''} -- ${shellQuoted.join(' ')}`;
 }
 
 // ---------------------------------------------------------------------------

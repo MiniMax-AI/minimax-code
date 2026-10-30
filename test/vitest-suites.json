@@ -10,6 +10,7 @@
       "packages/local-runtime/test/unit/skill-directory-symlinks.test.ts",
       "packages/agent-core/test/unit/bash-subprocess-env.test.ts",
       "packages/agent-modules/permission/test/unit/permission/bash-policy-regressions.test.ts",
+      "packages/agent-modules/permission/test/unit/permission/tools/rm-rewrite-execution.test.ts",
       "packages/agent-tools/src/shared/replace-all-edit.test.ts",
       "packages/agent-tools/src/shared/cron-schedule-input.test.ts",
       "packages/agent-tools/src/desktop/edit-diff-bounds.test.ts",

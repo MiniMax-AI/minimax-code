@@ -12,7 +12,7 @@ import { resolvePermissionPath } from './path-resolver.js';
 import { readWindowsTrashExecution } from './windows-trash-execution.js';
 import { isRmCommand, parseRmTargets } from './tools/bash-permission.js';
 import { splitCommand } from './tools/bash-split.js';
-import { shellTokenize } from './tools/shell-tokenize.js';
+import { shellTokenize, shellTokenizeWithMetadata } from './tools/shell-tokenize.js';
 import { parseWindowsNativeDelete } from './tools/windows-native-delete.js';
 
 export type { ExecutionPlan } from './permission-core.js';
@@ -319,7 +319,8 @@ function readRecoverableDeleteTargets(
     const tokens = shellTokenize(segment);
     const executable = readExecutableBasename(segment, tokens[0]);
     if (executable !== 'mavis-trash' && executable !== 'mavis-trash.cmd') return [];
-    return tokens.slice(tokens[1] === '--' ? 2 : 1);
+    const executableToken = shellTokenizeWithMetadata(segment)[0];
+    return executableToken ? parseRmTargets(`rm ${segment.slice(executableToken.end)}`) : [];
   });
   return targets.length > 0 || readWindowsTrashExecution(input) ? targets : undefined;
 }

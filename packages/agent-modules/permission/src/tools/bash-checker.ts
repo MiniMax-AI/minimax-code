@@ -34,7 +34,7 @@ import {
   checkBashPermission,
   evaluateBashStatic,
   splitCommand,
-  parseRmTargetsWithMetadata,
+  parseRmCommand,
   buildTrashCommand,
   resolveHomeInTarget,
 } from './bash-permission.js';
@@ -973,7 +973,8 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
           context.platform === 'win32'
             ? path.win32.join(dataDir, 'bin', 'mavis-trash.cmd')
             : path.join(dataDir, 'bin', 'mavis-trash');
-        const rawTargetsWithMeta = parseRmTargetsWithMetadata(subcmd);
+        const parsedRm = parseRmCommand(subcmd, context.platform);
+        const rawTargetsWithMeta = parsedRm.targets;
         // Only HOME-expand unquoted targets; single/double-quoted or
         // backslash-escaped targets stay literal (matches bash semantics —
         // `rm '~/x'` and `rm \~/x` name a literal `~/x` in cwd, not the
@@ -983,7 +984,10 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         const resolvedTargets = rawTargetsWithMeta.map((t) =>
           t.quoted ? t.value : resolveHomeInTarget(t.value),
         );
-        const rewrittenSubcmd = buildTrashCommand(trashBin, rawTargetsWithMeta);
+        const rewrittenSubcmd = [
+          buildTrashCommand(trashBin, rawTargetsWithMeta, parsedRm.force),
+          ...parsedRm.redirects,
+        ].join(' ');
         rewrittenParts.set(subcmd, rewrittenSubcmd);
         rewriteAudit.push({ subcmd, rawTargets, resolvedTargets, rewrittenSubcmd });
       }
