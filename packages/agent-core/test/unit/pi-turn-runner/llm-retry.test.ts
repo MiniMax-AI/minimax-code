@@ -588,6 +588,13 @@ describe("withLLMRetry", () => {
     ["minimax_api", "400 Upstream [invalid_request_error] Too many images in request: 31 > 30"],
     ["custom_provider:work", '400 {"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}'],
     ["fake-provider", "400 Too many images in request: 31 > 30"],
+    ["custom_provider:work", '413 {"error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}'],
+    [
+      "custom_provider:work",
+      '{"type":"error","error":{"type":"invalid_request_error","message":"上游返回 413，取消重试：request body too large: 154339079 bytes exceeds limit of 134217728 bytes"}}',
+    ],
+    ["custom_provider:work", "Input is too long for requested model."],
+    ["minimax_api", "invalid params, context window exceeds limit"],
   ])("does not retry a deterministic request rejection from %s: %s", async (provider, message) => {
     let attempts = 0;
     const sleep = vi.fn(async () => {});

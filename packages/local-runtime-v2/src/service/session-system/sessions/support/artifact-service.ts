@@ -8,6 +8,7 @@ export interface NativeSessionArtifactOwners {
   readonly canonicalHistory: { delete(sessionId: string): void | Promise<void> };
   readonly stream: { deleteSession(sessionId: string): void };
   readonly reports: { ensureDirectory(sessionId: string): string | Promise<string> };
+  readonly snapshots: { resolveDirectory(sessionId: string): string | Promise<string> };
 }
 
 export class SessionArtifactService {
@@ -15,6 +16,11 @@ export class SessionArtifactService {
 
   async ensureReportsDirectory(sessionId: string): Promise<string> {
     return this.owners.reports.ensureDirectory(sessionId);
+  }
+
+  /** Where each compaction keeps the full history it replaced. */
+  async resolveSnapshotsDirectory(sessionId: string): Promise<string> {
+    return this.owners.snapshots.resolveDirectory(sessionId);
   }
 
   async deleteSession(

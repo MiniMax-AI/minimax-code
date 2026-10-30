@@ -24,6 +24,7 @@ import { assertAgentHostCapabilityAvailable } from '../empty-dependencies.js';
 import { messagesCarrySessionId } from '../compaction/session-identity.js';
 import {
   prepareLocalInlineMedia,
+  type LocalAttachmentImageEncoding,
   type LocalInlineMediaCandidate,
   type LocalMultimodalAttachmentCapabilities,
 } from '../preparation/inline-media.js';
@@ -130,6 +131,8 @@ export interface LocalTurnInputPreparerOptions {
    */
   readonly agentReferenceProjection?: LocalAgentReferenceProjection;
   readonly reminders: LocalTurnReminderFacts;
+  /** Read for every user turn; the Read tool's limits when absent. */
+  readonly getImageEncoding?: () => LocalAttachmentImageEncoding;
 }
 
 export interface LocalTurnInputPreparationRequest {
@@ -204,6 +207,7 @@ export class LocalTurnInputPreparer {
     const selectedMedia = await prepareLocalInlineMedia(
       inlineMediaCandidates(attachments),
       capabilities,
+      this.options.getImageEncoding?.(),
     );
     const systemValue = await this.options.reminders.buildSystem({
       session: input.session,
@@ -369,6 +373,7 @@ export class LocalTurnInputPreparer {
     const selectedMedia = await prepareLocalInlineMedia(
       inlineMediaCandidates(attachments),
       capabilities,
+      this.options.getImageEncoding?.(),
     );
     const reminderBlocks = [
       buildAttachmentReminder(attachments, selectedMedia.inlinedKeys, capabilities),

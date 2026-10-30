@@ -64,8 +64,17 @@ import {
 import { hasOpenPlatformThinkingVariants } from './openplatform-thinking.js';
 import { withByokErrorAttribution } from './byok-error-attribution.js';
 import { withLocalDynamicMaxTokens } from './dynamic-max-tokens.js';
-import { normalizeLocalMultimodalLimitCapabilities } from './file-api-capabilities.js';
+import { resolveLocalRequestBodyBytes } from './file-api-capabilities.js';
 import { resolveLocalFileApiGatewayAuth } from './file-api-gateway-auth.js';
+
+/**
+ * Images per request for a model that declares none. The Messages API accepts
+ * 100 on 200K-context models and 600 otherwise, OpenAI 1500; MiniMax M3 models
+ * accept 20 and Mistral's API 8, recognized below.
+ */
+const LOCAL_DEFAULT_MAX_IMAGES_PER_REQUEST = 100;
+const MINIMAX_M3_MAX_IMAGES_PER_REQUEST = 20;
+const MINIMAX_M3_FAMILY = /^minimax-m3(?:[.-]|$)/iu;
 
 const FALLBACK_MODEL_LIMITS = {
   contextWindow: 200_000,
@@ -204,9 +213,10 @@ export class LocalModelResolver implements LocalModelResolverLike {
     const maxTokens = positive(input.modelRef.max_tokens) || input.maxTokens;
     const thinking = resolveThinking(input, this.options.implicitCustomProviderThinking === true);
     const baseUrl = normalizeResolvedBaseUrl(input.api, input.baseUrl);
-    const maxRequestBodyBytes = Number(
-      normalizeLocalMultimodalLimitCapabilities(input.modelRef.capabilities).max_request_body_bytes,
-    );
+    const maxRequestBodyBytes = resolveLocalRequestBodyBytes(input.modelRef.capabilities, {
+      api: input.api,
+      baseUrl,
+    });
     const model = buildResolvedModel({ input, contextWindow, maxTokens, baseUrl, thinking });
     const streamFn = resolveModelStream(input, this.options.streamFn);
     const fileApiGatewayAuth = input.managedProvider
@@ -631,7 +641,10 @@ function buildResolvedModel(scope: {
   const compat = resolvedModelCompatibility(input, thinking);
   const maxImagesPerRequest =
     normalizeMaxImagesPerRequest(input.modelRef.capabilities?.max_images_per_request) ??
-    knownMaxImagesPerRequestForBaseUrl(baseUrl);
+    knownMaxImagesPerRequestForBaseUrl(baseUrl) ??
+    (MINIMAX_M3_FAMILY.test(input.modelId.trim())
+      ? MINIMAX_M3_MAX_IMAGES_PER_REQUEST
+      : LOCAL_DEFAULT_MAX_IMAGES_PER_REQUEST);
   const model: Model<Api> & ModelRequestImageLimit = {
     id: input.modelId,
     name: input.modelId,

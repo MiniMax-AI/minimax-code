@@ -251,8 +251,12 @@ function assertRequestBodyFits(payload: Record<string, unknown>, limit: number |
   if (limit === undefined) return;
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
   if (bytes <= limit) return;
+  // `request_too_large` lets Pi's isContextOverflow recognise the local gate
+  // like the provider rejection it pre-empts.
   throw Object.assign(
-    new Error(`Request body too large: ${bytes} bytes exceeds client limit ${limit} bytes.`),
+    new Error(
+      `Request body too large (request_too_large): ${bytes} bytes exceeds client limit ${limit} bytes.`,
+    ),
     {
       code: 'REQUEST_BODY_TOO_LARGE',
       retryable: false,

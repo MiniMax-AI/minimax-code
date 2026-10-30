@@ -30,6 +30,8 @@ export {
   normaliseMultimodalMimeType,
   isSupportedNativeVideoMime,
   selectMultimodalAttachments,
+  encodeAttachmentImage,
+  type AttachmentImageEncoding,
   type MultimodalAttachmentCapabilities,
   type MultimodalAttachmentKind,
 } from "./shared/multimodal-attachments.js";

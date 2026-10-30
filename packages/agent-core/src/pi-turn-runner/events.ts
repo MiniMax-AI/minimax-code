@@ -93,6 +93,7 @@ export function subscribeEvents(
     event: Extract<AgentEvent, { type: 'message_end' }>,
   ): Promise<'emit' | 'discard'> => {
     if (event.message.role !== 'assistant' || turn.hooks.afterLLM.length === 0) return 'emit';
+    if (event.message.stopReason !== 'error') turn.recovery.used = false;
     for (const hook of turn.hooks.afterLLM) {
       let decision: Awaited<ReturnType<typeof hook>>;
       try {
@@ -135,6 +136,22 @@ export function subscribeEvents(
           content: [{ type: 'text', text: decision.prompt }],
           timestamp: Date.now(),
         });
+        return 'discard';
+      }
+      if (decision.type === 'recover') {
+        if (
+          event.message.stopReason !== 'error' ||
+          turn.recovery.used ||
+          turn.input.signal?.aborted === true
+        ) {
+          continue;
+        }
+        turn.recovery.used = true;
+        turn.recovery.pending = {
+          reason: decision.reason,
+          errorMessage: event.message.errorMessage ?? '',
+          requestMessages: turn.recovery.lastRequest ?? [],
+        };
         return 'discard';
       }
       // A failed response is rejected as a whole. Never let its still-pending

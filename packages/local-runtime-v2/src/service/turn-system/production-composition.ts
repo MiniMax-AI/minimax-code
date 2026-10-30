@@ -6,8 +6,10 @@ import type {
   PromptSnapshotSource,
 } from '@mavis/agent-runtime';
 import {
+  requestMediaExtension,
   sessionReportExtension,
   toolOutputBudgetExtension,
+  type RequestMediaExtensionOptions,
   type ToolOutputArtifactInput,
 } from '@mavis/agent-extension';
 import type { LLMRetryOptions } from '@mavis/agent-core/pi-turn-runner';
@@ -16,7 +18,10 @@ import type { IAgentConfig } from '@mavis/protocol';
 import type { GlobalEventInput } from '@mavis/shared/global-events';
 import {
   TOOL_RESULT_COMPACTION_DEFAULTS,
+  parseRequestMediaConfig,
   parseToolResultCompactionConfig,
+  type RequestImageSettings,
+  type RequestMediaSettings,
   type ResolvedAgentCapabilities,
   type RunawayGuardOverride,
 } from '@mavis/config';
@@ -72,8 +77,10 @@ import { LocalContextCompactor } from './compaction/local-context-compactor.js';
 import {
   AutomaticContextCompactor,
   createAutomaticContextRequestFilterHook,
+  createRequestMediaGuardHook,
 } from './compaction/automatic-context-compactor.js';
 import type {
+  EarlierFilesResolver,
   ToolResultCompactionConfig,
   SubagentCheckpointStateSource,
 } from './compaction/contracts.js';
@@ -348,8 +355,12 @@ export async function createLocalAgentHost<
   const contextUsageAnchor = new ContextUsageAnchorState();
   const toolOutputArtifacts = createToolOutputArtifactRepository(options);
   const getToolResultCompactionConfig = createToolResultCompactionConfigGetter(options);
+  const getRequestMediaConfig = createRequestMediaConfigGetter(options);
+  const getRecoveryDivisor = () => getRequestMediaConfig().recoveryDivisor;
+  const getImageEncoding = () => requestImageEncoding(getRequestMediaConfig().image);
   const toolResultArchiver = new ToolResultArchiver({
     writeArtifact: (input) => toolOutputArtifacts.write(input),
+    writeImageArtifact: (input) => toolOutputArtifacts.writeImage(input),
     logger: options.product.runner.logger,
     getConfig: getToolResultCompactionConfig,
   });
@@ -362,6 +373,7 @@ export async function createLocalAgentHost<
     options,
     toolOutputArtifacts,
     getToolResultCompactionConfig,
+    getImageEncoding,
   );
   const dependencies = await createNativeAgentHostProductionDependencies({
     sessions: {
@@ -406,7 +418,7 @@ export async function createLocalAgentHost<
       config: options.product.preparation.configBuilder.config().mcpToolSearch,
       env: process.env,
     },
-    inputPreparation: options.product.inputPreparation,
+    inputPreparation: { ...options.product.inputPreparation, getImageEncoding },
     permission: createHostPermissionPolicy(options),
     runner: {
       ...options.product.runner,
@@ -446,6 +458,7 @@ export async function createLocalAgentHost<
       activatePluginHookSessionOwnership: options.pluginHookSessionOwnership.activate,
       afterCompactionBeforeLlmCallHooks: [
         createAutomaticContextRequestFilterHook(),
+        createRequestMediaGuardHook(getRecoveryDivisor),
         createSessionIdentityReminderHook(contextUsageAnchor),
         createTodoCadenceReminderHook(contextUsageAnchor),
       ],
@@ -470,6 +483,14 @@ export async function createLocalAgentHost<
         toolResultArchiver,
         promptSnapshots: options.product.promptSnapshots,
         getCompactionTriggerAt: createCompactionTriggerAtGetter(options),
+        getRecoveryDivisor,
+        resolveEarlierFiles: async (sessionId) => {
+          const [snapshots, toolOutputs] = await Promise.all([
+            options.sessions.artifacts.resolveSnapshotsDirectory(sessionId),
+            toolOutputArtifacts.directory(sessionId),
+          ]);
+          return { snapshots, toolOutputs };
+        },
       }),
       control: options.turnControl,
       lifecycle: options.sessions.agentProjection.compactionLifecycle,
@@ -516,6 +537,7 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
   toolOutputArtifacts: ToolOutputArtifactRepository,
   getToolResultCompactionConfig: () => ToolResultCompactionConfig,
+  getImageEncoding: RequestMediaExtensionOptions['getImageEncoding'],
 ): readonly AgentExtension[] | undefined {
   return mergeNormalExtensions(
     [
@@ -524,6 +546,7 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
         reportFailure: options.product.executor.reportFailure,
       }),
       createHostRunawayGuardExtension(options),
+      requestMediaExtension({ getImageEncoding }),
       toolOutputBudgetExtension({
         maxInlineBytes: TOOL_RESULT_COMPACTION_DEFAULTS.maxInlineKiB * 1_024,
         getMaxInlineBytes: () => getToolResultCompactionConfig().maxInlineBytes,
@@ -600,6 +623,8 @@ function createContextCompactors(input: {
   readonly toolResultArchiver: ToolResultArchiver;
   readonly promptSnapshots: ConstructorParameters<typeof LocalContextCompactor>[2];
   readonly getCompactionTriggerAt: () => number | undefined;
+  readonly getRecoveryDivisor: () => number;
+  readonly resolveEarlierFiles: EarlierFilesResolver;
 }) {
   return {
     automatic: new AutomaticContextCompactor(
@@ -610,9 +635,14 @@ function createContextCompactors(input: {
         toolResultArchiver: input.toolResultArchiver,
         promptSnapshots: input.promptSnapshots,
         getCompactionTriggerAt: input.getCompactionTriggerAt,
+        getRecoveryDivisor: input.getRecoveryDivisor,
+        resolveEarlierFiles: input.resolveEarlierFiles,
       },
     ),
-    manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots),
+    manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots, {
+      imageFileWriter: input.toolResultArchiver,
+      resolveEarlierFiles: input.resolveEarlierFiles,
+    }),
   };
 }
 
@@ -637,6 +667,28 @@ function createCompactionTriggerAtGetter<TAgent extends AgentExecutionSnapshot>(
     // The compactor treats an unreadable config as unset.
   }
   return read;
+}
+
+function createRequestMediaConfigGetter<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): () => RequestMediaSettings {
+  return () => {
+    let raw: unknown;
+    try {
+      raw = options.product.preparation.configBuilder.config().requestMedia;
+    } catch {
+      raw = undefined;
+    }
+    return parseRequestMediaConfig(raw);
+  };
+}
+
+function requestImageEncoding(image: RequestImageSettings) {
+  return {
+    maxWidth: image.max_width,
+    maxHeight: image.max_height,
+    maxBase64Bytes: image.max_base64_bytes,
+  };
 }
 
 function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSnapshot>(

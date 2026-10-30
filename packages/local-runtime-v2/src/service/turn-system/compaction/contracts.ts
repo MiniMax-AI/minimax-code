@@ -18,6 +18,16 @@ export interface SubagentCheckpointStateSource {
   }): Promise<CompactionSubagentState | undefined>;
 }
 
+/** Session directories that keep what a checkpoint summary leaves out. */
+export interface CheckpointEarlierFiles {
+  /** One JSONL of the full history per compaction, written as it commits. */
+  readonly snapshots: string;
+  /** Tool images and oversized tool output. */
+  readonly toolOutputs: string;
+}
+
+export type EarlierFilesResolver = (sessionId: string) => Promise<CheckpointEarlierFiles>;
+
 /** Runtime-owned thresholds shared by recoverable archive and destructive trim. */
 export interface ToolResultCompactionConfig {
   readonly enabled?: boolean;

@@ -204,6 +204,7 @@ export type AutomaticContextCompactionInput = Readonly<
     | 'tools'
     | 'thinkingLevel'
     | 'signal'
+    | 'recovery'
   > & {
     readonly maxSerializedInputBytes?: number;
   }

@@ -7,7 +7,11 @@ import {
   type CompactionSubagentState,
   type CompactionUserQuery,
 } from '../compat.js';
-import { ContextCompactionError, type CheckpointGenerationMetadata } from '../contracts.js';
+import {
+  ContextCompactionError,
+  type CheckpointEarlierFiles,
+  type CheckpointGenerationMetadata,
+} from '../contracts.js';
 import { projectTodoHistory } from './todo-cadence.js';
 import { projectBackgroundHistory } from './background-cadence.js';
 
@@ -34,6 +38,7 @@ export interface ValidCheckpointGeneration {
 export interface CheckpointMessageOptions {
   readonly timestamp: number;
   readonly subagents?: CompactionSubagentState;
+  readonly earlierFiles?: CheckpointEarlierFiles;
 }
 
 export function validateCheckpointGeneration(
@@ -99,13 +104,25 @@ export function buildCheckpointMessage(
     previous?.recentUserQueries ?? [],
     options.subagents,
   );
+  const body = options.earlierFiles
+    ? `${summary}\n\n${earlierFilesText(options.earlierFiles)}`
+    : summary;
   const checkpoint: AgentMessage = {
     role: 'compactionSummary',
-    summary: appendCompactionState(summary, state),
+    summary: appendCompactionState(body, state),
     tokensBefore,
     timestamp: options.timestamp,
   };
   return checkpoint;
+}
+
+function earlierFilesText(files: CheckpointEarlierFiles): string {
+  return [
+    'Files from before this compaction:',
+    `- Full conversation history before each compaction, one JSONL file per compaction (the highest g<generation> is the latest): ${files.snapshots}`,
+    `- Tool images and oversized tool outputs: ${files.toolOutputs}`,
+    'Read them when you need exact details that the summary above leaves out.',
+  ].join('\n');
 }
 
 function buildVerifiedCheckpointState(

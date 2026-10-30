@@ -276,6 +276,32 @@ describe('automatic ContextCompactor trigger probe', () => {
   });
 });
 
+describe('automatic ContextCompactor recovery probe', () => {
+  it('passes the recovery of a repeated request to the compactor', async () => {
+    const probeBeforeLlm = vi.fn(() => ({ shouldStart: false }));
+    const hook = createAutomaticContextCompactionHook(
+      {
+        automatic: { probeBeforeLlm, compactBeforeLlm: vi.fn() },
+        lifecycle: {
+          completeCommittedHistory: vi.fn(async () => undefined),
+          failCommittedHistory: vi.fn(async () => undefined),
+        },
+      },
+      context,
+      'lease-recovery-probe',
+    );
+    const recovery = {
+      reason: 'request_media',
+      errorMessage: '413 request_too_large',
+      requestMessages: [],
+    };
+
+    await hook(hookInput({ recovery }));
+
+    expect(probeBeforeLlm).toHaveBeenCalledWith(expect.objectContaining({ recovery }));
+  });
+});
+
 describe('automatic ContextCompactor diagnostics', () => {
   it('logs only bounded checkpoint metadata with Host correlation', async () => {
     const logger = { info: vi.fn(), error: vi.fn() };

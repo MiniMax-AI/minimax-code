@@ -13,6 +13,7 @@ import type {
   PiAfterToolCallHook,
   PiBeforeLlmCallHook,
   PiBeforeToolCallHook,
+  PiLlmCallRecovery,
   PiOnLlmCallPreparedHook,
   PiOnHistoryChangedHook,
   PiOnStepEndHook,
@@ -120,6 +121,18 @@ export interface turnState<TCtx extends ToolExecutionContext = ToolExecutionCont
   syntheticResponse: { pending?: { readonly text: string; readonly reason: string } };
   /** Assistant responses rejected after message_end but still referenced by Pi's loop context. */
   rejectedAssistantMessages: Set<AgentMessage>;
+  /**
+   * At most one recovered provider error per LLM call: `used` clears on the
+   * next response that is not an error. `pending` waits for the runner to
+   * repeat the request; `active` is handed to the next beforeLlmCall.
+   * `lastRequest` is the request view of the latest provider call.
+   */
+  recovery: {
+    used: boolean;
+    pending?: PiLlmCallRecovery;
+    active?: PiLlmCallRecovery;
+    lastRequest?: readonly AgentMessage[];
+  };
   nextEventId(kind: string): string;
   nextRuntimeSeq(): number;
 }
@@ -265,6 +278,7 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     blockedToolCalls: [],
     syntheticResponse,
     rejectedAssistantMessages: new Set(),
+    recovery: { used: false },
     nextEventId,
     nextRuntimeSeq,
   };

@@ -6,6 +6,7 @@ import type {
   PiAfterLlmReplacementCommit,
   PiBeforeLlmCallAppendMessage,
   PiBeforeLlmCallReplaceMetadata,
+  PiLlmCallRecovery,
 } from './hooks.js';
 import type { LLMModelConfig } from './types.js';
 import type { turnHistory } from './history.js';
@@ -45,6 +46,14 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
 
   let checkpointCallCount = 0;
   agent.transformContext = async (messages, signal) => {
+    const request = await prepareRequest(messages, signal);
+    turn.recovery.lastRequest = [...request];
+    return request;
+  };
+  const prepareRequest = async (
+    messages: AgentMessage[],
+    signal: AbortSignal | undefined,
+  ): Promise<AgentMessage[]> => {
     const rejectedMessages = messages.filter((message) =>
       turn.rejectedAssistantMessages.has(message),
     );
@@ -60,7 +69,9 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
     if (turn.hooks.beforeLLM.length === 0) return messages;
     const phase = checkpointCallCount === 0 ? 'initial' : 'iteration';
     checkpointCallCount += 1;
-    const checkpoint = await runBeforeLLM(turn, messages, phase, signal);
+    const recovery = turn.recovery.active;
+    delete turn.recovery.active;
+    const checkpoint = await runBeforeLLM(turn, messages, phase, signal, recovery);
     if (checkpoint.type === 'abort') {
       turn.metrics.tryRecordTerminalFailure({
         errorSource: 'before_llm_hook',
@@ -137,6 +148,7 @@ async function runBeforeLLM(
   messages: AgentMessage[],
   phase: 'initial' | 'iteration',
   signal?: AbortSignal,
+  recovery?: PiLlmCallRecovery,
 ): Promise<
   | { type: 'unchanged'; messages: AgentMessage[] }
   | { type: 'requestOnly'; messages: AgentMessage[] }
@@ -179,6 +191,7 @@ async function runBeforeLLM(
         sessionId: turn.input.sessionId,
         turnId: turn.input.turnId,
         phase,
+        ...(recovery ? { recovery } : {}),
         messages: [...currentMessages],
         canonicalMessages: [...canonicalMessages],
         model: turn.llm.model,

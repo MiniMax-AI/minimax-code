@@ -38,25 +38,21 @@ export interface ToolOutputArtifactWriteInput {
   readonly sensitive: boolean;
 }
 
+export interface ToolOutputImageWriteInput {
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  /** Base64 image data. */
+  readonly data: string;
+  readonly mimeType: string;
+}
+
 /** Persists oversized tool text under the Session-owned reports directory. */
 export class ToolOutputArtifactRepository {
   constructor(private readonly options: ToolOutputArtifactRepositoryOptions) {}
 
   async write(input: ToolOutputArtifactWriteInput) {
-    const reportsDirectory = await this.options.resolveSessionReportsDirectory(input.sessionId);
-    const directory = join(reportsDirectory, TOOL_OUTPUT_DIRECTORY);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const [canonicalReportsDirectory, canonicalDirectory] = await Promise.all([
-      realpath(reportsDirectory),
-      realpath(directory),
-    ]);
-    if (!isPathInside(canonicalDirectory, canonicalReportsDirectory)) {
-      throw new Error('Tool output artifact directory escapes its Session reports directory.');
-    }
-    const directoryInfo = await lstat(canonicalDirectory);
-    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) {
-      throw new Error('Tool output artifact directory is not a safe directory.');
-    }
+    const canonicalDirectory = await this.resolveDirectory(input.sessionId);
     const identity = artifactIdentity(input);
     const artifactPath = join(canonicalDirectory, identity.fileName);
     await ensureRawArtifact(artifactPath, input.text, identity.contentSha256);
@@ -88,6 +84,73 @@ export class ToolOutputArtifactRepository {
       },
     };
   }
+
+  /** Persists a tool result image so history can name a file instead of carrying it. */
+  async writeImage(input: ToolOutputImageWriteInput): Promise<{ readonly reference: string }> {
+    const canonicalDirectory = await this.resolveDirectory(input.sessionId);
+    const bytes = Buffer.from(input.data, 'base64');
+    const contentSha256 = createHash('sha256').update(bytes).digest('hex');
+    const artifactPath = join(
+      canonicalDirectory,
+      `${callDigest(input)}-${contentSha256}.${imageExtension(input.mimeType)}`,
+    );
+    const expected = { bytes: bytes.length, sha256: contentSha256 };
+    const existing = await readSafeFileInfo(artifactPath, 'Existing tool output image');
+    if (existing) {
+      await verifyArtifactInfo(artifactPath, existing, expected, 'Existing tool output image');
+    } else {
+      await publishArtifactAtomically(
+        artifactPath,
+        'Existing tool output image',
+        async (handle) => {
+          await handle.writeFile(bytes);
+          return expected;
+        },
+      );
+    }
+    return { reference: artifactPath };
+  }
+
+  /** Where this Session's tool output is written; it may not exist yet. */
+  async directory(sessionId: string): Promise<string> {
+    return join(
+      await this.options.resolveSessionReportsDirectory(sessionId),
+      TOOL_OUTPUT_DIRECTORY,
+    );
+  }
+
+  private async resolveDirectory(sessionId: string): Promise<string> {
+    const reportsDirectory = await this.options.resolveSessionReportsDirectory(sessionId);
+    const directory = join(reportsDirectory, TOOL_OUTPUT_DIRECTORY);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const [canonicalReportsDirectory, canonicalDirectory] = await Promise.all([
+      realpath(reportsDirectory),
+      realpath(directory),
+    ]);
+    if (!isPathInside(canonicalDirectory, canonicalReportsDirectory)) {
+      throw new Error('Tool output artifact directory escapes its Session reports directory.');
+    }
+    const directoryInfo = await lstat(canonicalDirectory);
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) {
+      throw new Error('Tool output artifact directory is not a safe directory.');
+    }
+    return canonicalDirectory;
+  }
+}
+
+function imageExtension(mimeType: string): string {
+  const subtype = mimeType.toLowerCase().split('/')[1]?.split(/[;+]/u)[0];
+  if (subtype === 'jpeg') return 'jpg';
+  return subtype && /^[a-z0-9]{1,8}$/u.test(subtype) ? subtype : 'bin';
+}
+
+function callDigest(input: { readonly toolCallId: string; readonly toolName: string }): string {
+  return createHash('sha256')
+    .update(input.toolCallId)
+    .update('\0')
+    .update(input.toolName)
+    .digest('hex')
+    .slice(0, 24);
 }
 
 function isPathInside(candidate: string, parent: string): boolean {
@@ -102,14 +165,8 @@ function artifactIdentity(input: ToolOutputArtifactWriteInput): {
 } {
   // The reports directory already scopes artifacts to a Session. Exclude the
   // projecting turn so the same historical tool result keeps one stable path.
-  const callDigest = createHash('sha256')
-    .update(input.toolCallId)
-    .update('\0')
-    .update(input.toolName)
-    .digest('hex')
-    .slice(0, 24);
   const contentSha256 = sha256Text(input.text);
-  const baseName = `${callDigest}-${contentSha256}`;
+  const baseName = `${callDigest(input)}-${contentSha256}`;
   return {
     fileName: `${baseName}.txt`,
     readableFileName: `${baseName}.readable.v${READABLE_FORMAT_VERSION}.jsonl`,

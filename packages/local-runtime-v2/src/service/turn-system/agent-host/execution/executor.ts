@@ -47,7 +47,6 @@ import {
 } from '../events/runtime-event-writer.js';
 import { AgentEventAssociationError } from '../local-agent-host.js';
 import { inputReviewRunnerOptions } from '../runner/policy/input-review-runner-options.js';
-import { createLocalCuScreenshotPruner } from '../runner/local-cu-screenshot-pruner.js';
 import { applyProcessLocalToolResultPolicy } from '../runner/policy/process-local-tool-result-policy.js';
 import type {
   LocalContextUsagePromptRange,
@@ -630,7 +629,6 @@ export class LocalRuntimeTurnExecutor<
   ): Promise<readonly PiBeforeLlmCallHook[]> {
     return [
       ...((await this.options.resolveBeforeLlmCallHooks?.(input)) ?? []),
-      createLocalCuScreenshotPruner(2),
       ...(input.contextCompactionHook
         ? [withPluginAutomaticCompactionLifecycle(input.contextCompactionHook, input)]
         : []),

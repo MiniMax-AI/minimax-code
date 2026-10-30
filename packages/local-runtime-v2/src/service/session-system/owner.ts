@@ -253,7 +253,7 @@ export function initializeSessionSystem(options: InitializeSessionSystemOptions)
     onLegacyCleanupError,
     canonicalHistory,
     stream,
-    reports: createSessionReportsOwner(historyLocations, sessions),
+    ...createSessionDirectoryOwners(historyLocations, sessions),
   });
   const { agentProjection, conversationActions } = createAgentCapabilities({
     options,
@@ -443,15 +443,19 @@ function createSessionMetadataCapabilities(
   return { sessions, historyLocations, interactionMode, planDocuments };
 }
 
-function createSessionReportsOwner(
+function createSessionDirectoryOwners(
   historyLocations: SessionHistoryLocationResolver,
   sessions: ReturnType<typeof createSessionRepository>,
 ) {
+  const locate = async (sessionId: string) => {
+    const session = await sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    return historyLocations.ensure(session);
+  };
   return {
-    ensureDirectory: async (sessionId: string) => {
-      const session = await sessions.get(sessionId);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      return (await historyLocations.ensure(session)).reports;
+    reports: { ensureDirectory: async (sessionId: string) => (await locate(sessionId)).reports },
+    snapshots: {
+      resolveDirectory: async (sessionId: string) => (await locate(sessionId)).snapshots,
     },
   };
 }

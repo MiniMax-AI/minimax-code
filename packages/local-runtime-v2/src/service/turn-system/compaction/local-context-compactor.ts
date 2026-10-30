@@ -16,18 +16,29 @@ import {
   type CompactContextDecision,
   type CompactContextInput,
 } from './algorithm/compact-context.js';
+import type { ToolResultArchiver } from './algorithm/tool-result-archiver.js';
 import { createCheckpointSession } from './execution/checkpoint-provider.js';
 import { checkpointMaxOutputTokens } from './execution/checkpoint-prompt.js';
 import { createLocalContextFootprintMeasurer } from './execution/local-context-footprint.js';
-import type { SubagentCheckpointStateSource } from './contracts.js';
+import type { EarlierFilesResolver, SubagentCheckpointStateSource } from './contracts.js';
 
 /** Manual caller: bypasses the automatic trigger and transient filters. */
 export class LocalContextCompactor implements ContextCompactor {
+  private readonly imageFileWriter?: Pick<ToolResultArchiver, 'writeImageFile'>;
+  private readonly resolveEarlierFiles?: EarlierFilesResolver;
+
   constructor(
     private readonly checkpointState?: SubagentCheckpointStateSource,
     private readonly logger?: Pick<PiTurnRunnerLogger, 'warn' | 'error'>,
     private readonly promptSnapshots?: PromptSnapshotSource,
-  ) {}
+    context: {
+      readonly imageFileWriter?: Pick<ToolResultArchiver, 'writeImageFile'>;
+      readonly resolveEarlierFiles?: EarlierFilesResolver;
+    } = {},
+  ) {
+    this.imageFileWriter = context.imageFileWriter;
+    this.resolveEarlierFiles = context.resolveEarlierFiles;
+  }
 
   async compactManual(
     input: ManualContextCompactionInput,
@@ -44,6 +55,8 @@ export class LocalContextCompactor implements ContextCompactor {
       checkpointState: this.checkpointState,
       logger: this.logger,
       promptSnapshots: this.promptSnapshots,
+      imageFileWriter: this.imageFileWriter,
+      resolveEarlierFiles: this.resolveEarlierFiles,
     });
     logManualReplacementGrowthBestEffort(this.logger, input.sessionId, decision, {
       providerInputLimit: preparation.providerInputLimit,
@@ -78,10 +91,21 @@ async function runManualPolicy(options: {
   readonly checkpointState?: SubagentCheckpointStateSource;
   readonly logger?: Pick<PiTurnRunnerLogger, 'warn' | 'error'>;
   readonly promptSnapshots?: PromptSnapshotSource;
+  readonly imageFileWriter?: Pick<ToolResultArchiver, 'writeImageFile'>;
+  readonly resolveEarlierFiles?: EarlierFilesResolver;
 }) {
-  const { input, hooks, preparation } = options;
+  const { input, hooks, preparation, imageFileWriter, resolveEarlierFiles } = options;
   return compactContext({
     history: preparation.history,
+    ...(resolveEarlierFiles
+      ? { resolveEarlierFiles: () => resolveEarlierFiles(input.sessionId) }
+      : {}),
+    ...(imageFileWriter
+      ? {
+          writeImageFile: (messages, image) =>
+            imageFileWriter.writeImageFile({ sessionId: input.sessionId, messages }, image),
+        }
+      : {}),
     ...(input.customInstructions === undefined ? {} : { instructions: input.customInstructions }),
     limits: manualLimits(input, preparation.providerInputLimit),
     measurePair: async (pair) => preparation.measurer.measurePair(pair),

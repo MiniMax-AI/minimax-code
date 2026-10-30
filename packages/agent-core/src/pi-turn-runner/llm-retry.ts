@@ -1,10 +1,11 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
-import type {
-  AssistantMessage,
-  AssistantMessageEvent,
-  AssistantMessageEventStream,
-  ProviderResponse,
-  SimpleStreamOptions,
+import {
+  isContextOverflow,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  type ProviderResponse,
+  type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import {
   isLLMDeterministicRequestRejection,
@@ -585,12 +586,14 @@ function failureResult(input: {
   // 400 `invalid_request_error`). Retrying those only re-sends the same request,
   // repeats (and may re-bill) the rejection and delays the actionable error by
   // the whole backoff window. The deterministic check excludes anything that
-  // also looks transient (timeout, network, 408/429/5xx).
+  // also looks transient (timeout, network, 408/429/5xx). A context overflow,
+  // by tokens or by request bytes, is left to context management as in Pi.
   const decision =
     input.retryAllErrors &&
     !normalized.facts.explicitAbort &&
     !normalized.facts.signals.has('refusal') &&
-    !isLLMDeterministicRequestRejection(normalized)
+    !isLLMDeterministicRequestRejection(normalized) &&
+    !(input.final && isContextOverflow(input.final))
       ? { retryable: true, reason: 'network' as const }
       : toLLMRetryDecision(normalized);
   if (!decision.retryable) {

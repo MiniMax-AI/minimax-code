@@ -1371,7 +1371,6 @@ describe("LocalRuntimeTurnExecutor", () => {
     expect(captured?.hooks?.beforeLlmCallHook).toEqual([
       ...(input.assembly.hooks.beforeLlmCallHook ?? []),
       expect.any(Function),
-      expect.any(Function),
     ]);
     expect(captured?.hooks?.onHistoryChangedHook).toHaveLength(2);
     expect(order).toEqual([
@@ -5079,7 +5078,7 @@ describe("LocalRuntimeTurnExecutor beforeLlmCall and reconcile", () => {
     });
 
     await new LocalRuntimeTurnExecutor(executorOptions).execute(input);
-    const wrappedCompaction = captured?.hooks?.beforeLlmCallHook?.[2];
+    const wrappedCompaction = captured?.hooks?.beforeLlmCallHook?.[1];
     const decision = await wrappedCompaction?.({} as never);
     if (!decision || decision.type !== "replaceMessages") {
       throw new Error("expected wrapped compaction replacement");
@@ -5211,10 +5210,9 @@ describe("LocalRuntimeTurnExecutor beforeLlmCall compaction hooks", () => {
       hostHook,
       expect.any(Function),
       expect.any(Function),
-      expect.any(Function),
       afterCompactionHook,
     ]);
-    expect(captured?.hooks?.beforeLlmCallHook?.[3]).not.toBe(compactionHook);
+    expect(captured?.hooks?.beforeLlmCallHook?.[2]).not.toBe(compactionHook);
     expect(executorOptions.resolveBeforeLlmCallHooks).toHaveBeenCalledTimes(1);
   });
 

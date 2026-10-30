@@ -1,7 +1,17 @@
 import { createHash } from 'node:crypto';
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
+import {
+  replaceRequestImages,
+  type PiTurnRunnerLogger,
+  type RequestImage,
+} from '@mavis/agent-core/pi-turn-runner';
+import {
+  archivedImageText,
+  isArchivableRequestImage,
+  selectImagesToArchive,
+  type RequestMediaBudget,
+} from '@mavis/context-manager';
 
 import type { ToolResultCompactionConfig } from '../contracts.js';
 import { parseToolRounds, type ToolCallIdentity, type ToolRound } from './history-reduction.js';
@@ -50,10 +60,22 @@ interface ToolResultArtifact {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+interface ToolResultImageArtifactInput {
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly data: string;
+  readonly mimeType: string;
+}
+
 export interface ToolResultArchiverOptions {
   readonly writeArtifact: (
     input: ToolResultArtifactInput,
   ) => ToolResultArtifact | Promise<ToolResultArtifact>;
+  /** Stores an archived image that names no source file; without it the receipt names none. */
+  readonly writeImageArtifact?: (
+    input: ToolResultImageArtifactInput,
+  ) => { readonly reference: string } | Promise<{ readonly reference: string }>;
   readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'>;
   readonly referenceMemoEntries?: number;
   /** Live threshold source. Missing or invalid fields retain the current defaults. */
@@ -108,6 +130,12 @@ export interface ToolResultTrimCandidate {
 }
 
 export type ToolResultCompactionCandidate = ToolResultArchiveCandidate | ToolResultTrimCandidate;
+
+export interface ToolResultImageArchive {
+  readonly messages: readonly AgentMessage[];
+  readonly archivedImageCount: number;
+  readonly savedBytes: number;
+}
 
 /**
  * Plans the shared ToolResult candidate set for durable context compaction.
@@ -203,6 +231,68 @@ export class ToolResultArchiver {
       trimmedResultCount: replacements.length,
       actualSavingsBytes: materialized.actualSavingsBytes,
     };
+  }
+
+  /**
+   * Replaces tool result images older than the newest ones within `target`
+   * with a receipt naming their file, so later requests carry text instead.
+   * An image whose history names no source file is written to the Session
+   * artifacts first; user attachments are never archived.
+   */
+  async archiveImages(input: {
+    readonly sessionId: string;
+    readonly messages: readonly AgentMessage[];
+    readonly target: RequestMediaBudget;
+  }): Promise<ToolResultImageArchive | undefined> {
+    const images = selectImagesToArchive(input.messages, input.target, isArchivableRequestImage);
+    if (images.length === 0) return undefined;
+    const receipts = new Map<string, string>();
+    let savedBytes = 0;
+    for (const image of images) {
+      const receipt = archivedImageText(image.path ?? (await this.writeImageFile(input, image)));
+      receipts.set(image.key, receipt);
+      savedBytes += Math.max(0, image.base64Bytes - Buffer.byteLength(receipt));
+    }
+    logBestEffort(this.options.logger, 'info', {
+      event: 'tool_result_image_archive',
+      session_id: input.sessionId,
+      archived_image_count: images.length,
+      saved_bytes: savedBytes,
+    });
+    return {
+      messages: replaceRequestImages(input.messages, (image) => receipts.get(image.key)),
+      archivedImageCount: images.length,
+      savedBytes,
+    };
+  }
+
+  /** Writes a tool result image to the Session artifacts; `undefined` when it cannot. */
+  async writeImageFile(
+    input: { readonly sessionId: string; readonly messages: readonly AgentMessage[] },
+    image: RequestImage,
+  ): Promise<string | undefined> {
+    const message = input.messages[image.messageIndex];
+    if (!this.options.writeImageArtifact || message?.role !== 'toolResult') return undefined;
+    const block = message.content[image.blockIndex];
+    if (block?.type !== 'image') return undefined;
+    try {
+      const artifact = await this.options.writeImageArtifact({
+        sessionId: input.sessionId,
+        toolCallId: message.toolCallId,
+        toolName: message.toolName,
+        data: block.data,
+        mimeType: block.mimeType,
+      });
+      return nonEmptyString(artifact.reference);
+    } catch (error) {
+      logBestEffort(this.options.logger, 'error', {
+        event: 'tool_result_image_artifact_failed',
+        session_id: input.sessionId,
+        tool_name: message.toolName,
+        reason: safeErrorReason(error),
+      });
+      return undefined;
+    }
   }
 
   private finishMaterialization(

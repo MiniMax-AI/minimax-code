@@ -136,6 +136,8 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
   readonly toolResultCompaction?: Config['toolResultCompaction'];
   /** Context management values resolved from config.yaml. */
   readonly contextManagement?: Partial<Config['contextManagement']>;
+  /** Request media recovery values resolved from config.yaml. */
+  readonly requestMedia?: Config['requestMedia'];
   /**
    * Widened past `Config['agents']`: the v2 Agent cutover also threads
    * already-resolved capabilities through this read model, and `default` is

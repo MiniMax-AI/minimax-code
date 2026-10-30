@@ -76,11 +76,18 @@ export {
 export {
   DEFAULT_MAX_IMAGES_PER_REQUEST,
   limitRequestImages,
+  listRequestImages,
   knownMaxImagesPerRequestForBaseUrl,
   normalizeMaxImagesPerRequest,
+  replaceRequestImages,
   resolveMaxImagesPerRequest,
 } from './request-image-limit.js';
-export type { ModelRequestImageLimit, RequestImageLimitResult } from './request-image-limit.js';
+export type {
+  ModelRequestImageLimit,
+  RequestImage,
+  RequestImageLimitResult,
+} from './request-image-limit.js';
+export { isLLMImageLimitMessage } from '@mavis/shared/llm-error-classifier';
 export { toPiUserMessage } from './agent.js';
 export {
   createToolContextHistogramBucketsByName,
@@ -122,6 +129,7 @@ export type {
   PiHistoryChangedHookInput,
   PiHistoryChangeReason,
   PiLlmCallPreparedHookInput,
+  PiLlmCallRecovery,
   PiOnLlmCallPreparedHook,
   PiOnHistoryChangedHook,
   PiOnStepEndHook,

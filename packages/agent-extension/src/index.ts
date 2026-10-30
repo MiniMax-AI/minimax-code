@@ -31,6 +31,7 @@ export {
   type ToolOutputArtifactInput,
   type ToolOutputBudgetExtensionOptions,
 } from './tool-output-budget.js';
+export { requestMediaExtension, type RequestMediaExtensionOptions } from './request-media.js';
 export {
   runawayGuardExtension,
   runawayGuardShadowExtension,

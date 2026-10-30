@@ -153,6 +153,8 @@ export {
   parseToolResultCompactionConfig,
 } from './tool-result-compaction-config.js';
 export type { ToolResultCompactionSettings } from './tool-result-compaction-config.js';
+export { REQUEST_MEDIA_DEFAULTS, parseRequestMediaConfig } from './request-media-config.js';
+export type { RequestImageSettings, RequestMediaSettings } from './request-media-config.js';
 export {
   parseSandboxConfig,
   getSandboxConfigDefaults,

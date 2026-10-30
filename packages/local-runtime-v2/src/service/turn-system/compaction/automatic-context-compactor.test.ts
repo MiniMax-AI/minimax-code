@@ -15,6 +15,7 @@ import { readCompactionCompatibility } from './compat.js';
 import {
   AutomaticContextCompactor,
   createAutomaticContextRequestFilterHook,
+  createRequestMediaGuardHook,
 } from './automatic-context-compactor.js';
 import { ToolResultArchiver } from './algorithm/tool-result-archiver.js';
 import {
@@ -434,6 +435,193 @@ describe('AutomaticContextCompactor ToolResult reduction policy', () => {
     expect(writeArtifact).toHaveBeenCalledTimes(5);
     expect(plan).toHaveBeenCalledTimes(2);
     expect(messages).toEqual(snapshot);
+  });
+});
+
+describe('AutomaticContextCompactor request media', () => {
+  const model: Model<'anthropic-messages'> = {
+    id: 'model-1',
+    name: 'Model 1',
+    api: 'anthropic-messages',
+    provider: 'test',
+    baseUrl: 'https://example.invalid',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1_000_000,
+    maxTokens: 4_096,
+  };
+
+  function screenshots(count: number): AgentMessage[] {
+    return Array.from({ length: count }, (_, index): AgentMessage[] => {
+      const id = `shot-${index}`;
+      return [
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id, name: 'screenshot', arguments: {} }],
+          provider: 'test',
+          api: 'anthropic-messages',
+          model: 'model-1',
+          stopReason: 'toolUse',
+          timestamp: index * 2 + 1,
+        } as unknown as AgentMessage,
+        {
+          role: 'toolResult',
+          toolCallId: id,
+          toolName: 'screenshot',
+          content: [{ type: 'image', data: 'a'.repeat(4_000), mimeType: 'image/png' }],
+          isError: false,
+          timestamp: index * 2 + 2,
+        } as AgentMessage,
+      ];
+    }).flat();
+  }
+
+  function compactorWithImageDump() {
+    const writeImageArtifact = vi.fn(async (input: { readonly toolCallId: string }) => ({
+      reference: `/session/reports/tool-outputs/${input.toolCallId}.png`,
+    }));
+    const archiver = new ToolResultArchiver({ writeArtifact: vi.fn(), writeImageArtifact });
+    return {
+      compactor: automaticCompactor(undefined, undefined, undefined, {
+        toolResultArchiver: archiver,
+      }),
+      writeImageArtifact,
+    };
+  }
+
+  const baseInput = {
+    sessionId: 'session-1',
+    phase: 'initial' as const,
+    model,
+    thinkingLevel: 'off' as const,
+    tools: [{ name: 'read', description: 'Read', parameters: { type: 'object' } }],
+  };
+
+  it('leaves images in history while they fit the request image budget', () => {
+    const { compactor } = compactorWithImageDump();
+    expect(compactor.probeBeforeLlm({ ...baseInput, messages: screenshots(20) }).shouldStart).toBe(
+      false,
+    );
+  });
+
+  it('archives tool images to the low watermark once the request guard would drop one', async () => {
+    const { compactor, writeImageArtifact } = compactorWithImageDump();
+
+    const result = await compactor.compactBeforeLlm({ ...baseInput, messages: screenshots(21) });
+
+    expect(result).toMatchObject({ status: 'completed', method: 'tool_archive' });
+    if (result.status !== 'completed') throw new Error('Expected durable image archive.');
+    const remaining = result.replacementMessages.filter((message) =>
+      JSON.stringify(message).includes('"type":"image"'),
+    );
+    expect(remaining).toHaveLength(10);
+    expect(writeImageArtifact).toHaveBeenCalledTimes(11);
+    expect(
+      createRequestMediaGuardHook()({
+        ...baseInput,
+        turnId: 'turn-1',
+        messages: result.replacementMessages,
+        canonicalMessages: [],
+        systemPrompt: '',
+        tools: [],
+      } as never),
+    ).toEqual({ type: 'continue' });
+  });
+
+  it('archives the older half of the rejected images when repeating a recovered request', async () => {
+    const { compactor, writeImageArtifact } = compactorWithImageDump();
+    const recovery = {
+      reason: 'request_media',
+      errorMessage: '413 request_too_large',
+      requestMessages: screenshots(10),
+    };
+
+    const result = await compactor.compactBeforeLlm({
+      ...baseInput,
+      recovery,
+      messages: screenshots(10),
+    });
+
+    expect(result).toMatchObject({ status: 'completed', method: 'tool_archive' });
+    if (result.status !== 'completed') throw new Error('Expected durable image archive.');
+    const remaining = result.replacementMessages.filter((message) =>
+      JSON.stringify(message).includes('"type":"image"'),
+    );
+    expect(remaining).toHaveLength(5);
+    expect(writeImageArtifact).toHaveBeenCalledTimes(5);
+    expect(JSON.stringify(result.replacementMessages[1])).toContain(
+      'File: /session/reports/tool-outputs/shot-0.png',
+    );
+    expect(
+      createRequestMediaGuardHook()({
+        ...baseInput,
+        turnId: 'turn-1',
+        recovery,
+        messages: result.replacementMessages,
+        canonicalMessages: [],
+        systemPrompt: '',
+        tools: [],
+      } as never),
+    ).toEqual({ type: 'continue' });
+  });
+});
+
+describe('createRequestMediaGuardHook', () => {
+  it('limits the request copy to the model image limit and leaves fitting requests alone', async () => {
+    const hook = createRequestMediaGuardHook();
+    const image = { type: 'image' as const, data: 'aaaa', mimeType: 'image/png' };
+    const user = (index: number) =>
+      ({ role: 'user', content: [image], timestamp: index }) as AgentMessage;
+    const input = (count: number) =>
+      ({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        phase: 'initial',
+        messages: Array.from({ length: count }, (_, index) => user(index)),
+        canonicalMessages: [],
+        model: { id: 'model', maxImagesPerRequest: 4 },
+        systemPrompt: '',
+        tools: [],
+        thinkingLevel: 'off',
+      }) as never;
+
+    expect(await hook(input(4))).toEqual({ type: 'continue' });
+    const limited = await hook(input(5));
+    expect(limited).toMatchObject({
+      type: 'replaceRequestMessages',
+      reason: 'request-media-guard',
+    });
+    const messages = (limited as { messages: AgentMessage[] }).messages;
+    expect(JSON.stringify(messages).match(/"type":"image"/gu)).toHaveLength(2);
+  });
+
+  it('fits a repeated request to 1/divisor of the rejected one, user images included', async () => {
+    const image = { type: 'image' as const, data: 'aaaa', mimeType: 'image/png' };
+    const messages = Array.from(
+      { length: 10 },
+      (_, index) => ({ role: 'user', content: [image], timestamp: index }) as AgentMessage,
+    );
+    const sentImages = async (hook: ReturnType<typeof createRequestMediaGuardHook>) => {
+      const recovered = await hook({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        phase: 'initial',
+        recovery: { reason: 'request_media', errorMessage: '413', requestMessages: messages },
+        messages,
+        canonicalMessages: [],
+        model: { id: 'model' },
+        systemPrompt: '',
+        tools: [],
+        thinkingLevel: 'off',
+      } as never);
+      expect(recovered).toMatchObject({ type: 'replaceRequestMessages' });
+      const sent = (recovered as { messages: AgentMessage[] }).messages;
+      return JSON.stringify(sent).match(/"type":"image"/gu)?.length;
+    };
+
+    expect(await sentImages(createRequestMediaGuardHook())).toBe(5);
+    expect(await sentImages(createRequestMediaGuardHook(() => 5))).toBe(2);
   });
 });
 

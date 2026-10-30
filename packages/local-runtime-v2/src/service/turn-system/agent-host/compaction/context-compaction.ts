@@ -225,6 +225,7 @@ function automaticContextCompactionInput(
   return {
     sessionId: input.sessionId,
     phase: input.phase,
+    ...(input.recovery ? { recovery: input.recovery } : {}),
     messages: input.messages,
     model: input.model,
     ...(maxSerializedInputBytes === undefined ? {} : { maxSerializedInputBytes }),

@@ -2,11 +2,14 @@ import { readFile } from 'node:fs/promises';
 
 import type { UserMessageInput } from '@mavis/agent-core/pi-turn-runner';
 import {
+  encodeAttachmentImage,
   selectMultimodalAttachments,
+  type AttachmentImageEncoding,
   type MultimodalAttachmentCapabilities,
 } from '@mavis/agent-tools';
 
 export type LocalMultimodalAttachmentCapabilities = MultimodalAttachmentCapabilities;
+export type LocalAttachmentImageEncoding = AttachmentImageEncoding;
 
 export interface LocalInlineMediaCandidate {
   readonly key: string;
@@ -21,6 +24,7 @@ export interface LocalInlineMediaCandidate {
 export async function prepareLocalInlineMedia(
   candidates: readonly LocalInlineMediaCandidate[],
   capabilities: LocalMultimodalAttachmentCapabilities | undefined,
+  encoding?: LocalAttachmentImageEncoding,
 ): Promise<{
   readonly attachments: NonNullable<UserMessageInput['attachments']>;
   readonly inlinedKeys: ReadonlySet<string>;
@@ -31,14 +35,16 @@ export async function prepareLocalInlineMedia(
 }> {
   const selected = selectMultimodalAttachments(candidates, capabilities);
   const materialized = await Promise.all(
-    selected.kept.map(async ({ candidate, mime }) => {
-      const data = await readInlineMediaData(candidate);
-      return data
-        ? {
-            key: candidate.key,
-            attachment: { type: 'image' as const, data, mimeType: mime },
-          }
-        : undefined;
+    selected.kept.map(async ({ candidate, kind, mime }) => {
+      const bytes = await readInlineMediaBytes(candidate);
+      if (!bytes) return undefined;
+      const media = (kind === 'image'
+        ? await encodeAttachmentImage(bytes, mime, encoding)
+        : undefined) ?? {
+        data: candidate.data ?? Buffer.from(bytes).toString('base64'),
+        mimeType: mime,
+      };
+      return { key: candidate.key, attachment: { type: 'image' as const, ...media } };
     }),
   );
   const available = materialized.filter(
@@ -51,12 +57,12 @@ export async function prepareLocalInlineMedia(
   };
 }
 
-async function readInlineMediaData(
+async function readInlineMediaBytes(
   candidate: LocalInlineMediaCandidate,
-): Promise<string | undefined> {
-  if (candidate.data) return candidate.data;
+): Promise<Uint8Array | undefined> {
+  if (candidate.data) return Buffer.from(candidate.data, 'base64');
   try {
-    return (await readFile(candidate.filePath)).toString('base64');
+    return await readFile(candidate.filePath);
   } catch {
     return undefined;
   }

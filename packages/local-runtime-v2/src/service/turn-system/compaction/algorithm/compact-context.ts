@@ -1,4 +1,10 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import {
+  listRequestImages,
+  replaceRequestImages,
+  type RequestImage,
+} from '@mavis/agent-core/pi-turn-runner';
+import { checkpointImageText } from '@mavis/context-manager';
 
 import type {
   CheckpointAttemptMetadata,
@@ -9,6 +15,7 @@ import {
   CheckpointCandidateMediaRejectedError,
   CheckpointCandidateTooLargeError,
   ContextCompactionError,
+  type CheckpointEarlierFiles,
   type ContextCompactionSizeDiagnostics,
 } from '../contracts.js';
 import type { CompactionSubagentState } from '../compat.js';
@@ -63,6 +70,16 @@ export interface CompactContextInput {
   };
   readonly captureSubagents?: () => Promise<CompactionSubagentState | undefined>;
   readonly onSubagentCaptureFailure?: () => void;
+  /**
+   * Saves an image whose history names no file, so the summary request can
+   * name one instead of carrying the image; `undefined` when it cannot.
+   */
+  readonly writeImageFile?: (
+    messages: readonly AgentMessage[],
+    image: RequestImage,
+  ) => Promise<string | undefined>;
+  /** Directories listed after a checkpoint summary; none are listed when this fails. */
+  readonly resolveEarlierFiles?: () => Promise<CheckpointEarlierFiles>;
   readonly signal?: AbortSignal;
 }
 
@@ -130,12 +147,12 @@ export async function compactContext(input: CompactContextInput): Promise<Compac
   const validated = validateCheckpointGeneration(generated.generation, generated.maxOutputTokens);
   const subagents = await captureSubagents(input);
   input.signal?.throwIfAborted();
-  let replacementMessages = [
-    buildCheckpointMessage(input.history, validated.summary, input.checkpoint.tokensBefore, {
-      timestamp: input.checkpoint.timestamp,
-      ...(subagents ? { subagents } : {}),
-    }),
-  ];
+  const earlierFiles = await resolveEarlierFiles(input);
+  input.signal?.throwIfAborted();
+  let replacementMessages = buildCheckpointReplacement(input, validated.summary, {
+    ...earlierFiles,
+    ...(subagents ? { subagents } : {}),
+  });
   let measurement = await input.measurePair({
     beforeMessages: input.history,
     afterMessages: replacementMessages,
@@ -143,11 +160,7 @@ export async function compactContext(input: CompactContextInput): Promise<Compac
   input.signal?.throwIfAborted();
   assertValidMeasurement(measurement);
   if (subagents && !fitsFinalRequest(measurement, input.limits)) {
-    replacementMessages = [
-      buildCheckpointMessage(input.history, validated.summary, input.checkpoint.tokensBefore, {
-        timestamp: input.checkpoint.timestamp,
-      }),
-    ];
+    replacementMessages = buildCheckpointReplacement(input, validated.summary, earlierFiles);
     measurement = await input.measurePair({
       beforeMessages: input.history,
       afterMessages: replacementMessages,
@@ -175,6 +188,26 @@ export async function compactContext(input: CompactContextInput): Promise<Compac
   };
 }
 
+function buildCheckpointReplacement(
+  input: CompactContextInput,
+  summary: string,
+  {
+    subagents,
+    earlierFiles,
+  }: {
+    readonly subagents?: CompactionSubagentState;
+    readonly earlierFiles?: CheckpointEarlierFiles;
+  },
+): AgentMessage[] {
+  return [
+    buildCheckpointMessage(input.history, summary, input.checkpoint.tokensBefore, {
+      timestamp: input.checkpoint.timestamp,
+      ...(subagents ? { subagents } : {}),
+      ...(earlierFiles ? { earlierFiles } : {}),
+    }),
+  ];
+}
+
 async function captureSubagents(
   input: CompactContextInput,
 ): Promise<CompactionSubagentState | undefined> {
@@ -189,6 +222,17 @@ async function captureSubagents(
       // Diagnostics are best effort and cannot change compaction.
     }
     return undefined;
+  }
+}
+
+async function resolveEarlierFiles(
+  input: CompactContextInput,
+): Promise<{ readonly earlierFiles?: CheckpointEarlierFiles }> {
+  try {
+    const earlierFiles = await input.resolveEarlierFiles?.();
+    return earlierFiles ? { earlierFiles } : {};
+  } catch {
+    return {};
   }
 }
 
@@ -320,17 +364,12 @@ async function generateCheckpoint(
 }> {
   const session = await input.checkpoint.open();
   validateNonNegativeSafeInteger(session.maxOutputTokens, 'maxOutputTokens');
-  const checkpointCandidates: Array<{
-    readonly candidate: CheckpointCandidate;
-    readonly messages: readonly AgentMessage[];
-  }> = [{ candidate: 'h0', messages: input.history }];
-  if (candidate && toolResultReplacementCount(candidate) > 0) {
-    checkpointCandidates.push({ candidate: 'htrim', messages: candidate.messages });
-  }
-  const hall = buildAllToolResultsCandidate(checkpointCandidates.at(-1)?.messages ?? input.history);
-  if (hall.trimmedResultCount > 0) {
-    checkpointCandidates.push({ candidate: 'hall', messages: hall.messages });
-  }
+  const describeImages = checkpointImageDescriber(input);
+  const history = await describeImages(input.history);
+  const described = candidate
+    ? { ...candidate, messages: await describeImages(candidate.messages) }
+    : undefined;
+  const { checkpointCandidates, hall } = buildCheckpointCandidates(history, described);
   const counter = { value: 0 };
   let overflow: CheckpointCandidateTooLargeError | undefined;
 
@@ -384,6 +423,65 @@ async function generateCheckpoint(
     counter,
     priorOverflow: overflow,
   });
+}
+
+/**
+ * The summary request carries every image as a line naming its file, saving
+ * the ones history names no file for; an image's file is saved once even when
+ * several candidates carry it.
+ */
+function checkpointImageDescriber(
+  input: CompactContextInput,
+): (messages: readonly AgentMessage[]) => Promise<readonly AgentMessage[]> {
+  const files = new Map<unknown, Promise<string | undefined>>();
+  const fileOf = (messages: readonly AgentMessage[], image: RequestImage) => {
+    if (image.path || !input.writeImageFile) return Promise.resolve(image.path);
+    const block = (messages[image.messageIndex] as { content?: unknown[] }).content?.[
+      image.blockIndex
+    ];
+    const data = (block as { data?: unknown } | undefined)?.data;
+    let file = files.get(data);
+    if (!file) {
+      file = input.writeImageFile(messages, image);
+      files.set(data, file);
+    }
+    return file;
+  };
+  return async (messages) => {
+    const images = listRequestImages(messages).filter(
+      (image) => !image.mimeType?.toLowerCase().startsWith('video/'),
+    );
+    if (images.length === 0) return messages;
+    const texts = new Map<string, string>();
+    for (const image of images) {
+      texts.set(image.key, checkpointImageText(await fileOf(messages, image)));
+    }
+    return replaceRequestImages(messages, (image) => texts.get(image.key));
+  };
+}
+
+function buildCheckpointCandidates(
+  history: readonly AgentMessage[],
+  candidate: ToolResultCompactionCandidate | ToolTrimCandidate | undefined,
+): {
+  readonly checkpointCandidates: ReadonlyArray<{
+    readonly candidate: CheckpointCandidate;
+    readonly messages: readonly AgentMessage[];
+  }>;
+  readonly hall: ReturnType<typeof buildAllToolResultsCandidate>;
+} {
+  const checkpointCandidates: Array<{
+    readonly candidate: CheckpointCandidate;
+    readonly messages: readonly AgentMessage[];
+  }> = [{ candidate: 'h0', messages: history }];
+  if (candidate && toolResultReplacementCount(candidate) > 0) {
+    checkpointCandidates.push({ candidate: 'htrim', messages: candidate.messages });
+  }
+  const hall = buildAllToolResultsCandidate(checkpointCandidates.at(-1)?.messages ?? history);
+  if (hall.trimmedResultCount > 0) {
+    checkpointCandidates.push({ candidate: 'hall', messages: hall.messages });
+  }
+  return { checkpointCandidates, hall };
 }
 
 /**

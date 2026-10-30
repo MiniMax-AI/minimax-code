@@ -651,7 +651,8 @@ describe('model capability helpers', () => {
       support_files_api: false,
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 67_108_864,
+      max_request_body_bytes: 18_874_368,
+      default_request_body_bytes: true,
       max_attachments_count: 4,
       thinking_mode: ThinkingMode.FORCED_ON,
     });
@@ -701,7 +702,7 @@ describe('model capability helpers', () => {
       support_files_api: false,
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 67_108_864,
+      max_request_body_bytes: 18_874_368,
       max_attachments_count: 4,
     });
     expect(
@@ -711,7 +712,7 @@ describe('model capability helpers', () => {
     ).toMatchObject({
       support_video: true,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 67_108_864,
+      max_request_body_bytes: 18_874_368,
     });
   });
 
@@ -730,7 +731,7 @@ describe('model capability helpers', () => {
       ).toMatchObject({
         max_image_bytes_inline: 10_485_760,
         max_video_bytes_inline: 52_428_800,
-        max_request_body_bytes: 67_108_864,
+        max_request_body_bytes: 18_874_368,
         max_attachments_count: 4,
       });
     },
@@ -829,7 +830,7 @@ describe('model capability helpers', () => {
     expect(capabilities).toMatchObject({
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 67_108_864,
+      max_request_body_bytes: 18_874_368,
       max_attachments_count: 4,
     });
   });
