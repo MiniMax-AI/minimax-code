@@ -28,10 +28,11 @@ describe('user stop cascade trigger', () => {
   it('opens the cascade before aborting, so a task driven terminal cannot slip a delivery through', async () => {
     const fixture = harness();
     const order: string[] = [];
-    fixture.cascadeBegin.mockImplementation(async () => {
+    fixture.cascadeBegin.mockImplementation(() => {
       order.push('cascade-begin');
       return {
         accept: vi.fn(async () => undefined),
+        markBoundary: vi.fn(),
         complete: vi.fn(() => {
           order.push('cascade-complete');
         }),
@@ -215,7 +216,10 @@ describe('user stop cascade trigger', () => {
 
   it('still aborts when the cascade hook itself fails', async () => {
     const fixture = harness();
-    fixture.cascadeBegin.mockRejectedValue(new Error('cascade unavailable'));
+    // `begin` is synchronous, so the failure must be a throw, not a rejection.
+    fixture.cascadeBegin.mockImplementation(() => {
+      throw new Error('cascade unavailable');
+    });
     fixture.controller.abort.mockResolvedValue({ status: 'aborted', turnId: 'turn-1' });
 
     await expect(
@@ -352,8 +356,12 @@ function harness() {
   const cascadeCancel = vi.fn();
   const cascadeAccept = vi.fn(async () => undefined);
   const loggerInfo = vi.fn();
-  const cascadeBegin = vi.fn(async () => ({
+  // `begin` is synchronous by contract: the delivery window must be open before
+  // the abort, so the service never awaits the handle it returns.
+  const cascadeMarkBoundary = vi.fn();
+  const cascadeBegin = vi.fn(() => ({
     accept: cascadeAccept,
+    markBoundary: cascadeMarkBoundary,
     complete: cascadeComplete,
     cancel: cascadeCancel,
   }));
@@ -385,6 +393,7 @@ function harness() {
     cascadeComplete,
     cascadeCancel,
     cascadeAccept,
+    cascadeMarkBoundary,
     loggerInfo,
     service: createTurnExecutionService(options),
   };
