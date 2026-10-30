@@ -154,6 +154,15 @@ export class LocalAgentHost<
     this.preflight = new TurnPreflight(dependencies);
   }
 
+  private notifyTurnStarted(context: AgentEventContext): void {
+    try {
+      // A new Turn supersedes any suggestion still generating for this Session.
+      this.dependencies.promptSuggestion?.turnStarted(context.sessionId);
+    } catch {
+      /* An optional suggestion can never fail a Turn. */
+    }
+  }
+
   async run(input: AgentHostRunInput): Promise<AgentHostTurnOutcome> {
     const lease = captureAcceptedTurnLease(readUnknownProperty(input, 'lease'));
     const control = scopeTurnControl(this.dependencies, lease);
@@ -176,6 +185,7 @@ export class LocalAgentHost<
         });
         context = createAgentEventContext(acceptedInput);
         assertAgentHostDependenciesReady(this.dependencies);
+        this.notifyTurnStarted(context);
         setupLogContext.executionMode = acceptedInput.request.executionMode ?? 'activate';
         const turnCapabilities = this.dependencies.turnCapabilities;
         capabilityLease = turnCapabilities
@@ -490,7 +500,18 @@ export class LocalAgentHost<
       });
     }
     await this.commitBackgroundTaskReads(context, outcome);
+    // Only now is the Turn durable: fire optional post-commit work without
+    // awaiting it, so a suggestion can never delay or fail this Turn.
+    this.afterSuccessfulCommit(outcome);
     return outcome;
+  }
+
+  private afterSuccessfulCommit(outcome: AgentHostTurnOutcome): void {
+    try {
+      this.dependencies.executor.afterSuccessfulCommit?.(outcome);
+    } catch {
+      /* An optional post-commit observer can never fail a committed Turn. */
+    }
   }
 
   private async commitBackgroundTaskReads(

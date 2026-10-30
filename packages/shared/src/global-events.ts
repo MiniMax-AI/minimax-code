@@ -30,6 +30,8 @@ export const GLOBAL_EVENT_TYPES = [
   "questionnaire.dismiss",
   "questionnaire.superseded",
   "message.rewind",
+  "turn.prompt_suggestion.generated",
+  "turn.prompt_suggestion.status",
   "notification.read",
   "notification.refresh",
   "content.retry.exceeded",
@@ -318,6 +320,24 @@ export type GlobalEventPayloadMap = {
     supersededAt: number;
   };
   "message.rewind": { sessionId: string; contextReset?: boolean };
+  "turn.prompt_suggestion.status": {
+    sessionId: string;
+    turnId: string;
+    status: "generating" | "unavailable" | "cancelled";
+  };
+  "turn.prompt_suggestion.generated": {
+    sessionId: string;
+    turnId: string;
+    suggestion: string;
+    /** Binds this text to the exact prompt that produced it. */
+    promptVersion?: string;
+    elapsedMs?: number;
+    usage?: {
+      /** The whole prompt, including any provider-cached prefix. */
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+  };
   "notification.read": {
     notification_id: string;
     read_at_ms: number;

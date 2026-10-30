@@ -7,7 +7,6 @@ import type {
 import type { RuntimeEvent } from '@mavis/agent-core/protocol';
 import type { AssemblyResult, TurnAssemblyCtx } from '@mavis/agent-runtime';
 import type { RuntimeTool } from '@mavis/agent-core/tools';
-
 import type { SessionRecord, UserMessageId } from '../../../session-system/index.js';
 import type {
   CanonicalHistoryChange,
@@ -306,4 +305,10 @@ export interface LocalTurnOutputTokenCapResolver {
  */
 export interface LocalTurnExecutor<TAgent extends AgentExecutionSnapshot = AgentExecutionSnapshot> {
   execute(input: LocalTurnExecutionInput<TAgent>): Promise<AgentHostTurnOutcome>;
+  /**
+   * Optional. Called by the Host once the Turn's terminal state is durably
+   * committed, for work that must not run before that commit succeeded. Must be
+   * synchronous, best-effort and must never block the committed Turn.
+   */
+  afterSuccessfulCommit?(outcome: AgentHostTurnOutcome): void;
 }

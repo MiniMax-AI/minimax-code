@@ -28,6 +28,7 @@ import type {
   LocalTurnOutputTokenCapResolver,
   LocalTurnToolPolicyGuard,
 } from '../runner/contracts.js';
+import type { PromptSuggestionTurnPort } from '../runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   FileApiUploadStoreSource,
   MessagesFileApiPatcherLogger,
@@ -301,6 +302,8 @@ export interface LocalRuntimeTurnExecutorOptions<
       }
     | undefined;
   readonly executionPreparation: LocalTurnExecutionPreparationSource<TAgent, TContext>;
+  /** Optional next-message suggestion. Absent or disabled collects no context. */
+  readonly promptSuggestion?: PromptSuggestionTurnPort;
   readonly fileChanges: LocalTurnFileChangeLifecycle;
   readonly nowMs?: () => number;
   readonly attemptRecall: {

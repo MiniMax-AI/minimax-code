@@ -131,6 +131,7 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
   readonly memory?: Partial<Config['memory']>;
   /** Session title auto-generation flag — see @mavis/config SessionTitleConfig. */
   readonly sessionTitle?: Config['sessionTitle'];
+  readonly promptSuggestion?: Config['promptSuggestion'];
   /** Runaway Guard local policy resolved from config.yaml. */
   readonly runawayGuard?: Config['runawayGuard'];
   /** ToolResult compaction values resolved from config.yaml. */

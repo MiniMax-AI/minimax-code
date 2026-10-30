@@ -174,6 +174,18 @@ export function buildLocalRequestPayloadTransform(
   });
 }
 
+/**
+ * Optional next-message calls reuse the main request transform unchanged, so
+ * thinking and effort follow exactly what the user selected for the Turn. Only
+ * the main Turn's output contract is dropped: the suggestion is plain text.
+ */
+export function buildPromptSuggestionPayloadTransform(
+  input: Parameters<typeof buildLocalRequestPayloadTransform>[0],
+  runtime: Parameters<typeof buildLocalRequestPayloadTransform>[1],
+) {
+  return buildLocalRequestPayloadTransform({ ...input, outputContract: undefined }, runtime);
+}
+
 export function buildTurnPayloadTransforms<TAgent extends AgentExecutionSnapshot>(
   input: Pick<LocalTurnExecutionInput<TAgent>, 'lease' | 'preparation'>,
   outputContract: TurnOutputContract | undefined,

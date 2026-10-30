@@ -875,6 +875,7 @@ async function initializeOwnerRuntime(input: {
       capabilityProfile: options.capabilityProfile,
       systemPromptOverrides: options.systemPromptOverrides,
       getRunawayGuardConfig: options.getRunawayGuardConfig,
+      getPromptSuggestionPolicy: options.getPromptSuggestionPolicy,
       ...(options.getToolResultCompactionConfig
         ? {
             getToolResultCompactionConfig:

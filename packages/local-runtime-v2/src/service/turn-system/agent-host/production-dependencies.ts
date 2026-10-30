@@ -45,6 +45,7 @@ export interface AgentHostProductionDependenciesOptions<
   readonly turnControl: AgentHostTurnControl;
   readonly turnCapabilities?: AgentHostDependencies<TAgent>['turnCapabilities'];
   readonly assemblyObserver?: AgentHostDependencies<TAgent>['assemblyObserver'];
+  readonly promptSuggestion?: AgentHostDependencies<TAgent>['promptSuggestion'];
   readonly canonicalHistory: DurableCanonicalHistoryProvider;
   readonly usage?: AgentHostUsageProjection;
   readonly logger?: AgentHostDependencies<TAgent>['logger'];
@@ -79,7 +80,13 @@ export function createAgentHostProductionDependencies<
     options,
     history,
     events,
-    new LocalRuntimeTurnExecutor(options.executor),
+    // The suggestion port is host-owned; the executor only forwards the
+    // short-lived capture after a successful commit.
+    new LocalRuntimeTurnExecutor(
+      options.promptSuggestion
+        ? { ...options.executor, promptSuggestion: options.promptSuggestion }
+        : options.executor,
+    ),
   );
 }
 
@@ -118,6 +125,7 @@ function createDependencyRecord<
       : {}),
     ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
     ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    promptSuggestion: options.promptSuggestion,
     history,
     events,
     ...(options.logger ? { logger: options.logger } : {}),

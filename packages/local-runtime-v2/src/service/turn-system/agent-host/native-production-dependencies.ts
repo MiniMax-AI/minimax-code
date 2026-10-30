@@ -197,6 +197,7 @@ function createNativeAgentHostDependencies<TAgent extends AgentExecutionSnapshot
     turnControl: options.turnControl,
     ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
     ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    promptSuggestion: options.promptSuggestion,
     canonicalHistory: options.canonicalHistory,
     ...(options.runner.logger ? { logger: options.runner.logger } : {}),
     ...(options.usage ? { usage: options.usage } : {}),

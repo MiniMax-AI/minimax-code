@@ -133,3 +133,25 @@ export {
 export { buildLocalTurnPayloadTransform } from './agent-host/index.js';
 
 export { normalizeModelSelection, type UserModelSelection } from './agent-host/index.js';
+export {
+  createPromptSuggestionService,
+  type PromptSuggestionReadResult,
+  type PromptSuggestionReadStatus,
+  type PromptSuggestionResult,
+  type PromptSuggestionTurnPort,
+} from './agent-host/runner/prompt-suggestion/prompt-suggestion-service.js';
+export {
+  evaluatePromptSuggestionPolicy,
+  PROMPT_SUGGESTION_VERSION,
+  promptSuggestionInstruction,
+  type PromptSuggestionPolicy,
+  type PromptSuggestionPolicyDecision,
+  type PromptSuggestionPolicyRefusal,
+} from './agent-host/runner/prompt-suggestion/prompt-suggestion-policy.js';
+export {
+  createPromptSuggestionEligibility,
+  isEligibleMembership,
+  type MembershipFacts,
+  type PromptSuggestionEligibilityPort,
+  type PromptSuggestionIneligibility,
+} from './agent-host/runner/prompt-suggestion/prompt-suggestion-eligibility.js';

@@ -95,6 +95,7 @@ export interface LocalRuntimeConfig {
   askUser?: Config['askUser'];
   promptConfig?: Config['promptConfig'];
   runawayGuard?: Config['runawayGuard'];
+  promptSuggestion?: Config['promptSuggestion'];
   toolResultCompaction?: Config['toolResultCompaction'];
   mcp?: {
     nativeToolAllowlist?: string[];

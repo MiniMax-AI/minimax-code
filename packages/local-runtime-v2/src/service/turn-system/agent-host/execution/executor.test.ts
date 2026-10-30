@@ -2011,6 +2011,269 @@ describe("LocalRuntimeTurnExecutor context publication", () => {
   });
 });
 
+/** Prompt suggestions are offered only on the platform-billed (subscription) path. */
+function suggestionInput(
+  managedProvider: boolean,
+  overrides: Parameters<typeof executionInput>[0] = {},
+): LocalTurnExecutionInput {
+  const input = executionInput(overrides);
+  return {
+    ...input,
+    preparation: { ...input.preparation, llm: { ...input.preparation.llm, managedProvider } },
+  } as LocalTurnExecutionInput;
+}
+
+const managedInput = (overrides: Parameters<typeof executionInput>[0] = {}) =>
+  suggestionInput(true, overrides);
+
+async function suggestionHooks(
+  runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>,
+  status = RuntimeEventStatus.COMPLETED,
+): Promise<void> {
+  await runInput.hooks?.onLlmCallPreparedHook?.at(-1)?.({
+    sessionId: "session-1",
+    turnId: "turn-1",
+    phase: "initial",
+    scope: "agent",
+    messages: [{ role: "user", content: "hello", timestamp: 0 }],
+    model: runInput.llm.model,
+    systemPrompt: "base system",
+    tools: [],
+    thinkingLevel: "off",
+  } as never);
+  await runInput.hooks?.afterLlmCallHook?.at(-1)?.({
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      api: "anthropic-messages",
+      provider: "provider",
+      model: "model",
+      usage: {
+        input: 20,
+        output: 12,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 32,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 1,
+    },
+  } as never);
+  await runInput.eventWriter.pushRuntime(terminalEvent(status));
+}
+
+describe("LocalRuntimeTurnExecutor prompt suggestion", () => {
+  it("collects nothing for a turn on a BYOK model, even when the feature is on", async () => {
+    const makeByok = () => suggestionInput(false);
+    const counts: number[] = [];
+    const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
+      counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
+      await suggestionHooks(runInput);
+    };
+    await new LocalRuntimeTurnExecutor(options(observe)).execute(makeByok());
+    const committed = vi.fn();
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(observe),
+      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
+    });
+    const outcome = await runner.execute(makeByok());
+    runner.afterSuccessfulCommit(outcome);
+    expect(outcome.status).toBe("completed");
+    // No capture Hook was installed, so the BYOK request is untouched.
+    expect(counts[1]).toBe(counts[0]);
+    expect(committed).not.toHaveBeenCalled();
+  });
+
+  it("collects a BYOK turn when the port allows unmanaged models (internal builds)", async () => {
+    const committed = vi.fn();
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        await suggestionHooks(runInput);
+      }),
+      promptSuggestion: {
+        enabled: () => true,
+        allowUnmanagedModels: true,
+        turnStarted: () => undefined,
+        committed,
+      },
+    });
+    const outcome = await runner.execute(suggestionInput(false));
+    runner.afterSuccessfulCommit(outcome);
+    expect(committed).toHaveBeenCalledOnce();
+  });
+
+  it("forwards one committed capture only after the Host commits the Turn", async () => {
+    const committed = vi.fn();
+    let hookCount: number | undefined;
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        hookCount = runInput.hooks?.onLlmCallPreparedHook?.length;
+        await suggestionHooks(runInput);
+      }),
+      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
+    });
+
+    const outcome = await runner.execute(managedInput());
+    // execute() returning is not durability: the suggestion must not have run yet.
+    expect(outcome).toEqual({ status: "completed" });
+    expect(hookCount).toBeGreaterThan(0);
+    expect(committed).not.toHaveBeenCalled();
+
+    runner.afterSuccessfulCommit(outcome);
+    expect(committed).toHaveBeenCalledOnce();
+    const [scope, capture] = committed.mock.calls[0]!;
+    expect(scope).toEqual({
+      sessionId: "session-1",
+      turnId: "turn-1",
+      caller: "chat",
+      session: { parentSessionId: undefined, interactionMode: undefined },
+    });
+    expect(capture.finalAssistant.content).toEqual([{ type: "text", text: "done" }]);
+  });
+
+  it("installs no capture Hook and commits nothing while the feature is disabled", async () => {
+    const counts: number[] = [];
+    const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
+      counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
+      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+    };
+    const committed = vi.fn();
+    // Same executor options with and without the optional port.
+    await new LocalRuntimeTurnExecutor(options(observe)).execute(managedInput());
+    await new LocalRuntimeTurnExecutor({
+      ...options(observe),
+      promptSuggestion: { enabled: () => false, turnStarted: () => undefined, committed },
+    }).execute(managedInput());
+
+    expect(counts[1]).toBe(counts[0]);
+    expect(committed).not.toHaveBeenCalled();
+  });
+
+  it("collects a suggestion for the turn that a questionnaire answer resumes", async () => {
+    // A questionnaire answer is the user's own input, but it carries no
+    // user-authored query text; the turn it resumes still ends at the composer.
+    const base = managedInput();
+    const input = managedInput({
+      request: {
+        ...base.request,
+        genuineUserQueryText: "",
+        provenance: { ...base.request.provenance, source: "questionnaire" },
+      },
+    });
+    const committed = vi.fn();
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        await suggestionHooks(runInput);
+      }),
+      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
+    });
+    const outcome = await runner.execute(input);
+    runner.afterSuccessfulCommit(outcome);
+    expect(committed).toHaveBeenCalledOnce();
+  });
+
+  it.each(["goal-continuation", "goal-summary", "plan", "hidden-input"] as const)(
+    "does not collect or generate a suggestion for %s",
+    async (kind) => {
+      const base = managedInput();
+      const makeInput = () =>
+        managedInput({
+          request: {
+            ...base.request,
+            ...(kind === "goal-continuation"
+              ? { provenance: { source: "thread-goal", routingFingerprint: "goal:continuation" } }
+              : {}),
+            ...(kind === "hidden-input" ? { genuineUserQueryText: "" } : {}),
+          },
+          assemblyContext: {
+            ...base.assemblyContext,
+            ...(kind === "goal-summary" ? { turnIntent: { kind: "goal-budget-summary" } } : {}),
+            ...(kind === "plan"
+              ? { plan: { active: true as const, canonicalPath: "/plan.md" } }
+              : {}),
+          },
+        });
+      const counts: number[] = [];
+      const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
+        counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
+        await suggestionHooks(runInput);
+      };
+      await new LocalRuntimeTurnExecutor(options(observe)).execute(makeInput());
+      const committed = vi.fn();
+      const runner = new LocalRuntimeTurnExecutor({
+        ...options(observe),
+        promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
+      });
+      const outcome = await runner.execute(makeInput());
+      runner.afterSuccessfulCommit(outcome);
+      expect(outcome.status).toBe("completed");
+      expect(counts[1]).toBe(counts[0]);
+      expect(committed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("ignores a post-commit hook for an outcome it never produced", async () => {
+    const committed = vi.fn();
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        await suggestionHooks(runInput);
+      }),
+      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
+    });
+
+    await runner.execute(managedInput());
+    runner.afterSuccessfulCommit({ status: "completed" });
+    expect(committed).not.toHaveBeenCalled();
+
+    // The capture is consumed once, so a repeated hook cannot double-spend.
+    const next = await runner.execute(managedInput());
+    runner.afterSuccessfulCommit(next);
+    runner.afterSuccessfulCommit(next);
+    expect(committed).toHaveBeenCalledOnce();
+  });
+
+  it("never fails the Turn when the post-commit suggestion throws", async () => {
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        await suggestionHooks(runInput);
+      }),
+      promptSuggestion: {
+        enabled: () => true,
+        turnStarted: () => undefined,
+        committed: () => {
+          throw new Error("optional suggestion failed");
+        },
+      },
+    });
+
+    const outcome = await runner.execute(managedInput());
+    expect(() => runner.afterSuccessfulCommit(outcome)).not.toThrow();
+  });
+
+  it.each([
+    ["a failed Turn", RuntimeEventStatus.FAILED, undefined],
+    [
+      "a wait-for-user Turn",
+      RuntimeEventStatus.COMPLETED,
+      { status: "completed", waitingForUser: true },
+    ],
+  ] as const)("commits nothing after %s", async (_name, status, outcome) => {
+    const committed = vi.fn();
+    const runner = new LocalRuntimeTurnExecutor({
+      ...options(async (runInput) => {
+        await suggestionHooks(runInput, status);
+        return outcome ? { outcome } : undefined;
+      }),
+      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
+    });
+
+    const settled = await runner.execute(managedInput());
+    runner.afterSuccessfulCommit(settled);
+    expect(committed).not.toHaveBeenCalled();
+  });
+});
+
 describe("LocalRuntimeTurnExecutor user query provenance", () => {
   it("marks the exact query suffix after assembling the final initial prompt", async () => {
     let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;

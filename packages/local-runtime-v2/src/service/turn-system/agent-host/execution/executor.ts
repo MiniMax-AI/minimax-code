@@ -74,6 +74,13 @@ import {
 import { withPluginAutomaticCompactionLifecycle } from './plugin-hook-compaction-lifecycle.js';
 import { createControlledToolHooks } from './plugin-hook-tool-lifecycle.js';
 import { createExecutionBudgetReminder } from '../runner/execution-budget-reminder.js';
+import {
+  createTurnPromptSuggestionCapture,
+  PromptSuggestionCommitRelay,
+  readPromptSuggestionScope,
+  withPromptSuggestionHooks,
+  type PromptSuggestionScope,
+} from '../runner/prompt-suggestion/capture.js';
 import { withExecutionObservability } from './execution-observability.js';
 import {
   ackCommittedToolResultTailClaims,
@@ -128,6 +135,9 @@ export class LocalRuntimeTurnExecutor<
   TAgent extends AgentExecutionSnapshot = AgentExecutionSnapshot,
   TContext extends ToolExecutionContext = ToolExecutionContext,
 > implements LocalTurnExecutor<TAgent> {
+  private readonly promptSuggestions = new PromptSuggestionCommitRelay(
+    () => this.options.promptSuggestion,
+  );
   constructor(private readonly options: LocalRuntimeTurnExecutorOptions<TAgent, TContext>) {
     validateOptions(options);
   }
@@ -315,6 +325,9 @@ export class LocalRuntimeTurnExecutor<
     );
     const toolSafetyGuard = this.options.createTurnToolSafetyGuard?.();
     const payloadTransforms = buildTurnPayloadTransforms(input, outputContract, this.options);
+    // Short-lived internal state. When the feature is off nothing is captured
+    // and no extra Hook is installed, so the main Turn behaves exactly as before.
+    const promptSuggestion = createTurnPromptSuggestionCapture(input, prepared, this.options);
     const childBash = this.options.createChildBashLifecycle?.({
       session: input.session,
       turnId: input.lease.turnId,
@@ -353,18 +366,21 @@ export class LocalRuntimeTurnExecutor<
         disableBuiltinToolFallback: prepared.toolResolution.disableBuiltinToolFallback,
         toolContext: prepared.toolContext,
         hooks: withExecutionObservability(
-          mergeHooks({
-            input,
-            toolResolution: prepared.toolResolution,
-            pendingToolResultTailClaims,
-            hostBeforeLlmCallHooks: prepared.beforeLlmCallHooks,
-            readTaskOutputTaskIds,
-            terminalTaskOutputReadIds,
-            toolsDisabled: this.options.disableTools === true,
-            toolSafetyGuard,
-            toolPolicyGuard: this.options.toolPolicyGuard,
-            finalizeToolResultForHistory: this.options.finalizeToolResultForHistory,
-          }),
+          withPromptSuggestionHooks(
+            mergeHooks({
+              input,
+              toolResolution: prepared.toolResolution,
+              pendingToolResultTailClaims,
+              hostBeforeLlmCallHooks: prepared.beforeLlmCallHooks,
+              readTaskOutputTaskIds,
+              terminalTaskOutputReadIds,
+              toolsDisabled: this.options.disableTools === true,
+              toolSafetyGuard,
+              toolPolicyGuard: this.options.toolPolicyGuard,
+              finalizeToolResultForHistory: this.options.finalizeToolResultForHistory,
+            }),
+            promptSuggestion?.capture,
+          ),
           input.request.provenance.sourceContext?.executionDiagnostics === true,
         ),
         caller: prepared.caller,
@@ -429,7 +445,13 @@ export class LocalRuntimeTurnExecutor<
       prepared,
       readTaskOutputTaskIds,
       runnerResult,
+      promptSuggestion: readPromptSuggestionScope(input, prepared, promptSuggestion?.capture),
     };
+  }
+
+  /** Fires the optional next-message suggestion once the Host durably committed the Turn. */
+  afterSuccessfulCommit(outcome: AgentHostTurnOutcome): void {
+    this.promptSuggestions.committed(outcome);
   }
 
   private async settleTurn(
@@ -444,7 +466,13 @@ export class LocalRuntimeTurnExecutor<
           ? { assistantMessageId: settled.runnerResult.outcome.messageId }
           : {}),
       });
-      return attachCommittedFacts(settled.outcome, observation, settled.readTaskOutputTaskIds);
+      const committed = attachCommittedFacts(
+        settled.outcome,
+        observation,
+        settled.readTaskOutputTaskIds,
+      );
+      this.promptSuggestions.remember(committed, settled.promptSuggestion);
+      return committed;
     } catch (error) {
       return this.throwWithFileFailure(input, error);
     }
@@ -831,6 +859,7 @@ interface SettledRuntimeTurn<TContext extends ToolExecutionContext> {
   readonly prepared: PreparedRunnerInput<TContext>;
   readonly readTaskOutputTaskIds: ReadonlySet<string>;
   readonly runnerResult: LocalRuntimeTurnRunnerResult | void;
+  readonly promptSuggestion?: PromptSuggestionScope;
 }
 
 /**

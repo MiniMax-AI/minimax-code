@@ -1,4 +1,4 @@
-import type { RunawayGuardOverride } from '@mavis/config';
+import type { PromptSuggestionRemotePolicy, RunawayGuardOverride } from '@mavis/config';
 import type {
   CreateLocalRuntimeHostOptions as V1CreateLocalRuntimeHostOptions,
   CreatedLocalRuntimeHost as V1CreatedLocalRuntimeHost,
@@ -52,6 +52,8 @@ interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOption
   browserToolExposure?: LocalBrowserToolExposure;
   /** Optional live config source; missing/invalid fields retain runtime defaults. */
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
+  /** Optional live remote rollout policy for the next-message suggestion. */
+  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
   getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */
@@ -70,6 +72,8 @@ interface CreateLocalRuntimeHostOptions extends V1CreateLocalRuntimeHostOptions 
   browserToolExposure?: LocalBrowserToolExposure;
   /** Optional live config source; missing/invalid fields retain runtime defaults. */
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
+  /** Optional live remote rollout policy for the next-message suggestion. */
+  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
   getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */

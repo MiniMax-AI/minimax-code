@@ -333,7 +333,8 @@ function applyLocalConfigUpdate(raw: Record<string, unknown>, body: Record<strin
       if (
         field === 'review.mode' ||
         field === 'permission.nativeDelete' ||
-        field === 'worktreeRefreshBeforeCreate'
+        field === 'worktreeRefreshBeforeCreate' ||
+        field === 'promptSuggestion.enabled'
       ) {
         throw new LocalConfigValidationError(`Unsupported config update operation for ${field}`);
       }

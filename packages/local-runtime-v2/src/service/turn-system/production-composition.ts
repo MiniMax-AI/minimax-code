@@ -64,7 +64,11 @@ import {
   type NativeAgentPreparationOptions,
   type NativeLocalAgentPreparationOptions,
 } from './agent-host/index.js';
-import type { AgentExecutionSnapshot, AgentHost } from './agent-host/contracts.js';
+import type {
+  AgentExecutionSnapshot,
+  AgentHost,
+  AgentHostDependencies,
+} from './agent-host/contracts.js';
 import type { CanonicalHistoryCompactionChange } from './agent-host/history/contracts.js';
 import type { DurableCanonicalHistoryProvider } from './agent-host/history/durable-canonical-history-store.js';
 import { captureSemanticSnapshot } from './agent-host/history/semantic-identity.js';
@@ -219,6 +223,7 @@ export interface CreateLocalAgentHostOptions<
   readonly eventObserver?: AgentEventBestEffortObserver;
   readonly contextUsageProjection?: RequiredAgentRuntimeProjector;
   readonly assemblyObserver?: AgentHostAssemblyObserver;
+  readonly promptSuggestion?: AgentHostDependencies['promptSuggestion'];
   readonly onSteeringConsumed: NonNullable<
     LocalRuntimeTurnExecutorOptions<TAgent, LocalRuntimeTurnToolContext>['onSteeringConsumed']
   >;
@@ -473,8 +478,7 @@ export async function createLocalAgentHost<
     },
     ...optionalNormalExtensions(normalExtensions),
     turnControl: options.turnControl,
-    ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
-    ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    ...optionalTurnHooks(options),
     canonicalHistory: adaptCanonicalHistory(
       options.sessions.canonicalHistory,
       options.sessions.sessions.historyMutation,
@@ -891,6 +895,20 @@ function optionalDesktopHostCapabilities(cliProductPolicy: boolean | undefined) 
 
 function optionalNormalExtensions(normalExtensions: readonly AgentExtension[] | undefined) {
   return normalExtensions ? { normalExtensions } : {};
+}
+
+/** Optional per-Turn seams; absent ones are omitted rather than set to undefined. */
+function optionalTurnHooks(
+  options: Pick<
+    CreateLocalAgentHostOptions,
+    'turnCapabilities' | 'assemblyObserver' | 'promptSuggestion'
+  >,
+) {
+  return {
+    ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
+    ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    ...(options.promptSuggestion ? { promptSuggestion: options.promptSuggestion } : {}),
+  };
 }
 
 export function combineAgentEventObservers(

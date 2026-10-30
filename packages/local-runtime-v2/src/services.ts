@@ -3,7 +3,10 @@ import type {
   AgentExtension,
   InternalTurnPromptReadRegistry,
 } from "@mavis/agent-runtime";
-import type { RunawayGuardOverride } from "@mavis/config";
+import type {
+  PromptSuggestionRemotePolicy,
+  RunawayGuardOverride,
+} from "@mavis/config";
 import {
   getRuntimeRegion,
   isLocalSourceProvenanceEnabled,
@@ -319,6 +322,8 @@ export interface CreateRuntimeServicesOptions
   readonly greetingEnabled?: boolean;
   /** Live optional Runaway Guard override injected by the owning product. */
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
+  /** Live remote rollout policy for the next-message suggestion. */
+  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
   /** Live ToolResult compaction thresholds injected by the owning product. */
   readonly getToolResultCompactionConfig?: () =>
     | ToolResultCompactionConfig

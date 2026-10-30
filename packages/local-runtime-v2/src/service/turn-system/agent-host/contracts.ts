@@ -1,3 +1,4 @@
+import type { PromptSuggestionTurnPort } from './runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   AgentRuntime,
   AssemblyResult,
@@ -258,6 +259,11 @@ export interface AgentHostDependencies<
   readonly turnCapabilities?: AgentHostTurnCapabilityLifecycle;
   /** Observes the exact immutable assembly selected for this accepted Turn. */
   readonly assemblyObserver?: AgentHostAssemblyObserver;
+  /**
+   * Optional next-message suggestion seam: told when a Turn starts, and
+   * forwarded to the Turn executor for the post-commit generation.
+   */
+  readonly promptSuggestion?: PromptSuggestionTurnPort;
   /** Best-effort structured diagnostics; production binds the persistent local-runtime logger. */
   readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'>;
   /** Request-scoped payload transform shared by normal and manual Provider calls. */

@@ -781,6 +781,17 @@ export interface SessionTitleConfig {
   enabled: boolean;
 }
 
+// ── Next Prompt Suggestion ───────────────────────────────────────
+
+/**
+ * Explicit opt-in for one extra post-turn model request. Default off, except in
+ * internal builds, where an unset value defaults on. The rollout policy (kill
+ * switch, sampling) is remote-only; see `PromptSuggestionRemotePolicy`.
+ */
+export interface PromptSuggestionConfig {
+  enabled: boolean;
+}
+
 // ── CLI Feature Flags ─────────────────────────────────────────────
 
 export interface CliSpawnConfig {
@@ -1003,6 +1014,8 @@ export interface Config {
   askUser: AskUserConfig;
   /** Session title auto-generation feature flag — see `SessionTitleConfig`. */
   sessionTitle: SessionTitleConfig;
+  /** Post-turn next-user-prompt suggestion — see `PromptSuggestionConfig`. */
+  promptSuggestion: PromptSuggestionConfig;
   /** CLI feature flags. */
   cli: CliConfig;
   /** Browser provider options; activation is owned by V2 Plugin/config policy. */
@@ -1750,6 +1763,10 @@ const DEFAULTS: Omit<
     // Default ON. See `SessionTitleConfig`.
     enabled: true,
   },
+  promptSuggestion: {
+    // Explicit opt-in because this performs one additional model request.
+    enabled: false,
+  },
   cli: {
     spawn: {
       enabled: false,
@@ -2068,6 +2085,7 @@ export function resolveConfigFromRaw(
     skills: parseSkillsConfig(raw),
     askUser: parseAskUserConfig(raw, DEFAULTS.askUser),
     sessionTitle: parseSessionTitleConfig(raw),
+    promptSuggestion: parsePromptSuggestionConfig(raw),
     cli: parseCliConfig(raw),
     browser: parseBrowserConfig(raw.browser),
     tui: parseTuiConfig(raw),
@@ -2463,6 +2481,20 @@ function parseSessionTitleConfig(
   return {
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : defaults.enabled,
   };
+}
+
+// ── prompt suggestion config parsing ────────────────────────────
+
+function parsePromptSuggestionConfig(raw: Record<string, unknown>): PromptSuggestionConfig {
+  const value = raw.promptSuggestion;
+  const enabled =
+    value != null && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>).enabled
+      : undefined;
+  // Internal builds dogfood the feature, so an unset value means on there; an
+  // explicit `false` still wins. Resolved at parse time, like `promptConfig`.
+  const defaultEnabled = DEFAULTS.promptSuggestion.enabled || isInternalBuild();
+  return { enabled: typeof enabled === 'boolean' ? enabled : defaultEnabled };
 }
 
 // ── CLI config parsing ──────────────────────────────────────────

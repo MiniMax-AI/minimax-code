@@ -1,5 +1,6 @@
 import type { AppDb } from '../../infra/db/client.js';
 import type { InputSafetyDecision } from '../content-safety/index.js';
+import type { PromptSuggestionReadResult } from './agent-host/runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   CommittedQueueCapability,
   QueueClaimAcceptanceLookup,
@@ -552,6 +553,20 @@ export interface TurnService {
   /** Internal Queue mutation/release wake used by compatibility composition. */
   dispatchQueue(sessionId: string): Promise<void>;
   sessionDeletion(sessionId: string, cleanup: () => Promise<void>): Promise<void>;
+  /**
+   * Optional next-message suggestion control. Scoped to one exact settled Turn
+   * of one Session so a stale cancel can never affect a newer Turn.
+   */
+  readonly promptSuggestion?: {
+    /** True only when it actually cancelled that Turn's in-flight request. */
+    cancel(sessionId: string, turnId: string): boolean;
+    /**
+     * Restores an already generated suggestion. Issues no model request and
+     * spends no quota. Returns a status instead of text whenever the result must
+     * not be resurrected.
+     */
+    read(sessionId: string, turnId: string): PromptSuggestionReadResult;
+  };
 }
 
 /** Queue execution seam implemented by the TurnSystem-owned message-delivery workflow. */

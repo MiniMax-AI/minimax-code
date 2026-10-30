@@ -3,6 +3,8 @@ export { isLocalSourceProvenanceEnabled } from './source-provenance.js';
 export { writeTuiStatusLineSetting } from './tui-status-line-write.js';
 export { parseRunawayGuardOverride, resolveRunawayGuardConfig } from './runaway-guard-config.js';
 export type { RunawayGuardSettings, RunawayGuardOverride } from './runaway-guard-config.js';
+export { parsePromptSuggestionRemotePolicy } from './prompt-suggestion-config.js';
+export type { PromptSuggestionRemotePolicy } from './prompt-suggestion-config.js';
 export {
   BRAND,
   DEFAULT_PORT,

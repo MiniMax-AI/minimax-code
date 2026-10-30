@@ -251,7 +251,12 @@
       "packages/local-runtime/test/unit/local-background-task-admission-stop.test.ts",
       "packages/local-runtime/test/unit/local-background-task-delivery-user-stop-admission.test.ts",
       "packages/tui/test/unit/tui/features/interaction/plan-path.test.ts",
-      "packages/shared/test/unit/turn-message-kind.test.ts"
+      "packages/shared/test/unit/turn-message-kind.test.ts",
+      "packages/config/test/prompt-suggestion-config.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/prompt-suggestion-eligibility.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/prompt-suggestion-policy.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/prompt-suggestion-service.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/recent-context.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
