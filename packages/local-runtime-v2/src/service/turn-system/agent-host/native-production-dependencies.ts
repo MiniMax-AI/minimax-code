@@ -37,6 +37,7 @@ import {
   type LocalRuntimeTurnToolContext,
 } from './execution/executor.js';
 import type { LocalTurnToolPolicyGuard } from './runner/contracts.js';
+import { resetPtcPrefixBaseline } from './runner/policy/ptc-prefix-fingerprint.js';
 import {
   LocalAgentConfigBuilder,
   LocalAgentPreparationService,
@@ -318,6 +319,7 @@ export function createAgentHostRuntimeLifecycle(
 ): AgentHostRuntimeLifecycle {
   return {
     async disposeSession(sessionId) {
+      resetPtcPrefixBaseline(sessionId);
       await Promise.all([
         disposeRuntimeSession(runtime, sessionId),
         mutations?.clearSession(sessionId) ?? Promise.resolve(),

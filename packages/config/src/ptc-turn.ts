@@ -5,33 +5,20 @@
  * behind run_code, and the system prompt, which tells the model those tools
  * are callable only inside run_code. If they disagreed, the prompt would send
  * the model to run_code when it does not exist, or keep recommending direct
- * calls that are rejected. Both call this one function with facts taken from
- * the same rendered Agent profile.
+ * calls that are rejected. Both call this one function with the Session mode
+ * read once while the Turn's agent config is built.
+ *
+ * The Session mode is the only input. It is fixed from `beta.ptc` when the
+ * Session is created (Peek and fork Sessions inherit their source) and
+ * refreshed only after a committed summary (`llm_checkpoint`) compaction, so
+ * the prompt prefix of a Session never changes between those points: trigger
+ * source, Session kind, role and surface do not take part.
  */
 export interface PtcTurnFacts {
-  /**
-   * The Session runs in PTC mode (`toolCallMode: 'ptc'`, fixed from `beta.ptc`
-   * at creation or after a compaction) and a trusted top-level entry that may
-   * use PTC (Agent Host turn intent `desktop-ptc`).
-   */
+  /** The Session runs in PTC mode (`toolCallMode: 'ptc'`). */
   readonly requested: boolean;
-  /** Prompt surface of the rendered profile; missing means interactive. */
-  readonly surface?: 'interactive' | 'task-child' | 'cli';
-  /**
-   * Canonical view name of a trusted built-in Agent (`creationSource ===
-   * 'builtin'`); absent for Custom Agents.
-   */
-  readonly canonicalRole?: string;
 }
 
-/** Built-in roles that keep native tools: read-only Explore and Peek. */
-const NATIVE_ONLY_ROLES: ReadonlySet<string> = new Set(['explore', 'peek']);
-
 export function isPtcTurnEnabled(facts: PtcTurnFacts): boolean {
-  const surface = facts.surface ?? 'interactive';
-  return (
-    facts.requested &&
-    (surface === 'interactive' || surface === 'cli') &&
-    (facts.canonicalRole === undefined || !NATIVE_ONLY_ROLES.has(facts.canonicalRole))
-  );
+  return facts.requested;
 }

@@ -85,7 +85,6 @@ import type {
   ProcessLocalContext,
   ProcessLocalStreamResult,
 } from "@mavis/conversation-contract";
-import type { ConversationRequestContext } from "../application/conversation/ptc-admission.js";
 
 import type {
   ConversationApplication,
@@ -106,10 +105,7 @@ export type CliSendMessageOptions = ConversationSendOptions;
 
 /** In-process CLI entry point: call local Application directly, without HTTP or RPC envelopes. */
 export class CliService {
-  constructor(
-    private readonly options: CliServiceOptions,
-    private readonly trustedPtcEntrypoint = false,
-  ) {}
+  constructor(private readonly options: CliServiceOptions) {}
 
   listSessions(
     req: ListSessionsReq,
@@ -290,10 +286,9 @@ export class CliService {
   ): Promise<
     ProcessLocalStreamResult<SessionStreamFrameView, SessionStreamErrorBody>
   > {
-    const context = this.conversationContext(ctx);
     return options
-      ? this.options.conversation.sendMessage(context, req, options)
-      : this.options.conversation.sendMessage(context, req);
+      ? this.options.conversation.sendMessage(ctx, req, options)
+      : this.options.conversation.sendMessage(ctx, req);
   }
 
   resumeSession(
@@ -323,15 +318,7 @@ export class CliService {
     req: EnqueueMessageReq,
     ctx: ProcessLocalContext = {},
   ): Promise<EnqueueMessageResp> {
-    return this.options.conversation.enqueueMessage(this.conversationContext(ctx), req);
-  }
-
-  private conversationContext(
-    ctx: ProcessLocalContext,
-  ): ProcessLocalContext & ConversationRequestContext {
-    const { ptcEligible, ...context } = ctx as ProcessLocalContext & { ptcEligible?: unknown };
-    void ptcEligible;
-    return this.trustedPtcEntrypoint ? { ...context, ptcEligible: true } : context;
+    return this.options.conversation.enqueueMessage(ctx, req);
   }
 
   requestCompaction(

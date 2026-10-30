@@ -135,22 +135,6 @@ export function createSecretFreeModelContextAssemblyContext<
   };
 }
 
-/**
- * True when this request's turn intent is `desktop-ptc`, the same projection
- * the tool catalog reads from the assembly context. Preparation renders the
- * system prompt before assembly, so it asks here instead of re-deriving the
- * rule; a separate check could drift and let the prompt and the catalog
- * disagree about PTC.
- */
-export function isDesktopPtcTurnRequest(
-  provenance: AgentHostRunInput['request']['provenance'] | undefined,
-): boolean {
-  // A request without provenance (direct test seams, malformed callers) keeps
-  // the native prompt instead of failing preparation: PTC needs trusted provenance.
-  if (!provenance) return false;
-  return projectTurnIntent(provenance)?.kind === 'desktop-ptc';
-}
-
 function projectTurnIntent(
   provenance: AgentHostRunInput['request']['provenance'],
 ): TurnAssemblyCtx['turnIntent'] | undefined {
@@ -169,9 +153,6 @@ function projectTurnIntent(
   if (provenance.source === 'task') return projectGoalVerifierIntent(origin);
   if (provenance.source === 'code_review') {
     return projectCodeReviewIntent(readRecord(provenance.sourceContext?.review));
-  }
-  if (provenance.source === 'api' && provenance.sourceContext?.ptcEligible === true) {
-    return { kind: 'desktop-ptc' };
   }
   return undefined;
 }

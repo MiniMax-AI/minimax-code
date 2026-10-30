@@ -228,8 +228,8 @@ export async function renderFrozenAgentProfile(
     surface,
   });
   const snapshot = definition.promptSnapshot;
-  // Frozen definitions belong to Task Sessions, whose task-child surface keeps
-  // PTC off; resolved here anyway so every profile path applies the same rule.
+  // Frozen definitions belong to Task Sessions; they follow the Session mode
+  // like every other profile path.
   const renderInput = await withPtcRender(
     dependencies.catalog,
     input,
@@ -239,7 +239,6 @@ export async function renderFrozenAgentProfile(
       surface,
       capabilities,
     ),
-    { creationSource: builtin ? 'builtin' : 'manual', canonicalViewName, surface },
   );
   const [surfacePrompt, sharedBase] = await Promise.all([
     // Agent-private surface overrides were never part of the saved definition.
@@ -419,13 +418,7 @@ async function renderBuiltinProfile(
     toBuiltinRenderInput(context, resolveLocale),
     context.input,
   );
-  const ptc = await resolvePtcRender(
-    dependencies.catalog,
-    context.input,
-    baseRenderInput,
-    ptcProfileFacts(context),
-  );
-  const renderInput = ptc ? { ...baseRenderInput, ptc } : baseRenderInput;
+  const renderInput = await withPtcRender(dependencies.catalog, context.input, baseRenderInput);
   const rendered = await dependencies.catalog.render(renderInput);
   const read = dependencies.repository.getBuiltinCanonicalConfig;
   if (!read) {
@@ -587,13 +580,7 @@ async function renderCustomProfile(
     toBuiltinRenderInput(context, resolveLocale),
     context.input,
   );
-  const ptc = await resolvePtcRender(
-    dependencies.catalog,
-    context.input,
-    baseRenderInput,
-    ptcProfileFacts(context),
-  );
-  const renderInput = ptc ? { ...baseRenderInput, ptc } : baseRenderInput;
+  const renderInput = await withPtcRender(dependencies.catalog, context.input, baseRenderInput);
   const [canonical, surfacePrompt, sharedBasePrompt] = await Promise.all([
     readCanonicalAgentConfig(dependencies.repository, context.meta.name),
     dependencies.catalog.renderSurfacePrompt({
@@ -615,7 +602,7 @@ async function renderCustomProfile(
       ...(context.input.promptReadContext === undefined
         ? {}
         : { promptReadContext: context.input.promptReadContext }),
-      ...(ptc ? { ptc } : {}),
+      ...(renderInput.ptc ? { ptc: renderInput.ptc } : {}),
     }),
     dependencies.catalog.renderSharedBasePrompt(renderInput, context.executionMeta.agentRole),
   ]);
@@ -649,54 +636,19 @@ async function renderCustomProfile(
 }
 
 /**
- * The profile facts the tool catalog reads back from this profile: `surface`,
- * and `canonical_view_name` only when `creationSource` is `builtin`
- * (local-turn-tool-catalog-source.ts). Using the same three values keeps the
- * prompt's PTC section and the PTC catalog on one decision.
+ * Adds the rendered PTC section when the Session runs in PTC mode, the same
+ * isPtcTurnEnabled decision the tool catalog makes from agentConfig.ptc_enabled.
+ * A render without ptcRequested (listing, Task capture) keeps the native prompt
+ * byte for byte.
  */
-function ptcProfileFacts(context: AgentProfileRenderContext): PtcProfileFacts {
-  return {
-    creationSource: context.meta.creationSource,
-    canonicalViewName: context.canonicalViewName,
-    surface: context.surface,
-  };
-}
-
-interface PtcProfileFacts {
-  readonly creationSource: string;
-  readonly canonicalViewName: string;
-  readonly surface: AgentExecutionProfile['surface'];
-}
-
-/**
- * The rendered PTC section when PTC is really on for this Turn, otherwise
- * undefined. A Turn that did not request PTC (ptcRequested missing, as on
- * every compaction, title, listing and Task capture render) never reaches
- * isPtcTurnEnabled, so its prompt stays byte-for-byte what it was.
- */
-async function resolvePtcRender(
-  catalog: BuiltinAgentCatalog,
-  request: AgentProfileRequest,
-  renderInput: BuiltinRenderInput,
-  facts: PtcProfileFacts,
-): Promise<BuiltinPtcRender | undefined> {
-  if (request.ptcRequested !== true) return undefined;
-  const enabled = isPtcTurnEnabled({
-    requested: true,
-    surface: facts.surface,
-    ...(facts.creationSource === 'builtin' ? { canonicalRole: facts.canonicalViewName } : {}),
-  });
-  return enabled ? { section: await catalog.renderPtcSection(renderInput) } : undefined;
-}
-
 async function withPtcRender<T extends BuiltinRenderInput>(
   catalog: BuiltinAgentCatalog,
   request: AgentProfileRequest,
   renderInput: T,
-  facts: PtcProfileFacts,
 ): Promise<T> {
-  const ptc = await resolvePtcRender(catalog, request, renderInput, facts);
-  return ptc ? { ...renderInput, ptc } : renderInput;
+  if (!isPtcTurnEnabled({ requested: request.ptcRequested === true })) return renderInput;
+  const ptc: BuiltinPtcRender = { section: await catalog.renderPtcSection(renderInput) };
+  return { ...renderInput, ptc };
 }
 
 function withPromptReadContext(

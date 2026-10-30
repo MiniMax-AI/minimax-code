@@ -110,7 +110,7 @@ export interface InitializeSessionSystemOptions {
   readonly defaultWorkspaceDir: () => string;
   readonly titlePolicy: SessionRecordServiceDeps['titlePolicy'];
   readonly resolveRequestedModel?: SessionRecordServiceDeps['resolveRequestedModel'];
-  /** Tool call mode for new Sessions and for Sessions after a committed compaction. */
+  /** Tool call mode for new Sessions and for Sessions after a committed summary compaction. */
   readonly toolCallMode?: SessionToolCallModePolicy;
   readonly facts: SessionFactSink;
   readonly conversationFacts: SessionConversationFactSink;

@@ -92,3 +92,30 @@ export function readPtcTurnReminder(tools: readonly RuntimeTool[] | undefined): 
   }
   return undefined;
 }
+
+/**
+ * The catalog this Turn lists without PTC (buildPtcCatalog's input), kept beside
+ * run_code so the prefix fingerprint can tell a change PTC made from one the
+ * native catalog made too (a config change the user made mid-conversation).
+ */
+const nativeCatalogByRunCode = new WeakMap<RuntimeTool, readonly RuntimeTool[]>();
+
+export function registerPtcNativeCatalog(
+  runCode: RuntimeTool,
+  nativeCatalog: readonly RuntimeTool[],
+): RuntimeTool {
+  nativeCatalogByRunCode.set(runCode, nativeCatalog);
+  return runCode;
+}
+
+/** The native catalog registered with a visible run_code; undefined on Turns without PTC. */
+export function readPtcNativeCatalog(
+  tools: readonly RuntimeTool[] | undefined,
+): readonly RuntimeTool[] | undefined {
+  if (!tools) return undefined;
+  for (const tool of tools) {
+    const catalog = nativeCatalogByRunCode.get(tool);
+    if (catalog) return catalog;
+  }
+  return undefined;
+}

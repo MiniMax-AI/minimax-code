@@ -56,10 +56,6 @@ import type {
   DirectSendDelivery,
   DirectSendInput,
 } from "./direct-send-delivery.js";
-import {
-  type ConversationRequestContext,
-  resolvePtcEligibility,
-} from "./ptc-admission.js";
 import type { TurnContinuationDelivery } from "./turn-continuation-delivery.js";
 import { ApplicationError, turnAdmissionError } from "./errors.js";
 import type { QueueSteerWorkflow } from "./queue-steer-workflow.js";
@@ -161,7 +157,7 @@ export class ConversationApplication {
   }
 
   async sendMessage(
-    ctx: ConversationRequestContext & ProcessLocalContext,
+    ctx: ProcessLocalContext,
     req: ConversationSendMessageRequest,
     options: ConversationSendOptions = {},
   ): Promise<
@@ -171,8 +167,7 @@ export class ConversationApplication {
     if (gateError) return gateError;
     let prepared: PreparedDirectSendInput;
     try {
-      const ptcEligible = await resolvePtcEligibility(ctx, req, this.options.sessionReader);
-      prepared = await toDirectSendInput(req, this.options.attachmentRegistration, ptcEligible);
+      prepared = await toDirectSendInput(req, this.options.attachmentRegistration);
     } catch (error) {
       const mapped = sendMessagePreparationError(error);
       if (mapped) {
@@ -398,7 +393,7 @@ export class ConversationApplication {
   }
 
   async enqueueMessage(
-    ctx: ConversationRequestContext,
+    _ctx: ProcessLocalContext,
     req: EnqueueMessageReq,
   ): Promise<EnqueueMessageResp> {
     const reviewAdmissionError = await this.reviewAdmissionError(req);
@@ -411,12 +406,11 @@ export class ConversationApplication {
         this.options.attachmentRegistration,
       );
       discardCreated = input.discardCreated;
-      const ptcEligible = await resolvePtcEligibility(ctx, req, this.options.sessionReader);
       result = await this.options.turn.submit({
         sessionId: input.sessionId,
         allowQueue: true,
         input: input.input,
-        provenance: enqueueMessageProvenance(req, ptcEligible),
+        provenance: enqueueMessageProvenance(req),
         ...enqueueSubmissionMetadata(input),
       });
     } catch (error) {
@@ -559,7 +553,6 @@ function requireNonEmpty(value: string | undefined): string | undefined {
 async function toDirectSendInput(
   req: ConversationSendMessageRequest,
   registration: LocalAttachmentRegistrationPort,
-  ptcEligible = false,
 ): Promise<PreparedDirectSendInput> {
   const executionOptions = directExecutionOptions(req);
   const materialized = await materializeLocalAttachmentInputs(registration, {
@@ -590,7 +583,7 @@ async function toDirectSendInput(
       sessionId: req.id,
       input: toAgentHostUserInput(req, text, attachments),
       ...executionOptions,
-      provenance: messageProvenance(req, ptcEligible),
+      provenance: messageProvenance(req),
       ...(req.displayContent !== undefined
         ? { displayContent: req.displayContent }
         : {}),
@@ -832,7 +825,6 @@ function messageProvenance(
     ConversationSendMessageRequest,
     "id" | "reviewRequest" | "clientIntent" | "executionDiagnostics"
   >,
-  ptcEligible = false,
 ): DirectSendInput["provenance"] {
   if (req.clientIntent === "cloud-handoff") {
     return {
@@ -845,13 +837,8 @@ function messageProvenance(
     return {
       source: "api",
       routingFingerprint: `api:${req.id}`,
-      ...(req.executionDiagnostics === true || ptcEligible
-        ? {
-            sourceContext: {
-              ...(req.executionDiagnostics === true ? { executionDiagnostics: true } : {}),
-              ...(ptcEligible ? { ptcEligible: true } : {}),
-            },
-          }
+      ...(req.executionDiagnostics === true
+        ? { sourceContext: { executionDiagnostics: true } }
         : {}),
     };
   }
@@ -872,14 +859,12 @@ function messageProvenance(
 
 function enqueueMessageProvenance(
   req: EnqueueMessageReq,
-  ptcEligible = false,
 ): DirectSendInput["provenance"] {
   if (req.reviewRequest || req.clientIntent === "cloud-handoff")
     return messageProvenance(req);
   return {
     source: "api",
     routingFingerprint: `api:${req.id}:${req.clientRequestId ?? "queue"}`,
-    ...(ptcEligible ? { sourceContext: { ptcEligible: true } } : {}),
   };
 }
 

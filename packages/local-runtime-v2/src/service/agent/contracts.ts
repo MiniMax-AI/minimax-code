@@ -483,9 +483,8 @@ export interface AgentProfileRequest {
   /** Immutable prompt version captured before this model call starts. */
   readonly promptReadContext?: PromptReadContext | PromptReadScope;
   /**
-   * The Turn asked for PTC (Session `toolCallMode: 'ptc'` and a `desktop-ptc` entry). The prompt
-   * gets the PTC section only when isPtcTurnEnabled also accepts the rendered
-   * role and surface, exactly as the tool catalog decides.
+   * The Session runs in PTC mode (`toolCallMode: 'ptc'`). The prompt gets the PTC section when
+   * isPtcTurnEnabled accepts it, exactly as the tool catalog decides from the same Session mode.
    */
   readonly ptcRequested?: boolean;
 }

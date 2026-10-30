@@ -115,7 +115,6 @@ interface RuntimeLifecycleModule {
       workspaceDir: string;
       version: string;
       surface: 'tui';
-      ptcEntrypoint: 'interactive';
       ptcLaunchOverride?: boolean;
       observability: TuiObservability;
       contextMode?: McodeContextMode;
@@ -360,7 +359,6 @@ export async function launchTui(
           workspaceDir,
           version: options.version,
           surface: 'tui',
-          ptcEntrypoint: 'interactive',
           ...(options.ptc ? { ptcLaunchOverride: true } : {}),
           observability,
           ...(options.contextMode ? { contextMode: options.contextMode } : {}),

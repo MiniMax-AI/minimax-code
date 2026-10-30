@@ -84,8 +84,6 @@ export interface CreateTuiRuntimeOptions {
   promptMode?: CreateLocalRuntimeHostOptions['promptMode'];
   systemPromptOverrides?: CreateLocalRuntimeHostOptions['systemPromptOverrides'];
   surface?: TuiObservabilitySurface;
-  /** Set only by the interactive launcher or exec command, independently of beta.ptc. */
-  ptcEntrypoint?: 'interactive' | 'exec';
   /**
    * `--ptc`: new Sessions in this process use PTC regardless of `beta.ptc`.
    * Held in memory only; config.yaml is never rewritten by the flag.

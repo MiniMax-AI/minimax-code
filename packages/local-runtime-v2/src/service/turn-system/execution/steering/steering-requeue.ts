@@ -543,7 +543,6 @@ function toBatchRequeueInput(
     userMessageId: first.userMessageId,
     createdAt: first.createdAt,
     immediateSendBatch: { id, members },
-    ptcEligible: messages.every(trustedPtcSteering) ? true : undefined,
     message: batchQueueMessage(members),
     ...(model ? { model } : {}),
   };
@@ -606,7 +605,6 @@ function toRequeueInput(
     session: { sessionId, agentName },
     ...toRequeueIdentity(message),
     source: 'api',
-    ...ptcRequeueField(message),
     queuePlacement: 'front',
     message: {
       content: input.text,
@@ -625,16 +623,6 @@ function toRequeueInput(
     // the requeued follow-up query must restore the user's choice.
     ...toRequeueModel(message.requeueModel ?? input.model),
   };
-}
-
-function trustedPtcSteering(message: AgentHostSteeringMessage): boolean {
-  return (
-    message.provenance.source === 'api' && message.provenance.sourceContext?.ptcEligible === true
-  );
-}
-
-function ptcRequeueField(message: AgentHostSteeringMessage): { readonly ptcEligible?: true } {
-  return trustedPtcSteering(message) ? { ptcEligible: true } : {};
 }
 
 /**

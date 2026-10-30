@@ -67,8 +67,9 @@ export interface SessionRecord {
   readonly runLocation?: SessionRunLocation;
   readonly appMode?: AppMode;
   /**
-   * Set when the Session is created and refreshed only after a compaction, so a `beta.ptc`
-   * toggle never rewrites the prompt prefix of an ongoing conversation.
+   * Set when the Session is created and refreshed only after a summary (`llm_checkpoint`)
+   * compaction, so a `beta.ptc` toggle never rewrites the prompt prefix of an ongoing
+   * conversation.
    */
   readonly toolCallMode?: SessionToolCallMode;
   readonly interactionMode?: SessionInteractionMode;

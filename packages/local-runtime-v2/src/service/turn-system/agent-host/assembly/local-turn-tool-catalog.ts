@@ -31,7 +31,7 @@ import type { HostCapabilityResolver } from './host-capability/contracts.js';
 import { getBrowserHostBinding } from './host-capability/browser.js';
 import { mergeAgentHostTurnCapabilities } from './local-turn-plugin-capabilities.js';
 import { createPtcRunCodeTool } from '../runner/ptc/run-code-tool.js';
-import { registerPtcTurnReminder } from '../execution/ptc/catalog.js';
+import { registerPtcNativeCatalog, registerPtcTurnReminder } from '../execution/ptc/catalog.js';
 import {
   isPtcChildTool,
   isPtcDirectMcpTarget,
@@ -330,15 +330,10 @@ function resolvedTurnCatalog(
 }
 
 function isPtcTurnEnabled(input: BuildLocalTurnToolCatalogInput): boolean {
-  // Same function and the same profile facts as the system prompt's ptc.enabled
+  // Same function and the same Session mode as the system prompt's ptc.enabled
   // (agent-profile.ts), so the prompt never promises run_code-only tools on a
   // Turn whose catalog kept them native, or the reverse.
-  const profile = input.agentProfile;
-  return isSharedPtcTurnEnabled({
-    requested: input.ptcEnabled === true,
-    ...(profile?.surface ? { surface: profile.surface } : {}),
-    ...(profile?.canonicalRole ? { canonicalRole: profile.canonicalRole } : {}),
-  });
+  return isSharedPtcTurnEnabled({ requested: input.ptcEnabled === true });
 }
 
 function buildPtcCatalog(
@@ -376,9 +371,12 @@ function buildPtcCatalog(
   // executor can put it back verbatim after compaction drops that user message.
   // The long tail is callable but stays out of this list and the run_code SDK:
   // listing it would put back the definitions Tool Search keeps out.
-  const runCode = registerPtcTurnReminder(
-    createPtcRunCodeTool(childTools, {}, observable.trustedNativeTools, onDemand.callable),
-    reminder,
+  const runCode = registerPtcNativeCatalog(
+    registerPtcTurnReminder(
+      createPtcRunCodeTool(childTools, {}, observable.trustedNativeTools, onDemand.callable),
+      reminder,
+    ),
+    tools,
   );
   return { tools: [runCode, ...directTools], reminder, childTools };
 }

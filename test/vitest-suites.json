@@ -270,7 +270,11 @@
       "packages/agent-core/test/unit/tools/input-validation.test.ts",
       "packages/local-runtime-v2/src/service/plugin-system/plugin/package/local-plugin-apps.test.ts",
       "packages/local-runtime/test/unit/trash-script.test.ts",
-      "packages/local-runtime-v2/test/unit/agent/storage/builtin-agent-files.test.ts"
+      "packages/local-runtime-v2/test/unit/agent/storage/builtin-agent-files.test.ts",
+      "packages/config/test/ptc-turn.test.ts",
+      "packages/local-runtime-v2/src/service/session-system/sessions/support/tool-call-mode.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-admission-observability.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-prefix-fingerprint.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"

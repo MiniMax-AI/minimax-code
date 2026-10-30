@@ -16,6 +16,15 @@
  */
 const SIDE_SESSION_PROMPT_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['read', 'grep', 'glob']);
 
+/**
+ * The trusted run_code itself does nothing: every child it calls reaches this
+ * gate on its own (run_code children go through the same beforeToolCall chain
+ * with their own name and source), so read, grep and glob children run
+ * unprompted and every other child still asks once. Prompting for the outer
+ * call as well would add a confirmation the native catalog never asks for.
+ */
+const SIDE_SESSION_PTC_PROGRAM_TOOL = 'run_code';
+
 export const SIDE_SESSION_APPROVAL_REASON =
   'This tool runs inside a temporary side conversation while the main task may still be working; confirm before running it here.';
 
@@ -25,6 +34,9 @@ export function sideSessionRequiresApproval(input: {
   readonly toolSource: string;
 }): boolean {
   const normalized = input.toolName.trim().toLowerCase();
+  if (input.toolSource === 'builtin' && input.toolName === SIDE_SESSION_PTC_PROGRAM_TOOL) {
+    return false;
+  }
   const trustedBuiltin = input.toolSource === 'builtin' || input.toolSource === 'builtin-matrix';
   return !(trustedBuiltin && SIDE_SESSION_PROMPT_EXEMPT_TOOLS.has(normalized));
 }

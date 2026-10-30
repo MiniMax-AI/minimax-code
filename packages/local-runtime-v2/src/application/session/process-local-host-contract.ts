@@ -381,14 +381,7 @@ interface ProcessLocalApiHost {
   getProcessLocalRuntimeDiagnostics(): Record<string, unknown>;
   getProcessLocalAccountStatus(sessionId?: string): Promise<Record<string, unknown>>;
   retryBuiltinGreetings(): Promise<void>;
-  /**
-   * Connection-owned request facts are consumed by the front door (structural counterpart of
-   * the HTTP layer's `RuntimeTrustedRequestContext`); the fallthrough host ignores them.
-   */
-  handleRequest(
-    request: Request,
-    trustedRequestContext?: { readonly trustedLocalTransport?: 'desktop-renderer' },
-  ): Promise<Response>;
+  handleRequest(request: Request): Promise<Response>;
   routeLocalApiRequest(request: Request): Promise<Response>;
   permissionRouteContext(): LocalPermissionRouteContext;
   questionnaireServiceDeps(): LocalQuestionnaireServiceDeps;

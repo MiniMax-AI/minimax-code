@@ -19,6 +19,7 @@ import {
 } from '../compaction/context-compaction.js';
 import { AgentHostDependencyUnavailableError } from '../empty-dependencies.js';
 import { SemanticReplayRegistry } from '../events/semantic-replay-registry.js';
+import { resetPtcPrefixBaseline } from '../runner/policy/ptc-prefix-fingerprint.js';
 import { captureSemanticSnapshot, estimateSemanticValueSize } from './semantic-identity.js';
 
 const DEFAULT_COMMITTED_HISTORY_REPLAYS = 2_048;
@@ -344,6 +345,8 @@ export class AgentHostCommittedHistoryWriter {
     compaction: CompactionEffects | undefined,
   ): Promise<void> {
     if (!metadata || !compaction) return;
+    // The replacement history is durable: the next Turn may assemble a new prefix.
+    resetPtcPrefixBaseline(context.sessionId);
     await compaction.lifecycle.completeCommittedHistory({
       context,
       attemptId: metadata.attemptId,

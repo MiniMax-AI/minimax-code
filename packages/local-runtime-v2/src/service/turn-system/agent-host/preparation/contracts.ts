@@ -227,9 +227,9 @@ export interface LocalAgentProfileSource {
     readonly agentBinding?: TaskSessionBinding;
     readonly promptRead?: PromptReadScope;
     /**
-     * The Session's `toolCallMode` is `ptc` and the turn intent is
-     * `desktop-ptc`. The Agent profile still applies the role and surface rules
-     * before rendering the PTC prompt section.
+     * The Session's `toolCallMode` is `ptc`, the same fact the tool catalog
+     * reads as agentConfig.ptc_enabled; the profile then renders the PTC
+     * prompt section.
      */
     readonly ptcRequested?: boolean;
   }): Promise<LocalAgentExecutionProfile>;

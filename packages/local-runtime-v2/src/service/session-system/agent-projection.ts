@@ -26,6 +26,7 @@ import type { SessionStateWriter } from './sessions/recovery/capabilities.js';
 import type { SessionRepository } from './sessions/repo/contract.js';
 import {
   refreshToolCallModeAfterCompaction,
+  type CommittedCompactionMethod,
   type SessionToolCallModeRefresh,
 } from './sessions/support/tool-call-mode.js';
 import type { SessionStreamWriter } from './stream/session-frame.js';
@@ -206,8 +207,13 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
           await writeCompactionFact(options, input, 'compaction');
           recordCompletedCompactionMetrics(options, input, startedCompactions.get(input.attemptId));
           // Reached only after AgentHost durably committed the replacement history (automatic
-          // and manual alike); failed, skipped or deferred compactions never get here.
-          await refreshToolCallModeAfterCompaction(options.toolCallMode, input.context.sessionId);
+          // and manual alike); failed, skipped or deferred compactions never get here. The mode
+          // follows the switch only when the method is a summary (`llm_checkpoint`).
+          await refreshToolCallModeAfterCompaction(
+            options.toolCallMode,
+            input.context.sessionId,
+            readCompactionMethod(input.metadata),
+          );
         }),
       failCommittedHistory: (input: SessionCompactionFailureInput) =>
         compactionLane.run(input.attemptId, () =>
@@ -695,10 +701,18 @@ function terminalCompactionOutcome(
   return input.reason === 'internal-context-filter' ? 'filter_only' : 'below_trigger';
 }
 
+function readCompactionMethod(value: unknown): CommittedCompactionMethod | undefined {
+  if (!isRecord(value)) return undefined;
+  const method = value.method;
+  return method === 'tool_archive' || method === 'tool_trim' || method === 'llm_checkpoint'
+    ? method
+    : undefined;
+}
+
 function readCompactionMetricMetadata(value: unknown):
   | {
       readonly phase: 'initial' | 'iteration' | 'manual';
-      readonly method: 'tool_archive' | 'tool_trim' | 'llm_checkpoint';
+      readonly method: CommittedCompactionMethod;
       readonly tokensBefore: number;
       readonly tokensAfter: number;
       readonly bytesBefore: number;
@@ -710,10 +724,8 @@ function readCompactionMetricMetadata(value: unknown):
   if (!isRecord(value)) return undefined;
   const phase = value.phase;
   if (phase !== 'initial' && phase !== 'iteration' && phase !== 'manual') return undefined;
-  const method = value.method;
-  if (method !== 'tool_archive' && method !== 'tool_trim' && method !== 'llm_checkpoint') {
-    return undefined;
-  }
+  const method = readCompactionMethod(value);
+  if (!method) return undefined;
   const counts = readCompactionMetricCounts(value);
   const tokenUsage = readCompactionTokenUsage(value.tokenUsage);
   return counts

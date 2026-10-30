@@ -68,8 +68,6 @@ interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOption
   promptMode?: 'tui' | 'coding' | 'work';
   /** Launch-scoped main-Agent prompt overrides; held in process memory and never persisted. */
   systemPromptOverrides?: LocalRuntimeSystemPromptOverrides;
-  /** Owned process-local user entrypoint; never read from config or an HTTP request. */
-  readonly cliPtcEntrypoint?: 'interactive' | 'exec';
 }
 
 /** Runtime V2 host options after process-local compatibility wiring. */

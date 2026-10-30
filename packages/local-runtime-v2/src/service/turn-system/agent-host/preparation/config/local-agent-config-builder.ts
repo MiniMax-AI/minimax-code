@@ -221,7 +221,7 @@ export class LocalAgentConfigBuilder {
     const profileAndBinding = await this.renderProfileForTurn({
       ...input,
       ...(promptRead ? { promptRead } : {}),
-      ...ptcRequestedField(runtimeFacts, input),
+      ...ptcRequestedField(runtimeFacts),
     });
     const profile = profileAndBinding.profile;
     const turnInput = input;
@@ -394,8 +394,6 @@ type AgentConfigBuildInput = {
   readonly clientIntent?: string;
   /** Internal Greeting scope captured before its content was rendered. */
   readonly promptRead?: PromptReadScope;
-  /** The request's turn intent is `desktop-ptc` (see isDesktopPtcTurnRequest). */
-  readonly ptcEntry?: boolean;
 };
 
 const PLAN_MODE_WORKFLOW_PROMPT_KEYS = ['workflow/plan-mode/agent-entry.md'] as const;
@@ -435,15 +433,15 @@ async function readRetryContinuationPrompt(
 }
 
 /**
- * Same Session mode as agentConfig.ptc_enabled and the same turn intent
- * the tool catalog checks, so the prompt's PTC section and the PTC catalog
- * are decided from one set of facts.
+ * The same Session mode that becomes agentConfig.ptc_enabled, which the tool
+ * catalog reads, so the prompt's PTC section and the PTC catalog are decided
+ * from one fact on every build of this Session (Turns, compaction, title,
+ * Context Debug) and the prompt prefix does not depend on what started the Turn.
  */
-function ptcRequestedField(
-  runtimeFacts: Pick<AgentRuntimeFacts, 'ptcEnabled'>,
-  input: Pick<AgentConfigBuildInput, 'ptcEntry'>,
-): { readonly ptcRequested?: true } {
-  return runtimeFacts.ptcEnabled && input.ptcEntry === true ? { ptcRequested: true } : {};
+function ptcRequestedField(runtimeFacts: Pick<AgentRuntimeFacts, 'ptcEnabled'>): {
+  readonly ptcRequested?: true;
+} {
+  return runtimeFacts.ptcEnabled ? { ptcRequested: true } : {};
 }
 
 interface AgentRuntimeFacts {
@@ -1002,8 +1000,9 @@ function resolveAgentRuntimeFacts(
     ...(agent.builtinSkillNames ? { builtinSkillNames: agent.builtinSkillNames } : {}),
     cuModeActive: agent.cuModeActive === true,
     exposeCuModeActive: agent.cuModeActive !== undefined,
-    // Fixed at Session creation and refreshed only after a compaction (beta.ptc resolved for the
-    // build then), so toggling beta.ptc never changes an ongoing conversation's prompt prefix.
+    // Fixed at Session creation and refreshed only after a summary compaction (beta.ptc resolved
+    // for the build then), so toggling beta.ptc never changes an ongoing conversation's prompt
+    // prefix.
     ptcEnabled: session.toolCallMode === 'ptc',
   };
 }

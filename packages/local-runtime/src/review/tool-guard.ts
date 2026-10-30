@@ -4,6 +4,10 @@ import type { ReviewTurnState } from './turn-state.js';
 
 // Bash retains ordinary permission checks; Review adds no argument policy.
 const REVIEW_ALLOWED_TOOLS = new Set(['read', 'grep', 'glob', 'skill', 'bash']);
+// In a PTC-mode Session the allowed tools are run_code children. The trusted
+// run_code is only the program; each child reaches this guard on its own name
+// and source, so the allowlist above still decides every call it makes.
+const REVIEW_PTC_PROGRAM_TOOL = 'run_code';
 // Native controls enforce session ownership in the task service. Review must
 // retain them when an allowed Bash call runs in the background.
 const REVIEW_TASK_CONTROLS = new Set(['task_query', 'task_output', 'task_stop']);
@@ -28,11 +32,7 @@ export function createReviewToolGuard(state: ReviewTurnState): {
           reason: buildRepeatedCodeReviewSkillReason(state.prepared),
         };
       }
-      const source = readToolSource(toolContext.toolCall);
-      if (source !== 'configured' && REVIEW_ALLOWED_TOOLS.has(toolName)) return undefined;
-      if ((source === undefined || source === 'builtin') && REVIEW_TASK_CONTROLS.has(toolName)) {
-        return undefined;
-      }
+      if (isReviewAllowedTool(toolName, readToolSource(toolContext.toolCall))) return undefined;
 
       return {
         block: true,
@@ -40,6 +40,12 @@ export function createReviewToolGuard(state: ReviewTurnState): {
       };
     },
   };
+}
+
+function isReviewAllowedTool(toolName: string, source: unknown): boolean {
+  if (source === 'builtin' && toolName === REVIEW_PTC_PROGRAM_TOOL) return true;
+  if (source !== 'configured' && REVIEW_ALLOWED_TOOLS.has(toolName)) return true;
+  return (source === undefined || source === 'builtin') && REVIEW_TASK_CONTROLS.has(toolName);
 }
 
 function readSkillName(input: unknown): string | undefined {

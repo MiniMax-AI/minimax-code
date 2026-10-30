@@ -23,7 +23,11 @@ import {
   buildRuntimeWarningEvent,
 } from '@mavis/agent-core/event-bridge';
 import { withPtcCompactionReminder } from './ptc/compaction-reminder.js';
-import { createPtcTurnCompactionReminder, preparePtcExecution } from './ptc/turn-preparation.js';
+import {
+  createPtcTurnCompactionReminder,
+  observePtcTurnAdmission,
+  preparePtcExecution,
+} from './ptc/turn-preparation.js';
 import {
   beginLocalPluginHookTurn,
   createLocalPluginHookEventReporter,
@@ -563,6 +567,7 @@ export class LocalRuntimeTurnExecutor<
       tools,
       contextUsagePromptRanges,
     } = providerContext;
+    observePtcTurnAdmission(input, ptc, this.options, { systemPrompt, tools });
     input.onContextUsagePromptRangesResolved?.(contextUsagePromptRanges);
     const userPromptPrefix = joinUserPrompt(
       input.assembly.userPromptPrefix,

@@ -1519,6 +1519,10 @@ async function createHost(hostDataDir: string): Promise<CreatedLocalRuntimeHost>
   const config = {
     dataDir: hostDataDir,
     defaultModel: 'test/model',
+    // The scripted Turns call bash and task from the top-level catalog. PTC
+    // follows the Session mode alone and non-production builds default
+    // beta.ptc on, so keep these Sessions native.
+    beta: { ptc: false },
     provider: {
       test: {
         options: { apiKey: 'test-key', baseURL: 'https://provider.test/v1' },

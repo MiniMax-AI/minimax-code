@@ -359,7 +359,7 @@ async function createLocalRuntimeHostV2Internal(
     ownerCompromiseGuard.publish();
     ownerRuntime?.background.startMaintenance();
 
-    return createStartedHost(v1, ownerRuntime, cliService, v1.ready);
+    return createStartedHost(v1, ownerRuntime, v1.ready);
   } catch (error) {
     compatibility?.failConversation(error);
     await cleanupFailedStartup({
@@ -435,15 +435,15 @@ function reportDetachedOwnerChannelStartupTiming(
 function createStartedHost(
   v1: V1CreatedLocalRuntimeHost,
   ownerRuntime: InitializedOwnerRuntime | undefined,
-  cliService: ReturnType<typeof createCliService> | undefined,
   ready: Promise<void>,
 ): CreatedLocalRuntimeHost {
+  const cliService = ownerRuntime ? createCliService(ownerRuntime.services) : undefined;
   return {
     ...v1,
     ...(ownerRuntime ? { application: ownerRuntime.services.application } : {}),
     ...(cliService ? { cliService } : {}),
     apiHost: v1.apiHost,
-    ready: v1.ready,
+    ready,
     ...(ownerRuntime
       ? {
           notifyAuthContextChanged: (authState) =>
@@ -764,7 +764,6 @@ function configureV1HostOptions(
   void promptConfigKey;
   void promptMode;
   void systemPromptOverrides;
-  delete v1Options.cliPtcEntrypoint;
   // V2 owns the channel startup point: the V1 shell must build stores, APIs,
   // runner and registries without restoring a single transport.
   if (compatibility) {

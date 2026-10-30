@@ -54,9 +54,8 @@ export function createLocalTurnToolCatalogInput(
     llmModel: readResolvedModel(context.model),
     effectivePluginSkills: readEffectivePluginSkills(context.agentConfig),
     ...(context.userInput ? { userText: context.userInput.text } : {}),
-    ...(context.agentConfig.ptc_enabled === true && context.turnIntent?.kind === 'desktop-ptc'
-      ? { ptcEnabled: true }
-      : {}),
+    // The Session mode alone: the prompt prefix must not change with what started the Turn.
+    ...(context.agentConfig.ptc_enabled === true ? { ptcEnabled: true } : {}),
     ...(modelCapabilities ? { modelCapabilities } : {}),
     ...(agentProfile ? { agentProfile } : {}),
     ...(desktopCapabilities ? { desktopCapabilities } : {}),

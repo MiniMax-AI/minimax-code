@@ -11,7 +11,12 @@ import { applyProcessLocalToolResultPolicy } from '../../runner/policy/process-l
 import { observePtcAdmission } from '../../runner/policy/ptc-admission-observability.js';
 import { createPtcToolLabeler, createPtcTurnObserver } from '../../runner/ptc/ptc-observability.js';
 import type { LocalRuntimeTurnExecutorOptions } from '../contracts.js';
-import { isNativeTaskOutputTool, readPtcChildTools, readPtcTurnReminder } from './catalog.js';
+import {
+  isNativeTaskOutputTool,
+  readPtcChildTools,
+  readPtcNativeCatalog,
+  readPtcTurnReminder,
+} from './catalog.js';
 import {
   createPtcCompactionReminderRestorer,
   type PtcCompactionReminderHooks,
@@ -77,8 +82,6 @@ export function preparePtcExecution(
   const ptcTools = rawPtcTools
     ? applyProcessLocalToolResultPolicy(rawPtcTools, options.cliProductPolicy === true)
     : undefined;
-  // The catalog already decided; this records that decision for PTC-mode Session Turns.
-  observePtcAdmission(input, ptcTools !== undefined, options);
   const ptcFactCollector = createPtcToolFactCollector();
   const ptcResultProjection = options.createPtcResultProjection?.(ptcFactCollector);
   // Only PTC Turns get an observer, so only they report program-level metrics.
@@ -95,6 +98,27 @@ export function preparePtcExecution(
       ...(ptcObserver ? { ptcObserver } : {}),
     },
   };
+}
+
+/**
+ * Records the catalog's decision for a PTC-mode Session Turn once the request
+ * prefix is final (system prompt and tools exactly as sent), so the admission
+ * line can carry the prefix fingerprint. The native catalog is buildPtcCatalog's
+ * input on a PTC Turn and the assembled catalog itself otherwise.
+ */
+export function observePtcTurnAdmission(
+  input: Parameters<typeof preparePtcExecution>[3] & Pick<LocalTurnExecutionInput, 'assembly'>,
+  ptc: Pick<ReturnType<typeof preparePtcExecution>, 'ptcTools'>,
+  options: Pick<
+    LocalRuntimeTurnExecutorOptions<AgentExecutionSnapshot, ToolExecutionContext>,
+    'logger' | 'ptcSurface' | 'metricsClient'
+  >,
+  prefix: Pick<Parameters<typeof observePtcAdmission>[3], 'systemPrompt' | 'tools'>,
+): void {
+  observePtcAdmission(input, ptc.ptcTools !== undefined, options, {
+    ...prefix,
+    nativeCatalog: readPtcNativeCatalog(input.assembly.tools) ?? input.assembly.tools,
+  });
 }
 
 function createTurnObserver(

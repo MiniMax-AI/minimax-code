@@ -49,9 +49,9 @@ export function isPtcDirectTool(tool: RuntimeTool): boolean {
  *
  * The run_code child catalog is whatever this Agent enabled, minus the direct
  * tools above, so it has no bash when a user-built (Custom) Agent drops bash
- * from its tool list and the user talks to that Agent directly
- * (`isPtcTurnEnabled` in packages/config/src/ptc-turn.ts does not exclude
- * Custom Agents). The run_code description still names bash in such a turn:
+ * from its tool list and the user talks to that Agent directly (PTC
+ * follows the Session mode alone, `isPtcTurnEnabled` in
+ * packages/config/src/ptc-turn.ts). The run_code description still names bash in such a turn:
  * "Bash commands belong in tools.bash(...)", the tools.bash git status example
  * and "Bash exit codes are in data.exitCode", the timeout_ms / tools.bash
  * sentences of WALL_CLOCK_HINT, the explicit background Bash line, the shell
