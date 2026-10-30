@@ -566,6 +566,7 @@ function createTurnFacade(input: {
 }): TurnService {
   return {
     fork: (request) => input.historyMutation.fork(request),
+    inspectForkBoundary: (request) => input.historyMutation.inspectForkBoundary(request),
     rewind: (request) => input.historyMutation.rewind(request),
     submit: (request) => input.submission.submit(request),
     resumeUserInput: (request) => input.submission.resumeUserInput(request),

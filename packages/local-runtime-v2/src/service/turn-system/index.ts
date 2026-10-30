@@ -8,6 +8,8 @@ export type {
   ConversationEditAdmissionResult,
   ContinueTurnInput,
   ContinueTurnResult,
+  HistoryForkBoundaryInput,
+  HistoryForkBoundaryInspection,
   HistoryForkInput,
   HistoryForkResult,
   HistoryRewindInput,

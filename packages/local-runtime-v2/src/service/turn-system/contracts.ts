@@ -442,7 +442,7 @@ export interface HistoryForkInput {
   readonly targetWorkspaceDir: string;
   /** Frozen inclusive complete-prefix boundary used by side conversations. */
   readonly throughMessageId?: string;
-  /** Preferred inclusive canonical Assistant boundary. */
+  /** Preferred inclusive canonical Assistant boundary, plus the results of its own tool calls. */
   readonly throughAssistantMessageId?: string;
   /** Compatibility boundary for legacy Display rows without an Assistant identity. */
   readonly beforeUserMessageId?: UserMessageId;
@@ -459,6 +459,17 @@ export interface HistoryForkInput {
     readonly kind: string;
     readonly content: string;
   };
+}
+
+/** Boundary fields that decide which canonical prefix a Fork would copy. */
+export type HistoryForkBoundaryInput = Pick<
+  HistoryForkInput,
+  'sourceSessionId' | 'throughMessageId' | 'throughAssistantMessageId' | 'beforeUserMessageId'
+>;
+
+export interface HistoryForkBoundaryInspection {
+  /** False when the selected prefix would end inside an unfinished tool call. */
+  readonly settled: boolean;
 }
 
 export interface HistoryRewindInput {
@@ -540,6 +551,8 @@ export interface TurnRewindProjectionCapability {
 /** Stable consumer-facing TurnSystem capability. */
 export interface TurnService {
   fork(input: HistoryForkInput): Promise<HistoryForkResult>;
+  /** Read-only Fork preflight with the exact prefix rule of `fork()`; creates nothing. */
+  inspectForkBoundary?(input: HistoryForkBoundaryInput): Promise<HistoryForkBoundaryInspection>;
   rewind(input: HistoryRewindInput): Promise<HistoryRewindResult>;
   submit(input: SubmitTurnSubmission): Promise<SubmitTurnResult>;
   resumeUserInput(input: ResumeUserInputSubmission): Promise<ActivateTurnResult>;

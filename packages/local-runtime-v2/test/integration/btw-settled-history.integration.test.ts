@@ -56,24 +56,39 @@ function result(id: string): CanonicalHistoryEnvelope {
     },
   };
 }
+// `userForkable`: whether a user-facing Fork of the latest tool-call Assistant can copy all of its
+// own tool results. BTW always forks the settled prefix, so it succeeds either way.
 const cases = [
-  { name: 'pending tool', rows: [user, answer, call(['one'])], retained: [user, answer] },
+  {
+    name: 'pending tool',
+    rows: [user, answer, call(['one'])],
+    retained: [user, answer],
+    userForkable: false,
+  },
   {
     name: 'persisted result without a later assistant',
     rows: [user, answer, call(['one']), result('one')],
     retained: [user, answer, call(['one']), result('one')],
+    userForkable: true,
   },
   {
     name: 'partially completed parallel tools',
     rows: [user, answer, call(['one', 'two']), result('one')],
     retained: [user, answer],
+    userForkable: false,
   },
   {
     name: 'completed parallel tools',
     rows: [user, answer, call(['one', 'two']), result('two'), result('one')],
     retained: [user, answer, call(['one', 'two']), result('two'), result('one')],
+    userForkable: true,
   },
-  { name: 'first assistant is a pending tool', rows: [user, call(['one'])], retained: [user] },
+  {
+    name: 'first assistant is a pending tool',
+    rows: [user, call(['one'])],
+    retained: [user],
+    userForkable: false,
+  },
 ];
 
 async function writeHistory(path: string, rows: readonly CanonicalHistoryEnvelope[]) {
@@ -189,13 +204,30 @@ async function fixture(rows: readonly CanonicalHistoryEnvelope[], archived: bool
 describe('BTW production fork with persisted tool history', () => {
   it.each(cases.flatMap((test) => [false, true].map((archived) => ({ ...test, archived }))))(
     '$name (archived=$archived)',
-    async ({ rows, retained, archived }) => {
+    async ({ rows, retained, archived, userForkable }) => {
       const f = await fixture(rows, archived);
       try {
         const before = await f.history.read('source');
-        expect(await f.workflow.getSessionForkOptions({} as never, { id: 'source' })).toMatchObject(
-          { canFork: true },
-        );
+        if (userForkable) {
+          expect(
+            await f.workflow.getSessionForkOptions({} as never, { id: 'source' }),
+          ).toMatchObject({ canFork: true });
+        } else {
+          // A user Fork through this Assistant would split its unfinished tool call: options and
+          // Fork agree and refuse before any child exists.
+          expect(
+            await f.workflow.getSessionForkOptions({} as never, { id: 'source' }),
+          ).toMatchObject({ canFork: false, unavailableReason: 'message-boundary-invalid' });
+          await expect(
+            f.workflow.forkSession({} as never, {
+              id: 'source',
+              clientRequestId: 'user-fork-pending-tool',
+              useSuggestedTitle: true,
+              createIsolatedWorktree: false,
+            }),
+          ).rejects.toMatchObject({ status: 400, key: 'MESSAGE_BOUNDARY_INVALID' });
+          expect(f.create).not.toHaveBeenCalled();
+        }
         const child = await f.workflow.createSideSession({
           operationId: 'btw:tools',
           parentSessionId: 'source',

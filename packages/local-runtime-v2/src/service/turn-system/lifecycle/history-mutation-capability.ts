@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 import type {
+  HistoryForkBoundaryInput,
+  HistoryForkBoundaryInspection,
   HistoryForkInput,
   HistoryForkResult,
   HistoryRewindInput,
@@ -72,10 +74,12 @@ interface RewindPlan extends RewindOperationData {
 
 export function createHistoryMutationCapability(options: HistoryMutationCapabilityOptions): {
   fork(input: HistoryForkInput): Promise<HistoryForkResult>;
+  inspectForkBoundary(input: HistoryForkBoundaryInput): Promise<HistoryForkBoundaryInspection>;
   rewind(input: HistoryRewindInput): Promise<HistoryRewindResult>;
 } {
   return {
     fork: (input) => fork(options, input),
+    inspectForkBoundary: (input) => inspectForkBoundary(options, input),
     rewind: (input) => rewind(options, input),
   };
 }
@@ -84,22 +88,7 @@ async function fork(
   options: HistoryMutationCapabilityOptions,
   input: HistoryForkInput,
 ): Promise<HistoryForkResult> {
-  const inclusiveBoundary = input.throughMessageId ?? input.throughAssistantMessageId;
-  const boundary = inclusiveBoundary ?? input.beforeUserMessageId;
-  const source = await readBoundarySource(
-    options,
-    input.sourceSessionId,
-    boundary,
-    input.beforeUserMessageId,
-  );
-  const sourceArtifact = findForkArtifact(source, boundary, Boolean(input.throughMessageId));
-  if (!sourceArtifact) boundaryNotFound(boundary);
-  const index = boundary
-    ? sourceArtifact.records.findIndex((envelope) => envelope.message_id === boundary)
-    : sourceArtifact.records.length;
-  if (index < 0) boundaryNotFound(boundary);
-  const prefixEnd = inclusiveBoundary ? index + 1 : index;
-  const prefix = withoutSourceBackgroundReminders(sourceArtifact.records.slice(0, prefixEnd));
+  const { source, sourceArtifact, boundary, prefix } = await selectForkPrefix(options, input);
   if (boundary && !isSettledPrefix(prefix)) {
     throw new HistoryMutationError('boundary-invalid', 'History fork target prefix is not settled');
   }
@@ -132,6 +121,82 @@ async function fork(
     generation: sourceArtifact.generation,
     historyRevision: canonicalActiveHistoryRevision(active),
   };
+}
+
+/** Read-only preflight: reports whether `fork()` would accept this boundary, without staging. */
+async function inspectForkBoundary(
+  options: HistoryMutationCapabilityOptions,
+  input: HistoryForkBoundaryInput,
+): Promise<HistoryForkBoundaryInspection> {
+  const { boundary, prefix } = await selectForkPrefix(options, input);
+  return { settled: !boundary || isSettledPrefix(prefix) };
+}
+
+/** Single source of the Fork prefix rule shared by `fork()` and its preflight. */
+async function selectForkPrefix(
+  options: HistoryMutationCapabilityOptions,
+  input: HistoryForkBoundaryInput,
+) {
+  const inclusiveBoundary = input.throughMessageId ?? input.throughAssistantMessageId;
+  const boundary = inclusiveBoundary ?? input.beforeUserMessageId;
+  const source = await readBoundarySource(
+    options,
+    input.sourceSessionId,
+    boundary,
+    input.beforeUserMessageId,
+  );
+  const sourceArtifact = findForkArtifact(source, boundary, Boolean(input.throughMessageId));
+  if (!sourceArtifact) boundaryNotFound(boundary);
+  const index = boundary
+    ? sourceArtifact.records.findIndex((envelope) => envelope.message_id === boundary)
+    : sourceArtifact.records.length;
+  if (index < 0) boundaryNotFound(boundary);
+  const prefixEnd = forkPrefixEnd(sourceArtifact.records, index, input);
+  const prefix = withoutSourceBackgroundReminders(sourceArtifact.records.slice(0, prefixEnd));
+  return { source, sourceArtifact, boundary, prefix };
+}
+
+function forkPrefixEnd(
+  records: readonly CanonicalHistoryEnvelope[],
+  index: number,
+  input: HistoryForkBoundaryInput,
+): number {
+  if (input.throughMessageId) return index + 1;
+  if (input.throughAssistantMessageId) return assistantBoundaryEnd(records, index);
+  return index;
+}
+
+/**
+ * An Assistant boundary owns the results of its own tool calls. Pi commits each result as a
+ * separate record right after the call, so cutting between them would leave an unsettled prefix
+ * (e.g. Fork from a `task_output` or ask_user card). Only contiguous results for this Assistant's
+ * calls are included; any other record ends the boundary.
+ */
+function assistantBoundaryEnd(records: readonly CanonicalHistoryEnvelope[], index: number): number {
+  const pendingCallIds = new Set(assistantToolCallIds(records[index]?.message));
+  let end = index + 1;
+  while (pendingCallIds.size > 0) {
+    const callId = toolResultCallId(records[end]?.message);
+    if (!callId || !pendingCallIds.delete(callId)) break;
+    end += 1;
+  }
+  return end;
+}
+
+function assistantToolCallIds(message: object | undefined): string[] {
+  if (!message || Reflect.get(message, 'role') !== 'assistant') return [];
+  const content: unknown = Reflect.get(message, 'content');
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block: unknown) => {
+    if (!isRecord(block) || block.type !== 'toolCall') return [];
+    return typeof block.id === 'string' && block.id ? [block.id] : [];
+  });
+}
+
+function toolResultCallId(message: object | undefined): string | undefined {
+  if (!message || Reflect.get(message, 'role') !== 'toolResult') return undefined;
+  const callId: unknown = Reflect.get(message, 'toolCallId');
+  return typeof callId === 'string' && callId ? callId : undefined;
 }
 
 function createForkActiveHistory(

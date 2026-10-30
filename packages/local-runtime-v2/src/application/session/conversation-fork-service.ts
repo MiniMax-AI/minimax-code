@@ -514,6 +514,37 @@ export class ForkService {
     return this.startForkOwned(input);
   }
 
+  /**
+   * Fork options and a fresh Fork share this preflight so a boundary that `history.fork` would
+   * reject (e.g. inside an unfinished tool call) is refused before any child Session exists.
+   */
+  async isHistoryBoundarySettled(
+    sourceSessionId: string,
+    boundary: ForkBoundary,
+  ): Promise<boolean> {
+    const inspect = this.deps.history.inspectBoundary;
+    if (!inspect || !hasCanonicalForkBoundary(boundary)) return true;
+    const inspection = await inspect({
+      sourceSessionId,
+      ...canonicalHistoryBoundaryInput(boundary),
+    });
+    return inspection.settled;
+  }
+
+  /** Refuses before any owned resource exists; read failures keep the shape `fork()` reported. */
+  private async assertHistoryBoundarySettled(
+    sourceSessionId: string,
+    boundary: ForkBoundary,
+  ): Promise<void> {
+    let settled: boolean;
+    try {
+      settled = await this.isHistoryBoundarySettled(sourceSessionId, boundary);
+    } catch (error) {
+      throw normalizeStartError(error);
+    }
+    if (!settled) throw unsettledHistoryBoundary();
+  }
+
   private async resumePending(
     input: ForkRequest,
     pending: PendingForkOperation,
@@ -553,6 +584,7 @@ export class ForkService {
     );
     const resolvedRequest = resolveForkRequest(input, boundary);
     this.assertForkBoundary(source, boundary, resolvedRequest);
+    await this.assertHistoryBoundarySettled(source.sessionId, boundary);
     const progress = createStartProgress(this.deps.operations, resolvedRequest);
     await progress.advance('running', 'validated');
     try {
@@ -742,6 +774,13 @@ function assertWorktreeEligible(source: SessionRecord): void {
 function requireResumeChild(child: SessionRecord | undefined): SessionRecord {
   if (child) return child;
   throw new ForkServiceError('fork-failed', 'Fork recovery child session is missing');
+}
+
+function unsettledHistoryBoundary(): ForkServiceError {
+  return new ForkServiceError(
+    'invalid-boundary',
+    'Fork boundary would end inside an unfinished tool call',
+  );
 }
 
 function missingWorktreeProof(): ForkServiceError {
