@@ -619,7 +619,12 @@ export class CronRegistry {
       this.scheduler.assertSchedulable(config);
     } catch (err) {
       if (err instanceof AppError) throw err;
-      throw new AppError(err instanceof Error ? err.message : String(err), 'VALIDATION_ERROR', 400);
+      // Keep the scheduler detail on the server; clients get a stable validation code.
+      logger.warn(
+        backgroundCtx(),
+        `[cron] schedule rejected by scheduler: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+      throw new AppError('Invalid cron schedule', 'VALIDATION_ERROR', 400);
     }
   }
 

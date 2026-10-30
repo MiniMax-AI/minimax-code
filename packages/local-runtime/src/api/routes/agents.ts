@@ -874,10 +874,15 @@ export class LocalApiAgentRoutes {
         typeof Object(error).code === "string"
           ? Object(error).code
           : "INTERNAL_ERROR";
-      return json(
-        { error: error instanceof Error ? error.message : String(error), code },
-        { status },
-      );
+      // 5xx: generic client text (full error stays in server logs upstream).
+      // 4xx: keep the typed message the UI already keys on.
+      const message =
+        status >= 500
+          ? "Internal error"
+          : error instanceof Error
+            ? error.message
+            : "Request failed";
+      return json({ error: message, code }, { status });
     }
   }
 
