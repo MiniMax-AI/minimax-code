@@ -1452,7 +1452,9 @@ export class TuiFeatureFlow {
   private showInspectionPanel(panel: Component): void {
     this.closeInspectionPanel();
     this.inspectionPanel = panel;
-    this.options.surface.show(panel);
+    // The panel is appended below the fullscreen transcript and hides the Composer; it must be in
+    // view, otherwise End/PgDn go to the off-screen panel and the user appears stuck.
+    this.options.surface.show(panel, { reveal: true });
   }
 
   private closeInspectionPanel(panel?: Component): void {

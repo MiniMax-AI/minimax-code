@@ -496,6 +496,7 @@ export function createTuiApplicationSurface(options: {
       goal.setAnimationPaused(active);
     },
     () => layout.followBottom(),
+    () => layout.forceFollowBottom(),
   );
   return { layout, surfaceHost, fullscreenLayout: surfaceHost, themeRendering, interactionSurface };
 }
