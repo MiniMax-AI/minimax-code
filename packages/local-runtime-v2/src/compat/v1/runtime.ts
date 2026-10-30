@@ -22,7 +22,7 @@ import {
   SUBAGENT_TELEMETRY_EVENT,
   ThreadGoalContractError,
   updateLocalConfigFile,
-  withAgentNameConflictMigrationLock,
+  withAgentNameConflictMigrationScope,
   type CreateConversationCompatibilityHostOptions,
   type CreatedLocalRuntimeHost,
   type ManagedWorktreeServicePort,
@@ -125,12 +125,15 @@ async function resolveDelegatableAgentReference(
   }
 }
 
-/** Cross-process cutover lock shared with the legacy conflict migration. */
-export function withAgentStorageLock<T>(
+/**
+ * Legacy Agent storage scope for the V2 cutover. Takes no lock: the caller
+ * must hold the dataDir startup migration lock for the whole operation.
+ */
+export function withAgentStorageScope<T>(
   dataDir: string,
   operation: (scope: AgentStorageLockScope) => T | PromiseLike<T>,
 ): Promise<T> {
-  return withAgentNameConflictMigrationLock(dataDir, async (legacyScope) => {
+  return withAgentNameConflictMigrationScope(dataDir, async (legacyScope) => {
     let active = true;
     const applyCollision = (nowMs?: () => number) => {
       if (!active)

@@ -26,7 +26,10 @@ export {
 } from "./persistence/sqlite-persistence.js";
 export { closeAgentDb } from "./agent/db.js";
 export { resolveTaskTarget } from "./agent/port.js";
-export { withAgentNameConflictMigrationLock } from "./persistence/migration/agent-name-conflict-migration.js";
+export {
+  withAgentNameConflictMigrationScope,
+  type AgentNameConflictMigrationResult,
+} from "./persistence/migration/agent-name-conflict-migration.js";
 export {
   createDeferredLocalAgentRuntimePort,
   type DeferredLocalAgentRuntimePort,

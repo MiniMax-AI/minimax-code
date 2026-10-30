@@ -11,7 +11,7 @@ import {
   cleanupFailedV1Startup,
   createDeferredAgentRuntimeTelemetry,
   createV1RuntimeCompatibility,
-  withAgentStorageLock,
+  withAgentStorageScope,
 } from "../../../../src/compat/v1/runtime.js";
 
 type ThreadGoalIntegration = CreatedLocalRuntimeHost["apiHost"]["threadGoal"];
@@ -45,7 +45,7 @@ vi.mock("@mavis/local-runtime", async () => {
     scanWorkspace: mocked.scanWorkspace,
     isTaskDeliverySuppressed: (_host: unknown, taskId: string) =>
       mocked.suppressedDeliveryTaskIds.has(taskId),
-    withAgentNameConflictMigrationLock: async (
+    withAgentNameConflictMigrationScope: async (
       _dataDir: string,
       operation: (scope: {
         inspectCollision: () => unknown;
@@ -120,7 +120,7 @@ describe("v1 runtime compatibility", () => {
     });
     let escaped: (() => unknown) | undefined;
 
-    await withAgentStorageLock("/tmp/runtime", async (scope) => {
+    await withAgentStorageScope("/tmp/runtime", async (scope) => {
       escaped = scope.applyLegacyAgentStorage;
     });
     const escapedCallback = escaped;
@@ -157,7 +157,7 @@ describe("v1 runtime compatibility", () => {
       mappings: [],
     });
 
-    await withAgentStorageLock("/tmp/runtime", async (scope) => {
+    await withAgentStorageScope("/tmp/runtime", async (scope) => {
       expect(scope.inspectLegacyAgentStorage()).toBe(inspection);
       expect(scope.applyLegacyAgentStorage()).toEqual({
         status: "completed",
@@ -176,7 +176,7 @@ describe("v1 runtime compatibility", () => {
     });
 
     await expect(
-      withAgentStorageLock("/tmp/runtime", async (scope) =>
+      withAgentStorageScope("/tmp/runtime", async (scope) =>
         scope.applyLegacyAgentStorage(),
       ),
     ).rejects.toThrow("rewrite failed");
@@ -200,7 +200,7 @@ describe("v1 runtime compatibility", () => {
 
     let error: unknown;
     try {
-      await withAgentStorageLock("/tmp/runtime", async (scope) =>
+      await withAgentStorageScope("/tmp/runtime", async (scope) =>
         scope.applyLegacyAgentStorage(),
       );
     } catch (caught) {
@@ -230,7 +230,7 @@ describe("v1 runtime compatibility", () => {
 
     let error: unknown;
     try {
-      await withAgentStorageLock("/tmp/runtime", async (scope) =>
+      await withAgentStorageScope("/tmp/runtime", async (scope) =>
         scope.applyLegacyAgentStorage(),
       );
     } catch (caught) {
@@ -271,8 +271,6 @@ describe("v1 prompt suggestion setting compatibility", () => {
   });
 });
 
-describe("v1 Agent reference compatibility", () => {
-  function resolver(overrides: Partial<AgentReferenceResolver> = {}): AgentReferenceResolver {
 describe("v1 Agent reference compatibility", () => {
   function resolver(
     overrides: Partial<AgentReferenceResolver> = {},
