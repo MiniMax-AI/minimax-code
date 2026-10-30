@@ -15,6 +15,8 @@ import { isQuestionnaireTool } from '../../src/tui/controller/projection/turn-to
 import type { TuiQuestionnaireRequest } from '../../src/runtime/port.js';
 import { TuiUserProjection } from '../../src/tui/controller/projection/turn-user-projection.js';
 import { TuiSessionAccess } from '../../src/runtime/adapters/session-access.js';
+import { waitFor } from '../helpers/wait-for.js';
+import { normalizeAccountStatus } from '../../src/runtime/adapters/normalizers.js';
 
 function pendingQuestionnaire(
   sessionId: string,
@@ -529,7 +531,9 @@ describe('TuiChatController', () => {
       code: 'auth.login_required',
     });
 
-    expect(runtime.getAccountStatus).toHaveBeenCalledWith(undefined, undefined);
+    expect(runtime.getAccountStatus).toHaveBeenCalledWith(undefined, {
+      includeMembership: false,
+    });
     expect(runtime.createSession).not.toHaveBeenCalled();
     expect(runtime.sendMessage).not.toHaveBeenCalled();
     expect(transcript.snapshot()).toEqual([]);
@@ -2542,6 +2546,61 @@ describe('TuiChatController', () => {
         includeMembership: true,
       }),
     );
+  });
+
+  it('starts a turn without waiting for Token Plan membership and keeps the shown quota', async () => {
+    let membershipCalls = 0;
+    const quota = {
+      fiveHour: { remainingPercent: 82, unlimited: false },
+      weekly: { remainingPercent: 64, unlimited: false },
+    };
+    // What the adapter yields for a signed-in Token Plan read without membership.
+    const account = normalizeAccountStatus({
+      provider: { id: 'minimax', authMode: 'managed-login' },
+      auth: { tokenPresent: true },
+      modelSource: 'token-plan',
+    });
+    const runtime = {
+      createSession: vi.fn(async () => ({ sessionId: 'session-cold-plan' })),
+      listSessions: vi.fn(async () => []),
+      getAccountStatus: vi.fn((_sessionId?: string, options?: { includeMembership?: boolean }) => {
+        // Like the adapter, membership is looked up unless explicitly skipped.
+        if (options?.includeMembership === false) return Promise.resolve(account);
+        membershipCalls += 1;
+        // Only the first membership lookup answers; later ones stay cold.
+        return membershipCalls === 1
+          ? Promise.resolve({ ...account, tokenPlanQuotaState: 'available' as const, tokenPlanQuota: quota })
+          : new Promise<never>(() => undefined);
+      }),
+      sendMessage: vi.fn(async function* sendMessage(): AsyncGenerator<TuiStreamEvent> {
+        yield { type: 'delta', content: 'Done' };
+        yield { type: 'done' };
+      }),
+      abortSession: vi.fn(async () => true),
+    };
+    let quotaShown = false;
+    const quotaAfterShown: boolean[] = [];
+    const controller = new TuiChatController({
+      runtime,
+      transcript: new TranscriptStore(),
+      workspaceDir: '/workspace',
+      onChange: ({ account: shown }) => {
+        // The status line renders quota only while it is `available`.
+        const visible = shown?.tokenPlanQuotaState === 'available' && !!shown.tokenPlanQuota;
+        quotaShown ||= visible;
+        if (quotaShown) quotaAfterShown.push(visible);
+      },
+    });
+    await controller.initialize();
+    await waitFor(() => expect(quotaShown).toBe(true));
+    // The membership cache has gone cold: later lookups stay pending.
+    controller.refreshAccountStatusNow();
+    await waitFor(() => expect(membershipCalls).toBe(2));
+
+    await expect(controller.submit('Start right away')).resolves.toBe('succeeded');
+
+    expect(runtime.sendMessage).toHaveBeenCalledOnce();
+    expect(quotaAfterShown).not.toContain(false);
   });
 
   it('retains the displayed history and warning position across paged refreshes and respects rewind', async () => {

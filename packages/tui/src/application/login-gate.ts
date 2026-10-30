@@ -49,7 +49,13 @@ async function readTuiAccount(
   onAccount?: (account: TuiAccountStatus) => void,
   options?: TuiAccountStatusOptions,
 ): Promise<TuiAccountStatus> {
-  const account = await runtime.getAccountStatus(sessionId, options);
+  // Gates decide only on the login state. Token Plan membership and quota feed the
+  // status line through their own refresh; once their caches expire they cost up to
+  // four serial Matrix requests, which must not hold a submission.
+  const account = await runtime.getAccountStatus(sessionId, {
+    ...options,
+    includeMembership: false,
+  });
   onAccount?.(account);
   return account;
 }

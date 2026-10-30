@@ -12,7 +12,7 @@ import type { TranscriptAttachment, TranscriptUserPresentation } from '../transc
 import { MINIMAX_CODE_DEFAULT_AGENT_NAME } from '../../product-context.js';
 import { TuiTurnProjection } from './projection/turn-projection.js';
 import type { OptimisticUserCommitMode } from './projection/turn-projection.js';
-import { TuiStatusMetricsFlow } from './projection/status-metrics-flow.js';
+import { TuiStatusMetricsFlow, withKnownTokenPlan } from './projection/status-metrics-flow.js';
 import { TuiTurnOutputRate } from './projection/turn-output-rate.js';
 import {
   cloneAccountStatus,
@@ -910,7 +910,7 @@ export class TuiChatController {
 
   async requireLoginForAgentAction(): Promise<void> {
     await requireTuiInteractiveAgentAccess(this.runtime, this.state.session?.sessionId, (account) =>
-      this.updateState({ account }),
+      this.updateState({ account: withKnownTokenPlan(this.state.account, account) }),
     );
   }
 

@@ -3464,6 +3464,7 @@
     "packages/tui/src/user-facing-failure.ts",
     "packages/tui/test/helpers/theme-contrast.ts",
     "packages/tui/test/helpers/virtual-terminal.ts",
+    "packages/tui/test/helpers/wait-for.ts",
     "packages/tui/test/pi-084-upstream/virtual-terminal.ts",
     "packages/tui/test/unit/acp-agent.test.ts",
     "packages/tui/test/unit/acp-prompt-content.test.ts",
