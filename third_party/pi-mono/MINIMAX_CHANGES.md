@@ -13,6 +13,14 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 No upstream source files are changed in the baseline import.
 
+### 2026-10-26 — keep unsafe integers in tool arguments as their source text
+
+- Reason: a model sometimes emits a long number whose schema type is `string` (an 18-digit ID number, a snowflake ID) as an unquoted JSON number. `parseStreamingJson` used plain `JSON.parse`, which rounds any integer past `Number.MAX_SAFE_INTEGER` to the nearest double; schema coercion then stringified the rounded value, so the tool silently received different digits (`440103198004279575` → `"440103198004279550"`) and the wrong number was stored in session history. Upstream issue `earendil-works/pi#8943` reports the same problem and was auto-closed as `no-action` without maintainer comment; upstream `main` (2026-10-25 `d5b3de22d`) still has the original implementation.
+- Affected package: `packages/ai` (`@earendil-works/pi-ai`), `utils/json-parse.ts`. `parseStreamingJson` now passes a reviver when parsing complete JSON and uses `JSON.parse` source text access (Node 21+) to keep an integer literal that is not a safe integer as its original string. `parseJsonWithRepair` gained an optional reviver parameter; other callers (such as the outer SSE envelope parse) do not pass one, so their behavior is unchanged.
+- Behavior: a `string` parameter receives the exact digits; `integer` / `number` parameters coerce to the same double as before; an untyped or `string | number` field changes from a (rounded) number to the source string. Decimals, exponent notation and safe integers are unchanged. Incomplete or unrepairable JSON still falls back to partial-json, and the Google provider parses arguments through its SDK; both paths are outside this patch.
+- Upstream PR: not opened.
+- Validation: `packages/ai/test/tool-argument-unsafe-integer.test.ts` streams a tool call whose 18-digit ID arrives unquoted and split across deltas and asserts the exact digits for a string parameter, an unchanged double for numeric parameters, and that only integer literals a double cannot hold exactly are rewritten. All three cases fail on the unpatched baseline. Vendored upstream suites remain outside this distribution's verification gates.
+
 ### 2026-10-06 — opt-in fallback for unexpected provider tool calls
 
 - Reason: a conversational host can intentionally advertise no tools, but a provider may still emit a structured tool call. The normal missing-tool result starts another model hop and can leave the host without a final assistant response.
