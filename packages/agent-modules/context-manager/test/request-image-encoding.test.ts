@@ -13,15 +13,19 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, typed, checksum]);
 }
 
-/** Opaque grey RGB PNG of the given size. */
-function png(width: number, height: number, level = -1): Buffer {
+/**
+ * Opaque grey RGB PNG of the given size. `pixelBytes` cuts the image data
+ * short of what the header declares: a well-formed file whose data is
+ * truncated.
+ */
+function png(width: number, height: number, level = -1, pixelBytes?: number): Buffer {
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
   header[8] = 8;
   header[9] = 2;
   const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, 0x80)]);
-  const pixels = Buffer.concat(Array.from({ length: height }, () => row));
+  const pixels = Buffer.concat(Array.from({ length: height }, () => row)).subarray(0, pixelBytes);
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', header),
@@ -74,9 +78,17 @@ describe('encodeRequestImage', () => {
     expect(heavy!.data.length).toBeLessThan(153_600);
   });
 
-  it('keeps non-image media and undecodable images', async () => {
+  it('keeps non-image media', async () => {
     await expect(encodeRequestImage(Buffer.from('video'), 'video/mp4')).resolves.toBeUndefined();
-    await expect(encodeRequestImage(Buffer.from('broken'), 'image/png')).resolves.toBeUndefined();
+  });
+
+  it('reports image data the image processor cannot decode', async () => {
+    await expect(encodeRequestImage(Buffer.from('broken'), 'image/png')).resolves.toBe(
+      'undecodable',
+    );
+    await expect(encodeRequestImage(png(1_950, 180, -1, 423_420), 'image/png')).resolves.toBe(
+      'undecodable',
+    );
   });
 });
 
@@ -125,5 +137,24 @@ describe('encodeRequestImageBlocks', () => {
   it('reports no change when every image already fits', async () => {
     const small = { type: 'image', data: png(40, 24).toString('base64'), mimeType: 'image/png' };
     await expect(encodeRequestImageBlocks([small])).resolves.toBeUndefined();
+  });
+
+  it('replaces an image the processor cannot decode, so its bytes never enter history', async () => {
+    // Shape of the image behind invalid params (2013): the header declares
+    // 1950x180 RGB, the pixel data stops mid-row at 423,420 of 1,053,180
+    // bytes. Every later request replayed it and MiniMax-M3 rejected each one.
+    const truncated = png(1_950, 180, -1, 423_420);
+    const intro = { type: 'text', text: 'Read image file [image/png]' };
+    const small = { type: 'image', data: png(40, 24).toString('base64'), mimeType: 'image/png' };
+    const broken = { type: 'image', data: truncated.toString('base64'), mimeType: 'image/png' };
+
+    await expect(encodeRequestImageBlocks([intro, broken, small])).resolves.toEqual([
+      intro,
+      {
+        type: 'text',
+        text: `[Image omitted: the image/png data (${truncated.length} bytes) could not be decoded; it may be corrupt, truncated, or in an unsupported format.]`,
+      },
+      small,
+    ]);
   });
 });

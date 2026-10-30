@@ -298,15 +298,18 @@ export const DEFAULT_REQUEST_IMAGE_ENCODING: Readonly<RequestImageEncoding> = {
  * and `encoding.maxBase64Bytes` of base64 data.
  *
  * Returns `undefined` when the caller should keep the original: the image
- * already fits, is not an image, or cannot be decoded or shrunk. Dropping the
- * image costs more than a provider that rejects it.
+ * already fits, is not an image, or the image processor cannot load. Returns
+ * `'undecodable'` when the image processor cannot decode the data: the caller
+ * must not send it, because history replays it into every later request and
+ * the provider rejects each one.
  */
 export async function encodeRequestImage(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding = DEFAULT_REQUEST_IMAGE_ENCODING,
-): Promise<EncodedRequestImage | undefined> {
-  return (await encodeImage(bytes, mimeType, encoding))?.image;
+): Promise<EncodedRequestImage | 'undecodable' | undefined> {
+  const encoded = await encodeImage(bytes, mimeType, encoding);
+  return encoded === 'undecodable' ? encoded : encoded?.image;
 }
 
 export interface EncodedRequestImageDetails {
@@ -322,7 +325,7 @@ export async function encodeRequestImageDetails(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding = DEFAULT_REQUEST_IMAGE_ENCODING,
-): Promise<EncodedRequestImageDetails | undefined> {
+): Promise<EncodedRequestImageDetails | 'undecodable' | undefined> {
   return encodeImage(bytes, mimeType, encoding);
 }
 
@@ -335,7 +338,8 @@ const IMAGE_PROCESSOR_UNAVAILABLE_NOTE =
  * changed. A shrunk image is followed by the Read tool's note on its original
  * size, so coordinates read off it can be mapped back to the original. An
  * image over the limits is replaced with `IMAGE_PROCESSOR_UNAVAILABLE_NOTE`
- * when the image processor cannot load, as the Read tool did.
+ * when the image processor cannot load, as the Read tool did, and an image it
+ * cannot decode is replaced with a note, so its bytes never enter history.
  */
 export async function encodeRequestImageBlocks<T extends { readonly type: string }>(
   blocks: readonly T[],
@@ -348,14 +352,16 @@ export async function encodeRequestImageBlocks<T extends { readonly type: string
       if (block.type !== 'image' || typeof data !== 'string' || typeof mimeType !== 'string') {
         return [block];
       }
-      const encodedImage = await encodeImageOrUnavailable(
-        Buffer.from(data, 'base64'),
-        mimeType,
-        encoding,
-      );
+      const bytes = Buffer.from(data, 'base64');
+      const encodedImage = await encodeImageOrUnavailable(bytes, mimeType, encoding);
       if (encodedImage === PROCESSOR_UNAVAILABLE) {
         changed = true;
         return [{ type: 'text', text: IMAGE_PROCESSOR_UNAVAILABLE_NOTE } as unknown as T];
+      }
+      if (encodedImage === 'undecodable') {
+        changed = true;
+        const text = `[Image omitted: the ${mimeType} data (${bytes.length} bytes) could not be decoded; it may be corrupt, truncated, or in an unsupported format.]`;
+        return [{ type: 'text', text } as unknown as T];
       }
       if (!encodedImage) return [block];
       changed = true;
@@ -372,7 +378,7 @@ async function encodeImage(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding,
-): Promise<EncodedRequestImageDetails | undefined> {
+): Promise<EncodedRequestImageDetails | 'undecodable' | undefined> {
   const encoded = await encodeImageOrUnavailable(bytes, mimeType, encoding);
   return encoded === PROCESSOR_UNAVAILABLE ? undefined : encoded;
 }
@@ -383,7 +389,7 @@ async function encodeImageOrUnavailable(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding,
-): Promise<EncodedRequestImageDetails | typeof PROCESSOR_UNAVAILABLE | undefined> {
+): Promise<EncodedRequestImageDetails | 'undecodable' | typeof PROCESSOR_UNAVAILABLE | undefined> {
   if (!mimeType.toLowerCase().startsWith('image/')) return undefined;
   try {
     const resized = await resizeImage(bytes, mimeType, {
@@ -391,7 +397,10 @@ async function encodeImageOrUnavailable(
       maxHeight: encoding.maxHeight,
       maxBytes: encoding.maxBase64Bytes,
     });
-    if (!resized?.wasResized) return undefined;
+    // Photon returns null when it cannot decode the data. It also does when
+    // even a 1x1 encoding exceeds the byte limit, which takes a limit of ~100 B.
+    if (!resized) return 'undecodable';
+    if (!resized.wasResized) return undefined;
     const encoded = {
       image: { data: resized.data, mimeType: resized.mimeType },
       width: resized.width,

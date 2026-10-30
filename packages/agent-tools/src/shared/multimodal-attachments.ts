@@ -123,13 +123,14 @@ export function base64EncodedSize(rawBytes: number): number {
 
 /**
  * Encode an inline image attachment like a tool result image, so it fits every
- * provider the session may switch to. `undefined` keeps the original bytes.
+ * provider the session may switch to. `undefined` keeps the original bytes;
+ * `'undecodable'` means the bytes must not be inlined.
  */
 export function encodeAttachmentImage(
   bytes: Uint8Array,
   mime: string,
   encoding?: AttachmentImageEncoding,
-): Promise<EncodedAttachmentImage | undefined> {
+): Promise<EncodedAttachmentImage | 'undecodable' | undefined> {
   return encodeRequestImageDetails(bytes, mime, encoding);
 }
 

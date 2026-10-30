@@ -29,7 +29,9 @@ interface EncodedInlineMediaCandidate extends LocalInlineMediaCandidate {
  * Concrete local media IO kept outside the AgentHost orchestration core.
  *
  * Images are encoded to `encoding` before the capability limits are checked,
- * so a large original that encodes small enough is still sent inline.
+ * so a large original that encodes small enough is still sent inline. An
+ * image that cannot be decoded is never inlined and stays a path reference:
+ * history would replay its bytes into every later request.
  */
 export async function prepareLocalInlineMedia(
   candidates: readonly LocalInlineMediaCandidate[],
@@ -48,7 +50,12 @@ export async function prepareLocalInlineMedia(
   const encoded = await Promise.all(
     candidates.map((candidate) => encodeInlineImage(candidate, capabilities, encoding)),
   );
-  const selected = selectMultimodalAttachments(encoded, capabilities);
+  const selected = selectMultimodalAttachments(
+    encoded.filter(
+      (candidate): candidate is EncodedInlineMediaCandidate => candidate !== undefined,
+    ),
+    capabilities,
+  );
   const materialized = await Promise.all(
     selected.kept.map(async ({ candidate, mime }) => {
       const data = candidate.data ?? (await readInlineMediaData(candidate));
@@ -79,7 +86,7 @@ async function encodeInlineImage(
   candidate: LocalInlineMediaCandidate,
   capabilities: LocalMultimodalAttachmentCapabilities | undefined,
   encoding: LocalAttachmentImageEncoding | undefined,
-): Promise<EncodedInlineMediaCandidate> {
+): Promise<EncodedInlineMediaCandidate | undefined> {
   if (
     nativeMultimodalKindForMime(candidate.mime) !== 'image' ||
     capabilities?.support_image !== true
@@ -89,6 +96,7 @@ async function encodeInlineImage(
   const bytes = await readInlineMediaBytes(candidate);
   if (!bytes) return candidate;
   const encoded = await encodeAttachmentImage(bytes, candidate.mime, encoding);
+  if (encoded === 'undecodable') return undefined;
   if (!encoded) {
     return candidate.data
       ? candidate

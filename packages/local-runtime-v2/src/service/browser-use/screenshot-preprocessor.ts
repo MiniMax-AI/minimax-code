@@ -101,9 +101,11 @@ async function prepareScreenshot(
       'BROWSER_SCREENSHOT_PREPROCESS_FAILED: Browser screenshot is not a PNG, JPEG, or WebP image',
     );
   }
-  const encoded = encoding
+  const result = encoding
     ? await encodeRequestImageDetails(captured, capturedMime, encoding)
     : undefined;
+  // An undecodable capture stays as is; the host encoder replaces it in the tool result.
+  const encoded = result === 'undecodable' ? undefined : result;
   const bytes = encoded ? Buffer.from(encoded.image.data, 'base64') : captured;
   const mimeType = encoded?.image.mimeType ?? capturedMime;
   const size = encoded ?? parseImageDimensionsFromBytes(captured);
