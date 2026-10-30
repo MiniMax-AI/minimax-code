@@ -6,7 +6,7 @@ import {
   VStack,
 } from '../engine/public.js';
 import type { Component } from '../rendering/component.js';
-import { stripAnsi } from '../rendering/text.js';
+import { stripAnsi, truncateToWidth } from '../rendering/text.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../theme/runtime.js';
 import { resolveTuiLayoutPolicy } from './layout-policy.js';
 
@@ -383,7 +383,9 @@ export class TuiChatLayout implements Component {
       const shown = Math.max(0, liveBudget - 1);
       const hidden = live.length - shown;
       live = [
-        ...(liveBudget > 0 ? insetPart([renderHeldRowsNotice(hidden)]) : []),
+        ...(liveBudget > 0
+          ? insetPart([renderHeldRowsNotice(hidden, frame.contentWidth)])
+          : []),
         ...live.slice(live.length - shown),
       ];
     }
@@ -631,9 +633,15 @@ function joinWelcomeAndTranscript(
   return [...compactWelcome, ...(isVisuallyBlank(transcript[0] ?? '') ? [] : ['']), ...transcript];
 }
 
-function renderHeldRowsNotice(hiddenRows: number): string {
+function renderHeldRowsNotice(hiddenRows: number, width: number): string {
   const noun = hiddenRows === 1 ? 'line' : 'lines';
-  return chalk.hex(colors.muted)(`↑ ${hiddenRows} more ${noun} above · still updating`);
+  // Singular form is exactly 37 columns. A ~21-column pane then fails the
+  // regular-mode differential redraw guard (37 > 21) and stops the TUI.
+  return truncateToWidth(
+    chalk.hex(colors.muted)(`↑ ${hiddenRows} more ${noun} above · still updating`),
+    Math.max(0, width),
+    '…',
+  );
 }
 
 function isStableRowsAwareComponent(

@@ -641,6 +641,18 @@ function createServiceGlobalEventWriter(
   });
 }
 
+function planFailureReporter(
+  product: ProductionSessionComposition['product'],
+  stage: 'lifecycle-reconcile' | 'review-fallback',
+): (error: unknown) => void {
+  return (error) => {
+    product.executor.reportFailure?.(
+      'plan-lifecycle',
+      `owner=plan;stage=${stage};error=${describeError(error)}`,
+    );
+  };
+}
+
 async function initializeRuntimeServiceOwners(
   input: RuntimeServiceOwnerInitializationInput,
 ): Promise<InitializedRuntimeServiceOwners> {
@@ -707,12 +719,8 @@ async function initializeRuntimeServiceOwners(
         requireTurnSystem(turnSystem).turns.dispatchQueue(sessionId),
       entryEnabled: input.planEntryEnabled,
       agentEntryEnabled: input.agentPlanEntryEnabled,
-      reportFailure: (error) => {
-        input.product.executor.reportFailure?.(
-          "plan-lifecycle",
-          `owner=plan;stage=lifecycle-reconcile;error=${describeError(error)}`,
-        );
-      },
+      reportFailure: planFailureReporter(input.product, 'lifecycle-reconcile'),
+      reportReviewFallbackFailure: planFailureReporter(input.product, 'review-fallback'),
       nowMs: input.nowMs,
     });
     bindConversationMutationPlanState({

@@ -101,8 +101,9 @@ export class QuestionnaireGenericReplyLifecycle {
         sessionId: record.sessionId,
         error: err instanceof Error ? err.message : String(err),
       });
-      if (ownedAction) {
-        this.deps.onOwnedActionFailure?.(record.requestId);
+      const recoverOwnedAction = this.ownedActionRecovery(ownedAction);
+      if (recoverOwnedAction) {
+        recoverOwnedAction(record.requestId);
       } else {
         throw new LocalQuestionnaireError(
           503,
@@ -120,8 +121,9 @@ export class QuestionnaireGenericReplyLifecycle {
         ...(completed.status !== undefined ? { status: completed.status } : {}),
         ...(completed.error ? { error: completed.error } : {}),
       });
-      if (ownedAction) {
-        this.deps.onOwnedActionFailure?.(record.requestId);
+      const recoverOwnedAction = this.ownedActionRecovery(ownedAction);
+      if (recoverOwnedAction) {
+        recoverOwnedAction(record.requestId);
       } else {
         throw new LocalQuestionnaireError(
           completed.status ?? 503,
@@ -163,6 +165,15 @@ export class QuestionnaireGenericReplyLifecycle {
       answeredAt,
       injected: completed?.completed === true,
     };
+  }
+
+  /**
+   * An owned action's saved answer is resumed by its owner's recovery hook.
+   * Without one nothing retries it before the next startup reconciliation, so
+   * the caller must see the failure instead of an accepted reply.
+   */
+  private ownedActionRecovery(ownedAction: boolean): ((requestId: string) => void) | undefined {
+    return ownedAction ? this.deps.onOwnedActionFailure : undefined;
   }
 
   private async requireReplyRecord(
