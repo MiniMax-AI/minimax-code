@@ -25,6 +25,40 @@ import type {
 } from './builtin-defs.js';
 import type { WebSearchInput } from '../shared/web-search.js';
 
+/**
+ * LOCAL Plugin subagent definition from the Turn capability lease. Selectors
+ * use the Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
+ */
+export interface LocalPluginAgentDefinition {
+  /** Task target `<plugin>:<agent>`. */
+  readonly scopedName: string;
+  readonly pluginName: string;
+  readonly agentName: string;
+  readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  readonly packageDigest: string;
+  readonly pluginRoot: string;
+  readonly description: string;
+  readonly displayName?: string;
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly extensionSkills?: readonly string[];
+  /** MCP server names this Plugin package declares, whether or not they published tools. */
+  readonly declaredMcpServers?: readonly string[];
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+}
+
+export interface LocalPluginAgentRoster {
+  list(): readonly LocalPluginAgentDefinition[];
+  /** Case-insensitive `<plugin>:<agent>` lookup. */
+  resolve(scopedName: string): LocalPluginAgentDefinition | undefined;
+}
+
 export interface LocalRuntimeToolContext extends ToolExecutionContext {
   /** Frozen from the final Turn catalog; false keeps ordinary Bash synchronous. */
   readonly allowBashAutoPromotion?: boolean;
@@ -70,6 +104,11 @@ export interface LocalRuntimeToolContext extends ToolExecutionContext {
    * set shared by the skill and Browser tools; legacy/test hosts may omit it.
    */
   readonly loadedSkills?: Set<string>;
+  /**
+   * LOCAL Plugin subagents frozen with this Turn's capability lease. Absent
+   * means no Plugin Agent target is admissible for `task`.
+   */
+  readonly pluginAgents?: LocalPluginAgentRoster;
   /** Parent-turn Plugin Hook generation inherited by a user-visible child Agent. */
   readonly pluginSubagentLifecycle?: {
     start(

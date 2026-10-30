@@ -11,6 +11,7 @@ import {
   type CanonicalPluginRoot,
 } from './filesystem.js';
 import { PluginReaderError, readerFail } from './reader-errors.js';
+import { readCompatiblePluginAgents } from './agent/compatible.js';
 import { readPluginHooks } from './hook/reader.js';
 import type {
   PluginMcpServer,
@@ -46,7 +47,18 @@ export async function readCompatiblePluginPackage(
     defaultPath: 'hooks/hooks.json',
     manifestPath: manifestRelativePath,
   });
-  if (mcp.servers.length + skills.length + hookResult.hooks.length === 0) {
+  const agentResult =
+    kind !== 'CODEX'
+      ? await readCompatiblePluginAgents(root, {
+          pluginName: name,
+          declared: manifest.agents,
+          skills,
+        })
+      : { agents: [], diagnostics: [] };
+  if (
+    mcp.servers.length + skills.length + hookResult.hooks.length + agentResult.agents.length ===
+    0
+  ) {
     readerFail(
       'MANIFEST_SCHEMA_INVALID',
       'Compatible Plugin has no supported executable capability',
@@ -66,7 +78,8 @@ export async function readCompatiblePluginPackage(
     mcpServers: mcp.servers,
     skills,
     hooks: hookResult.hooks,
-    diagnostics: [...mcp.diagnostics, ...hookResult.diagnostics],
+    ...(agentResult.agents.length > 0 ? { agents: agentResult.agents } : {}),
+    diagnostics: [...mcp.diagnostics, ...hookResult.diagnostics, ...agentResult.diagnostics],
   };
 }
 

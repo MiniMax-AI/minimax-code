@@ -138,6 +138,7 @@ function toPluginView(
       appCount: plugin.capabilities.appCount,
       mcpServerCount: plugin.capabilities.mcpServerCount,
       skillCount: plugin.capabilities.skillCount,
+      ...(plugin.capabilities.agentCount ? { agentCount: plugin.capabilities.agentCount } : {}),
     },
   };
 }

@@ -5,6 +5,7 @@ import type {
   CreateAgentInput as CreateAgentInput,
 } from "@mavis/protocol/local";
 import type {
+  ConversationPluginAgentDefinition,
   ConversationSessionKind,
   ConversationTaskModelSelection,
   RuntimeConversation,
@@ -702,6 +703,8 @@ export class LocalApiAgentRoutes {
     effectiveModelVariant?: string | null;
     effectiveModelThinking?: LocalModelThinkingSelection | null;
     taskModelSelection?: ConversationTaskModelSelection;
+    /** Trusted Task-only Plugin Agent; HTTP request mappers never set it. */
+    pluginAgentDefinition?: ConversationPluginAgentDefinition;
     isDefaultWorkspace?: boolean;
     /**
      * Creation provenance persisted on the session record. Defaults to

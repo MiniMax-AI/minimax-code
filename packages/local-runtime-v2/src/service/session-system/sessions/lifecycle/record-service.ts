@@ -3,6 +3,7 @@ import {
   hasConversationTaskModelSelection,
   type ConversationModelThinkingSelection,
   type ConversationModelSelection,
+  type ConversationPluginAgentDefinition,
   type ConversationTaskModelSelection,
 } from '@mavis/conversation-contract';
 
@@ -111,6 +112,8 @@ export interface InternalSessionCreateInput {
   readonly preserveDefaultWorkspaceIdentity?: boolean;
   /** Trusted Fork-only snapshot; its owner, prompt, capabilities and model remain immutable. */
   readonly forkedAgentDefinition?: SessionAgentDefinitionCreate;
+  /** Trusted Task-only Plugin Agent copied from the parent Turn's capability lease. */
+  readonly pluginAgentDefinition?: ConversationPluginAgentDefinition;
   readonly origin?: SessionOrigin;
 }
 
@@ -235,6 +238,7 @@ export interface SessionRecordServiceDeps {
       readonly taskModelSelection?: ConversationTaskModelSelection;
       readonly requestedModel?: ConversationModelSelection;
       readonly parentModel?: FrozenAgentExecutionDefinition['model'];
+      readonly pluginAgent?: ConversationPluginAgentDefinition;
     }): Promise<CapturedTaskAgentBinding>;
     captureSessionDefinition(input: {
       readonly agentName: string;
@@ -594,6 +598,7 @@ export class SessionRecordService
         ...(hasConversationTaskModelSelection(input.taskModelSelection)
           ? { taskModelSelection: input.taskModelSelection }
           : {}),
+        pluginAgent: input.input.pluginAgentDefinition,
       }),
     };
   }
@@ -712,7 +717,9 @@ export class SessionRecordService
     readonly appMode?: SessionRecord['appMode'];
     readonly taskModelSelection?: ConversationTaskModelSelection;
     readonly requestedModel?: ConversationModelSelection;
+    readonly pluginAgent?: ConversationPluginAgentDefinition;
   }): Promise<CapturedTaskAgentBinding | undefined> {
+    assertPluginAgentTaskSession(input.session, input.pluginAgent);
     if (!isTaskSession(input.session)) return undefined;
     const capture = this.taskAgentBindingCapture;
     if (!capture) {
@@ -738,6 +745,7 @@ export class SessionRecordService
       ...(hasConversationTaskModelSelection(input.taskModelSelection)
         ? { taskModelSelection: input.taskModelSelection }
         : {}),
+      pluginAgent: input.pluginAgent,
     });
   }
 
@@ -1162,6 +1170,15 @@ function internalVariantField(
 ): Pick<SessionMetadataCreateInput, 'effectiveModelVariant'> {
   if (taskCapture) return whenDefined('effectiveModelVariant', taskCapture.effectiveModelVariant);
   return whenDefined('effectiveModelVariant', input.effectiveModelVariant);
+}
+
+function assertPluginAgentTaskSession(
+  session: SessionRecord,
+  pluginAgent: ConversationPluginAgentDefinition | undefined,
+): void {
+  if (pluginAgent && !isTaskSession(session)) {
+    throw new SessionServiceError('invalid-session-kind', 'Plugin Agent requires a Task Session');
+  }
 }
 
 function internalBindingFields(

@@ -8,6 +8,7 @@ import {
 } from '@mavis/system-reminder';
 import {
   mergeAgentHostTurnCapabilities,
+  renderPluginAgentRoster,
   type MergeAgentHostTurnCapabilitiesInput,
 } from './local-turn-plugin-capabilities.js';
 
@@ -165,5 +166,93 @@ describe('Plugin identity selection at the final Runtime capability boundary', (
     expect(result!.length).toBeLessThan(16384);
     expect(result).toContain('omitted');
     expect(result).toContain('</system-reminder>');
+  });
+});
+
+function baseInput(userText: string): MergeAgentHostTurnCapabilitiesInput {
+  return {
+    tools: [],
+    plan: { deferred: false, inlineTools: [] },
+    model: { provider: "minimax", id: "model", contextWindow: 100_000 },
+    options: {
+      enabled: true,
+      modelWhitelist: [],
+      thresholdPct: 0.15,
+      minDeferCount: 1,
+      topKDefault: 5,
+      topKMax: 20,
+      systemHint: true,
+      maxSchemaTextLen: 4_096,
+    },
+    effectivePluginSkills: [{ pluginName: "demo", name: "demo:skill" }],
+    userText,
+  };
+}
+
+function view(overrides: Record<string, unknown>) {
+  return {
+    revision: "revision-1",
+    plugins: [
+      { name: "demo", version: "1.0.0", source: "local", appProviders: ["notion"] },
+    ],
+    skills: [],
+    runtimeTools: [],
+    runtimeToolBindings: [],
+    ...overrides,
+  } as never;
+}
+
+describe('Plugin Agent roster reminder', () => {
+  const agent = (scopedName: string, description: string) => ({
+    scopedName,
+    pluginName: scopedName.split(':')[0]!,
+    agentName: scopedName.split(':').slice(1).join(':'),
+    sourceFormat: 'minimax' as const,
+    packageDigest: 'sha256:demo',
+    pluginRoot: '/plugins/demo',
+    description,
+    systemPrompt: 'Body',
+  });
+
+  it('lists sorted scoped names with flattened, bounded descriptions when task is present', () => {
+    const result = mergeAgentHostTurnCapabilities({
+      ...baseInput('inspect'),
+      tools: [tool('read'), tool('task')],
+      capabilities: view({
+        agents: [
+          agent('zeta:writer', 'Writes <docs>\nand notes'),
+          agent('alpha:review', 'x'.repeat(300)),
+        ],
+      }),
+    });
+
+    expect(result.reminder).toContain('<plugin-agents>');
+    const roster = result.reminder!.slice(result.reminder!.indexOf('<plugin-agents>'));
+    expect(roster.indexOf('`alpha:review`')).toBeLessThan(roster.indexOf('`zeta:writer`'));
+    expect(roster).toContain('- `zeta:writer`: Writes &lt;docs&gt; and notes');
+    expect(roster).toContain(`- \`alpha:review\`: ${'x'.repeat(199)}…`);
+  });
+
+  it('omits the roster when this Turn cannot call task', () => {
+    expect(
+      renderPluginAgentRoster([agent('demo:review', 'Review')], [tool('read')]),
+    ).toBeUndefined();
+    expect(renderPluginAgentRoster([], [tool('task')])).toBeUndefined();
+  });
+
+  it('treats a mentioned Subagent-only Plugin as available only when task can delegate', () => {
+    const input = {
+      ...baseInput('[@Agents](plugin://agents-only%40local) review this'),
+      capabilities: view({ agents: [agent('agents-only:reviewer', 'Reviews')] }),
+    };
+    const delegable = mergeAgentHostTurnCapabilities({
+      ...input,
+      tools: [tool('read'), tool('task')],
+    });
+    expect(delegable.reminder).not.toContain('is unavailable for this turn');
+    expect(delegable.reminder).toContain('`agents-only:reviewer`');
+
+    const noTask = mergeAgentHostTurnCapabilities({ ...input, tools: [tool('read')] });
+    expect(noTask.reminder).toContain('agents-only@local` is unavailable for this turn');
   });
 });

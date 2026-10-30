@@ -1163,8 +1163,51 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
   );
 });
 
-describe("LocalRuntimeTurnExecutor", () => {
-  it("keeps the standard provider context byte-for-byte and trims only explicit lightweight roots", async () => {
+describe('LocalRuntimeTurnExecutor Plugin Agent roster', () => {
+  it('injects the Turn lease roster into the tool context only when Plugin Agents exist', async () => {
+    const agent = {
+      scopedName: 'review:security',
+      pluginName: 'review',
+      agentName: 'security',
+      sourceFormat: 'minimax' as const,
+      packageDigest: 'sha256:review',
+      pluginRoot: '/plugins/review',
+      description: 'Reviews security.',
+      systemPrompt: 'Body',
+    };
+    const contexts: unknown[] = [];
+    const run = async (desktopCapabilities?: LocalTurnExecutionInput['desktopCapabilities']) => {
+      const input = executionInput(desktopCapabilities ? { desktopCapabilities } : {});
+      await new LocalRuntimeTurnExecutor(
+        options(async (runInput) => {
+          contexts.push(runInput.toolContext);
+          await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+        }),
+      ).execute(input);
+    };
+    const view = {
+      revision: 'rev-1',
+      plugins: [],
+      skills: [],
+      runtimeTools: [],
+      runtimeToolBindings: [],
+    };
+
+    await run({ ...view, agents: [agent] });
+    await run({ ...view, agents: [] });
+
+    const roster = Reflect.get(contexts[0] as object, 'pluginAgents') as {
+      resolve(name: string): unknown;
+      list(): unknown[];
+    };
+    expect(roster.list()).toEqual([agent]);
+    expect(roster.resolve('REVIEW:SECURITY')).toBe(agent);
+    expect(contexts[1]).not.toHaveProperty('pluginAgents');
+  });
+});
+
+describe('LocalRuntimeTurnExecutor lightweight context mode', () => {
+  it('keeps the standard provider context byte-for-byte and trims only explicit lightweight roots', async () => {
     const tool = {
       def: {
         name: "fixture_tool",

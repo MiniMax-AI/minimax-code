@@ -17,6 +17,7 @@ import {
 } from '@mavis/agent-core/pi-turn-runner';
 import { type RuntimeTool, type ToolExecutionContext } from '@mavis/agent-core/tools';
 import { prepareBashTurnTools } from '../assembly/local-turn-tool-catalog.js';
+import { createPluginAgentRoster } from '../assembly/turn-capability-lifecycle.js';
 import { buildCompletedTerminalStatusEvent } from '@mavis/agent-core/event-bridge';
 import {
   beginLocalPluginHookTurn,
@@ -497,9 +498,7 @@ export class LocalRuntimeTurnExecutor<
     );
     const toolContext = {
       ...toolResolution.context,
-      ...(input.pluginHooks?.length
-        ? { pluginSubagentLifecycle: createPluginSubagentLifecycle(input) }
-        : {}),
+      ...pluginToolContext(input),
       // Use admitted tools, including frozen selectors and final routing. A
       // configured/MCP namesake cannot read the native background task store.
       allowBashAutoPromotion: canConsumeBackgroundBashOutput,
@@ -682,6 +681,19 @@ export class LocalRuntimeTurnExecutor<
       // Diagnostic reporting cannot replace the owning Turn failure.
     }
   }
+}
+
+function pluginToolContext<TAgent extends AgentExecutionSnapshot>(
+  input: LocalTurnExecutionInput<TAgent>,
+) {
+  return {
+    ...(input.pluginHooks?.length
+      ? { pluginSubagentLifecycle: createPluginSubagentLifecycle(input) }
+      : {}),
+    ...(input.desktopCapabilities?.agents?.length
+      ? { pluginAgents: createPluginAgentRoster(input.desktopCapabilities.agents) }
+      : {}),
+  };
 }
 
 function createPluginSubagentLifecycle<TAgent extends AgentExecutionSnapshot>(

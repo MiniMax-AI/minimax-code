@@ -510,7 +510,9 @@ files; otherwise use one writer serially.
 ## Agent types
 ${roleDirectoryText()}
 
-A known custom Agent may also be selected by its stable name.
+A known custom Agent may also be selected by its stable name. An enabled
+Plugin Agent may be selected by the \`<plugin>:<agent>\` scoped name listed
+in the Plugin context.
 
 Do not make project-file creation or edits an acceptance criterion for explore
 or verifier. Use worker for changes, or have the child return findings or content

@@ -9,6 +9,7 @@ import {
   resolvePluginFile,
   type CanonicalPluginRoot,
 } from './filesystem.js';
+import { readMiniMaxPluginAgents } from './agent/minimax.js';
 import { readOptionalMiniAppContribution } from './miniapp/reader.js';
 import { ignoredManifestFieldDiagnostics, readerFail } from './reader-errors.js';
 import { readPluginHooks } from './hook/reader.js';
@@ -29,6 +30,7 @@ const ICON_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:png|jpe?g|webp)$/u
 const APP_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.app\.json$/u;
 const MCP_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.mcp\.json$/u;
 const SKILL_PATH = /^skills\/[A-Za-z0-9._-]+\/SKILL\.md$/u;
+const AGENT_PATH = /^agents\/[a-z][a-z0-9_-]*\.md$/u;
 const HOOK_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.json$/u;
 const HOST_BINDING_PATH = /^bindings\/[A-Za-z0-9._-]+\.binding\.json$/u;
 const HOST_BINDING_IDENTIFIER = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/u;
@@ -61,6 +63,8 @@ const MANIFEST_FIELDS = new Set([
   'hooks',
   'hostBindings',
 ]);
+/** The official package contract has no subagents; OFFICIAL keeps ignoring `agents`. */
+const LOCAL_MANIFEST_FIELDS = new Set([...MANIFEST_FIELDS, 'agents']);
 
 export async function readMiniMaxPluginPackage(
   packageRoot: string,
@@ -73,7 +77,7 @@ export async function readMiniMaxPluginPackage(
   const { path: manifestPath, value } = await readPluginJsonObject(root, MANIFEST_PATH, {
     portable: true,
   });
-  const manifest = readManifest(value);
+  const manifest = readManifest(value, options.source);
   const iconPath = await resolvePluginFile(root, manifest.icon, { portable: true });
   const darkIconPath = manifest.darkIcon
     ? await resolvePluginFile(root, manifest.darkIcon, { portable: true })
@@ -114,6 +118,11 @@ export async function readMiniMaxPluginPackage(
     declared: manifest.hooks,
     sourceFormat: 'MINIMAX',
   });
+  const agentResult = await readMiniMaxPluginAgents(root, {
+    pluginName: manifest.name,
+    declared: manifest.agents,
+    skills,
+  });
   const miniapp = await readOptionalMiniAppContribution(
     root.path,
     mcpServers.map((server) => server.name),
@@ -124,7 +133,8 @@ export async function readMiniMaxPluginPackage(
       mcpServers.length +
       skills.length +
       hostBindings.length +
-      hookResult.hooks.length ===
+      hookResult.hooks.length +
+      agentResult.agents.length ===
       0 &&
     !miniapp
   ) {
@@ -150,12 +160,18 @@ export async function readMiniMaxPluginPackage(
     skills,
     hostBindings,
     hooks: hookResult.hooks,
+    ...(agentResult.agents.length > 0 ? { agents: agentResult.agents } : {}),
     ...(miniapp ? { miniapp } : {}),
     diagnostics: [
       ...hookResult.diagnostics,
-      ...ignoredManifestFieldDiagnostics(value, MANIFEST_FIELDS),
+      ...agentResult.diagnostics,
+      ...ignoredManifestFieldDiagnostics(value, manifestFields(options.source)),
     ],
   };
+}
+
+function manifestFields(source: PluginPackageSource): ReadonlySet<string> {
+  return source === 'LOCAL_MINIMAX' ? LOCAL_MANIFEST_FIELDS : MANIFEST_FIELDS;
 }
 
 function assertRequiredMiniApp(
@@ -292,9 +308,13 @@ interface MiniMaxManifest {
   readonly skills: string[];
   readonly hooks: string[];
   readonly hostBindings: string[];
+  readonly agents: string[];
 }
 
-function readManifest(value: Record<string, unknown>): MiniMaxManifest {
+function readManifest(
+  value: Record<string, unknown>,
+  source: PluginPackageSource,
+): MiniMaxManifest {
   assertManifestEnvelope(value);
   const identity = readManifestIdentity(value);
   const icon = readManifestIcon(value.icon);
@@ -303,6 +323,10 @@ function readManifest(value: Record<string, unknown>): MiniMaxManifest {
   const category = readManifestCategory(value.category);
   const exampleQueries = readExampleQueries(value.exampleQueries);
   const capabilities = readManifestCapabilities(value);
+  const agents =
+    source === 'LOCAL_MINIMAX' && value.agents !== undefined
+      ? referenceArray(value.agents, 'agents', AGENT_PATH)
+      : [];
   return {
     ...identity,
     icon,
@@ -310,6 +334,7 @@ function readManifest(value: Record<string, unknown>): MiniMaxManifest {
     category,
     exampleQueries,
     ...capabilities,
+    agents,
   };
 }
 

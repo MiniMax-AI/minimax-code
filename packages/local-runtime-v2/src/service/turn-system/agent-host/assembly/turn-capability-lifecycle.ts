@@ -1,5 +1,4 @@
 import type { RuntimeTool } from '@mavis/agent-core/tools';
-
 import type { AgentHostPluginHookHandler } from '../plugin-hook-contracts.js';
 
 export interface AgentHostTurnSkillCapability {
@@ -36,6 +35,55 @@ export interface AgentHostTurnHostBinding {
   readonly allowedSurfaces: readonly ['interactive'];
 }
 
+/**
+ * LOCAL Plugin subagent definition frozen with this generation. Selectors use
+ * the Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
+ */
+export interface AgentHostTurnPluginAgent {
+  /** Task target `<plugin>:<agent>`. */
+  readonly scopedName: string;
+  readonly pluginName: string;
+  readonly agentName: string;
+  readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  readonly packageDigest: string;
+  readonly pluginRoot: string;
+  readonly description: string;
+  readonly displayName?: string;
+  /** Unsubstituted Markdown body. */
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly extensionSkills?: readonly string[];
+  /** MCP server names this Plugin package declares, whether or not they published tools. */
+  readonly declaredMcpServers?: readonly string[];
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+}
+
+export interface AgentHostTurnPluginAgentRoster {
+  list(): readonly AgentHostTurnPluginAgent[];
+  /** Case-insensitive `<plugin>:<agent>` lookup within this Turn lease. */
+  resolve(scopedName: string): AgentHostTurnPluginAgent | undefined;
+}
+
+export function createPluginAgentRoster(
+  agents: readonly AgentHostTurnPluginAgent[],
+): AgentHostTurnPluginAgentRoster {
+  const byName = new Map(agents.map((agent) => [pluginAgentKey(agent.scopedName), agent]));
+  return Object.freeze({
+    list: () => agents,
+    resolve: (scopedName: string) => byName.get(pluginAgentKey(scopedName)),
+  });
+}
+
+function pluginAgentKey(name: string): string {
+  return name.trim().normalize('NFKC').toLowerCase();
+}
+
 export type AgentHostTurnToolMode = 'omit' | 'inline' | 'tool_search';
 
 export interface AgentHostTurnRuntimeToolBinding {
@@ -55,6 +103,7 @@ export interface AgentHostTurnCapabilityView {
   readonly runtimeToolBindings: readonly AgentHostTurnRuntimeToolBinding[];
   readonly hostBindings?: readonly AgentHostTurnHostBinding[];
   readonly hooks?: readonly AgentHostPluginHookHandler[];
+  readonly agents?: readonly AgentHostTurnPluginAgent[];
 }
 
 export interface AgentHostTurnCapabilityPreparation {

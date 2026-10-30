@@ -90,6 +90,7 @@ export {
   type AgentHostTurnCapabilityPreparation,
   type AgentHostTurnCapabilityProvider,
   type AgentHostTurnCapabilityView,
+  type AgentHostTurnPluginAgent,
   type AgentHostTurnPublicationPort,
   type AgentHostTurnRuntimeToolBinding,
   type AgentHostTurnToolMode,

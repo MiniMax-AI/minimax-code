@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import type {
   AgentHostTurnCapabilityView as DesktopTurnCapabilityView,
+  AgentHostTurnPluginAgent as DesktopTurnPluginAgent,
   AgentHostTurnRuntimeToolBinding as DesktopTurnRuntimeToolBinding,
 } from '../../../turn-system/index.js';
 import type { AgentHostTurnHostBinding as DesktopTurnHostBinding } from '../../../turn-system/agent-host/assembly/turn-capability-lifecycle.js';
@@ -9,6 +10,7 @@ import { McpNameRegistry, configuredMcpNameKey, pluginMcpNameKey } from '@mavis/
 import { buildPluginSkillRuntimeName } from '@mavis/shared';
 
 import type {
+  PluginAgent,
   PluginMcpServer,
   PluginSkill,
   ReadPluginPackage,
@@ -113,6 +115,7 @@ interface SnapshotBuildState {
   mcpServers: PluginSnapshotMcpServer[];
   readonly hooks: NonNullable<ReadPluginPackage['hooks']>[number][];
   readonly hostBindings: DesktopTurnHostBinding[];
+  readonly agents: DesktopTurnPluginAgent[];
   readonly pluginNames: Set<string>;
   readonly skillNames: Set<string>;
 }
@@ -181,6 +184,9 @@ export class PluginSnapshotBuilder {
       runtimeToolBindings: freeze([]),
       hostBindings: freeze(state.hostBindings),
       hooks: freeze([...state.hooks]),
+      agents: freeze(
+        [...state.agents].sort((left, right) => left.scopedName.localeCompare(right.scopedName)),
+      ),
     });
 
     return freeze({
@@ -235,6 +241,7 @@ function createSnapshotBuildState(reservations: PluginCapabilityReservations): S
     mcpServers: [],
     hooks: [],
     hostBindings: [],
+    agents: [],
     pluginNames: new Set(),
     skillNames: new Set(reservations.skillNames.map(normalizedSkillKey)),
   };
@@ -302,12 +309,7 @@ function appendLocalPlugin(
     ...capabilityCollisionState(state),
   });
   if (!accepted) return;
-  if (
-    plugin.skills.length === 0 &&
-    plugin.mcpServers.length === 0 &&
-    (plugin.hooks?.length ?? 0) === 0 &&
-    !plugin.miniapp
-  ) {
+  if (!hasSupportedLocalCapability(plugin)) {
     state.diagnostics.push(
       freeze({ code: 'LOCAL_PLUGIN_NO_SUPPORTED_CAPABILITY', pluginName: plugin.name }),
     );
@@ -321,6 +323,17 @@ function appendLocalPlugin(
   state.mcpServers.push(...accepted.mcpServers);
   state.hooks.push(...accepted.hooks);
   state.hostBindings.push(...accepted.hostBindings);
+  state.agents.push(...accepted.agents);
+}
+
+function hasSupportedLocalCapability(plugin: RuntimeEligibleScannedReadPluginPackage): boolean {
+  return (
+    plugin.skills.length > 0 ||
+    plugin.mcpServers.length > 0 ||
+    (plugin.hooks?.length ?? 0) > 0 ||
+    (plugin.agents?.length ?? 0) > 0 ||
+    Boolean(plugin.miniapp)
+  );
 }
 
 function localProjection(
@@ -368,6 +381,7 @@ function acceptPackageCapabilities(input: PackageCapabilityAcceptanceInput):
       mcpServers: PluginSnapshotMcpServer[];
       hooks: NonNullable<ReadPluginPackage['hooks']>[number][];
       hostBindings: DesktopTurnHostBinding[];
+      agents: DesktopTurnPluginAgent[];
     }
   | undefined {
   const { plugin } = input;
@@ -384,7 +398,7 @@ function acceptPackageCapabilities(input: PackageCapabilityAcceptanceInput):
   const pluginKey = collisionKey(plugin.name);
   input.pluginNames.add(pluginKey);
   if (!input.includeRuntimeCapabilities) {
-    return { skills: [], mcpServers: [], hooks: [], hostBindings: [] };
+    return { skills: [], mcpServers: [], hooks: [], hostBindings: [], agents: [] };
   }
   const skills = acceptPackageSkills(input);
   return {
@@ -392,6 +406,53 @@ function acceptPackageCapabilities(input: PackageCapabilityAcceptanceInput):
     mcpServers: acceptPackageServers(input),
     hooks: [...(plugin.hooks ?? [])],
     hostBindings: acceptHostBindings(input, skills),
+    agents: input.sourceKind === 'local' ? acceptPackageAgents(input) : [],
+  };
+}
+
+function acceptPackageAgents(input: PackageCapabilityAcceptanceInput): DesktopTurnPluginAgent[] {
+  return (input.plugin.agents ?? []).map((agent) =>
+    turnPluginAgent(input.plugin, input.packageContentDigest, agent),
+  );
+}
+
+function turnPluginAgent(
+  plugin: ReadPluginPackage,
+  packageDigest: string,
+  agent: PluginAgent,
+): DesktopTurnPluginAgent {
+  return freeze({
+    scopedName: agent.scopedName,
+    pluginName: plugin.name,
+    agentName: agent.name,
+    sourceFormat:
+      agent.sourceFormat === 'MINIMAX' ? 'minimax' : '\u0063\u006c\u0061\u0075\u0064\u0065',
+    packageDigest,
+    pluginRoot: plugin.rootPath,
+    description: agent.description,
+    ...(agent.displayName ? { displayName: agent.displayName } : {}),
+    systemPrompt: agent.systemPrompt,
+    ...(agent.model ? { model: agent.model } : {}),
+    ...(agent.effort ? { effort: agent.effort } : {}),
+    ...(agent.contextWindow === undefined ? {} : { contextWindow: agent.contextWindow }),
+    ...(agent.maxOutputTokens === undefined ? {} : { maxOutputTokens: agent.maxOutputTokens }),
+    ...turnPluginAgentSelectors(agent),
+    declaredMcpServers: freeze(plugin.mcpServers.map((server) => server.name)),
+  } satisfies DesktopTurnPluginAgent);
+}
+
+function turnPluginAgentSelectors(
+  agent: PluginAgent,
+): Pick<
+  DesktopTurnPluginAgent,
+  'tools' | 'disallowedTools' | 'mcpServers' | 'skills' | 'extensionSkills'
+> {
+  return {
+    ...(agent.tools === undefined ? {} : { tools: agent.tools }),
+    ...(agent.disallowedTools === undefined ? {} : { disallowedTools: agent.disallowedTools }),
+    ...(agent.mcpServers === undefined ? {} : { mcpServers: agent.mcpServers }),
+    ...(agent.skills === undefined ? {} : { skills: agent.skills }),
+    ...(agent.extensionSkills === undefined ? {} : { extensionSkills: agent.extensionSkills }),
   };
 }
 

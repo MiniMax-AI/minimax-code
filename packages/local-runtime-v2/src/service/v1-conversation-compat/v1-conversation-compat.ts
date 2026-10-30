@@ -377,6 +377,7 @@ function sessionExecutionPreferences(input: ConversationSessionCreateInput) {
       ? { isDefaultWorkspace: input.isDefaultWorkspace }
       : {}),
     ...(input.origin ? { origin: input.origin } : {}),
+    ...(input.pluginAgentDefinition ? { pluginAgentDefinition: input.pluginAgentDefinition } : {}),
   };
 }
 

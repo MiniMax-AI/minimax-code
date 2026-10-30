@@ -1119,6 +1119,7 @@ export interface PluginCapabilitySummary {
   mcpServerCount: number;
   skillCount: number;
   hookCount?: number;
+  agentCount?: number;
 }
 
 export interface PluginAppInfo {

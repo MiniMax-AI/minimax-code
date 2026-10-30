@@ -4,6 +4,8 @@ export interface McodePluginCapabilities {
   readonly appCount: number;
   readonly mcpServerCount: number;
   readonly skillCount: number;
+  /** Local Plugin subagents; absent when the Runtime reports none. */
+  readonly agentCount?: number;
 }
 
 export interface McodePluginView {
