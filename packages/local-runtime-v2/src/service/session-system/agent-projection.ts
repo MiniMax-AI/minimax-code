@@ -197,6 +197,16 @@ export function createSessionSystemAgentProjection(options: SessionSystemAgentPr
     compactionObserver: {
       observe: (input: SessionCompactionObservation) =>
         compactionLane.run(input.attemptId, async () => {
+          // Manual compaction never settles Session state; mark it idle before its start is shown.
+          if (input.status === 'started' && input.reason === 'manual') {
+            const { sessionId, turnId, turnSequence } = input.context;
+            const eventId = `compaction:${input.attemptId}:started`;
+            try {
+              await options.state.markIdle({ sessionId, turnId, turnSequence, eventId });
+            } catch {
+              // Best-effort like this observation path (no logger here); never block the display.
+            }
+          }
           await projectCompactionObservation(options, startedCompactions, input);
         }),
     },
