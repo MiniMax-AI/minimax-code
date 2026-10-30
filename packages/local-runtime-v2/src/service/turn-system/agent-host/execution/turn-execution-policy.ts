@@ -31,17 +31,18 @@ export function contentReviewOptions<TAgent extends AgentExecutionSnapshot>(
     'cliProductPolicy' | 'tuiProductPolicy' | 'contentReviewEnabled'
   >,
 ): { contentReviewRequired?: boolean; streamUnreviewedOutput?: boolean } {
+  const managedProvider = input.preparation.llm.managedProvider === true;
   if (options.tuiProductPolicy === true) {
-    const contentReviewRequired =
-      options.contentReviewEnabled !== false && input.preparation.llm.managedProvider === true;
+    const contentReviewRequired = options.contentReviewEnabled !== false && managedProvider;
     return {
       contentReviewRequired,
       ...(contentReviewRequired ? {} : { streamUnreviewedOutput: true }),
     };
   }
-  return options.cliProductPolicy === true
-    ? { contentReviewRequired: input.preparation.llm.managedProvider === true }
-    : {};
+  if (options.cliProductPolicy === true) return { contentReviewRequired: managedProvider };
+  // A BYOK model (custom Provider, Codex OAuth) is not sent to content review and its
+  // output streams straight through; a managed model keeps its existing review ownership.
+  return managedProvider ? {} : { contentReviewRequired: false, streamUnreviewedOutput: true };
 }
 
 export async function resolveLlmRetryOptions<

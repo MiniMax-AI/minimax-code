@@ -8,6 +8,8 @@ export interface TitleResolvedModel<TModel> {
   readonly headers?: Readonly<Record<string, string>>;
   readonly thinkingLevel?: ModelThinkingLevel;
   readonly stream?: TitleModelStream<TModel>;
+  /** Only an explicit `false` skips title review (a BYOK model does not); omitted reviews as before. */
+  readonly contentReviewRequired?: boolean;
 }
 
 export interface TitleModelResponse {

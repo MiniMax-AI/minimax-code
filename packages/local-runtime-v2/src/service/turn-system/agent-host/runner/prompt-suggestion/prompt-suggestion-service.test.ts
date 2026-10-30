@@ -425,6 +425,34 @@ describe('prompt suggestions validation and deadlines', () => {
       expect.objectContaining({ type: 'turn.prompt_suggestion.generated' }),
     );
   });
+  it('publishes a BYOK suggestion without review', async () => {
+    const f = fixture();
+    // 审核若被调用就会拦下；BYOK 不应走到这里。
+    f.review.mockResolvedValue(false);
+    f.service.schedule('s', 't', { ...f.capture, contentReviewRequired: false });
+    await vi.waitFor(() =>
+      expect(f.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'turn.prompt_suggestion.generated' }),
+      ),
+    );
+    expect(f.review).not.toHaveBeenCalled();
+  });
+  it('carries the review requirement from creation into the capture', () => {
+    const f = fixture();
+    const read = (contentReviewRequired?: boolean) => {
+      const capture = createPromptSuggestionCapture(
+        f.capture.resolved,
+        f.capture.payloadFactory,
+        contentReviewRequired,
+      );
+      capture.preparedHook(f.capture.prepared);
+      capture.assistantHook({ message: answer() } as Parameters<typeof capture.assistantHook>[0]);
+      return capture.read();
+    };
+    expect(read(false)?.contentReviewRequired).toBe(false);
+    expect(read(true)?.contentReviewRequired).toBe(true);
+    expect(read()).not.toHaveProperty('contentReviewRequired');
+  });
   it.each([
     '不用了，先这样，谢谢',
     '好的，谢谢！',

@@ -127,11 +127,14 @@ export interface PromptSuggestionCapture {
   readonly prepared: PiLlmCallPreparedHookInput;
   readonly finalAssistant: AssistantMessage;
   readonly payloadFactory: PayloadFactory;
+  /** Only an explicit `false` skips content review (a BYOK model does not); omitted reviews as before. */
+  readonly contentReviewRequired?: boolean;
 }
 
 export function createPromptSuggestionCapture(
   resolved: LLMModelConfig,
   payloadFactory: PayloadFactory,
+  contentReviewRequired?: boolean,
 ) {
   let prepared: PiLlmCallPreparedHookInput | undefined;
   let finalAssistant: AssistantMessage | undefined;
@@ -146,7 +149,13 @@ export function createPromptSuggestionCapture(
     },
     read(): PromptSuggestionCapture | undefined {
       return prepared && finalAssistant
-        ? { resolved, prepared, finalAssistant, payloadFactory }
+        ? {
+            resolved,
+            prepared,
+            finalAssistant,
+            payloadFactory,
+            ...(contentReviewRequired !== undefined ? { contentReviewRequired } : {}),
+          }
         : undefined;
     },
   };
@@ -539,7 +548,7 @@ async function runScheduledSuggestion({
       return;
     }
     const text = verdict;
-    if (!(await options.review(text))) {
+    if (capture.contentReviewRequired !== false && !(await options.review(text))) {
       log({
         sessionId,
         turnId,

@@ -30,16 +30,21 @@ export function createTurnPromptSuggestionCapture(
   )
     return undefined;
   return {
-    capture: createPromptSuggestionCapture(prepared.llm, (signal) =>
-      buildPromptSuggestionPayloadTransform(
-        {
-          agentConfig: input.preparation.agentConfig,
-          llm: { ...input.preparation.llm, ...prepared.llm },
-          sessionId: input.lease.sessionId,
-          signal,
-        },
-        options,
-      ),
+    capture: createPromptSuggestionCapture(
+      prepared.llm,
+      (signal) =>
+        buildPromptSuggestionPayloadTransform(
+          {
+            agentConfig: input.preparation.agentConfig,
+            llm: { ...input.preparation.llm, ...prepared.llm },
+            sessionId: input.lease.sessionId,
+            signal,
+          },
+          options,
+        ),
+      // The suggestion uses this turn's model, so it reviews exactly as the reply does:
+      // a BYOK model is not sent to content review.
+      input.preparation.llm.managedProvider === true,
     ),
   };
 }

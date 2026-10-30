@@ -164,7 +164,6 @@ export function createProductionSessionComposition(
     rootAgents: input.agentSessionPorts.roots,
     defaultWorkspaceDir: input.compatibility.workspace.defaultDirectory,
     titlePolicy: createSessionTitlePolicy({
-      runtimeOwnerKind: input.runtimeOwnerKind,
       config: input.modelConfig.read,
       safety: input.safety,
       readDefinition: (sessionId) =>

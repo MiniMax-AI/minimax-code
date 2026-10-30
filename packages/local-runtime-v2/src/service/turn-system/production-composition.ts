@@ -342,6 +342,8 @@ export function createProductionRootArchiveTitleModel<
                 resolvedStream(model, mutableTitleContext(context), options),
             }
           : {}),
+        // The same decision as this turn's reply: an archive title from a BYOK model is not reviewed.
+        contentReviewRequired: resolved.managedProvider === true,
       };
     },
     review: product.safety.review,

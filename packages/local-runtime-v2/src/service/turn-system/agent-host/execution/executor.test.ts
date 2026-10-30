@@ -2127,28 +2127,31 @@ async function suggestionHooks(
 }
 
 describe("LocalRuntimeTurnExecutor prompt suggestion", () => {
-  it("collects a BYOK turn on the remote switch alone, with no model check", async () => {
-    const makeByok = () => suggestionInput(false);
-    const counts: number[] = [];
-    const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
-      counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
-      await suggestionHooks(runInput);
-    };
-    // Without the port the Turn is untouched.
-    await new LocalRuntimeTurnExecutor(options(observe)).execute(makeByok());
-    const committed = vi.fn();
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(observe),
-      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
-    });
-    const outcome = await runner.execute(makeByok());
-    runner.afterSuccessfulCommit(outcome);
-    expect(outcome.status).toBe("completed");
-    // The remote switch alone installs the capture Hook; an unmanaged model is
-    // no longer a reason to skip the turn.
-    expect(counts[1]).toBeGreaterThan(counts[0]);
-    expect(committed).toHaveBeenCalledOnce();
-  });
+  it.each([true, false])(
+    "collects the same way for a platform model and a custom model (managed: %s)",
+    async (managedProvider) => {
+      // No model is special-cased: a custom (BYOK) model collects like a platform one.
+      const committed = vi.fn();
+      const runner = new LocalRuntimeTurnExecutor({
+        ...options(async (runInput) => {
+          await suggestionHooks(runInput);
+        }),
+        promptSuggestion: {
+          enabled: () => true,
+          turnStarted: () => undefined,
+          committed,
+        },
+      });
+      const outcome = await runner.execute(suggestionInput(managedProvider));
+      runner.afterSuccessfulCommit(outcome);
+      expect(committed).toHaveBeenCalledOnce();
+      // Collection is identical; only review follows the model: a platform model
+      // reviews its suggestion, a BYOK model does not.
+      expect(committed.mock.calls[0]![1]).toMatchObject({
+        contentReviewRequired: managedProvider,
+      });
+    },
+  );
 
   it("forwards one committed capture only after the Host commits the Turn", async () => {
     const committed = vi.fn();
@@ -4313,7 +4316,32 @@ describe("LocalRuntimeTurnExecutor after-tool context and ordering", () => {
 });
 
 describe("LocalRuntimeTurnExecutor content review routing", () => {
-  it("keeps Desktop content review ownership unchanged when no product policy is set", async () => {
+  it("keeps Desktop managed-model content review ownership unchanged", async () => {
+    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
+    const base = executionInput();
+    const executor = new LocalRuntimeTurnExecutor(
+      options(async (runInput) => {
+        captured = runInput;
+        await runInput.eventWriter.pushRuntime(
+          terminalEvent(RuntimeEventStatus.COMPLETED),
+        );
+      }),
+    );
+
+    await executor.execute(
+      executionInput({
+        preparation: {
+          ...base.preparation,
+          llm: { ...base.preparation.llm, managedProvider: true } as never,
+        },
+      }),
+    );
+
+    expect(captured).not.toHaveProperty("contentReviewRequired");
+    expect(captured).not.toHaveProperty("streamUnreviewedOutput");
+  });
+
+  it("skips MiniMax content review for Desktop BYOK turns", async () => {
     let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
     const base = executionInput();
     const executor = new LocalRuntimeTurnExecutor(
@@ -4334,8 +4362,8 @@ describe("LocalRuntimeTurnExecutor content review routing", () => {
       }),
     );
 
-    expect(captured).not.toHaveProperty("contentReviewRequired");
-    expect(captured).not.toHaveProperty("streamUnreviewedOutput");
+    expect(captured?.contentReviewRequired).toBe(false);
+    expect(captured?.streamUnreviewedOutput).toBe(true);
   });
 
   it.each([
