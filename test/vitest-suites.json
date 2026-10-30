@@ -235,6 +235,7 @@
       "packages/tui/test/unit/tui/controller/runtime/runtime-event-flow-stale-run.test.ts",
       "packages/tui/test/unit/tui/controller/side-session-flow.test.ts",
       "packages/tui/test/unit/tui/features/composer/attachments.test.ts",
+      "packages/tui/test/unit/tui/features/interaction/plan-path.test.ts",
       "packages/tui/test/unit/tui/features/settings/hotkeys-picker.test.ts",
       "packages/tui/test/unit/tui/features/settings/status-line-picker.test.ts",
       "packages/tui/test/unit/tui/features/settings/theme-picker.test.ts",

@@ -15,6 +15,16 @@ interface MouseInteraction extends Component {
   handleMouse(event: TuiMouseEvent): boolean;
 }
 
+/** An interaction that can switch to a full, read-only view of its subject. */
+interface FullViewInteraction extends Component {
+  toggleFullView(): boolean;
+}
+
+/** An interaction that explains transcript rows held above it. */
+interface HeldRowsHintInteraction extends Component {
+  heldRowsHint(): string | undefined;
+}
+
 /**
  * Single-slot interaction region rendered directly above the Composer.
  *
@@ -91,6 +101,20 @@ export class TuiInlinePanelHost implements Component {
       ? this.activeComponent.handleMouse(event)
       : false;
   }
+
+  /** Returns false when the current interaction has no full view to toggle. */
+  toggleFullView(): boolean {
+    return isFullViewInteraction(this.activeComponent)
+      ? this.activeComponent.toggleFullView()
+      : false;
+  }
+
+  /** Replaces the generic notice for held transcript rows, when the interaction owns them. */
+  heldRowsHint(): string | undefined {
+    return isHeldRowsHintInteraction(this.activeComponent)
+      ? this.activeComponent.heldRowsHint()
+      : undefined;
+  }
 }
 
 function isViewportInteraction(component: Component): component is ViewportInteraction {
@@ -98,8 +122,19 @@ function isViewportInteraction(component: Component): component is ViewportInter
 }
 
 function clipInteractionViewport(lines: readonly string[], rawHeight: number): string[] {
+  return selectInteractionViewportRows(lines, rawHeight).map((index) => lines[index] ?? '');
+}
+
+/**
+ * Indices of the rows `clipInteractionViewport` keeps, in display order, so an
+ * interaction can map a viewport-local mouse row back to its rendered row.
+ */
+export function selectInteractionViewportRows(
+  lines: readonly string[],
+  rawHeight: number,
+): number[] {
   const height = Math.max(1, Math.floor(rawHeight));
-  if (lines.length <= height) return [...lines];
+  if (lines.length <= height) return lines.map((_, index) => index);
 
   const selectedRows = new Set<number>();
   const headRows = Math.min(5, Math.max(1, height - 3));
@@ -126,10 +161,7 @@ function clipInteractionViewport(lines: readonly string[], rawHeight: number): s
   ) {
     selectedRows.add(index);
   }
-  return [...selectedRows]
-    .sort((left, right) => left - right)
-    .slice(0, height)
-    .map((index) => lines[index] ?? '');
+  return [...selectedRows].sort((left, right) => left - right).slice(0, height);
 }
 
 function isScrollableInteraction(
@@ -147,5 +179,19 @@ function isScrollableInteraction(
 function isMouseInteraction(component: Component | undefined): component is MouseInteraction {
   return Boolean(
     component && 'handleMouse' in component && typeof component.handleMouse === 'function',
+  );
+}
+
+function isFullViewInteraction(component: Component | undefined): component is FullViewInteraction {
+  return Boolean(
+    component && 'toggleFullView' in component && typeof component.toggleFullView === 'function',
+  );
+}
+
+function isHeldRowsHintInteraction(
+  component: Component | undefined,
+): component is HeldRowsHintInteraction {
+  return Boolean(
+    component && 'heldRowsHint' in component && typeof component.heldRowsHint === 'function',
   );
 }

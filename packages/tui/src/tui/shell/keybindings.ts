@@ -27,6 +27,7 @@ export type TuiShellKeyAction =
   | 'cycle-permission'
   | 'scroll-up'
   | 'scroll-down'
+  | 'view-plan'
   | 'restore-draft'
   | 'clear'
   | 'interrupt'
@@ -442,6 +443,14 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     description: 'Scroll the current interaction',
     helpOrder: 81,
     helpGroup: 'interaction.navigation',
+  },
+  {
+    id: 'interaction.view-plan',
+    key: 'ctrl+o',
+    action: 'view-plan',
+    when: 'interaction',
+    description: 'Show or hide the full Plan during Plan Review',
+    helpOrder: 82,
   },
 ];
 

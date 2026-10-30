@@ -274,6 +274,11 @@ export class TuiInputFlow {
     }
     if (interactionActive) {
       this.lastEscapeAtMs = 0;
+      if (keyAction === 'view-plan') {
+        if (!this.options.interaction.toggleFullView()) return undefined;
+        this.options.tui.requestRender();
+        return { consume: true };
+      }
       if (keyAction !== 'scroll-up' && keyAction !== 'scroll-down') return undefined;
       const direction = keyAction === 'scroll-up' ? -1 : 1;
       const interactionScroll = this.options.interaction.scrollByPage(direction);

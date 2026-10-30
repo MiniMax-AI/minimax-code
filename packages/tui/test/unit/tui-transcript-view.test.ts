@@ -129,6 +129,26 @@ describe('TranscriptView', () => {
     expect(rendered).toContain('Approved · implementation queued');
   });
 
+  it('keeps the Plan File line on its own row in a resolved Plan Review receipt', () => {
+    const view = new TranscriptView(() => [
+      createTranscriptCell({
+        id: 'question:plan-review-path-view',
+        kind: 'question',
+        status: 'resolved',
+        title: 'Plan Review',
+        content: '',
+        detail:
+          'Approved · implementation queued\nPlan: /history/session-1/artifacts/plan.md · /plan view',
+        ephemeral: true,
+        createdAtMs: 1,
+      }),
+    ]);
+
+    const rows = view.render(100).map((line) => stripVTControlCharacters(line).trim());
+    expect(rows).toContain('Approved · implementation queued');
+    expect(rows).toContain('Plan: /history/session-1/artifacts/plan.md · /plan view');
+  });
+
   it('marks user and Assistant blocks as semantic terminal zones', () => {
     const view = new TranscriptView(() => [
       createTranscriptCell({

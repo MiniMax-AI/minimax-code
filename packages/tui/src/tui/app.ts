@@ -280,6 +280,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     stopTurn: () => {
       void abortLiveTurn();
     },
+    keybindings: options.keybindings,
   });
   const featureFlow = new TuiFeatureFlow({
     runtime: options.runtime,

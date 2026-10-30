@@ -239,6 +239,23 @@ describe("TUI shell keybindings", () => {
     ).toContain("Todo list");
   });
 
+  it("binds Ctrl+O to the full Plan view only while an interaction is active", () => {
+    const registry = createDefaultTuiKeybindingRegistry();
+
+    expect(registry.resolve("\x0f", { interactionActive: true, hasLiveRun: false })).toBe(
+      "view-plan",
+    );
+    expect(registry.resolve("\x0f", { interactionActive: false, hasLiveRun: false })).toBe(
+      "toggle-details",
+    );
+    expect(registry.findConflicts({})).toEqual([]);
+    expect(registry.helpRows()).toContainEqual({
+      ids: ["interaction.view-plan"],
+      keys: formatTuiKeybinding("interaction.view-plan", registry),
+      description: "Show or hide the full Plan during Plan Review",
+    });
+  });
+
   it("derives compact Help rows from the same registry definitions", () => {
     const registry = createDefaultTuiKeybindingRegistry();
     const rows = registry.helpRows();
