@@ -274,7 +274,8 @@
       "packages/config/test/ptc-turn.test.ts",
       "packages/local-runtime-v2/src/service/session-system/sessions/support/tool-call-mode.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-admission-observability.test.ts",
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-prefix-fingerprint.test.ts"
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/policy/ptc-prefix-fingerprint.test.ts",
+      "packages/local-runtime/test/unit/remote-token-counter-fallback.test.ts"
     ],
     "status-contract": [
       "packages/tui/test/unit/tui-build-mode-contract.test.ts"
