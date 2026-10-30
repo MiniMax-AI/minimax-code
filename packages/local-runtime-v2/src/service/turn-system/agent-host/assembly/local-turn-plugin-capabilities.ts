@@ -164,13 +164,13 @@ export function mergeAgentHostTurnCapabilities(
   return { ...attributed, ...(reminder ? { reminder } : {}) };
 }
 
-/** Plugin Agents come only from LOCAL packages and are callable only through `task`. */
+/** Plugin Agents are callable only through `task`; the id keeps each Agent's source. */
 function delegablePluginIds(
   agents: readonly AgentHostTurnPluginAgent[] | undefined,
   tools: readonly RuntimeTool[],
 ): ReadonlySet<string> {
   if (!agents?.length || !tools.some((tool) => tool.def.name === 'task')) return new Set();
-  return new Set(agents.map((agent) => buildPluginId(agent.pluginName, 'local')));
+  return new Set(agents.map((agent) => buildPluginId(agent.pluginName, agent.origin)));
 }
 
 const PLUGIN_AGENT_DESCRIPTION_LIMIT = 200;

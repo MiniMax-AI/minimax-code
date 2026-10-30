@@ -159,8 +159,9 @@ export interface ConversationSessionCreateInput {
 }
 
 /**
- * LOCAL Plugin subagent frozen with one Turn capability generation. Selectors
- * use the Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
+ * Plugin subagent (official or LOCAL package) frozen with one Turn capability
+ * generation. Selectors use the Custom Agent encoding: `undefined` inherits,
+ * `[]` explicitly disables.
  */
 export interface ConversationPluginAgentDefinition {
   /** Task target `<plugin>:<agent>`. */
@@ -168,6 +169,8 @@ export interface ConversationPluginAgentDefinition {
   readonly pluginName: string;
   readonly agentName: string;
   readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  /** Package origin; absent only for producers that predate official Plugin subagents. */
+  readonly origin?: 'official' | 'local';
   readonly packageDigest: string;
   readonly pluginRoot: string;
   readonly description: string;

@@ -31,7 +31,7 @@ export interface FrozenAgentExecutionDefinition extends FrozenAgentExecutionDefi
   readonly definitionVersion: 2;
   readonly exactOwnerName: string;
   readonly ownerInstanceId?: string;
-  /** Plugin identity for a LOCAL Plugin subagent; `exactOwnerName` is its scoped name. */
+  /** Plugin identity for a Plugin subagent; `exactOwnerName` is its scoped name. */
   readonly pluginSource?: FrozenPluginAgentSource;
   readonly model: Readonly<{
     readonly parameterSnapshot?: {
@@ -58,7 +58,14 @@ export interface FrozenPluginAgentSource {
   readonly agentName: string;
   readonly scopedName: string;
   readonly packageDigest: string;
+  /**
+   * Package origin at capture time. Optional so definitions frozen before
+   * official Plugin subagents existed (always LOCAL) keep decoding.
+   */
+  readonly origin?: FrozenPluginAgentOrigin;
 }
+
+export type FrozenPluginAgentOrigin = 'official' | 'local';
 
 export type AnyFrozenAgentExecutionDefinition =
   | LegacyFrozenAgentExecutionDefinition
@@ -338,12 +345,17 @@ function validateModel(model: FrozenAgentExecutionDefinition['model']): void {
 }
 
 const PLUGIN_SOURCE_FORMATS = new Set(['minimax', '\u0063\u006c\u0061\u0075\u0064\u0065']);
+const PLUGIN_SOURCE_ORIGINS: Record<FrozenPluginAgentOrigin, true> = {
+  official: true,
+  local: true,
+};
 
 function decodePluginSource(value: unknown): FrozenPluginAgentSource {
   if (
     !isRecord(value) ||
     value.kind !== 'plugin' ||
-    !PLUGIN_SOURCE_FORMATS.has(String(value.format))
+    !PLUGIN_SOURCE_FORMATS.has(String(value.format)) ||
+    (value.origin !== undefined && !Object.hasOwn(PLUGIN_SOURCE_ORIGINS, String(value.origin)))
   ) {
     throw new Error('Frozen Session Agent Plugin source is invalid.');
   }
@@ -354,6 +366,7 @@ function decodePluginSource(value: unknown): FrozenPluginAgentSource {
     agentName: requiredNonEmptyString(value.agentName, 'pluginSource.agentName'),
     scopedName: requiredNonEmptyString(value.scopedName, 'pluginSource.scopedName'),
     packageDigest: requiredNonEmptyString(value.packageDigest, 'pluginSource.packageDigest'),
+    ...(value.origin === undefined ? {} : { origin: value.origin as FrozenPluginAgentOrigin }),
   };
 }
 

@@ -36,8 +36,9 @@ export interface AgentHostTurnHostBinding {
 }
 
 /**
- * LOCAL Plugin subagent definition frozen with this generation. Selectors use
- * the Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
+ * Plugin subagent definition (official or LOCAL package) frozen with this
+ * generation. Selectors use the Custom Agent encoding: `undefined` inherits,
+ * `[]` explicitly disables.
  */
 export interface AgentHostTurnPluginAgent {
   /** Task target `<plugin>:<agent>`. */
@@ -45,6 +46,8 @@ export interface AgentHostTurnPluginAgent {
   readonly pluginName: string;
   readonly agentName: string;
   readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  /** Whether the owning package came from the official Marketplace or a LOCAL import. */
+  readonly origin: 'official' | 'local';
   readonly packageDigest: string;
   readonly pluginRoot: string;
   readonly description: string;

@@ -62,9 +62,8 @@ const MANIFEST_FIELDS = new Set([
   'skills',
   'hooks',
   'hostBindings',
+  'agents',
 ]);
-/** The official package contract has no subagents; OFFICIAL keeps ignoring `agents`. */
-const LOCAL_MANIFEST_FIELDS = new Set([...MANIFEST_FIELDS, 'agents']);
 
 export async function readMiniMaxPluginPackage(
   packageRoot: string,
@@ -77,7 +76,7 @@ export async function readMiniMaxPluginPackage(
   const { path: manifestPath, value } = await readPluginJsonObject(root, MANIFEST_PATH, {
     portable: true,
   });
-  const manifest = readManifest(value, options.source);
+  const manifest = readManifest(value);
   const iconPath = await resolvePluginFile(root, manifest.icon, { portable: true });
   const darkIconPath = manifest.darkIcon
     ? await resolvePluginFile(root, manifest.darkIcon, { portable: true })
@@ -165,13 +164,9 @@ export async function readMiniMaxPluginPackage(
     diagnostics: [
       ...hookResult.diagnostics,
       ...agentResult.diagnostics,
-      ...ignoredManifestFieldDiagnostics(value, manifestFields(options.source)),
+      ...ignoredManifestFieldDiagnostics(value, MANIFEST_FIELDS),
     ],
   };
-}
-
-function manifestFields(source: PluginPackageSource): ReadonlySet<string> {
-  return source === 'LOCAL_MINIMAX' ? LOCAL_MANIFEST_FIELDS : MANIFEST_FIELDS;
 }
 
 function assertRequiredMiniApp(
@@ -311,10 +306,7 @@ interface MiniMaxManifest {
   readonly agents: string[];
 }
 
-function readManifest(
-  value: Record<string, unknown>,
-  source: PluginPackageSource,
-): MiniMaxManifest {
+function readManifest(value: Record<string, unknown>): MiniMaxManifest {
   assertManifestEnvelope(value);
   const identity = readManifestIdentity(value);
   const icon = readManifestIcon(value.icon);
@@ -324,9 +316,7 @@ function readManifest(
   const exampleQueries = readExampleQueries(value.exampleQueries);
   const capabilities = readManifestCapabilities(value);
   const agents =
-    source === 'LOCAL_MINIMAX' && value.agents !== undefined
-      ? referenceArray(value.agents, 'agents', AGENT_PATH)
-      : [];
+    value.agents === undefined ? [] : referenceArray(value.agents, 'agents', AGENT_PATH);
   return {
     ...identity,
     icon,

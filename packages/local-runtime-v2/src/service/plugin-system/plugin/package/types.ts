@@ -62,7 +62,7 @@ export interface PluginSkill {
 export type PluginAgentSourceFormat = 'MINIMAX' | '\u0043\u004c\u0041\u0055\u0044\u0045';
 
 /**
- * Markdown subagent accepted from a LOCAL package. Selector fields keep the
+ * Markdown subagent accepted from an official or LOCAL package. Selector fields keep the
  * Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
  */
 export interface PluginAgent {
@@ -162,7 +162,7 @@ export interface ReadPluginPackage {
   readonly skills: readonly PluginSkill[];
   readonly hostBindings?: readonly PluginHostBinding[];
   readonly hooks?: readonly PluginHookCommandHandler[];
-  /** Only local MiniMax and compatible-format packages carry subagents. */
+  /** MiniMax (official and local) and compatible-format packages carry subagents. */
   readonly agents?: readonly PluginAgent[];
   readonly miniapp?: MiniAppContribution;
   readonly diagnostics: readonly PluginReaderDiagnostic[];

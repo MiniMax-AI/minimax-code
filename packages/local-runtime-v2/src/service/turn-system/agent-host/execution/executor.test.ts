@@ -1231,6 +1231,7 @@ describe('LocalRuntimeTurnExecutor Plugin Agent roster', () => {
       pluginName: 'review',
       agentName: 'security',
       sourceFormat: 'minimax' as const,
+      origin: 'local' as const,
       packageDigest: 'sha256:review',
       pluginRoot: '/plugins/review',
       description: 'Reviews security.',

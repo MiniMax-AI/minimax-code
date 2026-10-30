@@ -930,6 +930,7 @@
     "packages/local-runtime-v2/src/service/background-bash/executor.ts",
     "packages/local-runtime-v2/src/service/background-bash/index.ts",
     "packages/local-runtime-v2/src/service/background-bash/initialize.ts",
+    "packages/local-runtime-v2/src/service/background-bash/shared-task/local-task-subagents.ts",
     "packages/local-runtime-v2/src/service/browser-use/browser-skill-asset.ts",
     "packages/local-runtime-v2/src/service/browser-use/browser-use.service.ts",
     "packages/local-runtime-v2/src/service/browser-use/contracts.ts",

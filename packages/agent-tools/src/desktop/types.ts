@@ -26,8 +26,9 @@ import type {
 import type { WebSearchInput } from '../shared/web-search.js';
 
 /**
- * LOCAL Plugin subagent definition from the Turn capability lease. Selectors
- * use the Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
+ * Plugin subagent definition (official or LOCAL package) from the Turn
+ * capability lease. Selectors use the Custom Agent encoding: `undefined`
+ * inherits, `[]` explicitly disables.
  */
 export interface LocalPluginAgentDefinition {
   /** Task target `<plugin>:<agent>`. */
@@ -35,6 +36,8 @@ export interface LocalPluginAgentDefinition {
   readonly pluginName: string;
   readonly agentName: string;
   readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  /** Package origin; absent only for producers that predate official Plugin subagents. */
+  readonly origin?: 'official' | 'local';
   readonly packageDigest: string;
   readonly pluginRoot: string;
   readonly description: string;
@@ -105,7 +108,7 @@ export interface LocalRuntimeToolContext extends ToolExecutionContext {
    */
   readonly loadedSkills?: Set<string>;
   /**
-   * LOCAL Plugin subagents frozen with this Turn's capability lease. Absent
+   * Plugin subagents (official or LOCAL) frozen with this Turn's capability lease. Absent
    * means no Plugin Agent target is admissible for `task`.
    */
   readonly pluginAgents?: LocalPluginAgentRoster;

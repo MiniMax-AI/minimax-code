@@ -280,6 +280,7 @@ function appendOfficialPackages(
     state.mcpServers.push(...accepted.mcpServers);
     state.hooks.push(...accepted.hooks);
     state.hostBindings.push(...accepted.hostBindings);
+    state.agents.push(...accepted.agents);
   }
 }
 
@@ -406,28 +407,23 @@ function acceptPackageCapabilities(input: PackageCapabilityAcceptanceInput):
     mcpServers: acceptPackageServers(input),
     hooks: [...(plugin.hooks ?? [])],
     hostBindings: acceptHostBindings(input, skills),
-    agents: input.sourceKind === 'local' ? acceptPackageAgents(input) : [],
+    agents: (input.plugin.agents ?? []).map((agent) => turnPluginAgent(input, agent)),
   };
 }
 
-function acceptPackageAgents(input: PackageCapabilityAcceptanceInput): DesktopTurnPluginAgent[] {
-  return (input.plugin.agents ?? []).map((agent) =>
-    turnPluginAgent(input.plugin, input.packageContentDigest, agent),
-  );
-}
-
 function turnPluginAgent(
-  plugin: ReadPluginPackage,
-  packageDigest: string,
+  input: PackageCapabilityAcceptanceInput,
   agent: PluginAgent,
 ): DesktopTurnPluginAgent {
+  const { plugin } = input;
   return freeze({
     scopedName: agent.scopedName,
     pluginName: plugin.name,
     agentName: agent.name,
     sourceFormat:
       agent.sourceFormat === 'MINIMAX' ? 'minimax' : '\u0063\u006c\u0061\u0075\u0064\u0065',
-    packageDigest,
+    origin: input.sourceKind,
+    packageDigest: input.packageContentDigest,
     pluginRoot: plugin.rootPath,
     description: agent.description,
     ...(agent.displayName ? { displayName: agent.displayName } : {}),

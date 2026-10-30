@@ -202,57 +202,6 @@ function view(overrides: Record<string, unknown>) {
   } as never;
 }
 
-/** Apps are CLI-only; an on-demand Plugin MCP tool is what Tool Search lists for a Plugin. */
-function onDemandPluginMcp(name: string) {
-  const base = tool(name) as import('@mavis/agent-core/tools').RuntimeTool;
-  const deferred = { ...base, def: { ...base.def, loading: 'on_demand' as const } };
-  return {
-    runtimeTools: [deferred],
-    runtimeToolBindings: [
-      { kind: 'mcp' as const, source: 'demo', pluginName: 'demo', tool: deferred },
-    ],
-  };
-}
-
-function tool(name: string) {
-  return {
-    def: { name, description: name, schema: { type: 'object' } },
-    impl: { execute: async () => ({ content: [] }) },
-    source: 'configured',
-  } as never;
-}
-
-describe('CLI App owners without remote tool bindings', () => {
-  it('uses the captured App-named owner and preserves tools definitions', () => {
-    const bash = tool('bash') as import('@mavis/agent-core/tools').RuntimeTool;
-    const plugins = ['finance-suite', 'qixin'].map((name) => ({
-      name,
-      source: 'official',
-      version: '1.0.0',
-      appProviders: ['qixin'],
-      iconUrl: `https://cdn.example/${name}.png`,
-      darkIconUrl: `https://cdn.example/${name}-dark.png`,
-    }));
-    const input = { ...baseInput('search'), tools: [bash], capabilities: view({ plugins }) };
-    const result = mergeAgentHostTurnCapabilities(input);
-    expect(result.tools[0]?.def).toEqual(bash.def);
-    plugins[1]!.iconUrl = 'https://cdn.example/changed.png';
-    const event = result.tools[0]?.toolCallProvenanceResolver?.({
-      phase: 'start',
-      toolName: 'bash',
-      args: { command: "mcode-tools connector call connector__qixin__search --args '{}'" },
-    });
-    expect(event).toEqual([
-      expect.objectContaining({
-        plugin_name: 'qixin',
-        capability_name: 'connector__qixin__search',
-        icon_url: 'https://cdn.example/qixin.png',
-        dark_icon_url: 'https://cdn.example/qixin-dark.png',
-      }),
-    ]);
-  });
-});
-
 function withDiscovery(names: readonly string[]): string[] {
   return [
     ...names.filter((name) => name !== 'tool_search' && name !== 'mcp_invoke'),
@@ -262,11 +211,16 @@ function withDiscovery(names: readonly string[]): string[] {
 }
 
 describe('Plugin Agent roster reminder', () => {
-  const agent = (scopedName: string, description: string) => ({
+  const agent = (
+    scopedName: string,
+    description: string,
+    origin: 'official' | 'local' = 'local',
+  ) => ({
     scopedName,
     pluginName: scopedName.split(':')[0]!,
     agentName: scopedName.split(':').slice(1).join(':'),
     sourceFormat: 'minimax' as const,
+    origin,
     packageDigest: 'sha256:demo',
     pluginRoot: '/plugins/demo',
     description,
@@ -313,5 +267,23 @@ describe('Plugin Agent roster reminder', () => {
 
     const noTask = mergeAgentHostTurnCapabilities({ ...input, tools: [tool('read')] });
     expect(noTask.reminder).toContain('agents-only@local` is unavailable for this turn');
+  });
+
+  it('matches a mentioned Subagent-only official Plugin by its official id', () => {
+    const mention = baseInput('[@Review](plugin://review%40official) review this');
+    const official = mergeAgentHostTurnCapabilities({
+      ...mention,
+      tools: [tool('read'), tool('task')],
+      capabilities: view({ agents: [agent('review:checker', 'Checks', 'official')] }),
+    });
+    expect(official.reminder).not.toContain('is unavailable for this turn');
+    expect(official.reminder).toContain('`review:checker`');
+
+    const localOnly = mergeAgentHostTurnCapabilities({
+      ...mention,
+      tools: [tool('read'), tool('task')],
+      capabilities: view({ agents: [agent('review:checker', 'Checks')] }),
+    });
+    expect(localOnly.reminder).toContain('review@official` is unavailable for this turn');
   });
 });

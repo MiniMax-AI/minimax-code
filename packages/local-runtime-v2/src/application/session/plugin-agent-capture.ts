@@ -21,6 +21,7 @@ export interface CapturedPluginAgentSource {
   readonly agentName: string;
   readonly scopedName: string;
   readonly packageDigest: string;
+  readonly origin?: NonNullable<ConversationPluginAgentDefinition['origin']>;
 }
 
 /**
@@ -62,6 +63,7 @@ export function pluginAgentSource(
     agentName: agent.agentName,
     scopedName: agent.scopedName,
     packageDigest: agent.packageDigest,
+    ...(agent.origin ? { origin: agent.origin } : {}),
   };
 }
 
