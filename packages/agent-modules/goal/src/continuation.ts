@@ -78,7 +78,7 @@ const NO_PROGRESS_NUDGE = `No-progress guard:
 Your latest final response repeated an earlier final response. Do not repeat the same summary or stopping point again. Reinspect the current evidence, choose a materially different next action that advances the objective, and execute it before reporting back.`;
 
 const NO_TOOL_NUDGE = `No-progress guard:
-Your recent turns on this goal ended without using a single tool. Restating a plan, a status, or an intention is not progress. Inspect the current evidence with tools and execute the next concrete action before reporting back.`;
+Your recent turns on this goal made no new tool progress: they used no tool, or only repeated earlier tool calls and got the same results. Restating a plan, a status, or an intention is not progress, and neither is checking the same unchanged state again. Inspect the current evidence and execute a materially different next action before reporting back. If nothing can change until something outside this conversation finishes, say so once instead of checking again.`;
 
 export const DEFAULT_GOAL_RECOVERY_TEMPLATE = `Goal recovery check:
 This Goal is resuming after a retracted Turn or Runtime recovery. The conversation excerpt may be incomplete or stale.

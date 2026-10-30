@@ -300,7 +300,8 @@ export interface ThreadGoalState {
   readonly noProgressStreak: number;
   /**
    * Number of consecutive Goal-bound main execution turns that ended normally
-   * without a single committed tool call. Counted independently from
+   * without new tool progress: no committed tool call, or only calls that
+   * repeated recent ones with the same result. Counted independently from
    * `noProgressStreak`: the two breaker conditions share one configured limit
    * but never add up. A turn whose tool signal is missing or untrustworthy
    * resets this to 0 rather than counting as a trustworthy zero.

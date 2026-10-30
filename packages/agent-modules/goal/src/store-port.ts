@@ -158,22 +158,40 @@ export interface ThreadGoalBoundStoreOperations {
  * `unknown` is NOT "zero tool calls": it means the host could not observe the
  * committed history for this Turn, so the no-tool streak must reset instead of
  * letting an observation gap be stitched into a consecutive run.
+ *
+ * `repeated` means the Turn did call tools, but every call is known read-only
+ * and repeated one from the Goal's recent Turns with the same arguments and the
+ * same result, such as polling an unchanged file listing. It counts toward the
+ * no-tool condition like `absent`: it made no new tool progress.
+ *
+ * `rerun` means every call repeated a recent one, but at least one may have
+ * side effects (`printf x >> out.txt` changes the file each time with the same
+ * empty output). It counts toward neither condition except a reply repeated
+ * word for word.
  */
-export type ThreadGoalToolActivity = 'used' | 'absent' | 'unknown';
+export type ThreadGoalToolActivity = 'used' | 'repeated' | 'rerun' | 'absent' | 'unknown';
 
 export interface ThreadGoalBreakerInput {
   /** Goal epoch captured after this Turn's accounting write. */
   readonly expectedEpoch: number;
   /**
-   * sha256 of the normalized final main-worker reply, or `null` when this Turn
-   * produced no usable reply text. `null` leaves the persisted fingerprint and
+   * `fingerprintThreadGoalReply` of the final main-worker reply, or `null` when
+   * this Turn produced no usable reply text. `null` leaves the persisted fingerprint and
    * repeated-reply streak untouched — an empty reply may not silence the
    * independent no-tool condition.
    */
   readonly fingerprint: string | null;
-  /** Tool activity observed for this Turn; drives the no-tool condition. */
+  /**
+   * Tool activity observed for this Turn; drives the no-tool condition. A reply
+   * that repeats only once its numbers are ignored extends the repeated-reply
+   * run only on a `repeated` or `absent` Turn; a reply repeated word for word
+   * extends it regardless.
+   */
   readonly toolActivity: ThreadGoalToolActivity;
-  /** Shared limit: consecutive identical replies OR consecutive tool-less turns that pause the Goal. */
+  /**
+   * Shared limit: consecutive identical replies OR consecutive turns without new
+   * tool progress that pause the Goal.
+   */
   readonly limit: number;
   /** Durable reason selected when a no-progress pause overrides a completion claim. */
   readonly pauseReason?: Extract<
@@ -182,8 +200,12 @@ export interface ThreadGoalBreakerInput {
   >;
 }
 
-/** Which independent breaker condition produced the decided action. */
-export type ThreadGoalBreakerCause = 'repeated_reply' | 'no_tool';
+/**
+ * Which independent breaker condition produced the decided action.
+ * `repeated_tool` is the no-tool condition reached by a Turn whose tool calls
+ * all repeated earlier ones.
+ */
+export type ThreadGoalBreakerCause = 'repeated_reply' | 'no_tool' | 'repeated_tool';
 
 export type ThreadGoalBreakerStaleReason = 'missing_goal' | 'goal_epoch' | 'goal_status';
 
