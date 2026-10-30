@@ -12,19 +12,12 @@ import {
   type CheckpointEarlierFiles,
   type CheckpointGenerationMetadata,
 } from '../contracts.js';
+import { CHECKPOINT_SYSTEM_PROMPT, parseCheckpointHeadings } from './checkpoint-protocol.js';
 import { projectTodoHistory } from './todo-cadence.js';
 import { projectBackgroundHistory } from './background-cadence.js';
 
-const CHECKPOINT_HEADINGS = [
-  'Goal',
-  'Constraints & Preferences',
-  'Completed Work',
-  'Current State',
-  'Blockers',
-  'Key Decisions',
-  'Pending User Asks',
-  'Critical Context & Relevant Files',
-] as const;
+/** Derived from the prompt's own heading list so the protocol cannot drift. */
+const CHECKPOINT_HEADINGS = parseCheckpointHeadings(CHECKPOINT_SYSTEM_PROMPT);
 
 export interface CheckpointGeneration extends CheckpointGenerationMetadata {
   readonly text: string;

@@ -1486,6 +1486,7 @@
     "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/assistant-iteration-cadence.ts",
     "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/background-cadence.ts",
     "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/checkpoint-format.ts",
+    "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/checkpoint-protocol.ts",
     "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/compact-context.test.ts",
     "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/compact-context.ts",
     "packages/local-runtime-v2/src/service/turn-system/compaction/algorithm/history-reduction.ts",
