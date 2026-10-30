@@ -14,7 +14,10 @@ import {
   type FrozenAgentExecutionDefinition,
   type SessionRecord,
 } from '../../service/session-system/index.js';
-import type { AgentHostTurnCapabilityView } from '../../service/turn-system/index.js';
+import {
+  filterLocalTurnCapabilityInventory,
+  type AgentHostTurnCapabilityView,
+} from '../../service/turn-system/index.js';
 import { expandPluginAgentPlaceholders } from './plugin-agent-capture.js';
 import { createTaskAgentBindingCaptureCoordinator } from './task-agent-binding-capture.js';
 
@@ -174,11 +177,13 @@ describe('Plugin Agent Task capture', () => {
     const { capabilities } = captured.agentDefinition.definition as FrozenAgentExecutionDefinition;
 
     expect(capabilities.disallowedTools).toEqual(['mcp__docs_2__search']);
-    expect(capabilities.tools).not.toContain('mcp__docs_2__search');
-    expect(capabilities.tools).toContain('mcp__docs__search');
+    // No tools list: a native snapshot that bounds internal tools only.
+    expect(capabilities).toMatchObject({ mcpServers: [], selectorVersion: 2 });
+    expect(capabilities.tools).toEqual(['read', 'write']);
   });
 
-  it('never grants a same-named configured server when this Plugin server published no tools', async () => {
+  // Rebinding leaves no `mcp__*` name: the tools are unavailable, and only the marker keeps an all list.
+  it('freezes only the all-scope marker when this Plugin server published no tools', async () => {
     const captured = await createFixture({
       mcpEntries: [{ tool: tool('mcp__docs__search'), source: 'configured', serverName: 'docs' }],
     }).capture(
@@ -190,10 +195,10 @@ describe('Plugin Agent Task capture', () => {
     );
     const { capabilities } = captured.agentDefinition.definition as FrozenAgentExecutionDefinition;
 
-    expect(capabilities.tools).toEqual(['read']);
+    expect(capabilities.tools).toEqual(['read', 'mcp__:none']);
   });
 
-  it('leaves an own alias out of the allowlist when it differs from another owner only by case', async () => {
+  it('leaves an own alias differing from another owner only by case unavailable', async () => {
     const fixture = () => pluginMcpFixture({ server: 'Docs', alias: 'mcp__Docs__search' });
     const allowed = await fixture().capture(
       pluginAgent({ sourceFormat: COMPATIBLE, tools: ['read', 'mcp__Docs__search'] }),
@@ -204,7 +209,7 @@ describe('Plugin Agent Task capture', () => {
 
     expect(
       (allowed.agentDefinition.definition as FrozenAgentExecutionDefinition).capabilities.tools,
-    ).toEqual(['read']);
+    ).toEqual(['read', 'mcp__:none']);
     expect(
       (denied.agentDefinition.definition as FrozenAgentExecutionDefinition).capabilities
         .disallowedTools,
@@ -242,7 +247,7 @@ describe('Plugin Agent Task capture', () => {
     );
     const { capabilities } = captured.agentDefinition.definition as FrozenAgentExecutionDefinition;
 
-    expect(capabilities.tools).toEqual(['read']);
+    expect(capabilities.tools).toEqual(['read', 'mcp__:none']);
   });
 
   it('keeps MCP selectors for servers this Plugin does not declare', async () => {
@@ -279,6 +284,86 @@ describe('Plugin Agent Task capture', () => {
       }),
     ).rejects.toThrow('Plugin Agent definitions are captured only for new Task Sessions.');
   });
+});
+
+describe('Plugin Agent Task snapshot scope', () => {
+  it.each([
+    [
+      'its own MCP tool is ready',
+      collidingMcpFixture,
+      ['read', 'mcp__docs_2__search'],
+      ['read', 'mcp__docs_2__search'],
+    ],
+    [
+      'none of its MCP tools is ready',
+      () =>
+        createFixture({
+          mcpEntries: [
+            { tool: tool('mcp__docs__search'), source: 'configured', serverName: 'docs' },
+          ],
+        }),
+      // The marker keeps the list read as all and matches no tool: neither the
+      // same-named configured server nor later Plugin tools get through.
+      ['read', 'mcp__:none'],
+      ['read'],
+    ],
+  ] as const)(
+    'freezes a compatible list naming mcp__ tools with an mcp__ name when %s, so other MCP and later Plugin tools stay out',
+    async (_label, fixture, frozenTools, childTools) => {
+      const captured = await fixture().capture(
+        pluginAgent({
+          sourceFormat: COMPATIBLE,
+          tools: ['read', 'mcp__docs__search'],
+          declaredMcpServers: ['docs'],
+        }),
+      );
+      const { capabilities } = captured.agentDefinition
+        .definition as FrozenAgentExecutionDefinition;
+      expect(capabilities.tools).toEqual(frozenTools);
+      // Version 2 `[]` reads back as an unset `mcpServers` (agent-profile.ts).
+      const { mcpServers, ...configSelection } = capabilities;
+      expect(mcpServers).toEqual([]);
+      expect(capabilities.selectorVersion).toBe(2);
+
+      const laterApp = tool('app__later__open');
+      const laterMcp = tool('mcp__docs_2__other');
+      const ownAlias = tool('mcp__docs_2__search');
+      const child = filterLocalTurnCapabilityInventory({
+        sources: {
+          nativeTools: [tool('read'), tool('write')],
+          mcpEntries: [
+            { tool: tool('mcp__docs__search'), source: 'configured', serverName: 'docs' },
+          ],
+          threadGoalTools: [],
+          cuRuntimeAvailable: false,
+        },
+        agentProfile: {
+          capabilityCeiling: profile('review:security', {
+            systemPrompt: '',
+            capabilities: {},
+          }).capabilityCeiling,
+          trustedBuiltin: false,
+          surface: 'task-child',
+          configSelection,
+        },
+        desktopCapabilities: {
+          revision: 'later',
+          skills: [],
+          runtimeTools: [ownAlias, laterMcp, laterApp],
+          runtimeToolBindings: [
+            { kind: 'mcp', source: 'docs', pluginName: 'review', tool: ownAlias },
+            { kind: 'mcp', source: 'docs', pluginName: 'review', tool: laterMcp },
+            { kind: 'app', source: 'later', tool: laterApp },
+          ],
+        } as unknown as AgentHostTurnCapabilityView,
+      });
+      expect([
+        ...child.nativeTools.map(({ def }) => def.name),
+        ...child.mcpEntries.map(({ tool: entry }) => entry.def.name),
+        ...(child.desktopCapabilities?.runtimeTools.map(({ def }) => def.name) ?? []),
+      ]).toEqual(childTools);
+    },
+  );
 });
 
 function createFixture(

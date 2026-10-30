@@ -12,7 +12,13 @@ import {
   renderPluginAgentProfile,
   type CapturedPluginAgentSource,
 } from './plugin-agent-capture.js';
-import type { AgentExecutionProfile, LocalAgentService } from '../../service/agent/index.js';
+import {
+  FROZEN_MCP_SERVERS_NONE,
+  FROZEN_SELECTOR_VERSION,
+  FROZEN_TOOLS_ALL_SCOPE_MARKER,
+  type AgentExecutionProfile,
+  type LocalAgentService,
+} from '../../service/agent/index.js';
 import {
   resolveEffectiveAgentModelSelection,
   modelConfigForRef,
@@ -35,6 +41,8 @@ import type {
 } from '../../service/session-system/index.js';
 import {
   filterLocalTurnCapabilityInventory,
+  isAgentSelectorMcpToolName,
+  resolveToolsAllowlistScope,
   resolveAgentPromptSurface,
   type AgentHostTurnCapabilityView,
   type LocalTurnAgentProfileFacts,
@@ -181,6 +189,9 @@ async function freezeCapturedCapabilities(
   return freezeSelectorCapabilities(
     bindPluginAgentMcpSelectors(profile, pluginAgent, bindings, inventoryToolNames),
     ready,
+    // Decided from the list the author wrote: rebinding may replace a Plugin's
+    // `mcp__*` selectors with nothing, which must not turn it into a native list.
+    resolveToolsAllowlistScope(profile.configSelection?.tools),
   );
 }
 
@@ -734,24 +745,24 @@ function taskTargetModelSelection(
 function freezeSelectorCapabilities(
   profile: AgentExecutionProfile,
   ready: TaskAgentReadyCapabilityInventory,
+  authorToolsAllowlistScope?: LocalTurnAgentProfileFacts['toolsAllowlistScope'],
 ) {
+  const facts = toTurnProfileFacts(profile);
+  const toolsAllowlistScope =
+    authorToolsAllowlistScope ?? resolveToolsAllowlistScope(profile.configSelection?.tools);
   const filtered = filterLocalTurnCapabilityInventory({
     sources: ready.sources,
-    agentProfile: toTurnProfileFacts(profile),
+    agentProfile: { ...facts, toolsAllowlistScope },
     ...(ready.desktopCapabilities ? { desktopCapabilities: ready.desktopCapabilities } : {}),
   });
-  const tools = uniqueNames([
-    ...filtered.nativeTools.map((tool) => tool.def.name),
-    ...filtered.mcpEntries.map(({ tool }) => tool.def.name),
-    ...filtered.threadGoalTools.map((tool) => tool.def.name),
-    ...(filtered.desktopCapabilities?.runtimeTools.map((tool) => tool.def.name) ?? []),
-  ]);
-  const mcpServers = uniqueNames([
-    ...filtered.mcpEntries.flatMap((entry) => (entry.serverName ? [entry.serverName] : [])),
-    ...(filtered.desktopCapabilities?.runtimeToolBindings.flatMap((binding) =>
-      binding.kind === 'mcp' ? [binding.source] : [],
-    ) ?? []),
-  ]);
+  // This projection does not ship Computer Use, so no deferred native ceiling
+  // is captured here; the Agent's own selectors still apply on every Turn.
+  const tools = frozenToolNames(
+    filtered,
+    [],
+    toolsAllowlistScope,
+    profile.configSelection?.tools,
+  );
   // The Skill reader checks both allowlists for Desktop Plugin Skills, so a
   // frozen Plugin Skill must be named in `skills` as well as `extensionSkills`.
   const desktopSkills = (filtered.desktopCapabilities?.skills ?? [])
@@ -779,15 +790,62 @@ function freezeSelectorCapabilities(
   ]);
   const disallowedTools = profile.configSelection?.disallowedTools ?? [];
   return {
-    // Undefined canonical selectors resolve to the current ready inventory at
-    // Task creation. Persisting every bucket turns the snapshot into a true
-    // upper bound: later installs can only be removed by current runtime gates.
+    // The snapshot is an upper bound for internal tools and Skills only:
+    // undefined selectors resolve to the ready inventory at Task creation, and
+    // later installs can only be removed by current runtime gates. MCP and
+    // Plugin tools are not bounded by it; they follow the Agent's `mcpServers`
+    // and `disallowedTools` on every Turn.
     tools,
     disallowedTools: [...disallowedTools],
-    mcpServers,
+    // The Agent's own selector, not the servers ready now, so a server configured
+    // or recovered after capture stays reachable by the running Task.
+    mcpServers: frozenMcpServerSelector(profile.configSelection?.mcpServers),
     skills,
     extensionSkills,
+    selectorVersion: FROZEN_SELECTOR_VERSION,
   };
+}
+
+/**
+ * Version 2 encoding of the Agent's `mcpServers` in a field releases up to
+ * v3.1.4 require: unset → `[]` (unrestricted), `[]` → `[":none"]` (no MCP),
+ * server names as written.
+ */
+function frozenMcpServerSelector(selection: readonly string[] | undefined): readonly string[] {
+  if (selection === undefined) return [];
+  const names = uniqueNames(selection);
+  return names.length > 0 ? names : [FROZEN_MCP_SERVERS_NONE];
+}
+
+/**
+ * A `native` list bounds internal tools only, so the snapshot names no MCP or
+ * Plugin tool. An `all` list (one that names `mcp__*` tools) keeps every
+ * admitted name plus the `mcp__*` selectors themselves, even for tools not
+ * ready at capture, so later Turns still read it as `all` from its content.
+ * `selected` is the list after Plugin alias rebinding. When rebinding left no
+ * `mcp__*` name, those tools are unavailable: the author's names could match a
+ * same-named configured server, so only `FROZEN_TOOLS_ALL_SCOPE_MARKER` is
+ * added, which matches no tool and keeps the list read as `all`.
+ */
+function frozenToolNames(
+  filtered: ReturnType<typeof filterLocalTurnCapabilityInventory>,
+  deferredComputerTools: readonly string[],
+  scope: NonNullable<LocalTurnAgentProfileFacts['toolsAllowlistScope']>,
+  selected: readonly string[] | undefined,
+): readonly string[] {
+  const all = scope === 'all';
+  const admitted = uniqueNames([
+    ...deferredComputerTools,
+    ...filtered.nativeTools.map((tool) => tool.def.name),
+    ...filtered.mcpEntries
+      .map(({ tool }) => tool.def.name)
+      .filter((name) => all || !isAgentSelectorMcpToolName(name)),
+    ...filtered.threadGoalTools.map((tool) => tool.def.name),
+    ...(all ? (filtered.desktopCapabilities?.runtimeTools.map((tool) => tool.def.name) ?? []) : []),
+  ]);
+  if (!all) return admitted;
+  const named = uniqueNames([...admitted, ...(selected ?? []).filter(isAgentSelectorMcpToolName)]);
+  return named.some(isAgentSelectorMcpToolName) ? named : [...named, FROZEN_TOOLS_ALL_SCOPE_MARKER];
 }
 
 function isBuiltinRuntimeSkill(

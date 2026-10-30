@@ -216,6 +216,8 @@ export interface LocalAgentConfigurationSelection {
   readonly mcpServers?: readonly string[];
   readonly skills?: readonly string[];
   readonly extensionSkills?: readonly string[];
+  /** Diagnostics only: set on profiles rendered from a Task snapshot. */
+  readonly frozenSelectorVersion?: 2 | 'legacy';
 }
 
 /** Neutral profile renderer supplied by the Agent owner at composition time. */

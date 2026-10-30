@@ -28,16 +28,18 @@ import {
   normalizeRequestRef,
   parseExplicitNameOrStable,
 } from '../domain/names.js';
-import type {
-  AgentAvatarAsset,
-  AgentConfigurationSelection,
-  AgentExecutionProfile,
-  AgentProfileRequest,
-  AgentStoreMeta,
-  AgentStorePort,
-  AgentView,
-  BuiltinAgentDefinition,
-  FrozenAgentExecutionDefinition,
+import {
+  FROZEN_MCP_SERVERS_NONE,
+  FROZEN_SELECTOR_VERSION,
+  type AgentAvatarAsset,
+  type AgentConfigurationSelection,
+  type AgentExecutionProfile,
+  type AgentProfileRequest,
+  type AgentStoreMeta,
+  type AgentStorePort,
+  type AgentView,
+  type BuiltinAgentDefinition,
+  type FrozenAgentExecutionDefinition,
 } from '../contracts.js';
 import { AgentConfigError, type CanonicalAgentConfig } from '../storage/canonical-agent-config.js';
 import { isPerAgentReadAccessError } from '../storage/canonical-agent-patch.js';
@@ -735,18 +737,37 @@ function frozenConfigSelection(
       { field: 'definition.capabilities', reason: 'must be an object' },
     );
   }
+  const current = capabilities.selectorVersion === FROZEN_SELECTOR_VERSION;
   return {
     ...copyFrozenSelector(capabilities, 'tools'),
     ...copyFrozenSelector(capabilities, 'disallowedTools'),
-    ...copyFrozenSelector(capabilities, 'mcpServers'),
+    ...frozenMcpServers(copyFrozenSelector(capabilities, 'mcpServers').mcpServers, current),
     ...copyFrozenSelector(capabilities, 'skills'),
     ...copyFrozenSelector(capabilities, 'extensionSkills'),
+    frozenSelectorVersion: current ? FROZEN_SELECTOR_VERSION : 'legacy',
   };
+}
+
+/**
+ * Turns a frozen `mcpServers` back into an Agent selector. A version 2
+ * snapshot stores the Agent's own selector in a field releases up to v3.1.4
+ * require, so `[]` means unrestricted and `[":none"]` means no MCP. An older
+ * snapshot stored the servers ready at capture: it is used as written, so
+ * `[]` still means no MCP. See README "Desktop Local Agent 定义".
+ */
+function frozenMcpServers(
+  value: readonly string[] | undefined,
+  current: boolean,
+): Pick<AgentConfigurationSelection, 'mcpServers'> {
+  if (value === undefined) return {};
+  if (!current) return { mcpServers: value };
+  if (value.includes(FROZEN_MCP_SERVERS_NONE)) return { mcpServers: [] };
+  return value.length === 0 ? {} : { mcpServers: value };
 }
 
 function copyFrozenSelector(
   capabilities: FrozenAgentExecutionDefinition['capabilities'],
-  key: keyof FrozenAgentExecutionDefinition['capabilities'],
+  key: Exclude<keyof FrozenAgentExecutionDefinition['capabilities'], 'selectorVersion'>,
 ): Partial<AgentConfigurationSelection> {
   const value = capabilities[key];
   if (value === undefined) return {};

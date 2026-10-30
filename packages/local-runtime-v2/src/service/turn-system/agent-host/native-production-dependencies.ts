@@ -361,6 +361,8 @@ async function buildToolCatalog(
 ) {
   return buildLocalTurnToolCatalog({
     sessionId: input.sessionId,
+    turnId: input.turnId,
+    agentName: input.agentName,
     sources: await options.resolveSources(toolCatalogSourceInput(input)),
     llmModel: input.llmModel,
     effectivePluginSkills: input.effectivePluginSkills,

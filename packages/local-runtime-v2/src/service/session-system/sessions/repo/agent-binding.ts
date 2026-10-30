@@ -6,14 +6,28 @@ interface FrozenAgentExecutionDefinitionBase {
   readonly systemPrompt: string;
   readonly promptSnapshot?: AgentPromptSnapshot;
   readonly capabilities: Readonly<{
-    /** Every expansion-capable bucket is an explicit captured upper bound. */
+    /**
+     * Captured upper bound for internal tools. A list without `mcp__*` names
+     * names no MCP or Plugin tool: those follow `mcpServers` / `disallowedTools` live.
+     */
     readonly tools: readonly string[];
     readonly disallowedTools?: readonly string[];
+    /**
+     * Always present (releases up to v3.1.4 require it). With `selectorVersion`
+     * 2 it is the Agent's own selector: `[]` = unrestricted, `[":none"]` = no
+     * MCP. Older snapshots recorded the servers ready at capture and keep that
+     * meaning (`[]` = no MCP). See README "Desktop Local Agent 定义".
+     */
     readonly mcpServers: readonly string[];
     readonly skills: readonly string[];
     readonly extensionSkills: readonly string[];
+    /** `2` on snapshots captured with the current selector rules; absent on older ones. */
+    readonly selectorVersion?: FrozenSelectorVersion;
   }>;
 }
+
+/** The only selector version written today; see README "Desktop Local Agent 定义". */
+type FrozenSelectorVersion = 2;
 
 /** V1 was written only for Task Sessions. Keep it decodable during the rollout. */
 export interface LegacyFrozenAgentExecutionDefinition extends FrozenAgentExecutionDefinitionBase {
@@ -189,12 +203,7 @@ function validateFrozenDefinition(definition: AnyFrozenAgentExecutionDefinition)
     throw new Error('Frozen Session Agent definition is invalid.');
   }
   if (definition.promptSnapshot !== undefined) decodeAgentPromptSnapshot(definition.promptSnapshot);
-  for (const field of REQUIRED_FROZEN_CAPABILITY_FIELDS) {
-    validateStringArray(definition.capabilities[field]);
-  }
-  if (definition.capabilities.disallowedTools !== undefined) {
-    validateStringArray(definition.capabilities.disallowedTools);
-  }
+  validateCapabilities(definition.capabilities);
   if (definition.definitionVersion === 1) return;
   if (definition.definitionVersion !== 2 || !definition.exactOwnerName.trim()) {
     throw new Error('Frozen Session Agent owner is invalid.');
@@ -205,6 +214,16 @@ function validateFrozenDefinition(definition: AnyFrozenAgentExecutionDefinition)
     throw new Error('Frozen Session Agent owner instance is invalid.');
   }
   validatePluginSourceOwner(definition);
+}
+
+function validateCapabilities(
+  capabilities: FrozenAgentExecutionDefinitionBase['capabilities'],
+): void {
+  for (const field of REQUIRED_FROZEN_CAPABILITY_FIELDS) {
+    validateStringArray(capabilities[field]);
+  }
+  if (capabilities.disallowedTools !== undefined) validateStringArray(capabilities.disallowedTools);
+  decodeSelectorVersion(capabilities.selectorVersion);
 }
 
 /** A Plugin Agent has no Custom Agent incarnation and is owned by its scoped name. */
@@ -236,15 +255,7 @@ function freezeDefinition(
     ...(definition.promptSnapshot === undefined
       ? {}
       : { promptSnapshot: decodeAgentPromptSnapshot(definition.promptSnapshot) }),
-    capabilities: Object.freeze({
-      tools: Object.freeze([...definition.capabilities.tools]),
-      ...(definition.capabilities.disallowedTools === undefined
-        ? {}
-        : { disallowedTools: Object.freeze([...definition.capabilities.disallowedTools]) }),
-      mcpServers: Object.freeze([...definition.capabilities.mcpServers]),
-      skills: Object.freeze([...definition.capabilities.skills]),
-      extensionSkills: Object.freeze([...definition.capabilities.extensionSkills]),
-    }),
+    capabilities: freezeCapabilities(definition.capabilities),
   };
   if (definition.definitionVersion === 1) {
     return Object.freeze({ definitionVersion: 1, ...base });
@@ -273,16 +284,41 @@ function freezeDefinition(
   });
 }
 
+function freezeCapabilities(
+  capabilities: FrozenAgentExecutionDefinitionBase['capabilities'],
+): FrozenAgentExecutionDefinitionBase['capabilities'] {
+  return Object.freeze({
+    tools: Object.freeze([...capabilities.tools]),
+    ...(capabilities.disallowedTools === undefined
+      ? {}
+      : { disallowedTools: Object.freeze([...capabilities.disallowedTools]) }),
+    mcpServers: Object.freeze([...capabilities.mcpServers]),
+    skills: Object.freeze([...capabilities.skills]),
+    extensionSkills: Object.freeze([...capabilities.extensionSkills]),
+    ...(capabilities.selectorVersion === undefined
+      ? {}
+      : { selectorVersion: capabilities.selectorVersion }),
+  });
+}
+
 function decodeCapabilities(
   capabilities: Record<string, unknown>,
 ): FrozenAgentExecutionDefinitionBase['capabilities'] {
+  const selectorVersion = decodeSelectorVersion(capabilities.selectorVersion);
   return {
     tools: requiredStringArray(capabilities, 'tools'),
     ...optionalStringArray(capabilities, 'disallowedTools'),
     mcpServers: requiredStringArray(capabilities, 'mcpServers'),
     skills: requiredStringArray(capabilities, 'skills'),
     extensionSkills: requiredStringArray(capabilities, 'extensionSkills'),
+    ...(selectorVersion === undefined ? {} : { selectorVersion }),
   };
+}
+
+function decodeSelectorVersion(value: unknown): FrozenSelectorVersion | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 2) throw new Error('Frozen Task Agent capability selectorVersion is invalid.');
+  return value;
 }
 
 function decodeModel(value: unknown): FrozenAgentExecutionDefinition['model'] {

@@ -5,7 +5,6 @@ import {
   resolveLocalBashShell,
 } from '@mavis/agent-tools/desktop';
 import {
-  filterCanonicalBuiltinMcpEntries,
   filterCanonicalNativeToolCeiling,
   createMcpInvokeTool,
   createToolSearchTool,
@@ -105,12 +104,36 @@ export interface LocalTurnAgentProfileFacts {
   /** Raw Agent selectors; every value is intersected with this Turn's inventory. */
   readonly configSelection?: Pick<
     LocalAgentConfigurationSelection,
-    'tools' | 'disallowedTools' | 'mcpServers' | 'skills' | 'extensionSkills'
+    | 'tools'
+    | 'disallowedTools'
+    | 'mcpServers'
+    | 'skills'
+    | 'extensionSkills'
+    | 'frozenSelectorVersion'
   >;
+  /**
+   * Whether `configSelection.tools` also limits MCP and Plugin tools
+   * (`isAgentSelectorMcpToolName`). Omitted: decided from `tools`
+   * (`resolveToolsAllowlistScope`). Only Task capture sets it, in memory, to
+   * the scope of the list the author wrote, because Plugin alias rebinding can
+   * drop the `mcp__*` names that decide it.
+   */
+  readonly toolsAllowlistScope?: LocalAgentToolsAllowlistScope;
 }
+
+/**
+ * How `tools` treats MCP tools (`isAgentSelectorMcpToolName`). `native`: the
+ * list does not limit them. `all`: the list names `mcp__*` tools, so it
+ * limits every tool.
+ */
+export type LocalAgentToolsAllowlistScope = 'native' | 'all';
 
 export interface BuildLocalTurnToolCatalogInput {
   readonly sessionId: string;
+  /** Log correlation only. */
+  readonly turnId?: string;
+  /** Log correlation only. */
+  readonly agentName?: string;
   readonly sources: LocalTurnRawToolSources;
   readonly llmModel: {
     readonly provider: string;
@@ -142,7 +165,33 @@ export interface FilteredLocalTurnCapabilityInventory {
   readonly mcpEntries: readonly McpToolEntry[];
   readonly threadGoalTools: readonly RuntimeTool[];
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
+  /** Present only when the Agent declares a `tools` allowlist; counts only. */
+  readonly selectorSummary?: LocalAgentToolSelectorSummary;
 }
+
+/**
+ * How the Agent selectors treated MCP tools (`isAgentSelectorMcpToolName`) and
+ * Plugin App tools (Plugin tools without an `mcp__` name) this Turn.
+ */
+interface LocalAgentToolSelectorSummary {
+  readonly toolsAllowlistSize: number;
+  readonly toolsAllowlistScope: LocalAgentToolsAllowlistScope;
+  /** The Task snapshot's `selectorVersion` (`legacy` without one); absent off a snapshot. */
+  readonly frozenSelectorVersion?: 2 | 'legacy';
+  readonly mcpTotal: number;
+  readonly mcpKept: number;
+  readonly mcpBlockedByServerSelector: number;
+  readonly mcpBlockedByDisallowed: number;
+  readonly mcpBlockedByToolsAllowlist: number;
+  readonly pluginAppTotal: number;
+  readonly pluginAppKept: number;
+}
+
+type LocalAgentMcpOutcome =
+  | 'mcpKept'
+  | 'mcpBlockedByServerSelector'
+  | 'mcpBlockedByDisallowed'
+  | 'mcpBlockedByToolsAllowlist';
 
 /**
  * Applies only present-turn gates and Agent selectors to ready capability
@@ -158,7 +207,10 @@ export function filterLocalTurnCapabilityInventory(input: {
 }): FilteredLocalTurnCapabilityInventory {
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const profile = input.agentProfile;
-  const selector = createLocalAgentCapabilitySelector(profile?.configSelection);
+  const selector = createLocalAgentCapabilitySelector(
+    profile?.configSelection,
+    profile?.toolsAllowlistScope,
+  );
   const hasBrowserHostAlias = Boolean(
     input.hostCapabilityRegistry &&
     (profile?.surface ?? 'interactive') === 'interactive' &&
@@ -172,11 +224,7 @@ export function filterLocalTurnCapabilityInventory(input: {
   const keep = (
     tool: RuntimeTool,
     source: RuntimeToolSource,
-    options: {
-      readonly mcp?: boolean;
-      readonly serverName?: string;
-      readonly selectorAlias?: string;
-    } = {},
+    options: LocalTurnToolKeepOptions = {},
   ): boolean =>
     isReadyTurnToolAllowed({
       tool,
@@ -198,32 +246,114 @@ export function filterLocalTurnCapabilityInventory(input: {
     profile?.canonicalRole,
     profile?.trustedBuiltin === true,
   );
-  const mcpEntries = filterCanonicalBuiltinMcpEntries(
-    input.sources.mcpEntries.filter(({ tool, source, serverName }) =>
-      keep(tool, source, { mcp: true, ...(serverName ? { serverName } : {}) }),
-    ),
-    profile?.canonicalRole,
-    profile?.trustedBuiltin,
+  // Selected by name like every tool (`isAgentSelectorMcpToolName`), with no
+  // role-specific MCP filter: explore / verifier get MCP tools on the same
+  // terms as other Agents. Matrix tools (no `mcp__` prefix) are ordinary tools,
+  // still limited by `tools` and the `builtinTools` / `features` ceiling.
+  const mcpEntries = input.sources.mcpEntries.filter(({ tool, source, serverName }) =>
+    keep(tool, source, serverName ? { serverName } : {}),
   );
   const threadGoalTools = resolveThreadGoalTools(
     profile,
     input.sources.threadGoalTools.filter((tool) => keep(tool, 'builtin')),
   );
+  const desktopCapabilities = input.desktopCapabilities
+    ? filterDesktopCapabilities(input.desktopCapabilities, keep)
+    : undefined;
   return {
     selector,
     nativeTools,
     mcpEntries,
     threadGoalTools,
-    ...(input.desktopCapabilities
-      ? {
-          desktopCapabilities: filterDesktopCapabilities(
-            input.desktopCapabilities,
-            keep,
-            profile?.configSelection?.mcpServers !== undefined,
-          ),
-        }
-      : {}),
+    ...(desktopCapabilities ? { desktopCapabilities } : {}),
+    ...selectorSummaryFor({
+      profile,
+      selector,
+      raw: [...input.sources.mcpEntries, ...desktopToolServers(input.desktopCapabilities)],
+      kept: [...mcpEntries.map(({ tool }) => tool), ...(desktopCapabilities?.runtimeTools ?? [])],
+      rawPluginTools: input.desktopCapabilities?.runtimeTools ?? [],
+    }),
   };
+}
+
+interface LocalTurnToolKeepOptions {
+  /** The MCP server an `mcp__*` tool belongs to, checked against `mcpServers`. */
+  readonly serverName?: string;
+  readonly selectorAlias?: string;
+  /** A Plugin tool; see `LocalAgentCapabilitySelector.allowsTool`. */
+  readonly pluginTool?: boolean;
+}
+
+interface LocalTurnToolWithServer {
+  readonly tool: RuntimeTool;
+  readonly serverName?: string;
+}
+
+function selectorSummaryFor(input: {
+  readonly profile: LocalTurnAgentProfileFacts | undefined;
+  readonly selector: LocalAgentCapabilitySelector;
+  readonly raw: readonly LocalTurnToolWithServer[];
+  readonly kept: readonly RuntimeTool[];
+  readonly rawPluginTools: readonly RuntimeTool[];
+}): { readonly selectorSummary?: LocalAgentToolSelectorSummary } {
+  const allowlist = input.profile?.configSelection?.tools;
+  if (allowlist === undefined) return {};
+  const kept = new Set(input.kept);
+  const mcpTools = input.raw.filter(({ tool }) => isAgentSelectorMcpToolName(tool.def.name));
+  const counts: Record<LocalAgentMcpOutcome, number> = {
+    mcpKept: 0,
+    mcpBlockedByServerSelector: 0,
+    mcpBlockedByDisallowed: 0,
+    mcpBlockedByToolsAllowlist: 0,
+  };
+  for (const entry of mcpTools) {
+    const outcome = kept.has(entry.tool) ? 'mcpKept' : mcpBlockReason(input.selector, entry);
+    if (outcome) counts[outcome] += 1;
+  }
+  const pluginApps = input.rawPluginTools.filter(
+    (tool) => !isAgentSelectorMcpToolName(tool.def.name),
+  );
+  return {
+    selectorSummary: {
+      toolsAllowlistSize: new Set(allowlist.map(normalizedSelectorName).filter(Boolean)).size,
+      toolsAllowlistScope:
+        input.profile?.toolsAllowlistScope ?? resolveToolsAllowlistScope(allowlist),
+      ...(input.profile?.configSelection?.frozenSelectorVersion === undefined
+        ? {}
+        : { frozenSelectorVersion: input.profile.configSelection.frozenSelectorVersion }),
+      mcpTotal: mcpTools.length,
+      ...counts,
+      pluginAppTotal: pluginApps.length,
+      pluginAppKept: pluginApps.filter((tool) => kept.has(tool)).length,
+    },
+  };
+}
+
+/** The selector that removed an MCP tool; undefined when a model, ceiling or surface gate did. */
+function mcpBlockReason(
+  selector: LocalAgentCapabilitySelector,
+  { tool, serverName }: LocalTurnToolWithServer,
+): LocalAgentMcpOutcome | undefined {
+  // `featureOwned` skips only the `tools` allowlist: this is `disallowedTools` alone.
+  if (!selector.allowsTool(tool.def.name, undefined, { featureOwned: true }))
+    return 'mcpBlockedByDisallowed';
+  if (!selector.allowsTool(tool.def.name)) return 'mcpBlockedByToolsAllowlist';
+  if (!selector.allowsMcpServer(serverName)) return 'mcpBlockedByServerSelector';
+  return undefined;
+}
+
+/** Plugin tools with the MCP server only an MCP binding can prove. */
+function desktopToolServers(
+  capabilities: AgentHostTurnCapabilityView | undefined,
+): readonly LocalTurnToolWithServer[] {
+  if (!capabilities) return [];
+  const bindings = new Map(
+    capabilities.runtimeToolBindings.map((binding) => [binding.tool, binding]),
+  );
+  return capabilities.runtimeTools.map((tool) => {
+    const binding = bindings.get(tool);
+    return binding?.kind === 'mcp' ? { tool, serverName: binding.source } : { tool };
+  });
 }
 
 /**
@@ -240,6 +370,7 @@ export function buildLocalTurnToolCatalog(
   const ptc = isPtcTurnEnabled(input);
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const inventory = filterLocalTurnCapabilityInventory(input);
+  logAgentToolSelectorSummary(input, inventory.selectorSummary);
   const { nativeTools, mcpEntries, threadGoalTools } = inventory;
   const model = input.llmModel;
   const plan = planMcpDisclosure({ entries: mcpEntries, model, options });
@@ -572,6 +703,51 @@ function logPtcOnDemandTools(
   }
 }
 
+/**
+ * One line per catalog build for an Agent with a `tools` allowlist, so a
+ * Session can show whether its MCP tools (`isAgentSelectorMcpToolName`)
+ * reached the model and which selector removed the rest. Counts only: no tool
+ * names or arguments.
+ */
+function logAgentToolSelectorSummary(
+  input: Pick<
+    BuildLocalTurnToolCatalogInput,
+    'sessionId' | 'turnId' | 'agentName' | 'agentProfile' | 'logger'
+  >,
+  summary: LocalAgentToolSelectorSummary | undefined,
+): void {
+  if (!summary) return;
+  const profile = input.agentProfile;
+  try {
+    input.logger?.info?.(
+      {
+        event: 'agent_tool_selector_summary',
+        session_id: input.sessionId,
+        ...(input.turnId ? { turn_id: input.turnId } : {}),
+        ...(input.agentName ? { agent_name: input.agentName } : {}),
+        ...(profile?.canonicalRole ? { canonical_role: profile.canonicalRole } : {}),
+        trusted_builtin: profile?.trustedBuiltin === true,
+        surface: profile?.surface ?? 'interactive',
+        tools_allowlist_size: summary.toolsAllowlistSize,
+        tools_allowlist_scope: summary.toolsAllowlistScope,
+        ...(summary.frozenSelectorVersion === undefined
+          ? {}
+          : { frozen_selector_version: summary.frozenSelectorVersion }),
+        mcp_total: summary.mcpTotal,
+        mcp_kept: summary.mcpKept,
+        mcp_blocked_by_server_selector: summary.mcpBlockedByServerSelector,
+        mcp_blocked_by_disallowed: summary.mcpBlockedByDisallowed,
+        mcp_blocked_by_tools_allowlist: summary.mcpBlockedByToolsAllowlist,
+        plugin_app_total: summary.pluginAppTotal,
+        plugin_app_kept: summary.pluginAppKept,
+      },
+      '[local-runtime-v2] agent tool selector summary',
+    );
+  } catch {
+    // Diagnostics must not affect the Turn.
+  }
+}
+
 function createInlineHostGateway(input: BuildLocalTurnToolCatalogInput): readonly RuntimeTool[] {
   return reservesInlineGateway(input) ? [createMcpInvokeTool(new Map())] : [];
 }
@@ -587,7 +763,20 @@ function reservesInlineGateway(
 }
 
 export interface LocalAgentCapabilitySelector {
-  allowsTool(name: string, hostAlias?: string): boolean;
+  /**
+   * `featureOwned`: a builtin Tool its Feature alone gates for this Agent
+   * (`web_search` under `features.webSearch` on a trusted builtin role). Its
+   * `tools` allowlist cannot name it, so only `disallowedTools` applies here.
+   *
+   * `pluginTool`: a Plugin (App or MCP) tool. A `native`-scope `tools` list
+   * limits neither Plugin tools nor MCP tools (`isAgentSelectorMcpToolName`);
+   * an MCP tool's server is checked separately by `allowsMcpServer`.
+   */
+  allowsTool(
+    name: string,
+    hostAlias?: string,
+    options?: { featureOwned?: boolean; pluginTool?: boolean },
+  ): boolean;
   allowsMcpServer(serverName: string | undefined): boolean;
   allowsSkill(name: string): boolean;
   allowsExtensionSkill(pluginName: string, name: string): boolean;
@@ -596,11 +785,7 @@ export interface LocalAgentCapabilitySelector {
 function isReadyTurnToolAllowed(input: {
   readonly tool: RuntimeTool;
   readonly source: RuntimeToolSource;
-  readonly options: {
-    readonly mcp?: boolean;
-    readonly serverName?: string;
-    readonly selectorAlias?: string;
-  };
+  readonly options: LocalTurnToolKeepOptions;
   readonly excludedNames: ReadonlySet<string>;
   readonly cuRuntimeAvailable: boolean;
   readonly selector: LocalAgentCapabilitySelector;
@@ -608,8 +793,15 @@ function isReadyTurnToolAllowed(input: {
 }): boolean {
   if (input.excludedNames.has(input.tool.def.name)) return false;
   if (!isDesktopToolAvailable(input.tool, input.cuRuntimeAvailable)) return false;
-  if (!input.selector.allowsTool(input.tool.def.name, input.options.selectorAlias)) return false;
-  if (!isMcpServerAllowed(input.selector, input.options)) return false;
+  if (
+    !input.selector.allowsTool(input.tool.def.name, input.options.selectorAlias, {
+      featureOwned: isFeatureOwnedBuiltinTool(input.profile, input.tool.def.name, input.source),
+      pluginTool: input.options.pluginTool === true,
+    })
+  )
+    return false;
+  if (!isMcpServerAllowed(input.selector, input.tool.def.name, input.options.serverName))
+    return false;
   if (
     (DELEGATION_TOOL_NAMES.has(input.tool.def.name) ||
       (input.source !== 'builtin' && TASK_CONTROL_TOOL_NAMES.has(input.tool.def.name))) &&
@@ -621,16 +813,35 @@ function isReadyTurnToolAllowed(input: {
   return isProfileToolAllowed(input.profile, input.tool, input.source);
 }
 
+/**
+ * Builtin `web_search` (native or Matrix) is owned by `features.webSearch` on a
+ * trusted builtin role, whose `agent.md` `tools` can only name native tools.
+ * Custom and Plugin Agents may name `web_search` in `tools`, so their
+ * allowlist still decides it.
+ */
+function isFeatureOwnedBuiltinTool(
+  profile: LocalTurnAgentProfileFacts | undefined,
+  name: string,
+  source: RuntimeToolSource,
+): boolean {
+  return (
+    profile?.trustedBuiltin === true &&
+    name === 'web_search' &&
+    (source === 'builtin' || source === 'builtin-matrix')
+  );
+}
+
 function isDesktopToolAvailable(tool: RuntimeTool, cuRuntimeAvailable: boolean): boolean {
   return cuRuntimeAvailable || !tool.def.name.startsWith('desktop_');
 }
 
+/** `mcpServers` applies to MCP tools only; without a server it fails closed. */
 function isMcpServerAllowed(
   selector: LocalAgentCapabilitySelector,
-  options: { readonly mcp?: boolean; readonly serverName?: string },
+  name: string,
+  serverName: string | undefined,
 ): boolean {
-  if (!options.mcp) return true;
-  return selector.allowsMcpServer(options.serverName);
+  return !isAgentSelectorMcpToolName(name) || selector.allowsMcpServer(serverName);
 }
 
 function isProfileToolAllowed(
@@ -658,20 +869,65 @@ function isAuthoritativeMainProfile(profile: LocalTurnAgentProfileFacts | undefi
   );
 }
 
+/**
+ * The one rule for an Agent's `tools`, `disallowedTools` and `mcpServers`,
+ * the same for builtin, Custom and Plugin Agents and for every role (README
+ * "Desktop Local Agent 定义"). A tool is an MCP tool when its name starts with
+ * `mcp__`, whatever its source or Agent role.
+ * - `disallowedTools` removes any tool it names.
+ * - An MCP tool (user MCP, Plugin MCP, a builtin server with `mcp__` names)
+ *   must belong to a server named by `mcpServers` when the Agent has one.
+ * - A Plugin App tool (a Plugin tool without an `mcp__` name) is not limited
+ *   by `tools`: Plugin tools are outside the native allowlist.
+ * - Any other tool (native, Matrix such as `web_search`, thread goal) must be
+ *   named by `tools` when the Agent has one.
+ * - A `tools` list that names an `mcp__*` tool limits every tool, MCP and
+ *   Plugin tools included (`resolveToolsAllowlistScope`).
+ * Capability ceilings, the native role ceiling and surface gates apply on top.
+ */
+export function isAgentSelectorMcpToolName(name: string): boolean {
+  return normalizedSelectorName(name).startsWith('mcp__');
+}
+
+/**
+ * A `tools` list that names no MCP tool is a native list and limits neither
+ * MCP tools (`isAgentSelectorMcpToolName`) nor Plugin tools; this is how builtin worker /
+ * explore / verifier `agent.md` lists read. A list that names an `mcp__*`
+ * tool keeps limiting every tool: its author picked MCP tools one by one
+ * (compatible Plugin Agents, Task snapshots that froze concrete MCP names),
+ * and dropping that limit would widen what they chose.
+ */
+export function resolveToolsAllowlistScope(
+  tools: readonly string[] | undefined,
+): LocalAgentToolsAllowlistScope {
+  return tools?.some(isAgentSelectorMcpToolName) ? 'all' : 'native';
+}
+
 export function createLocalAgentCapabilitySelector(
   selection: LocalTurnAgentProfileFacts['configSelection'] | undefined,
+  toolsAllowlistScope?: LocalAgentToolsAllowlistScope,
 ): LocalAgentCapabilitySelector {
   const allowedTools = normalizeSelector(selection?.tools);
+  const allowlistIsNative =
+    (toolsAllowlistScope ?? resolveToolsAllowlistScope(selection?.tools)) === 'native';
+  const skipsAllowlist = (
+    name: string,
+    options?: { featureOwned?: boolean; pluginTool?: boolean },
+  ) =>
+    options?.featureOwned === true ||
+    (allowlistIsNative && (options?.pluginTool === true || isAgentSelectorMcpToolName(name)));
   const blockedTools = normalizeSelector(selection?.disallowedTools) ?? new Set<string>();
   const allowedMcpServers = normalizeSelector(selection?.mcpServers);
   const allowedSkills = normalizeSelector(selection?.skills);
   const allowedExtensionSkills = normalizeSelector(selection?.extensionSkills);
   return {
-    allowsTool(name, hostAlias) {
+    allowsTool(name, hostAlias, options) {
       const names = [name, ...(hostAlias ? [hostAlias] : [])].map(normalizedSelectorName);
       return (
         !names.some((candidate) => blockedTools.has(candidate)) &&
-        (!allowedTools || names.some((candidate) => allowedTools.has(candidate)))
+        (skipsAllowlist(name, options) ||
+          !allowedTools ||
+          names.some((candidate) => allowedTools.has(candidate)))
       );
     },
     allowsMcpServer(serverName) {
@@ -707,14 +963,17 @@ function filterDesktopCapabilities(
   keep: (
     tool: RuntimeTool,
     source: RuntimeToolSource,
-    options?: { readonly mcp?: boolean; readonly serverName?: string },
+    options?: LocalTurnToolKeepOptions,
   ) => boolean,
-  requireMcpServerProvenance: boolean,
 ): AgentHostTurnCapabilityView | undefined {
   if (!capabilities) return undefined;
+  // Plugin tools are outside a native `tools` list (`isAgentSelectorMcpToolName`):
+  // App tools follow `disallowedTools` only, and `mcp__*` tools follow
+  // `mcpServers` like every MCP tool, whose server only an MCP binding can prove.
   const bindings = capabilities.runtimeToolBindings.filter((binding) =>
     keep(binding.tool, 'configured', {
-      ...(binding.kind === 'mcp' ? { mcp: true, serverName: binding.source } : {}),
+      pluginTool: true,
+      ...(binding.kind === 'mcp' ? { serverName: binding.source } : {}),
     }),
   );
   const allowedBindingTools = new Set(bindings.map((binding) => binding.tool));
@@ -726,17 +985,12 @@ function filterDesktopCapabilities(
       if (allBindingTools.has(tool)) return allowedBindingTools.has(tool);
       // Older/third-party capability providers can expose a direct RuntimeTool
       // without an owner binding. Keep that existing inventory under normal
-      // gates. A declared MCP server selector is different: without server
-      // provenance we cannot prove that an `mcp__*` tool belongs to an allowed
-      // server, so fail closed only for that narrow ambiguous case.
-      if (requireMcpServerProvenance && isMcpRuntimeTool(tool)) return false;
-      return keep(tool, 'configured');
+      // gates. Without server provenance, an `mcp__*` tool cannot be proven to
+      // belong to an allowed server, so a declared `mcpServers` fails it closed
+      // (`isMcpServerAllowed`).
+      return keep(tool, 'configured', { pluginTool: true });
     }),
   };
-}
-
-function isMcpRuntimeTool(tool: RuntimeTool): boolean {
-  return normalizedSelectorName(tool.def.name).startsWith('mcp__');
 }
 
 function filterExtensionSkills(

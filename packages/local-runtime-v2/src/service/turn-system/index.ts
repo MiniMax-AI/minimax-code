@@ -103,6 +103,8 @@ export {
 export {
   createLocalAgentCapabilitySelector,
   filterLocalTurnCapabilityInventory,
+  isAgentSelectorMcpToolName,
+  resolveToolsAllowlistScope,
   type FilteredLocalTurnCapabilityInventory,
   type LocalAgentCapabilitySelector,
   type LocalTurnAgentProfileFacts,
