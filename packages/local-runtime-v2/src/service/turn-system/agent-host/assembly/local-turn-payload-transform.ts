@@ -417,6 +417,7 @@ function mergeRequestPatch(
   patch: Readonly<Record<string, unknown>>,
 ): void {
   for (const [key, value] of Object.entries(patch)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     if (value === undefined) {
       delete target[key];
       continue;

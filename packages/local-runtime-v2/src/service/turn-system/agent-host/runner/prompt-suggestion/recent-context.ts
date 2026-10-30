@@ -157,21 +157,77 @@ function removeTaggedBlocks(value: string, open: string, close: string): string 
   return out + value.slice(cursor);
 }
 
+function firstTaggedBlock(value: string, open: string, close: string): string | undefined {
+  const start = value.indexOf(open);
+  if (start === -1) return undefined;
+  const end = value.indexOf(close, start + open.length);
+  return end === -1 ? undefined : value.slice(start, end + close.length);
+}
+
+const REQUESTED_CHANGE_MARKER = 'User comment (requested change):';
+
+function isBlank(char: string): boolean {
+  return char.trim() === '';
+}
+
+/**
+ * Comment bodies after each requested-change marker: the marker's trailing
+ * whitespace up to its last newline is skipped, and the body runs to the first
+ * blank line. Index scans keep this linear on untrusted text.
+ */
+function requestedChangeComments(block: string): string[] {
+  const comments: string[] = [];
+  let cursor = 0;
+  for (;;) {
+    const marker = block.indexOf(REQUESTED_CHANGE_MARKER, cursor);
+    if (marker === -1) break;
+    let index = marker + REQUESTED_CHANGE_MARKER.length;
+    let bodyStart = -1;
+    while (index < block.length && isBlank(block[index] ?? '')) {
+      if (block[index] === '\n') bodyStart = index + 1;
+      index += 1;
+    }
+    if (bodyStart === -1) {
+      cursor = index;
+      continue;
+    }
+    const bodyEnd = blankLineStart(block, bodyStart);
+    if (bodyEnd === undefined) break;
+    comments.push(block.slice(bodyStart, bodyEnd.start));
+    cursor = bodyEnd.end;
+  }
+  return comments;
+}
+
+/** First `\n<whitespace>*\n` at or after `from`, as the span it covers. */
+function blankLineStart(value: string, from: number): { start: number; end: number } | undefined {
+  let newline = value.indexOf('\n', from);
+  while (newline !== -1) {
+    let index = newline + 1;
+    let lastNewline = -1;
+    while (index < value.length && isBlank(value[index] ?? '')) {
+      if (value[index] === '\n') lastNewline = index;
+      index += 1;
+    }
+    if (lastNewline !== -1) return { start: newline, end: lastNewline + 1 };
+    newline = value.indexOf('\n', newline + 1);
+  }
+  return undefined;
+}
+
 function cleanUserText(value: string): string {
   let text = removeTaggedBlocks(
     removeTaggedBlocks(value, '<system-reminder>', '</system-reminder>'),
     '<questionnaire-response>',
     '</questionnaire-response>',
   );
-  const block = text.match(/<user-provided-context>[\s\S]*?<\/user-provided-context>/);
+  const block = firstTaggedBlock(text, '<user-provided-context>', '</user-provided-context>');
   if (block) {
-    const comments = [
-      ...block[0].matchAll(/User comment \(requested change\):\s*\n([\s\S]*?)\n\s*\n/g),
-    ]
-      .map((match) => match[1]?.trim())
+    const comments = requestedChangeComments(block)
+      .map((comment) => comment.trim())
       .filter(Boolean);
     text = text.replace(
-      block[0],
+      block,
       comments.length
         ? `[对引用内容的批注] ${comments.map((comment, index) => `(${index + 1}) ${comment}`).join(' ')}`
         : '',
