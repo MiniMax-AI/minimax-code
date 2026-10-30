@@ -33,6 +33,17 @@ export {
 } from './config.js';
 export { minimaxApiModels } from './byok-config.js';
 export {
+  CONVERSATION_STOP_CONFIG_DEFAULTS,
+  parseConversationStopConfig,
+  readConversationStopConfig,
+} from './conversation-config.js';
+export type {
+  ConversationStopConfig,
+  ConversationStopConfigRead,
+  ConversationStopReadFailure,
+  ConversationStopValueSource,
+} from './conversation-config.js';
+export {
   GOAL_CONFIG_DEFAULTS,
   GOAL_CONFIG_LIMITS,
   GOAL_EVALUATOR_MODEL_POLICIES,

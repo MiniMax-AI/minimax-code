@@ -141,6 +141,47 @@ describe('Minimax Code observability', () => {
     });
   });
 
+  it('persists stop policy decisions as stop.policy events', async () => {
+    const writes: Array<{ path: string; content: string }> = [];
+    const observability = createTuiObservability('/data', {
+      surface: 'tui',
+      pid: 42,
+      startedAtMs: 900,
+      now: () => 1_000,
+      append: vi.fn(async (path: string, content: string) => {
+        writes.push({ path, content });
+      }),
+      ensureDirectory: vi.fn(async () => undefined),
+      prune: vi.fn(async () => undefined),
+    });
+
+    observability.recordStopPolicy?.({
+      sessionId: 'session-1',
+      stopSubAgent: false,
+      policySource: { stopSubAgent: 'read_failed', stopAsyncBash: 'read_failed' },
+      delegationStop: 'skipped_by_policy',
+      readFailure: 'yaml_error',
+    });
+    await observability.flush();
+
+    const events = writes
+      .flatMap((write) => write.content.trim().split('\n'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toEqual([
+      expect.objectContaining({
+        schemaVersion: 1,
+        observedAtMs: 1_000,
+        surface: 'tui',
+        type: 'stop.policy',
+        sessionId: 'session-1',
+        stopSubAgent: false,
+        policySource: { stopSubAgent: 'read_failed', stopAsyncBash: 'read_failed' },
+        delegationStop: 'skipped_by_policy',
+        readFailure: 'yaml_error',
+      }),
+    ]);
+  });
+
   it('keeps bounded render latency aggregates and emits a final summary', async () => {
     const writes: string[] = [];
     const observability = createTuiObservability('/data', {

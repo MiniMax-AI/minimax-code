@@ -50,6 +50,19 @@ import { VirtualTerminalScreen } from "../helpers/virtual-terminal.js";
 import { VirtualTerminal } from "../pi-084-upstream/virtual-terminal.js";
 import { TuiFailure } from "../../src/failure.js";
 import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
+import { readConversationStopConfig } from "@mavis/config";
+
+// Keep every case off the developer's real config: the cases below were written
+// for Esc also stopping delegated agents and background bash, so that stays the
+// default, and a case that needs the shipped default says so.
+vi.mock("@mavis/config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@mavis/config")>()),
+  readConversationStopConfig: vi.fn(() => ({
+    stopSubAgent: true,
+    stopAsyncBash: true,
+    policySource: { stopSubAgent: "explicit", stopAsyncBash: "explicit" },
+  })),
+}));
 
 const runtimeEvent = (event: RawTuiRuntimeEvent): TuiRuntimeEvent =>
   normalizeTuiRuntimeEvent(event);
@@ -3356,7 +3369,53 @@ describe("createTuiApp", () => {
     await submitting;
   });
 
-  it("resumes a launcher-selected Session and exposes its ID for the exit hint", async () => {
+  it('leaves delegated agents running when Esc stops the root and conversation.stopSubAgent is off', async () => {
+    const terminal = new FakeTerminal();
+    const runtime = createRuntime();
+    let finishTurn: (() => void) | undefined;
+    vi.mocked(runtime.sendMessage).mockImplementation(async function* sendMessage() {
+      yield {
+        type: 'delta',
+        turnId: 'turn-delegating',
+        role: 'assistant',
+        content: 'Delegating',
+      };
+      await new Promise<void>((resolve) => {
+        finishTurn = resolve;
+      });
+      yield { type: 'done', turnId: 'turn-delegating' };
+    });
+    const app = createTuiApp({
+      runtime,
+      terminal,
+      version: '0.1.0',
+      workspaceDir: '/workspace',
+    });
+
+    app.start();
+    await app.ready;
+    const submitting = app.submit('Delegate, then keep going');
+    await vi.waitFor(() => expect(app.controller.snapshot().status).toBe('running'));
+    vi.mocked(readConversationStopConfig).mockClear();
+    // No `conversation` section in config.yaml: the shipped default.
+    vi.mocked(readConversationStopConfig).mockReturnValueOnce({
+      stopSubAgent: false,
+      stopAsyncBash: true,
+      policySource: { stopSubAgent: 'default', stopAsyncBash: 'default' },
+    });
+
+    await app.abortTurn();
+
+    // The switch was read once, from the shared config reader, and it kept the
+    // delegated agents out of the stop: only the root Run is aborted.
+    expect(readConversationStopConfig).toHaveBeenCalledTimes(1);
+    expect(runtime.stopDelegation).not.toHaveBeenCalled();
+    finishTurn?.();
+    await submitting;
+    await app.stop();
+  });
+
+  it('resumes a launcher-selected Session and exposes its ID for the exit hint', async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
     const app = createTuiApp({

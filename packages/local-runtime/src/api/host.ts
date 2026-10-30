@@ -28,6 +28,7 @@ import { stopBackgroundLocalBashTask } from "../background-task/bash-runner.js";
 import { closeLocalBackgroundTaskDelivery } from "../background-task/delivery.js";
 import { createLocalBackgroundTaskService } from "../background-task/index.js";
 import {
+  abortAdmittedBackgroundTask,
   beginBackgroundTaskShutdown,
   drainBackgroundTasks,
 } from "../background-task/lifecycle.js";
@@ -685,6 +686,11 @@ export class LocalRuntimeApiHost {
       () => this.configGetter().dataDir,
       this.nowMs,
       async (task, reason) => {
+        abortAdmittedBackgroundTask(
+          this,
+          task.taskId,
+          reason ?? (task.kind === 'bash' ? 'Background bash stopped' : 'Background task stopped'),
+        );
         await stopBackgroundLocalBashTask(task, reason);
         const childSessionId = task.metadata?.childSessionId;
         const subTurnId = task.metadata?.subTurnId;

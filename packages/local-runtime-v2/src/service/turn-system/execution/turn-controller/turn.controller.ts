@@ -32,6 +32,8 @@ interface ActiveTurnEntry {
   readonly toolResultTail: AgentHostSteeringMessage[];
   readonly toolResultTailClaims: Map<string, readonly AgentHostSteeringMessage[]>;
   readonly renewalTimer: ReturnType<typeof setInterval>;
+  /** `onReleased` of accepted aborts; each runs once, synchronously, in `complete`. */
+  readonly releaseListeners: (() => void)[];
   toolResultTailOpen: number;
   phase: 'running' | 'closing' | 'aborted';
   abortReason?: string;
@@ -90,6 +92,7 @@ export function createTurnController(options: TurnControllerOptions): TurnContro
       toolResultTailClaims: new Map(),
       toolResultTailOpen: 0,
       phase: 'running',
+      releaseListeners: [],
       renewalTimer: setInterval(() => scheduleRenewal(entry), renewalIntervalMs),
     };
     entry.renewalTimer.unref?.();
@@ -139,10 +142,13 @@ export function createTurnController(options: TurnControllerOptions): TurnContro
   return {
     register,
     scope,
-    abort: async ({ sessionId, turnId, reason, onAccepted }) => {
+    abort: async ({ sessionId, turnId, reason, onAccepted, onReleased }) => {
       const entry = entries.get(sessionId);
       if (!entry) return { status: 'not-running' };
       if (turnId && entry.turn.turnId !== turnId) return { status: 'turn-mismatch' };
+      // Attached before `onAccepted` can yield: the Turn may release while that
+      // hook is still running, and the release moment must not be missed.
+      watchRelease(entry, onReleased);
       if (entry.phase === 'closing') {
         await onAccepted?.();
         const released = await waitForRelease(entry.released, abortTimeoutMs);
@@ -171,6 +177,9 @@ export function createTurnController(options: TurnControllerOptions): TurnContro
       clearInterval(entry.renewalTimer);
       entries.delete(turn.sessionId);
       clearControl(entry);
+      // Synchronously, right after `entries.delete`: nothing can register the
+      // next Turn in between, so a listener sees the exact release moment.
+      notifyReleased(options, entry);
       entry.resolveReleased();
     },
     activeTurnId: (sessionId) => entries.get(sessionId)?.turn.turnId,
@@ -214,6 +223,45 @@ function logRuntimeShutdown(
     );
   } catch {
     // Diagnostics must never change shutdown behavior.
+  }
+}
+
+function watchRelease(entry: ActiveTurnEntry, listener: (() => void) | undefined): void {
+  if (listener) entry.releaseListeners.push(listener);
+}
+
+/**
+ * Runs each accepted abort's `onReleased` exactly once. A failing listener is
+ * logged and never reaches the caller settling the Turn: releasing ownership
+ * must not depend on a stop's follow-up, nor may one listener starve the next.
+ */
+function notifyReleased(options: TurnControllerOptions, entry: ActiveTurnEntry): void {
+  for (const listener of entry.releaseListeners.splice(0)) {
+    try {
+      listener();
+    } catch (error) {
+      logReleaseListenerFailure(options, entry, error);
+    }
+  }
+}
+
+function logReleaseListenerFailure(
+  options: TurnControllerOptions,
+  entry: ActiveTurnEntry,
+  error: unknown,
+): void {
+  try {
+    options.logger?.info(
+      {
+        event: 'turn_release_listener_failed',
+        session_id: entry.turn.sessionId,
+        turn_id: entry.turn.turnId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      '[local-runtime-v2] Turn release listener failed',
+    );
+  } catch {
+    // Diagnostics must never change release behavior.
   }
 }
 

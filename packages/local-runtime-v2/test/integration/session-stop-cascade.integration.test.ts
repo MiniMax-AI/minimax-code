@@ -10,10 +10,12 @@
  * other layer is production: real TurnSystem admission/abort, real background
  * task rows, real bash execution (a real OS process), real delivery scheduler.
  */
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { getConfigPath } from '@mavis/config';
+import { logger } from '@mavis/shared/local-runtime-logging/logger';
 import {
   type CreatedLocalRuntimeHost,
   type LocalRuntimeConfig,
@@ -273,6 +275,10 @@ describe('session stop cascade over the production V2 host', () => {
 
       const turnsBeforeStop = harness.startedTurns.length;
 
+      // This case covers the full cascade, so it turns the subagent switch on
+      // (default off); the background bash switch is on by default.
+      await writeStopConfig(dataDir, { stopSubAgent: true });
+
       // Desktop Stop button entry: the same abort sink every stop funnels into.
       const stopStartedAt = Date.now();
       await conversation.ingress.abort(owner.sessionId, 'user_stop');
@@ -398,6 +404,416 @@ describe('session stop cascade boundary', () => {
       );
       expect(reminder).toContain(lateId);
       expect(reminder).toContain('"status":"canceled"');
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade boundary after release', () => {
+  it(
+    "A3: leaves the next Turn's background work alone when the stopped Turn released during the Goal pause",
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-a3-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+
+      const oldTaskId = deferred<string>();
+      const newTaskId = deferred<string>();
+      const newPidFile = join(dataDir, 'next-turn.pid');
+      harness.scripts = [
+        // Turn 1: starts long work, then keeps running until the stop aborts it.
+        async (input) => {
+          oldTaskId.resolve(await startBackgroundBash(input, 'sleep 600'));
+          await awaitAbort(input);
+        },
+        // Turn 2: the user's next message, admitted while the stop still pauses the Goal.
+        async (input) => {
+          newTaskId.resolve(
+            await startBackgroundBash(input, `echo $$ > ${JSON.stringify(newPidFile)}; sleep 600`),
+          );
+        },
+      ];
+      // The stop pauses the Goal (a storage write) after the abort was accepted.
+      // Hold that pause open: the stopped Turn releases and the next Turn starts
+      // before the stop request returns, exactly the window the boundary must close.
+      const goalPauseEntered = deferred<void>();
+      const goalPauseGate = deferred<void>();
+      vi.spyOn(liveHost.apiHost.threadGoal, 'pauseActiveGoalForAbort').mockImplementation(
+        async () => {
+          goalPauseEntered.resolve();
+          await goalPauseGate.promise;
+        },
+      );
+      try {
+        const owner = await conversation.lifecycle.createSession({
+          agentName: 'mavis',
+          workspaceDir: join(dataDir, 'workspace'),
+          sessionType: 'root',
+        });
+        const stopped = await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Work until I stop you', attachments: [] },
+        });
+        const oldId = await oldTaskId.promise;
+
+        const stopping = conversation.ingress.abort(owner.sessionId, 'user_stop');
+        await goalPauseEntered.promise;
+        // `completion` settles only after the controller released the stopped Turn.
+        await stopped.completion.catch(() => undefined);
+        const next = await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start something new', attachments: [] },
+        });
+        const newId = await newTaskId.promise;
+        await next.completion;
+        const pid = await vi.waitFor(() => readPidFile(newPidFile), {
+          timeout: 20_000,
+          interval: 100,
+        });
+
+        goalPauseGate.resolve();
+        await expect(stopping).resolves.toBe(true);
+
+        // The stopped Turn's own work is canceled as usual...
+        await expectTasksCanceled(liveHost, [oldId]);
+        // ...while the next Turn's work, created after the release, is no target.
+        // Give a (wrong) cascade ample time to act before asserting it did not.
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        await expect(liveHost.apiHost.backgroundTaskService.get(newId)).resolves.toMatchObject({
+          status: 'running',
+        });
+        expect(isProcessAlive(pid)).toBe(true);
+      } finally {
+        goalPauseGate.resolve();
+      }
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade identity at arrival', () => {
+  it(
+    'H1: a stop that arrives while the Session is idle leaves a Turn that starts during scope setup running',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-h1-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const lookupEntered = deferred();
+      const releaseLookup = deferred();
+      const newTaskId = deferred<string>();
+      const turnBReady = deferred();
+      const releaseTurnB = deferred();
+      const pidFile = join(dataDir, 'arrival-turn.pid');
+      let ownerSessionId = '';
+      let blockOwnerScopeLookup = false;
+      let turnBAborted = false;
+      const info = vi.spyOn(logger, 'info');
+      const originalGetSessionById = liveHost.apiHost.getSessionById.bind(liveHost.apiHost);
+      const getSessionById = vi
+        .spyOn(liveHost.apiHost, 'getSessionById')
+        .mockImplementation(async (sessionId) => {
+          if (blockOwnerScopeLookup && sessionId === ownerSessionId) {
+            blockOwnerScopeLookup = false;
+            lookupEntered.resolve();
+            await releaseLookup.promise;
+          }
+          return originalGetSessionById(sessionId);
+        });
+      harness.scripts = [
+        async (input) => {
+          newTaskId.resolve(
+            await startBackgroundBash(
+              input,
+              `echo $$ > ${JSON.stringify(pidFile)}; sleep 600`,
+            ),
+          );
+          turnBReady.resolve();
+          turnBAborted =
+            (await Promise.race([
+              releaseTurnB.promise.then(() => false),
+              awaitAbort(input).then(() => true),
+            ])) === true;
+        },
+      ];
+      try {
+        const owner = await conversation.lifecycle.createSession({
+          agentName: 'mavis',
+          workspaceDir: join(dataDir, 'workspace'),
+          sessionType: 'root',
+        });
+        ownerSessionId = owner.sessionId;
+        blockOwnerScopeLookup = true;
+
+        const stopping = conversation.ingress.abort(owner.sessionId, 'user_stop');
+        await lookupEntered.promise;
+        const started = await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start work while stop scope resolves', attachments: [] },
+        });
+        const taskId = await newTaskId.promise;
+        await turnBReady.promise;
+        const pid = await vi.waitFor(() => readPidFile(pidFile), {
+          timeout: 20_000,
+          interval: 100,
+        });
+
+        releaseLookup.resolve();
+        await expect(stopping).resolves.toBe(false);
+        await vi.waitFor(() =>
+          expect(info).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: 'background_task_user_stop_cascade_completed',
+              sessionId: owner.sessionId,
+            }),
+            expect.any(String),
+          ),
+        );
+        expect(turnBAborted).toBe(false);
+        releaseTurnB.resolve();
+        await expect(started.completion).resolves.toMatchObject({ status: 'completed' });
+        await expect(liveHost.apiHost.backgroundTaskService.get(taskId)).resolves.toMatchObject({
+          status: 'running',
+        });
+        expect(isProcessAlive(pid)).toBe(true);
+      } finally {
+        releaseLookup.resolve();
+        releaseTurnB.resolve();
+        getSessionById.mockRestore();
+        info.mockRestore();
+      }
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade final delivery admission: target suppression', () => {
+  it(
+    'H2: a background notice past the delivery recheck never wakes a Session stopped meanwhile',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-h2-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const taskId = deferred<string>();
+      const deliveryEntered = deferred();
+      const releaseDelivery = deferred();
+      const deliverySettled = deferred();
+      const info = vi.spyOn(logger, 'info');
+      const originalSteer = conversation.ingress.steer.bind(conversation.ingress);
+      const steer = vi.spyOn(conversation.ingress, 'steer').mockImplementation(async (input) => {
+        if (input.producerId === 'background-task-delivery') {
+          deliveryEntered.resolve();
+          await releaseDelivery.promise;
+          try {
+            return await originalSteer(input);
+          } finally {
+            deliverySettled.resolve();
+          }
+        }
+        return originalSteer(input);
+      });
+      harness.scripts = [
+        async (input) => {
+          taskId.resolve(await startBackgroundBash(input, 'sleep 1'));
+        },
+        async () => undefined,
+      ];
+      try {
+        const owner = await conversation.lifecycle.createSession({
+          agentName: 'mavis',
+          workspaceDir: join(dataDir, 'workspace'),
+          sessionType: 'root',
+        });
+        const first = await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start a short background task', attachments: [] },
+        });
+        await first.completion;
+        const x = await taskId.promise;
+        await deliveryEntered.promise;
+
+        await expect(conversation.ingress.abort(owner.sessionId, 'user_stop')).resolves.toBe(false);
+        await vi.waitFor(() =>
+          expect(info).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: 'background_task_user_stop_cascade_completed',
+              sessionId: owner.sessionId,
+            }),
+            expect.any(String),
+          ),
+        );
+        releaseDelivery.resolve();
+        await deliverySettled.promise;
+        await vi.waitFor(() =>
+          expect(info).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: 'background_task_delivery_suppressed',
+              reason: 'user_stop_target_admission',
+              result: 'skipped',
+            }),
+            expect.any(String),
+          ),
+        );
+
+        expect(
+          harness.startedTurns.filter((turn) => turn.turnId.startsWith('turn_task_delivery')),
+        ).toEqual([]);
+        await expect(conversation.query.getSession(owner.sessionId)).resolves.not.toMatchObject({
+          status: 'error',
+        });
+        expect((await liveHost.apiHost.backgroundTaskService.get(x))?.deliveredAt).toBeUndefined();
+
+        const next = await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'What happened?', attachments: [] },
+        });
+        await next.completion;
+        await vi.waitFor(() =>
+          expect(harness.injectedMessages.some(({ content }) => content.includes(x))).toBe(true),
+        );
+      } finally {
+        releaseDelivery.resolve();
+        steer.mockRestore();
+        info.mockRestore();
+      }
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade final delivery admission: open window', () => {
+  it(
+    'H3: a notice admitted while the stop window is open is held busy and then skipped',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-h3-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const taskId = deferred<string>();
+      const deliveryEntered = deferred();
+      const releaseDelivery = deferred();
+      const goalPauseEntered = deferred();
+      const releaseGoalPause = deferred();
+      const schedulerRetried = deferred();
+      const info = vi.spyOn(logger, 'info');
+      const originalSteer = conversation.ingress.steer.bind(conversation.ingress);
+      const steer = vi.spyOn(conversation.ingress, 'steer').mockImplementation(async (input) => {
+        if (input.producerId === 'background-task-delivery') {
+          deliveryEntered.resolve();
+          await releaseDelivery.promise;
+        }
+        return originalSteer(input);
+      });
+      let waitForSchedulerRetry = false;
+      let stoppedTaskId = '';
+      const originalGet = liveHost.apiHost.backgroundTaskService.get.bind(
+        liveHost.apiHost.backgroundTaskService,
+      );
+      const get = vi.spyOn(liveHost.apiHost.backgroundTaskService, 'get').mockImplementation(
+        async (id) => {
+          const task = await originalGet(id);
+          if (waitForSchedulerRetry && id === stoppedTaskId) schedulerRetried.resolve();
+          return task;
+        },
+      );
+      const pauseGoal = vi
+        .spyOn(liveHost.apiHost.threadGoal, 'pauseActiveGoalForAbort')
+        .mockImplementation(async () => {
+          goalPauseEntered.resolve();
+          await releaseGoalPause.promise;
+        });
+      harness.scripts = [
+        async (input) => {
+          taskId.resolve(await startBackgroundBash(input, 'echo terminal'));
+        },
+      ];
+      try {
+        const owner = await conversation.lifecycle.createSession({
+          agentName: 'mavis',
+          workspaceDir: join(dataDir, 'workspace'),
+          sessionType: 'root',
+        });
+        const first = await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start a background task', attachments: [] },
+        });
+        await first.completion;
+        stoppedTaskId = await taskId.promise;
+        await deliveryEntered.promise;
+
+        const stopping = conversation.ingress.abort(owner.sessionId, 'user_stop');
+        await goalPauseEntered.promise;
+        releaseDelivery.resolve();
+        await vi.waitFor(() =>
+          expect(info).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: 'background_task_delivery_suppressed',
+              reason: 'user_stop_window_admission',
+              result: 'busy',
+            }),
+            expect.any(String),
+          ),
+        );
+        releaseGoalPause.resolve();
+        await expect(stopping).resolves.toBe(false);
+        await vi.waitFor(() =>
+          expect(info).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: 'background_task_user_stop_cascade_completed',
+              sessionId: owner.sessionId,
+            }),
+            expect.any(String),
+          ),
+        );
+        waitForSchedulerRetry = true;
+        await schedulerRetried.promise;
+        await vi.waitFor(() =>
+          expect(info).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: 'background_task_delivery_suppressed',
+              taskIds: [stoppedTaskId],
+              reason: 'user_stop_target',
+            }),
+            expect.any(String),
+          ),
+        );
+
+        const windowAdmissions = info.mock.calls.filter(
+          ([fields]) =>
+            (fields as { event?: string; reason?: string }).event ===
+              'background_task_delivery_suppressed' &&
+            (fields as { reason?: string }).reason === 'user_stop_window_admission',
+        );
+        expect(windowAdmissions).toHaveLength(1);
+        expect(
+          harness.startedTurns.filter((turn) => turn.turnId.startsWith('turn_task_delivery')),
+        ).toEqual([]);
+      } finally {
+        releaseDelivery.resolve();
+        releaseGoalPause.resolve();
+        steer.mockRestore();
+        get.mockRestore();
+        pauseGoal.mockRestore();
+        info.mockRestore();
+      }
     },
     HOST_TEST_TIMEOUT_MS,
   );
@@ -711,6 +1127,375 @@ describe('session stop cascade scope', () => {
   );
 });
 
+describe('session stop cascade switches: defaults', () => {
+  it(
+    'G1: by default stops the owner bash and leaves a background subagent running; its completion still wakes the Session',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-g1-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const bashTaskId = deferred<string>();
+      const subagentTaskId = deferred<string>();
+      const childRunning = deferred<AbortSignal>();
+      const childRelease = deferred<void>();
+
+      harness.scripts = [
+        // Turn 1 (owner): a long bash plus a background subagent.
+        async (input) => {
+          bashTaskId.resolve(await startBackgroundBash(input, 'sleep 600'));
+          subagentTaskId.resolve(await startBackgroundSubagent(input, 'Keep working after the stop'));
+        },
+        // Turn 2 (child Session): keeps working until the test lets it finish.
+        async (input) => {
+          childRunning.resolve(input.signal!);
+          await Promise.race([childRelease.promise, awaitAbort(input)]);
+        },
+      ];
+
+      const owner = await conversation.lifecycle.createSession({
+        agentName: 'mavis',
+        workspaceDir: join(dataDir, 'workspace'),
+        sessionType: 'root',
+      });
+      await (
+        await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start a bash and a subagent', attachments: [] },
+        })
+      ).completion;
+      const bashId = await bashTaskId.promise;
+      const subagentId = await subagentTaskId.promise;
+      const childSignal = await childRunning.promise;
+
+      // No `conversation` section in config.yaml: the defaults apply.
+      await conversation.ingress.abort(owner.sessionId, 'user_stop');
+
+      await expectTasksCanceled(liveHost, [bashId]);
+      // Give a (wrong) cascade ample time to reach the subagent before asserting it did not.
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      expect(childSignal.aborted).toBe(false);
+      await expect(liveHost.apiHost.backgroundTaskService.get(subagentId)).resolves.toMatchObject({
+        status: 'running',
+      });
+
+      const turnsBeforeCompletion = harness.startedTurns.length;
+      childRelease.resolve();
+      // Its completion notice is delivered as usual: a delivery Turn wakes the owner.
+      await vi.waitFor(
+        () => {
+          const deliveryTurn = harness.startedTurns
+            .slice(turnsBeforeCompletion)
+            .find(
+              (turn) =>
+                turn.sessionId === owner.sessionId && turn.turnId.startsWith('turn_task_delivery'),
+            );
+          expect(deliveryTurn).toBeDefined();
+        },
+        { timeout: 30_000, interval: 100 },
+      );
+      await expect(liveHost.apiHost.backgroundTaskService.get(subagentId)).resolves.toMatchObject({
+        status: 'succeeded',
+      });
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade switches: subagents only', () => {
+  it(
+    'G2: stopSubAgent on and stopAsyncBash off stops the subagent and the bash in its child Session, and leaves the owner bash running',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-g2-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const ownerPidFile = join(dataDir, 'owner-bash.pid');
+      const childPidFile = join(dataDir, 'child-bash.pid');
+      const ownerBashTaskId = deferred<string>();
+      const subagentTaskId = deferred<string>();
+      const childBashTaskId = deferred<string>();
+
+      harness.scripts = [
+        // Turn 1 (owner): its own bash plus a background subagent.
+        async (input) => {
+          ownerBashTaskId.resolve(
+            await startBackgroundBash(input, `echo $$ > ${JSON.stringify(ownerPidFile)}; sleep 600`),
+          );
+          subagentTaskId.resolve(await startBackgroundSubagent(input, 'Start a bash, then work'));
+        },
+        // Turn 2 (child Session): the subagent starts a bash of its own, then works on.
+        async (input) => {
+          childBashTaskId.resolve(
+            await startBackgroundBash(input, `echo $$ > ${JSON.stringify(childPidFile)}; sleep 600`),
+          );
+          await awaitAbort(input);
+        },
+      ];
+
+      const owner = await conversation.lifecycle.createSession({
+        agentName: 'mavis',
+        workspaceDir: join(dataDir, 'workspace'),
+        sessionType: 'root',
+      });
+      await (
+        await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start a bash and a subagent', attachments: [] },
+        })
+      ).completion;
+      const ownerBashId = await ownerBashTaskId.promise;
+      const subagentId = await subagentTaskId.promise;
+      const childBashId = await childBashTaskId.promise;
+      const ownerPid = await vi.waitFor(() => readPidFile(ownerPidFile), {
+        timeout: 20_000,
+        interval: 100,
+      });
+      const childPid = await vi.waitFor(() => readPidFile(childPidFile), {
+        timeout: 20_000,
+        interval: 100,
+      });
+
+      await writeStopConfig(dataDir, { stopSubAgent: true, stopAsyncBash: false });
+      await conversation.ingress.abort(owner.sessionId, 'user_stop');
+
+      // The subagent goes with everything in its child Session, bash included:
+      // the bash switch only covers bash the owner started itself.
+      await expectTasksCanceled(liveHost, [subagentId, childBashId]);
+      await vi.waitFor(() => expect(isProcessAlive(childPid)).toBe(false), {
+        timeout: 15_000,
+        interval: 100,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await expect(liveHost.apiHost.backgroundTaskService.get(ownerBashId)).resolves.toMatchObject({
+        status: 'running',
+      });
+      expect(isProcessAlive(ownerPid)).toBe(true);
+      // The stop left it running on purpose; do not leak the process past the test.
+      await liveHost.apiHost.backgroundTaskService.stop(ownerBashId, 'test_cleanup');
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade switches: both off', () => {
+  it(
+    'G3: with both switches off leaves all background work running and still pauses the Goal',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-g3-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const pidFile = join(dataDir, 'bash.pid');
+      const bashTaskId = deferred<string>();
+      const subagentTaskId = deferred<string>();
+      const childRunning = deferred<AbortSignal>();
+
+      harness.scripts = [
+        async (input) => {
+          bashTaskId.resolve(
+            await startBackgroundBash(input, `echo $$ > ${JSON.stringify(pidFile)}; sleep 600`),
+          );
+          subagentTaskId.resolve(await startBackgroundSubagent(input, 'Work until stopped'));
+        },
+        async (input) => {
+          childRunning.resolve(input.signal!);
+          await awaitAbort(input);
+        },
+      ];
+
+      const owner = await conversation.lifecycle.createSession({
+        agentName: 'mavis',
+        workspaceDir: join(dataDir, 'workspace'),
+        sessionType: 'root',
+      });
+      await (
+        await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start a bash and a subagent', attachments: [] },
+        })
+      ).completion;
+      const bashId = await bashTaskId.promise;
+      const subagentId = await subagentTaskId.promise;
+      const childSignal = await childRunning.promise;
+      const pid = await vi.waitFor(() => readPidFile(pidFile), { timeout: 20_000, interval: 100 });
+      const goalPause = vi.spyOn(liveHost.apiHost.threadGoal, 'pauseActiveGoalForAbort');
+
+      await writeStopConfig(dataDir, { stopSubAgent: false, stopAsyncBash: false });
+      await conversation.ingress.abort(owner.sessionId, 'user_stop');
+
+      // Nothing ran at the time (not-running), so this pause can only come from the
+      // stop's own accept: the cascade is off, the Goal pause is not.
+      await vi.waitFor(() => expect(goalPause).toHaveBeenCalledWith(owner.sessionId));
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await expect(liveHost.apiHost.backgroundTaskService.get(bashId)).resolves.toMatchObject({
+        status: 'running',
+      });
+      expect(isProcessAlive(pid)).toBe(true);
+      await expect(liveHost.apiHost.backgroundTaskService.get(subagentId)).resolves.toMatchObject({
+        status: 'running',
+      });
+      expect(childSignal.aborted).toBe(false);
+      // The stop left both running on purpose; do not leak them past the test.
+      await liveHost.apiHost.backgroundTaskService.stop(bashId, 'test_cleanup');
+      await liveHost.apiHost.backgroundTaskService.stop(subagentId, 'test_cleanup');
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade switches: fresh read', () => {
+  it(
+    'G4: a config.yaml edit applies to the very next stop',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-g4-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const pidFile = join(dataDir, 'bash.pid');
+      const bashTaskId = deferred<string>();
+
+      harness.scripts = [
+        async (input) => {
+          bashTaskId.resolve(
+            await startBackgroundBash(input, `echo $$ > ${JSON.stringify(pidFile)}; sleep 600`),
+          );
+        },
+      ];
+
+      const owner = await conversation.lifecycle.createSession({
+        agentName: 'mavis',
+        workspaceDir: join(dataDir, 'workspace'),
+        sessionType: 'root',
+      });
+      await (
+        await conversation.ingress.submit({
+          sessionId: owner.sessionId,
+          source: 'api',
+          allowQueue: false,
+          message: { content: 'Start a bash', attachments: [] },
+        })
+      ).completion;
+      const bashId = await bashTaskId.promise;
+      const pid = await vi.waitFor(() => readPidFile(pidFile), { timeout: 20_000, interval: 100 });
+
+      await writeStopConfig(dataDir, { stopAsyncBash: false });
+      await conversation.ingress.abort(owner.sessionId, 'user_stop');
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await expect(liveHost.apiHost.backgroundTaskService.get(bashId)).resolves.toMatchObject({
+        status: 'running',
+      });
+
+      // Hand edit between two stops, no restart: the next stop reads the new value.
+      await writeStopConfig(dataDir, { stopAsyncBash: true });
+      await conversation.ingress.abort(owner.sessionId, 'user_stop');
+
+      await expectTasksCanceled(liveHost, [bashId]);
+      await vi.waitFor(() => expect(isProcessAlive(pid)).toBe(false), {
+        timeout: 15_000,
+        interval: 100,
+      });
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
+describe('session stop cascade switches: foreground subagent', () => {
+  it(
+    'G5: with the default config a foreground subagent still ends with the stopped Turn',
+    async () => {
+      dataDir = await mkdtemp(join(tmpdir(), 'stop-cascade-g5-'));
+      await mkdir(join(dataDir, 'workspace'), { recursive: true });
+      host = await createHost(dataDir);
+      const liveHost = host;
+      const conversation = host.apiHost.runtimeConversation!;
+      const childRunning = deferred<AbortSignal>();
+
+      harness.scripts = [
+        // Turn 1 (owner): a foreground task; the tool call blocks this Turn until
+        // its child ends. Its only link to the stop is the Turn's own signal.
+        async (input) => {
+          await tool(input, 'task')
+            .impl.execute(
+              input.toolConfig.context,
+              {
+                agent_name: 'worker',
+                description: 'Foreground child',
+                prompt: 'Run until the owner is stopped',
+                // Explicit: an omitted flag means background whenever the Turn can
+                // read task_output, which every production Turn here can.
+                run_in_background: false,
+              },
+              input.signal,
+            )
+            .catch(() => undefined);
+        },
+        // Turn 2 (child Session): runs until aborted.
+        async (input) => {
+          childRunning.resolve(input.signal!);
+          await awaitAbort(input);
+        },
+      ];
+
+      const owner = await conversation.lifecycle.createSession({
+        agentName: 'mavis',
+        workspaceDir: join(dataDir, 'workspace'),
+        sessionType: 'root',
+      });
+      const running = await conversation.ingress.submit({
+        sessionId: owner.sessionId,
+        source: 'api',
+        allowQueue: false,
+        message: { content: 'Delegate in the foreground', attachments: [] },
+      });
+      const childSignal = await childRunning.promise;
+      const turnsBeforeStop = harness.startedTurns.length;
+
+      // Default switches: stopSubAgent is off, and the foreground child must still
+      // end with the stopped Turn, through the tool call's abort signal.
+      await conversation.ingress.abort(owner.sessionId, 'user_stop');
+      await running.completion.catch(() => undefined);
+
+      await vi.waitFor(() => expect(childSignal.aborted).toBe(true), {
+        timeout: 20_000,
+        interval: 100,
+      });
+      const foreground = await vi.waitFor(
+        async () => {
+          const { items } = await liveHost.apiHost.backgroundTaskService.list({
+            ownerSessionId: owner.sessionId,
+            kinds: ['subagent'],
+            limit: 10,
+          });
+          const row = items.find((task) => task.metadata?.['executionMode'] === 'foreground');
+          expect(row).toMatchObject({ status: 'canceled' });
+          return row!;
+        },
+        { timeout: 20_000, interval: 100 },
+      );
+      // Settled by the Turn itself and latched as delivered: it never wakes the Session.
+      expect(foreground.deliveredAt).toBeDefined();
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      expect(
+        harness.startedTurns
+          .slice(turnsBeforeStop)
+          .filter((turn) => turn.turnId.startsWith('turn_task_delivery')),
+      ).toEqual([]);
+    },
+    HOST_TEST_TIMEOUT_MS,
+  );
+});
+
 /**
  * The runtime records no child pid, so the command publishes its own shell pid.
  * That is the process group the cascade must actually kill.
@@ -739,7 +1524,7 @@ async function expectTasksCanceled(
   );
 }
 
-function createHost(hostDataDir: string): Promise<CreatedLocalRuntimeHost> {
+async function createHost(hostDataDir: string): Promise<CreatedLocalRuntimeHost> {
   const config = {
     dataDir: hostDataDir,
     defaultModel: 'test/model',
@@ -752,7 +1537,7 @@ function createHost(hostDataDir: string): Promise<CreatedLocalRuntimeHost> {
       },
     },
   } as LocalRuntimeConfig;
-  return createLocalRuntimeHostV2ForTest({
+  const created = await createLocalRuntimeHostV2ForTest({
     dataDir: hostDataDir,
     runtimeOwnerKind: 'cli',
     capabilities: { cliEmbedded: true },
@@ -760,6 +1545,37 @@ function createHost(hostDataDir: string): Promise<CreatedLocalRuntimeHost> {
     defaultWorkspaceDir: join(hostDataDir, 'workspace'),
     fetchImpl: async () => Response.json({ errorCode: 0, action: 1 }),
   });
+  try {
+    // Every stop reads its switches from getConfigPath(), afresh. Host creation
+    // pins that to this test's data directory (it sets MINIMAX_DATA_DIR), which is
+    // what keeps these cases off the developer's real config.yaml.
+    expect(getConfigPath()).toBe(join(hostDataDir, 'config.yaml'));
+  } catch (error) {
+    await created.apiHost.close().catch(() => undefined);
+    throw error;
+  }
+  return created;
+}
+
+const STOP_CONFIG_MARKER = '# session-stop-cascade test switches';
+
+/**
+ * Sets the user-stop switches the next stop reads. Call it once the host is up,
+ * so nothing at startup can rewrite the file; content already there is kept.
+ */
+async function writeStopConfig(
+  hostDataDir: string,
+  conversation: { readonly stopSubAgent?: boolean; readonly stopAsyncBash?: boolean },
+): Promise<void> {
+  const path = join(hostDataDir, 'config.yaml');
+  const existing = await readFile(path, 'utf8').catch(() => '');
+  const kept = (existing.split(STOP_CONFIG_MARKER)[0] ?? '').trimEnd();
+  const block = [
+    STOP_CONFIG_MARKER,
+    'conversation:',
+    ...Object.entries(conversation).map(([key, value]) => `  ${key}: ${String(value)}`),
+  ].join('\n');
+  await writeFile(path, `${kept ? `${kept}\n` : ''}${block}\n`);
 }
 
 function isProcessAlive(pid: number): boolean {

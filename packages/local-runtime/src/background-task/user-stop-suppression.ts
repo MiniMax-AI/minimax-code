@@ -173,6 +173,32 @@ export function isTaskDeliverySuppressed(
   return getState(host).suppressedTaskIds.has(taskId);
 }
 
+export type UserStopAdmissionHold =
+  | { readonly result: 'busy'; readonly reason: 'user_stop_window_admission' }
+  | {
+      readonly result: 'busy' | 'skipped';
+      readonly reason: 'user_stop_target_admission';
+      readonly suppressedIds: readonly string[];
+    };
+
+/** Final-admission recheck for a background delivery; `undefined` admits it. */
+export function userStopAdmissionHold(
+  host: LocalTaskRunnerHostWithSessionLookup,
+  sessionId: string,
+  taskIds: readonly string[],
+): UserStopAdmissionHold | undefined {
+  if (isUserStopWindowOpen(host, sessionId)) {
+    return { result: 'busy', reason: 'user_stop_window_admission' };
+  }
+  const suppressedIds = taskIds.filter((taskId) => isTaskDeliverySuppressed(host, taskId));
+  if (suppressedIds.length === 0) return undefined;
+  return {
+    result: suppressedIds.length === taskIds.length ? 'skipped' : 'busy',
+    reason: 'user_stop_target_admission',
+    suppressedIds,
+  };
+}
+
 /**
  * Serializes cascades per Session. A second stop never joins the first one's
  * run: it may carry a later boundary (the user sent a new message, the new Turn

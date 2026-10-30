@@ -98,6 +98,16 @@ export interface AbortTurnInput {
   readonly reason: string;
   /** Runs after exact ownership accepts the abort, before waiting for release. */
   readonly onAccepted?: () => void | Promise<void>;
+  /**
+   * Called once, synchronously, at the moment the Turn this abort was accepted
+   * for releases its Session: before the abort resolves, and before the next
+   * Turn can be registered. The abort path holds no Session lock, so a caller
+   * that must tell this Turn's work from the next Turn's needs this moment, not
+   * the (later) moment the abort returns. Never called for `not-running` or
+   * `turn-mismatch`; after `abort-timeout` it still fires if the Turn releases
+   * later. Must not throw; a failure is logged and ignored.
+   */
+  readonly onReleased?: () => void;
 }
 
 export interface TurnFailureProjection {
@@ -613,10 +623,11 @@ export interface TurnSystemSessionCapabilities {
  */
 export interface UserStopCascadePort {
   /**
-   * Runs before the abort. Resolving `undefined` means "do not cascade" (child
-   * worker Session, unknown Session, or the hook itself failed).
+   * Runs synchronously before the abort and must not block. Its delivery window
+   * becomes effective before this returns; Session scope resolution happens in
+   * the returned run so the controller still aborts the Turn at arrival.
    */
-  begin(sessionId: string): Promise<UserStopCascadeRun | undefined>;
+  begin(sessionId: string): UserStopCascadeRun | undefined;
 }
 
 /**
@@ -625,12 +636,27 @@ export interface UserStopCascadePort {
  */
 export type UserStopAcceptance = 'controller_accepted' | 'not_running';
 
+/**
+ * Where a stop fixed its target boundary: the stopped Turn released the Session,
+ * or the controller reported that nothing was running.
+ */
+export type UserStopBoundarySource = 'released' | 'not_running';
+
 export interface UserStopCascadeRun {
   /**
    * Side effects a stop may only have once it is accepted (pausing the Goal).
-   * Idempotent; must never throw; resolves after the pause attempt.
+   * Idempotent; must never throw; resolves after Session scope resolution and
+   * the pause attempt.
    */
   accept(how: UserStopAcceptance): Promise<void>;
+  /**
+   * Fixes the target boundary now. Both sources are the last moment before the
+   * next Turn can be admitted — the stop itself holds no Session lock and is
+   * still pausing the Goal — so that Turn's work stays out of this stop.
+   * Synchronous (it runs inside the controller's release); the first boundary
+   * wins; must never throw.
+   */
+  markBoundary(source: UserStopBoundarySource): void;
   /** Detached follow-up; must never throw and never block the stop response. */
   complete(result: AbortTurnResult): void;
   /**
