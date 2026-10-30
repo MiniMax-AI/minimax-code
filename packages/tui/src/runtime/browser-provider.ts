@@ -26,9 +26,16 @@ export function resolveTuiBrowserProviderOptions(
 ): HeadlessChromeBrowserProviderOptions | undefined {
   if (config.beta?.browserUseTooling !== true) return undefined;
   const chromePath = env.MCODE_CHROME_PATH?.trim() || config.browser?.chromePath?.trim();
+  const useSwiftShader = env.MCODE_BROWSER_USE_SWIFTSHADER?.trim().toLowerCase() === 'true';
   return {
     dataDir,
     ...(chromePath ? { chromePath } : {}),
+    // CPU rendering is an explicit opt-in for trusted local tests on GPU-less hosts.
+    ...(useSwiftShader
+      ? {
+          extraArgs: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+        }
+      : {}),
   };
 }
 
