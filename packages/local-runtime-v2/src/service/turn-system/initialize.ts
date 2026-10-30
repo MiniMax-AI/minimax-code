@@ -90,9 +90,8 @@ export async function initializeTurnSystem(
     // Decision v5: fallen steering commits before the Turn releases Session
     // ownership, so a stop-then-send Turn reads the rows (TS-75).
     steeringTeardown: steeringRequeue,
-    ...(options.turnSettlement
-      ? { turnSettlement: options.turnSettlement }
-      : {}),
+    ...(options.turnSettlement ? { turnSettlement: options.turnSettlement } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
   });
   const execution = createTurnExecutionService({
     repository,

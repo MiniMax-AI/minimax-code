@@ -709,6 +709,8 @@ export interface InitializeTurnSystemOptions {
   readonly logger?: {
     info(fields: Record<string, unknown>, message: string): void;
     warn(fields: Record<string, unknown>, message: string): void;
+    error?(fields: Record<string, unknown>, message: string): void;
+    debug?(fields: Record<string, unknown>, message: string): void;
   };
   readonly sessions: TurnSystemSessionCapabilities;
   readonly processStartedAtMs: number;

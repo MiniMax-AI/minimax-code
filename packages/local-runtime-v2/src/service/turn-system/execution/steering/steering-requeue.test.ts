@@ -350,6 +350,64 @@ describe('createSteeringRequeue PTC provenance', () => {
   });
 });
 
+describe('createSteeringRequeue pending durability probe', () => {
+  function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it('reports a Turn batch as pending until the Queue holds it', async () => {
+    const enqueue = deferredVoid();
+    const requeue = createSteeringRequeue({
+      queue: queuePorts({
+        enqueue: vi.fn(async (input: QueueEnqueueInput) => {
+          await enqueue.promise;
+          return enqueueResult(input);
+        }),
+      }),
+      released: { publish: vi.fn(async () => undefined) },
+    });
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-1' })).toBe(false);
+
+    requeue.discard(batch([steering('composer-steer', 'req-1', 'follow-up query')]));
+
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-1' })).toBe(true);
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-2' })).toBe(false);
+
+    enqueue.resolve();
+    await requeue.drain();
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-1' })).toBe(false);
+  });
+
+  it('reports an aborted Turn batch as pending until it is durable in the conversation', async () => {
+    const commit = vi.fn(async () => false);
+    const requeue = createSteeringRequeue({
+      queue: queuePorts(),
+      released: { publish: vi.fn(async () => undefined) },
+      teardown: { commit },
+    });
+
+    requeue.discard({
+      ...batch([steering('composer-steer', 'req-1', 'stopped instruction')]),
+      cause: 'abort',
+      abortReason: 'user_stop',
+      turnReleased: deferredVoid().promise,
+    });
+
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-1' })).toBe(true);
+    // A failed commit leaves the batch unpersisted.
+    await requeue.commitDiscardedBeforeRelease({ sessionId: 'session-1', turnId: 'turn-1' });
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-1' })).toBe(true);
+
+    commit.mockResolvedValueOnce(true);
+    await requeue.commitDiscardedBeforeRelease({ sessionId: 'session-1', turnId: 'turn-1' });
+    expect(requeue.hasPendingForTurn({ sessionId: 'session-1', turnId: 'turn-1' })).toBe(false);
+  });
+});
+
 function trustedSteering(id: string): AgentHostSteeringMessage {
   const message = steering('composer-steer', id, id);
   return {
