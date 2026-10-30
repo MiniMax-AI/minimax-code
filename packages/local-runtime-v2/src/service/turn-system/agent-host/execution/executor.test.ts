@@ -1212,8 +1212,9 @@ describe('LocalRuntimeTurnExecutor PTC program Bash promotion', () => {
             source === null ? ['bash'] : ['bash', 'task_output'],
           );
           // task_output and bash are run_code children only, never top-level.
-          // tool_search is listed on every Turn since on-demand loading.
-          expect(runInput.tools?.map(({ def }) => def.name)).toEqual(['run_code', 'tool_search']);
+          // tool_search joins them only when MCP disclosure actually deferred
+          // something, which this Turn has nothing to defer.
+          expect(runInput.tools?.map(({ def }) => def.name)).toEqual(['run_code']);
           const description = runInput.tools?.[0]?.def.description ?? '';
           expect(description).not.toContain('moves to the background');
           expect(description).toContain('extends the program to fit it');
@@ -2126,13 +2127,14 @@ async function suggestionHooks(
 }
 
 describe("LocalRuntimeTurnExecutor prompt suggestion", () => {
-  it("collects nothing for a turn on a BYOK model, even when the feature is on", async () => {
+  it("collects a BYOK turn on the remote switch alone, with no model check", async () => {
     const makeByok = () => suggestionInput(false);
     const counts: number[] = [];
     const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
       counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
       await suggestionHooks(runInput);
     };
+    // Without the port the Turn is untouched.
     await new LocalRuntimeTurnExecutor(options(observe)).execute(makeByok());
     const committed = vi.fn();
     const runner = new LocalRuntimeTurnExecutor({
@@ -2142,26 +2144,9 @@ describe("LocalRuntimeTurnExecutor prompt suggestion", () => {
     const outcome = await runner.execute(makeByok());
     runner.afterSuccessfulCommit(outcome);
     expect(outcome.status).toBe("completed");
-    // No capture Hook was installed, so the BYOK request is untouched.
-    expect(counts[1]).toBe(counts[0]);
-    expect(committed).not.toHaveBeenCalled();
-  });
-
-  it("collects a BYOK turn when the port allows unmanaged models (internal builds)", async () => {
-    const committed = vi.fn();
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        await suggestionHooks(runInput);
-      }),
-      promptSuggestion: {
-        enabled: () => true,
-        allowUnmanagedModels: true,
-        turnStarted: () => undefined,
-        committed,
-      },
-    });
-    const outcome = await runner.execute(suggestionInput(false));
-    runner.afterSuccessfulCommit(outcome);
+    // The remote switch alone installs the capture Hook; an unmanaged model is
+    // no longer a reason to skip the turn.
+    expect(counts[1]).toBeGreaterThan(counts[0]);
     expect(committed).toHaveBeenCalledOnce();
   });
 
