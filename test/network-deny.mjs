@@ -19,7 +19,7 @@ function denied() {
   appendFileSync(process.env.MCODE_TEST_NETWORK_AUDIT, new Error('network-attempt').stack + '\n');
   throw new Error('Unexpected network access during standalone validation');
 }
-globalThis.fetch = function (input, init) {
+function offlineFetch(input, init) {
   const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
   if (allowed && url.origin === allowed.origin) return originalFetch(input, init);
   // Offline acceptance after restoring managed capabilities: these requests return only local failure responses and never reach servers.
@@ -33,7 +33,18 @@ globalThis.fetch = function (input, init) {
     return Promise.resolve(new Response(JSON.stringify({ error: 'Managed service offline fixture' }), { status: 503 }));
   }
   return denied();
-};
+}
+globalThis.fetch = offlineFetch;
+// The CLI installs Undici's fetch over the global one so direct connections stay on
+// HTTP/1.1. Keep this mock authoritative for the whole process: a later assignment
+// is ignored, so managed services still resolve to the offline fixture instead of
+// reaching the socket layer.
+Object.defineProperty(globalThis, 'fetch', {
+  configurable: true,
+  enumerable: true,
+  get: () => offlineFetch,
+  set: () => {},
+});
 Socket.prototype.connect = function (...args) {
   const options = Array.isArray(args[0]) ? args[0][0] : args[0];
   if (allowed && options && typeof options === 'object' && options.host === allowed.hostname && String(options.port) === allowed.port) {
