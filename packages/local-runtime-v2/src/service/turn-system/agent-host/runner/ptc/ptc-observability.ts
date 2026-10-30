@@ -334,14 +334,13 @@ export function createPtcProgramTiming(now: () => number = Date.now): PtcProgram
   };
 }
 
-type PtcChildPermissionDecision = 'allow' | 'deny' | 'deny_stop';
+type PtcChildPermissionDecision = 'allow' | 'deny';
 
 /**
  * Maps one final `permission.enforcement` decision to the user-facing outcome.
- * Policy and Plugin auto-approvals asked nobody and are skipped. A user denial
- * of a child is always "deny and stop": every child ask carries
- * `stopPtcOnDeny` and Agent Core stops the program on that denial. A Mini App
- * denial or a policy block does not stop the program.
+ * Policy and Plugin auto-approvals asked nobody and are skipped. Every
+ * blocked child is `deny`: a user denial, a Mini App denial and a policy
+ * block all fail only that child, and the program keeps running.
  */
 function ptcChildPermissionDecision(
   fields: Readonly<Record<string, unknown>>,
@@ -349,16 +348,13 @@ function ptcChildPermissionDecision(
   if (fields.gate_result === 'proceed')
     return fields.decision_source === 'user_reply' ? 'allow' : undefined;
   if (fields.gate_result !== 'blocked') return undefined;
-  return fields.decision_source === 'approval_or_abort' && fields.miniapp_denied !== true
-    ? 'deny_stop'
-    : 'deny';
+  return 'deny';
 }
 
 /**
  * `ptc child permission` and `ptc_child_permission_total`: which child asked
- * and what the user (or policy) decided, and how often a denial stops the
- * program. Only run_code children carry `parentToolCallId`, so ordinary
- * Turns never reach either write.
+ * and what the user (or policy) decided. Only run_code children carry
+ * `parentToolCallId`, so ordinary Turns never reach either write.
  */
 export function observePtcChildPermission(
   sinks: { readonly logger?: PtcLogger; readonly metricsClient?: Pick<PtcMetrics, 'counter'> },

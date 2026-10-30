@@ -44,7 +44,20 @@ export interface ExecutePtcQuickJsInput {
    * rest instead of stopping the program. Without it the limit is final.
    */
   readonly readDeadlineAtMs?: () => number | undefined;
+  /**
+   * True while a child is in its admission stage (before-tool hooks and the
+   * user's approval). Agent Core keeps moving the deadline later meanwhile,
+   * so the time left stays the same; see `onWallClock`.
+   */
+  readonly readDeadlinePaused?: () => boolean;
 }
+
+/**
+ * Shortest wait before the wall clock checks a paused deadline again. The
+ * time left does not shrink during the pause, so with only a few ms left the
+ * timer would otherwise wake almost continuously until the user answers.
+ */
+const PAUSED_DEADLINE_RECHECK_MS = 1_000;
 
 /** The host owns time limits, bridge admission and every execution record. */
 export async function executePtcQuickJs(
@@ -119,14 +132,21 @@ class PtcQuickJsExecution {
 
   private readonly onWallClock = (): void => {
     let deadlineAtMs: number | undefined;
+    let paused = false;
     try {
       deadlineAtMs = this.input.readDeadlineAtMs?.();
+      paused = this.input.readDeadlinePaused?.() === true;
     } catch {
       // An unreadable deadline keeps the limit the program started with.
     }
     const remainingMs = deadlineAtMs === undefined ? 0 : deadlineAtMs - Date.now();
     if (remainingMs > 0 && !this.finished && !this.stopReason) {
-      this.wallTimer = setTimeout(this.onWallClock, remainingMs);
+      // Admission time does not count against the program, so a paused
+      // deadline keeps the same time left; checking it again after that small
+      // remainder would spin the timer for as long as an approval stays open.
+      // At most one recheck interval of program time can pass the deadline.
+      const delayMs = paused ? Math.max(remainingMs, PAUSED_DEADLINE_RECHECK_MS) : remainingMs;
+      this.wallTimer = setTimeout(this.onWallClock, delayMs);
       return;
     }
     this.stop('wall_clock_exceeded');

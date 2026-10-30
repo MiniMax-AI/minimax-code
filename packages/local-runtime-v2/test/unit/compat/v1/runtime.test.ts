@@ -271,10 +271,9 @@ describe("v1 prompt suggestion setting compatibility", () => {
   });
 });
 
-describe("v1 Agent reference compatibility", () => {
-  function resolver(
-    overrides: Partial<AgentReferenceResolver> = {},
-  ): AgentReferenceResolver {
+
+describe('v1 Agent reference compatibility', () => {
+  function resolver(overrides: Partial<AgentReferenceResolver> = {}): AgentReferenceResolver {
     return {
       resolveAgentReadScope: vi.fn(async (requestedName: string) => ({
         requestedName,

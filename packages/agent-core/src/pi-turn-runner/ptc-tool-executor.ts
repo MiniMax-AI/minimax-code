@@ -88,6 +88,9 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
       id: `ptc_batch_${++nextBatchId}`,
       startedAtMs: options.nowMs(),
       wallClockMs: requested ?? PTC_DEFAULT_WALL_CLOCK_MS,
+      pauseCount: 0,
+      pausedSinceMs: undefined,
+      pausedMs: 0,
     };
     batches.set(parent, created);
     return created;
@@ -96,7 +99,7 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
   return {
     getBatch(parentToolCallId, wallClockMs) {
       const clock = getClock(parentToolCallId, wallClockMs);
-      return clock ? batchView(clock) : undefined;
+      return clock ? batchView(clock, options.nowMs()) : undefined;
     },
     getToolExecutionMode(toolName) {
       const tool = findRuntimeTool(options.turn, toolName);
@@ -120,7 +123,7 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
         return failedOutcome(baseRecord, 'PTC_NOT_AVAILABLE', 'PTC is unavailable for this turn.');
       }
       const clock = getClock(request.parentToolCallId);
-      if (!clock || options.nowMs() >= deadlineOf(clock)) {
+      if (!clock || isExpired(clock, options.nowMs())) {
         return failedOutcome(baseRecord, 'PTC_BATCH_EXPIRED', 'PTC batch deadline has expired.');
       }
       if (request.signal?.aborted) {
@@ -190,8 +193,19 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
         name: request.toolName,
         arguments: { ...request.args },
       } as AgentToolCall;
+      const beforeToolCall = options.agent.beforeToolCall;
       const lifecycleConfig: ToolCallLifecycleConfig = {
-        ...(options.agent.beforeToolCall ? { beforeToolCall: options.agent.beforeToolCall } : {}),
+        ...(beforeToolCall
+          ? {
+              beforeToolCall: pauseClockDuringAdmission(
+                beforeToolCall,
+                clock,
+                options.nowMs,
+                () => readTurnLogger(options.turn),
+                baseRecord,
+              ),
+            }
+          : {}),
         ...(options.agent.onToolExecutionStart
           ? { onToolExecutionStart: options.agent.onToolExecutionStart }
           : {}),
@@ -475,10 +489,11 @@ function completedOutcome(
       ...(effectiveIsError ? { is_error: true } : {}),
       ...(projected?.resultRef ? { result_ref: projected.resultRef } : {}),
     },
+    // A user denial of a child approval is native: only this call fails
+    // (PTC_PERMISSION_DENIED) and the program keeps running, so the whole
+    // result goes back to the model once the program ends. Stopping the
+    // whole program is the Turn's stop button, not the deny button.
     retainedFacts,
-    ...(failure?.kind === 'blocked' && failure.approvalStatus === 'denied'
-      ? { stopPtcProgram: true }
-      : {}),
     terminateAgent,
   };
 }
@@ -652,16 +667,128 @@ interface BatchClock {
   /**
    * Largest resolved wall clock any run_code call in the batch asked for, or
    * more when a foreground Bash child extended it (extendForChildTimeout).
+   * Time spent paused for tool admission is not part of it.
    */
   wallClockMs: number;
+  /** Children currently in their admission stage (see pauseClockDuringAdmission). */
+  pauseCount: number;
+  /** When the current pause began; set only while `pauseCount` is above zero. */
+  pausedSinceMs: number | undefined;
+  /** Total length of the pauses that have ended. */
+  pausedMs: number;
 }
 
-function deadlineOf(clock: BatchClock): number {
-  return clock.startedAtMs + clock.wallClockMs;
+/** Ended pauses plus the one in progress, if any. */
+function pausedTotalMs(clock: BatchClock, nowMs: number): number {
+  const ongoingMs =
+    clock.pausedSinceMs === undefined ? 0 : Math.max(0, nowMs - clock.pausedSinceMs);
+  return clock.pausedMs + ongoingMs;
 }
 
-function batchView(clock: BatchClock): PtcToolExecutionBatch {
-  return { id: clock.id, deadlineAtMs: deadlineOf(clock) };
+/** While a pause is in progress the deadline moves with the clock, so the time left stays the same. */
+function deadlineOf(clock: BatchClock, nowMs: number): number {
+  return clock.startedAtMs + clock.wallClockMs + pausedTotalMs(clock, nowMs);
+}
+
+function isExpired(clock: BatchClock, nowMs: number): boolean {
+  return nowMs >= deadlineOf(clock, nowMs);
+}
+
+function batchView(clock: BatchClock, nowMs: number): PtcToolExecutionBatch {
+  return {
+    id: clock.id,
+    deadlineAtMs: deadlineOf(clock, nowMs),
+    pausedMs: pausedTotalMs(clock, nowMs),
+    paused: clock.pauseCount > 0,
+  };
+}
+
+/**
+ * Starts one child's pause; returns its start, or undefined for a batch that
+ * had already expired. Pausing an expired batch would keep moving its
+ * deadline, and the program is not revived by a late admission.
+ */
+function beginPause(clock: BatchClock, nowMs: number): number | undefined {
+  if (isExpired(clock, nowMs)) return undefined;
+  if (clock.pauseCount === 0) clock.pausedSinceMs = nowMs;
+  clock.pauseCount += 1;
+  return nowMs;
+}
+
+/** Several children may be paused at once; the clock runs again only after the last one. */
+function endPause(clock: BatchClock, nowMs: number): void {
+  clock.pauseCount = Math.max(0, clock.pauseCount - 1);
+  if (clock.pauseCount > 0 || clock.pausedSinceMs === undefined) return;
+  clock.pausedMs += Math.max(0, nowMs - clock.pausedSinceMs);
+  clock.pausedSinceMs = undefined;
+}
+
+type BeforeToolCall = NonNullable<ToolCallLifecycleConfig['beforeToolCall']>;
+
+/** Pauses at least this long are logged; shorter ones are routine policy checks. */
+const LOGGED_ADMISSION_PAUSE_MS = 1_000;
+
+/**
+ * The program clock stands still while a child is in Pi's beforeToolCall
+ * chain: PTC child policy, tool safety checks, plugin PreToolUse hooks, plan
+ * mode and the permission gate, whose approval card waits for the user. A
+ * native tool call starts timing only after that chain (Pi runs the whole
+ * chain before `tool.execute`, where Bash computes its timeouts), so an
+ * approval left open for minutes used to stop the program with
+ * wall_clock_exceeded, while the same call outside a program just waited.
+ * The pause ends in `finally`, so a chain that throws or is cancelled also
+ * restarts the clock.
+ */
+function pauseClockDuringAdmission(
+  beforeToolCall: BeforeToolCall,
+  clock: BatchClock,
+  nowMs: () => number,
+  logger: () => Partial<PiTurnRunnerLogger> | undefined,
+  record: ChildRecord,
+): BeforeToolCall {
+  return async (context, signal) => {
+    const pausedAtMs = beginPause(clock, nowMs());
+    try {
+      return await beforeToolCall(context, signal);
+    } finally {
+      if (pausedAtMs !== undefined) {
+        const resumedAtMs = nowMs();
+        endPause(clock, resumedAtMs);
+        const pausedMs = resumedAtMs - pausedAtMs;
+        if (pausedMs >= LOGGED_ADMISSION_PAUSE_MS) {
+          logAdmissionPause(
+            logger(),
+            record,
+            pausedMs,
+            deadlineOf(clock, resumedAtMs) - resumedAtMs,
+          );
+        }
+      }
+    }
+  };
+}
+
+/** One line per long admission (usually an approval); never logs arguments. */
+function logAdmissionPause(
+  logger: Partial<PiTurnRunnerLogger> | undefined,
+  record: ChildRecord,
+  pausedMs: number,
+  remainingMs: number,
+): void {
+  try {
+    logger?.info?.(
+      {
+        child_tool_call_id: record.child_tool_call_id,
+        parent_tool_call_id: record.parent_tool_call_id,
+        tool_name: record.tool_name,
+        paused_ms: Math.round(pausedMs),
+        remaining_ms: Math.round(remainingMs),
+      },
+      'ptc wall clock paused for tool admission',
+    );
+  } catch {
+    // Diagnostics must not change the child outcome.
+  }
 }
 
 type ChildRecord = Pick<
@@ -683,12 +810,13 @@ function childDeadline(
 ): PtcChildDeadline {
   return {
     get atMs() {
-      return deadlineOf(clock);
+      return deadlineOf(clock, nowMs());
     },
     extendForTimeout: (timeoutSeconds: number) => {
-      const extension = extendForChildTimeout(clock, nowMs(), timeoutSeconds);
+      const atMs = nowMs();
+      const extension = extendForChildTimeout(clock, atMs, timeoutSeconds);
       if (extension) logWallClockExtended(logger(), record, timeoutSeconds, extension);
-      return deadlineOf(clock);
+      return deadlineOf(clock, atMs);
     },
     reportTimeout: (decision: PtcChildTimeoutDecision) =>
       logChildTimeout(logger(), record, decision),
@@ -723,14 +851,20 @@ function extendForChildTimeout(
   timeoutSeconds: number,
 ): WallClockExtension | undefined {
   if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) return undefined;
-  const deadlineAtMs = deadlineOf(clock);
+  // The deadline already includes the admission pauses, and `wallClockMs`
+  // excludes them. The one-hour cap counts program time only, so it moves by
+  // the pauses too; and the pauses are taken back out when the extended
+  // deadline is written into `wallClockMs`, so it lands exactly on now +
+  // timeout + margin instead of being pushed later by the pauses a second time.
+  const pausedMs = pausedTotalMs(clock, nowMs);
+  const deadlineAtMs = clock.startedAtMs + clock.wallClockMs + pausedMs;
   const remainingMs = deadlineAtMs - nowMs;
   if (remainingMs <= 0 || timeoutSeconds * 1_000 <= remainingMs) return undefined;
   const wantedAtMs = nowMs + timeoutSeconds * 1_000 + CHILD_TIMEOUT_MARGIN_MS;
-  const maxAtMs = clock.startedAtMs + PTC_MAX_WALL_CLOCK_MS;
+  const maxAtMs = clock.startedAtMs + PTC_MAX_WALL_CLOCK_MS + pausedMs;
   const extendedAtMs = Math.min(wantedAtMs, maxAtMs);
   if (extendedAtMs <= deadlineAtMs) return undefined;
-  clock.wallClockMs = extendedAtMs - clock.startedAtMs;
+  clock.wallClockMs = extendedAtMs - clock.startedAtMs - pausedMs;
   return { remainingMs, extendedRemainingMs: extendedAtMs - nowMs, capped: wantedAtMs > maxAtMs };
 }
 

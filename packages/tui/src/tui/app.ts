@@ -636,6 +636,12 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     },
     isStopped: () => stopped,
   });
+  const readPtcSetting = options.runtime.getPtcSetting?.bind(options.runtime);
+  const writePtcSetting = options.runtime.setPtcEnabled?.bind(options.runtime);
+  const ptcSetting =
+    readPtcSetting && writePtcSetting
+      ? { read: () => readPtcSetting(), write: (enabled: boolean) => writePtcSetting(enabled) }
+      : undefined;
   commandFlow = new TuiCommandFlow({
     bashFlow,
     workspaceDir: options.workspaceDir,
@@ -662,6 +668,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
           },
         }
       : {}),
+    ...(ptcSetting ? { ptcSetting } : {}),
     ...(options.auth ? { auth: options.auth } : {}),
     openExternalTarget: options.openExternalTarget,
     interactionFlow,

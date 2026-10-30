@@ -2286,3 +2286,367 @@ describe('TranscriptView', () => {
     expect(lines.every((line) => visibleWidth(line) <= 24)).toBe(true);
   });
 });
+
+describe('TranscriptView PTC programs', () => {
+  const program = (
+    status: 'running' | 'succeeded' | 'failed' | 'cancelled',
+    overrides: Partial<Parameters<typeof createTranscriptCell>[0]> = {},
+  ) =>
+    createTranscriptCell({
+      id: 'tool:turn-1:run-1',
+      kind: 'tool',
+      status,
+      title: 'run_code',
+      toolCallId: 'run-1',
+      content: JSON.stringify({
+        code: "const files = await tools.glob({ pattern: '*.ts' });\nreturn files.length;",
+        description: 'Count TypeScript files',
+      }),
+      turnId: 'turn-1',
+      createdAtMs: 1,
+      ...overrides,
+    });
+  const child = (
+    index: number,
+    status: 'running' | 'succeeded' | 'failed' | 'cancelled',
+    overrides: Partial<Parameters<typeof createTranscriptCell>[0]> = {},
+  ) =>
+    createTranscriptCell({
+      id: `tool:turn-1:child-${index}`,
+      kind: 'tool',
+      status,
+      title: 'read',
+      toolCallId: `child-${index}`,
+      parentToolCallId: 'run-1',
+      content: JSON.stringify({ path: `src/file-${index}.ts` }),
+      detail: status === 'failed' ? `ENOENT: missing file-${index}` : `body of file-${index}`,
+      turnId: 'turn-1',
+      createdAtMs: index + 2,
+      ...overrides,
+    });
+  const plain = (view: TranscriptView, width = 100) =>
+    stripVTControlCharacters(view.render(width).join('\n'));
+
+  it('streams the latest three child calls under a running program and folds earlier ones', () => {
+    const view = new TranscriptView(() => [
+      program('running'),
+      child(1, 'succeeded'),
+      child(2, 'succeeded'),
+      child(3, 'failed'),
+      child(4, 'succeeded'),
+      child(5, 'running'),
+    ]);
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Running code · Count TypeScript files');
+    expect(rendered).toContain('… 2 earlier calls');
+    expect(rendered).not.toContain('src/file-1.ts');
+    expect(rendered).not.toContain('src/file-2.ts');
+    expect(rendered).toContain('× Read src/file-3.ts · ENOENT: missing file-3');
+    expect(rendered).toContain('✓ Read src/file-4.ts');
+    expect(rendered).toContain('… Reading src/file-5.ts');
+    expect(rendered).not.toContain('Read (src/file-');
+    expect(rendered).not.toContain('"code"');
+  });
+
+  it('settles a finished program into one summary that keeps only failed calls and an output preview', () => {
+    const view = new TranscriptView(() => [
+      program('succeeded', {
+        durationMs: 2_500,
+        detail: 'line 1\nline 2\nline 3\nline 4\nline 5',
+      }),
+      child(1, 'succeeded'),
+      child(2, 'failed'),
+      child(3, 'succeeded'),
+    ]);
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Ran code · Count TypeScript files · 3 calls · 1 failed · 2.5s');
+    expect(rendered).toContain('× Read src/file-2.ts · ENOENT: missing file-2');
+    expect(rendered).not.toContain('src/file-1.ts');
+    expect(rendered).not.toContain('src/file-3.ts');
+    expect(rendered).toContain('line 3');
+    expect(rendered).not.toContain('line 4');
+    expect(rendered).toContain('… 2 more lines');
+  });
+
+  it('labels a failed program and keeps its error output', () => {
+    const view = new TranscriptView(() => [
+      program('failed', { detail: 'TypeError: files is not iterable' }),
+      child(1, 'succeeded'),
+    ]);
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Code failed · Count TypeScript files · 1 call');
+    expect(rendered).toContain('TypeError: files is not iterable');
+  });
+
+  it('shows the program code and every child call in detailed mode', () => {
+    const view = new TranscriptView(() => [
+      program('succeeded', { detail: 'result: 3 files' }),
+      child(1, 'succeeded'),
+      child(2, 'failed'),
+      child(3, 'succeeded'),
+      child(4, 'succeeded'),
+    ]);
+
+    view.toggleDetailMode();
+    const rendered = plain(view);
+
+    expect(rendered).toContain("const files = await tools.glob({ pattern: '*.ts' });");
+    expect(rendered).toContain('return files.length;');
+    for (const index of [1, 2, 3, 4]) expect(rendered).toContain(`Read src/file-${index}.ts`);
+    expect(rendered).toContain('ENOENT: missing file-2');
+    expect(rendered).toContain('result: 3 files');
+    expect(rendered.indexOf('return files.length;')).toBeLessThan(
+      rendered.indexOf('src/file-1.ts'),
+    );
+  });
+
+  it('shows only the heading when the program is explicitly collapsed', () => {
+    const view = new TranscriptView(() => [
+      program('running', { displayMode: 'collapsed' }),
+      child(1, 'running'),
+    ]);
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Running code · Count TypeScript files');
+    expect(rendered).not.toContain('src/file-1.ts');
+  });
+
+  it('keeps child reads out of read groups and finds children after unrelated rows', () => {
+    const view = new TranscriptView(() => [
+      program('running'),
+      child(1, 'succeeded'),
+      createTranscriptCell({
+        id: 'tool:turn-1:top-read',
+        kind: 'tool',
+        status: 'succeeded',
+        title: 'read',
+        toolCallId: 'top-read',
+        content: JSON.stringify({ path: 'README.md' }),
+        turnId: 'turn-1',
+        createdAtMs: 10,
+      }),
+      child(2, 'running'),
+    ]);
+
+    const rendered = plain(view);
+
+    expect(rendered).not.toMatch(/Read(ing)? \d+ files/u);
+    expect(rendered).toContain('Read (README.md)');
+    expect(rendered).toContain('✓ Read src/file-1.ts');
+    expect(rendered).toContain('… Reading src/file-2.ts');
+    expect(rendered.indexOf('src/file-2.ts')).toBeLessThan(rendered.indexOf('README.md'));
+  });
+
+  it('renders a child whose program is not in the transcript as a regular row', () => {
+    const view = new TranscriptView(() => [
+      child(1, 'succeeded'),
+      child(2, 'succeeded', { parentToolCallId: 'other' }),
+    ]);
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Read 2 files');
+    expect(rendered).not.toContain('Ran code');
+  });
+
+  it('marks children cut off by an interrupted program the same way live and in history', () => {
+    const live = new TranscriptView(() => [
+      program('cancelled'),
+      child(1, 'succeeded'),
+      child(2, 'cancelled'),
+    ]);
+    const history = new TranscriptView(() => [
+      program('failed', { detail: 'Run interrupted' }),
+      child(1, 'succeeded'),
+      child(2, 'running'),
+    ]);
+
+    const liveRendered = plain(live);
+    const historyRendered = plain(history);
+
+    expect(liveRendered).toContain(
+      'Code interrupted · Count TypeScript files · 2 calls · 1 interrupted',
+    );
+    expect(liveRendered).toContain('⊘ Reading src/file-2.ts · interrupted');
+    expect(historyRendered).toContain(
+      'Code failed · Count TypeScript files · 2 calls · 1 interrupted',
+    );
+    expect(historyRendered).toContain('⊘ Reading src/file-2.ts · interrupted');
+    expect(historyRendered).not.toContain('… Reading src/file-2.ts');
+  });
+
+  it('falls back to the generic summary when the description is missing', () => {
+    const view = new TranscriptView(() => [
+      program('succeeded', { content: JSON.stringify({ code: 'return 1;' }) }),
+    ]);
+
+    expect(plain(view)).toContain('Ran code');
+    expect(plain(view)).not.toContain('{"code"');
+  });
+
+  it('keeps program rows within a narrow terminal and keeps the call count visible', () => {
+    const view = new TranscriptView(() => [
+      program('succeeded', {
+        content: JSON.stringify({
+          code: 'x',
+          description: 'A very long program description '.repeat(4),
+        }),
+      }),
+      child(1, 'failed'),
+    ]);
+
+    const lines = view.render(48).map((line) => stripVTControlCharacters(line));
+
+    expect(lines.every((line) => visibleWidth(line) <= 48)).toBe(true);
+    expect(lines[0]).toContain('· 1 call · 1 failed');
+  });
+
+  it('rerenders a program when a child changes after it in the store', () => {
+    const store = new TranscriptStore([program('running'), child(1, 'running')]);
+    const view = new TranscriptView(store);
+
+    expect(plain(view)).toContain('… Reading src/file-1.ts');
+    store.upsert({ id: 'tool:turn-1:child-1', status: 'succeeded' });
+
+    expect(plain(view)).toContain('✓ Read src/file-1.ts');
+  });
+
+  it('keeps the program of visible children when a long turn is folded', () => {
+    const children = Array.from({ length: 8 }, (_, index) => child(index + 1, 'succeeded'));
+    const view = new TranscriptView(() => [program('succeeded'), ...children], {
+      maxCellsPerTurn: 4,
+    });
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Ran code · Count TypeScript files');
+    expect(rendered).not.toContain('Read (src/file-');
+    expect(rendered).not.toMatch(/Read \d+ files/u);
+  });
+
+  it.each([false, true])(
+    'still counts and shows a failed child that a long turn folded away (appendOnly=%s)',
+    (appendOnly) => {
+      const user = createTranscriptCell({
+        id: 'user:turn-1',
+        kind: 'user',
+        status: 'succeeded',
+        content: 'Read every file',
+        turnId: 'turn-1',
+        createdAtMs: 0,
+      });
+      const children = Array.from({ length: 8 }, (_, index) =>
+        child(index + 1, index === 0 ? 'failed' : 'succeeded'),
+      );
+      const cells = [user, program('succeeded'), ...children];
+      const folded = new TranscriptView(() => cells, {
+        maxCellsPerTurn: 4,
+        appendOnly: () => appendOnly,
+      });
+      const full = new TranscriptView(() => cells);
+
+      const rendered = plain(folded);
+
+      expect(plain(full)).toContain('Ran code · Count TypeScript files · 8 calls · 1 failed');
+      expect(rendered).toContain('Ran code · Count TypeScript files · 8 calls · 1 failed');
+      expect(rendered).toContain('× Read src/file-1.ts');
+      expect(rendered).not.toContain('Read (src/file-');
+    },
+  );
+
+  it('counts folded children when the program itself opens the turn', () => {
+    const children = Array.from({ length: 8 }, (_, index) =>
+      child(index + 1, index === 1 ? 'cancelled' : 'succeeded'),
+    );
+    const view = new TranscriptView(() => [program('succeeded'), ...children], {
+      maxCellsPerTurn: 4,
+    });
+
+    const rendered = plain(view);
+
+    expect(rendered).toContain('8 calls · 1 interrupted');
+    expect(rendered).toContain('⊘ Reading src/file-2.ts');
+  });
+
+  it('never trims scrollback between a program and a child that sits after other rows', () => {
+    const cells = [
+      createTranscriptCell({
+        id: 'user:turn-1',
+        kind: 'user',
+        status: 'succeeded',
+        content: 'go',
+        turnId: 'turn-1',
+        createdAtMs: 0,
+      }),
+      ...Array.from({ length: 3 }, (_, index) =>
+        createTranscriptCell({
+          id: `assistant:pre-${index}`,
+          kind: 'assistant',
+          status: 'succeeded',
+          content: `pre ${index}`,
+          turnId: 'turn-1',
+          createdAtMs: 1,
+        }),
+      ),
+      program('running', { createdAtMs: 2 }),
+      createTranscriptCell({
+        id: 'assistant:between',
+        kind: 'assistant',
+        status: 'succeeded',
+        content: 'note between',
+        turnId: 'turn-1',
+        createdAtMs: 3,
+      }),
+    ];
+    // Tight retention makes append-only trimming cut at the first stable unit it can.
+    const view = new TranscriptView(() => cells, {
+      appendOnly: () => true,
+      retainedRows: { high: 1, low: 1 },
+    });
+    const frames: string[] = [];
+    const render = () => frames.push(plain(view, 80));
+
+    render();
+    cells.push(child(9, 'running', { content: JSON.stringify({ path: 'src/late.ts' }) }));
+    render();
+    cells[cells.length - 1] = { ...cells[cells.length - 1]!, status: 'succeeded' };
+    render();
+    const programIndex = cells.findIndex((cell) => cell.id === 'tool:turn-1:run-1');
+    cells[programIndex] = { ...cells[programIndex]!, status: 'succeeded', detail: 'done' };
+    render();
+    for (let index = 0; index < 8; index += 1) {
+      cells.push(
+        createTranscriptCell({
+          id: `assistant:tail-${index}`,
+          kind: 'assistant',
+          status: 'succeeded',
+          content: `tail ${index}`,
+          turnId: 'turn-1',
+          createdAtMs: 30 + index,
+        }),
+      );
+      render();
+    }
+
+    expect(frames.some((frame) => !frame.includes('go'))).toBe(true);
+    // An orphaned child would render as its own top-level row: `└ • Read (src/late.ts)`.
+    for (const frame of frames) expect(frame).not.toMatch(/^[├└] \S+ Read \(?src\/late\.ts/mu);
+  });
+
+  it('names the folded calls when a folded program is expanded', () => {
+    const children = Array.from({ length: 8 }, (_, index) => child(index + 1, 'succeeded'));
+    const view = new TranscriptView(() => [program('succeeded'), ...children], {
+      maxCellsPerTurn: 4,
+    });
+    view.toggleDetailMode();
+
+    expect(plain(view)).toMatch(/… \d+ earlier calls folded/u);
+  });
+});

@@ -102,6 +102,16 @@ export class TuiProductAccess {
       .setPromptSuggestionEnabled(enabled);
   }
 
+  /** Undefined when this Runtime cannot read the switch. */
+  async getPtcEnabled(): Promise<boolean | undefined> {
+    return this.context.service('config.ptc.read').getPtcEnabled();
+  }
+
+  /** Undefined when this Runtime cannot persist the switch. */
+  async setPtcEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.context.service('config.ptc.write').setPtcEnabled(enabled);
+  }
+
   async listModels(sessionId?: string): Promise<TuiModel[]> {
     const service = this.context.service("model.list");
     const request = { ...(sessionId ? { sessionId } : {}) };

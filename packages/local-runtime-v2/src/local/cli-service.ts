@@ -664,12 +664,18 @@ export class CliService {
     return this.options.application.configuration?.setPromptSuggestionEnabled?.({ enabled });
   }
 
-  listModels(
-    input?: Parameters<
-      NonNullable<LocalRuntimeApplication["models"]>["list"]
-    >[0],
-  ) {
-    return this.requireCapability("models", "Model").list(input);
+  /** Undefined when this host cannot read the PTC switch. */
+  getPtcEnabled(): Promise<boolean> | undefined {
+    return this.options.application.configuration?.getPtcEnabled?.();
+  }
+
+  /** Undefined when this host cannot persist the PTC switch. */
+  setPtcEnabled(enabled: boolean): Promise<boolean> | undefined {
+    return this.options.application.configuration?.setPtcEnabled?.({ enabled });
+  }
+
+  listModels(input?: Parameters<NonNullable<LocalRuntimeApplication['models']>['list']>[0]) {
+    return this.requireCapability('models', 'Model').list(input);
   }
 
   selectModel(

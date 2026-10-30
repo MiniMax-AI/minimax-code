@@ -16161,6 +16161,92 @@ describe('TUI next-message suggestion', () => {
     await app.stop();
   });
 
+  it('switches Programmatic Tool Calling in /settings and says where it applies', async () => {
+    let enabled = false;
+    const setPtcEnabled = vi.fn(async (next: boolean) => {
+      enabled = next;
+      return { enabled, saved: enabled, launchOverride: false };
+    });
+    const { app, terminal } = startWithEventFeed({
+      configure: (runtime) => {
+        runtime.getPtcSetting = vi.fn(async () => ({ enabled, saved: enabled, launchOverride: false }));
+        runtime.setPtcEnabled = setPtcEnabled;
+      },
+    });
+    app.start();
+    await app.ready;
+
+    await app.submit('/settings');
+    await vi.waitFor(() =>
+      expect(app.surfaceHost.render(100).join('\n')).toContain('Programmatic Tool Calling (Beta)'),
+    );
+    let panel = app.surfaceHost.render(100).join('\n');
+    expect(panel).toContain('○ off');
+    expect(panel).toContain('Applies to new Sessions and after /compact');
+    expect(setPtcEnabled).not.toHaveBeenCalled();
+
+    // The switch is the last row; Up from the active TUI mode wraps onto it.
+    terminal.input?.('\u001b[A');
+    terminal.input?.('\r');
+    await vi.waitFor(() => expect(setPtcEnabled).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(app.surfaceHost.render(100).join('\n')).toContain('● on'));
+    expect(app.interaction.isActive()).toBe(true);
+
+    setPtcEnabled.mockRejectedValueOnce(new Error('config.yaml is locked'));
+    terminal.input?.(' ');
+    await vi.waitFor(() =>
+      expect(app.surfaceHost.render(100).join('\n')).toContain("Couldn't save beta.ptc"),
+    );
+    panel = app.surfaceHost.render(100).join('\n');
+    expect(panel).toContain('● on');
+    expect(enabled).toBe(true);
+    await app.stop();
+  });
+
+  it('flips the saved PTC choice in /settings while --ptc keeps this process on', async () => {
+    let saved = false;
+    const setPtcEnabled = vi.fn(async (next: boolean) => {
+      saved = next;
+      return { enabled: true, saved, launchOverride: true };
+    });
+    const { app, terminal } = startWithEventFeed({
+      configure: (runtime) => {
+        runtime.getPtcSetting = vi.fn(async () => ({ enabled: true, saved, launchOverride: true }));
+        runtime.setPtcEnabled = setPtcEnabled;
+      },
+    });
+    app.start();
+    await app.ready;
+
+    await app.submit('/settings');
+    await vi.waitFor(() =>
+      expect(app.surfaceHost.render(100).join('\n')).toContain('--ptc keeps PTC on in this process'),
+    );
+    expect(app.surfaceHost.render(100).join('\n')).toContain('○ off');
+
+    terminal.input?.('\u001b[A');
+    terminal.input?.('\r');
+    await vi.waitFor(() => expect(setPtcEnabled).toHaveBeenLastCalledWith(true));
+    await vi.waitFor(() => expect(app.surfaceHost.render(100).join('\n')).toContain('● on'));
+
+    terminal.input?.(' ');
+    await vi.waitFor(() => expect(setPtcEnabled).toHaveBeenLastCalledWith(false));
+    await vi.waitFor(() => expect(app.surfaceHost.render(100).join('\n')).toContain('○ off'));
+    expect(saved).toBe(false);
+    await app.stop();
+  });
+
+  it('leaves the PTC row out of /settings when the Runtime has no PTC switch', async () => {
+    const { app } = startWithEventFeed({});
+    app.start();
+    await app.ready;
+
+    await app.submit('/settings');
+    expect(app.surfaceHost.render(100).join('\n')).toContain('TUI mode · Regular');
+    expect(app.surfaceHost.render(100).join('\n')).not.toContain('Programmatic Tool Calling');
+    await app.stop();
+  });
+
   it('says /suggestions is unavailable when the Runtime cannot read or persist the switch', async () => {
     const setPromptSuggestionEnabled = vi.fn(async () => undefined);
     const { app, terminal } = startWithEventFeed({

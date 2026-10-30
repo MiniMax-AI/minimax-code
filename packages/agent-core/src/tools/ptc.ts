@@ -179,8 +179,22 @@ export interface PtcToolExecutionBatch {
    * run_code calls in one response cannot each claim a fresh budget. A
    * foreground Bash child with a longer `timeout` may also move it later
    * (`PtcChildDeadline.extendForTimeout`), so read it again rather than keep it.
+   * Time children spend in their admission stage (before-tool hooks, safety
+   * checks and the user's approval) is added to it: that time does not count
+   * against the program.
    */
   readonly deadlineAtMs: number;
+  /**
+   * Admission time already added to `deadlineAtMs` since the batch started,
+   * including a pause still in progress. Optional for older executors and
+   * test doubles; absent means none.
+   */
+  readonly pausedMs?: number;
+  /**
+   * True while at least one child is in its admission stage. The deadline
+   * then moves later with the clock, so the time left stays the same.
+   */
+  readonly paused?: boolean;
 }
 
 /**
@@ -189,7 +203,7 @@ export interface PtcToolExecutionBatch {
  * child calls and stops the guest program.
  */
 export interface PtcChildDeadline {
-  /** Unix ms; always the current batch deadline, including any extension. */
+  /** Unix ms; always the current batch deadline, including any extension and admission pause. */
   readonly atMs: number;
   /**
    * Called by a foreground Bash child with its own `timeout` (seconds). When
@@ -254,8 +268,6 @@ export interface PtcToolExecutionOutcome {
   };
   readonly record: PtcToolCallRecord;
   readonly retainedFacts: readonly PtcRetainedFact[];
-  /** Stop the current PTC program without terminating the outer agent. */
-  readonly stopPtcProgram?: boolean;
   readonly terminateAgent: boolean;
 }
 

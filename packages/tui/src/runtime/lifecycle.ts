@@ -5,9 +5,11 @@ import type {
 } from '@mavis/local-runtime-v2/process-local';
 import { getDefaultLocalRuntimeConfig } from '@mavis/local-runtime-v2';
 import {
+  currentBetaResolutionContext,
   getRuntimeBuildEnv,
   getRuntimeRegion,
   readExplicitBetaFeatureFromFile,
+  resolveBetaFeature,
 } from '@mavis/config';
 import {
   AuthSessionChangedError,
@@ -81,6 +83,13 @@ export interface CreateTuiRuntimeOptions {
   promptMode?: CreateLocalRuntimeHostOptions['promptMode'];
   systemPromptOverrides?: CreateLocalRuntimeHostOptions['systemPromptOverrides'];
   surface?: TuiObservabilitySurface;
+  /** Set only by the interactive launcher or exec command, independently of beta.ptc. */
+  ptcEntrypoint?: 'interactive' | 'exec';
+  /**
+   * `--ptc`: new Sessions in this process use PTC regardless of `beta.ptc`.
+   * Held in memory only; config.yaml is never rewritten by the flag.
+   */
+  ptcLaunchOverride?: boolean;
   observability?: TuiObservability;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
   contextMode?: McodeContextMode;
@@ -393,6 +402,7 @@ export async function createTuiRuntime(
         beta: {
           ...config.beta,
           mcodeTools: effectiveMcodeTools,
+          ...(options.ptcLaunchOverride ? { ptc: true } : {}),
         },
       };
     },
@@ -507,6 +517,18 @@ export async function createTuiRuntime(
       adapter: new TuiRuntimeAdapter(host.cliService, {
         workspaceDir: options.workspaceDir,
         observability,
+        ...(options.ptcLaunchOverride
+          ? {
+              ptcLaunchOverride: true,
+              // The source config, re-read after each write, never carries the override.
+              readSavedPtc: () =>
+                resolveBetaFeature(
+                  'ptc',
+                  getSourceConfig().beta?.ptc,
+                  currentBetaResolutionContext(),
+                ),
+            }
+          : {}),
         ...(options.contextMode ? { contextMode: options.contextMode } : {}),
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)

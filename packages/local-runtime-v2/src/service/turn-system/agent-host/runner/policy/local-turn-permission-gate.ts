@@ -643,13 +643,15 @@ function ptcApprovalContext(
   context: BeforeToolCallContext,
 ): Pick<
   Parameters<LocalTurnPermissionApprovalOwner['request']>[0],
-  'parentToolCallId' | 'parentToolDescription' | 'stopPtcOnDeny'
+  'parentToolCallId' | 'parentToolDescription'
 > {
   if (!context.parentToolCallId) return {};
+  // A denied child fails only that call and the program keeps running, as a
+  // native denial does, so the ask no longer sets `stopPtcOnDeny` (it only
+  // relabelled the deny button as "deny and stop").
   return {
     parentToolCallId: context.parentToolCallId,
     ...(context.parentDescription ? { parentToolDescription: context.parentDescription } : {}),
-    stopPtcOnDeny: true,
   };
 }
 

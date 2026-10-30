@@ -6,6 +6,8 @@ export type TuiMessageRole = 'user' | 'assistant' | 'system' | 'unknown';
 
 export interface TuiToolCall {
   id?: string;
+  /** Outer `run_code` Tool Call id when this call was made from a PTC program. */
+  parentToolCallId?: string;
   name: string;
   status?: string | number;
   input?: unknown;
@@ -338,6 +340,8 @@ export function normalizeTuiMessage(raw: unknown, fallbackTurnId?: string): TuiM
 }
 
 function normalizeMessage(message: Record<string, unknown>, fallbackTurnId?: string): TuiMessage {
+  // CliService history keeps the PTC parent of a Tool Call only in the raw JSON.
+  const rawMetadata = readRecord(parseJsonValue(message.rawJson ?? message.raw_json)) ?? {};
   return compact({
     id: readString(message, ['msg_id', 'msgId', 'id']),
     turnId: readString(message, ['turn_id', 'turnId']) ?? fallbackTurnId,
@@ -349,10 +353,13 @@ function normalizeMessage(message: Record<string, unknown>, fallbackTurnId?: str
     tokensBefore: readNumber(message, ['tokensBefore', 'tokens_before']),
     tokensAfter: readNumber(message, ['tokensAfter', 'tokens_after']),
     content: readString(message, ['msg_content', 'msgContent', 'content']),
-    editContent: readString(message, ['editContent']),
+    editContent: readString(message, ['editContent']) ?? readString(rawMetadata, ['editContent']),
     thinking: readString(message, ['thinking_content', 'thinkingContent', 'thinking']),
     thinkingDurationMs: readNumber(message, ['thinking_duration_ms', 'thinkingDurationMs']),
-    toolCalls: normalizeToolCalls(readArray(message, ['tool_calls', 'toolCalls'])),
+    toolCalls: withRawParentToolCallIds(
+      normalizeToolCalls(readArray(message, ['tool_calls', 'toolCalls'])),
+      rawMetadata,
+    ),
     toolResult: normalizeToolResult(readRecord(message.toolResult ?? message.tool_result)),
     parts: normalizeMessageParts(readArray(message, ['parts'])),
     attachments: normalizeAttachments(readArray(message, ['attachments'])),
@@ -536,6 +543,8 @@ function normalizeToolCalls(raw: unknown[] | undefined): TuiToolCall[] | undefin
     if (!name) return [];
     const toolCall = compact({
       id: readString(record, ['tool_call_id', 'toolCallId', 'id']),
+      parentToolCallId:
+        readString(record, ['parent_tool_call_id', 'parentToolCallId'])?.trim() || undefined,
       name,
       status:
         readString(record, ['tool_call_status', 'toolCallStatus', 'status']) ??
@@ -572,6 +581,33 @@ function normalizeToolCalls(raw: unknown[] | undefined): TuiToolCall[] | undefin
   });
 
   return toolCalls.length > 0 ? toolCalls : undefined;
+}
+
+/**
+ * The generated Session Tool Call view has no parent slot, so durable history
+ * carries a PTC child call's parent run_code id only in the message rawJson.
+ */
+function withRawParentToolCallIds(
+  toolCalls: TuiToolCall[] | undefined,
+  rawMetadata: Record<string, unknown>,
+): TuiToolCall[] | undefined {
+  if (!toolCalls?.some((toolCall) => toolCall.id && !toolCall.parentToolCallId)) return toolCalls;
+  const parents = new Map<string, string>();
+  for (const item of readArray(rawMetadata, ['tool_calls', 'toolCalls']) ?? []) {
+    const record = readRecord(item);
+    if (!record) continue;
+    const id = readString(record, ['tool_call_id', 'toolCallId', 'id']);
+    const parentToolCallId = readString(record, ['parent_tool_call_id', 'parentToolCallId']);
+    if (id && parentToolCallId) parents.set(id, parentToolCallId);
+  }
+  if (parents.size === 0) return toolCalls;
+  return toolCalls.map((toolCall) => {
+    const parentToolCallId =
+      toolCall.parentToolCallId ?? (toolCall.id ? parents.get(toolCall.id) : undefined);
+    return parentToolCallId && parentToolCallId !== toolCall.parentToolCallId
+      ? { ...toolCall, parentToolCallId }
+      : toolCall;
+  });
 }
 
 function normalizeRole(role: string | undefined): TuiMessageRole | undefined {

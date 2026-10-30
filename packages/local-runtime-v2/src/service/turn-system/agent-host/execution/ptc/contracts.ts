@@ -92,7 +92,6 @@ export interface PtcToolCallResult {
   readonly isError?: boolean;
   readonly error?: PtcFailure;
   readonly terminateAgent?: boolean;
-  readonly stopPtcProgram?: boolean;
   /** Authoritative post-hook record; absent only in isolated executor tests. */
   readonly record?: PtcPersistedChildCall;
   readonly retainedFacts?: readonly PtcRetainedFact[];

@@ -131,6 +131,18 @@ describe('headless invocation', () => {
     }
   });
 
+  it('carries --ptc as a per-Run PTC opt-in', async () => {
+    const cwd = await workspace();
+    const readStdin = vi.fn(async () => 'ignored');
+
+    await expect(resolveTuiExecInvocation('hi', { cwd, ptc: true }, readStdin)).resolves.toMatchObject(
+      { ptc: true },
+    );
+    await expect(resolveTuiExecInvocation('hi', { cwd }, readStdin)).resolves.not.toHaveProperty(
+      'ptc',
+    );
+  });
+
   it('accepts JSON stdin and rejects prompt/source conflicts', async () => {
     const cwd = await workspace();
     await expect(

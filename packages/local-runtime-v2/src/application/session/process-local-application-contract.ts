@@ -259,6 +259,10 @@ export interface LocalRuntimeApplication {
     getPromptSuggestionEnabled?(): Promise<boolean>;
     /** Persists `promptSuggestion.enabled` in config.yaml and returns the effective value. */
     setPromptSuggestionEnabled?(input: { enabled: boolean }): Promise<boolean>;
+    /** Effective `beta.ptc` for Sessions created (or compacted) from now on. */
+    getPtcEnabled?(): Promise<boolean>;
+    /** Persists `beta.ptc` in config.yaml and returns the effective value. */
+    setPtcEnabled?(input: { enabled: boolean }): Promise<boolean>;
   };
   readonly models?: {
     list(input?: { sessionId?: string }): Promise<readonly unknown[]>;

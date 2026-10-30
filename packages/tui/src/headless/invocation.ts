@@ -45,6 +45,7 @@ export interface RawTuiExecOptions extends RawSystemPromptOptions {
   lane?: string;
   outputLastMessage?: string;
   diagnosticsDir?: string;
+  ptc?: boolean;
 }
 
 export interface ResolvedTuiExecInvocation {
@@ -54,6 +55,8 @@ export interface ResolvedTuiExecInvocation {
   model?: string;
   effort?: string;
   contextMode?: McodeContextMode;
+  /** `--ptc`: PTC for a Session this Run creates; config.yaml is unchanged. */
+  ptc?: boolean;
   promptMode?: 'tui' | 'coding' | 'work';
   sessionId?: string;
   continueSession: boolean;
@@ -198,6 +201,7 @@ export async function resolveTuiExecInvocation(
     ...(options.model?.trim() ? { model: options.model.trim() } : {}),
     ...(effort === undefined ? {} : { effort }),
     ...(contextMode === 'lightweight' ? { contextMode } : {}),
+    ...(options.ptc === true ? { ptc: true } : {}),
     ...(options.session?.trim() ? { sessionId: options.session.trim() } : {}),
     continueSession: options.continue === true,
     ...(configPath ? { configPath } : {}),

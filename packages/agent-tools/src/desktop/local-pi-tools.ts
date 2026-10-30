@@ -672,9 +672,10 @@ export class LocalBashTool implements ToolImpl<
     const permissionExecutionPlan = readPermissionExecutionPlan(input);
     const envPolicy = () => resolvePermissionBashEnvPolicy(this.envPolicy, permissionExecutionPlan);
     // Only a PTC child carries ptcDeadline; every other call keeps the
-    // ordinary foreground timing. Computed after approval, so time spent
-    // waiting on a card already counts against the program. A longer
-    // foreground timeout first extends the program (ptcBashDeadline).
+    // ordinary foreground timing. Computed after approval; the program clock
+    // stood still while the card was open, so the wait is not taken from the
+    // time left. A longer foreground timeout first extends the program
+    // (ptcBashDeadline).
     const ptcTimeout = ctx.ptcDeadline
       ? resolvePtcForegroundTimeout(input, ptcBashDeadline(input, ctx.ptcDeadline), Date.now())
       : undefined;

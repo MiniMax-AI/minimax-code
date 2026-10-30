@@ -1462,6 +1462,7 @@
     "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/catalog.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/compaction-reminder.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/contracts.ts",
+    "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/program-wall-clock.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/subcall-scheduler.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/tool-bridge.ts",
     "packages/local-runtime-v2/src/service/turn-system/agent-host/execution/ptc/turn-preparation.ts",

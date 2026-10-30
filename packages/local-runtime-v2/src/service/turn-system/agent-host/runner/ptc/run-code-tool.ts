@@ -31,6 +31,7 @@ import {
   type PtcToolCallResult,
   type PtcToolDescriptor,
 } from '../../execution/ptc/contracts.js';
+import { programWallClock } from '../../execution/ptc/program-wall-clock.js';
 import { executePtcQuickJs } from './quickjs-executor.js';
 import type { PtcWorkerFactory } from './quickjs-executor.js';
 import { projectPtcOuterMedia } from './media-projection.js';
@@ -207,6 +208,7 @@ async function executeRunCode(
   // A foreground Bash child with a long timeout may extend the batch deadline
   // (Agent Core owns that); the guest wall clock reads it again when it fires.
   const readDeadlineAtMs = () => executor.getBatch(parentToolCallId)?.deadlineAtMs;
+  const readDeadlinePaused = () => executor.getBatch(parentToolCallId)?.paused === true;
   if (wallClockMs === 0) {
     logRunCodeRejected(context, parentToolCallId, 'PTC_BATCH_EXPIRED', wallClock);
     return failedRunCode('PTC_BATCH_EXPIRED', 'The run_code batch deadline has expired.');
@@ -274,21 +276,15 @@ async function executeRunCode(
           ...(outcome.error?.quotable === true ? { message: outcome.error.message } : {}),
         });
       }
-      // A cancelled Turn or a stopped program (including the other children
-      // of a "deny and stop") makes this a cancellation, not a failing tool.
-      // Not call.signal: it also fires on wall-clock, budget and
-      // guest-finished stops, which stay errors as before.
+      // A cancelled Turn or a stopped program makes this a cancellation, not
+      // a failing tool. Not call.signal: it also fires on wall-clock, budget
+      // and guest-finished stops, which stay errors as before.
       context.ptcObserver?.childCallSettled(
         call.name,
         ptcChildCallStatus(adapted, combinedSignal.aborted),
       );
-      // The user chose "deny and stop": say which child ended the program.
-      if (adapted.stopPtcProgram === true && !stop.signal.aborted) {
-        writeRunCodeEvent(context, parentToolCallId, 'ptc program stopped on deny', {
-          tool_call_id: outcome.record.child_tool_call_id,
-          tool: outcome.record.tool_name,
-        });
-      }
+      // A user denial is not a stop: like a native denial it fails only this
+      // child (PTC_PERMISSION_DENIED) and the program goes on to its next call.
       if (mustStopProgram(adapted)) stop.abort('ptc_control_fact');
       return adapted;
     },
@@ -302,9 +298,13 @@ async function executeRunCode(
       signal: combinedSignal,
       limits: { maxWallClockMs: wallClockMs },
       readDeadlineAtMs,
+      readDeadlinePaused,
       ...(options.workerFactory ? { workerFactory: options.workerFactory } : {}),
     });
-    const allowedMs = allowedWallClockMs(wallClockMs, startedAtMs, readDeadlineAtMs());
+    const { allowedMs, admissionWaitMs } = programWallClock(
+      { batch, startedAtMs, wallClockMs },
+      executor.getBatch(parentToolCallId),
+    );
     const outer = runCodeToolResult(result, context, failureByChild, allowedMs);
     logRunCodeFinished(context, parentToolCallId, result, {
       verdicts: truncationByChild,
@@ -312,6 +312,7 @@ async function executeRunCode(
       returnTruncated: outer.returnTruncated !== undefined,
       wallClock,
       wallClockMs: allowedMs,
+      admissionWaitMs,
       timing: timing.fields(),
     });
     context.ptcObserver?.programFinished(ptcProgramOutcome(result, Date.now() - startedAtMs));
@@ -320,15 +321,6 @@ async function executeRunCode(
     // A bounded outer result cannot release exclusivity while a child ignores abort.
     program.completion = releaseProgramAfterDrain(bridge, turnIdentity, program);
   }
-}
-
-/** What a program was finally allowed, including any Bash extension of the batch deadline. */
-function allowedWallClockMs(
-  startingMs: number,
-  startedAtMs: number,
-  deadlineAtMs: number | undefined,
-): number {
-  return deadlineAtMs === undefined ? startingMs : Math.max(startingMs, deadlineAtMs - startedAtMs);
 }
 
 async function releaseProgramAfterDrain(
@@ -396,12 +388,11 @@ function adaptChildOutcome(
 function childControlFields(
   outcome: PtcToolExecutionOutcome,
   refs: PtcToolCallResult['refs'],
-): Pick<PtcToolCallResult, 'media' | 'refs' | 'terminateAgent' | 'stopPtcProgram'> {
+): Pick<PtcToolCallResult, 'media' | 'refs' | 'terminateAgent'> {
   return {
     ...(outcome.result === undefined ? {} : { media: mediaContent(outcome.result) }),
     ...(refs ? { refs } : {}),
     ...(outcome.terminateAgent ? { terminateAgent: true } : {}),
-    ...(outcome.stopPtcProgram ? { stopPtcProgram: true } : {}),
   };
 }
 
@@ -524,14 +515,15 @@ function classifyChildTruncation(outcome: PtcToolExecutionOutcome): DesktopPtcTr
 
 /**
  * Failures now resolve inside the program, so only these still stop it: a
- * user rejecting an approval card, a plugin terminating the Agent or giving
- * mandatory feedback, and the outer call being cancelled (the child itself
- * then reports PTC_CANCELLED or PTC_ABORTED). Budgets stop it in the executor.
+ * plugin terminating the Agent or giving mandatory feedback, and the outer
+ * call being cancelled (the child itself then reports PTC_CANCELLED or
+ * PTC_ABORTED). Budgets stop it in the executor. A user rejecting an
+ * approval card no longer stops it: that child fails with
+ * PTC_PERMISSION_DENIED and the program continues, as a native denial does.
  */
 function mustStopProgram(outcome: PtcToolCallResult): boolean {
   return (
     outcome.terminateAgent === true ||
-    outcome.stopPtcProgram === true ||
     outcome.error?.code === 'PTC_CANCELLED' ||
     outcome.error?.code === 'PTC_ABORTED' ||
     outcome.retainedFacts?.some(
@@ -596,8 +588,10 @@ function factSummary(
         `PTC Bash child ${fact.child_tool_call_id} completed with exit code ${String(fact.exit_code)}.`,
       ];
     case 'approval':
+      // A denial no longer stops the program (see mustStopProgram), so the
+      // line says only this call was skipped.
       return [
-        `PTC child ${fact.child_tool_call_id} approval was ${fact.status}; the current PTC program stopped.`,
+        `PTC child ${fact.child_tool_call_id} approval was ${fact.status}; that call did not run and the program continued.`,
       ];
     case 'outcome_unknown':
       return [
@@ -938,11 +932,13 @@ function logRunCodeFinished(
     readonly returnTruncated: boolean;
     readonly wallClock: PtcWallClock;
     readonly wallClockMs: number;
+    /** Child admission time (hooks, approvals) during this program; not part of `wallClockMs`. */
+    readonly admissionWaitMs: number;
     /** child_ms_max / child_ms_total / queue_wait_ms_max / max_concurrency. */
     readonly timing: Readonly<Record<string, number>>;
   },
 ): void {
-  const { verdicts, failures, returnTruncated, wallClock, wallClockMs } = children;
+  const { verdicts, failures, returnTruncated, wallClock, wallClockMs, admissionWaitMs } = children;
   const truncated: RunCodeLogChild[] = [];
   const unknown: RunCodeLogChild[] = [];
   const completeTools: string[] = [];
@@ -986,6 +982,7 @@ function logRunCodeFinished(
     console_truncated: result.console?.truncated === true,
     return_truncated: returnTruncated,
     ...timeoutLogFields(wallClock, wallClockMs),
+    admission_wait_ms: Math.round(admissionWaitMs),
     ...children.timing,
   });
 }
@@ -1070,7 +1067,8 @@ function primaryResult(
  * model can fix by raising timeout_ms or going to the background; say how,
  * and how long this program actually had (less than timeout_ms when an earlier
  * run_code in the same response already used part of the shared deadline,
- * more when a Bash child's timeout extended it).
+ * more when a Bash child's timeout extended it). Time a child spent waiting
+ * for admission or approval is not part of it.
  */
 function failureMessage(
   error: { readonly code: string; readonly message: string },

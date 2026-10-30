@@ -23,6 +23,8 @@ export interface TuiInteractiveLaunchRequest {
   readonly resumeDraftAfterLogin?: boolean;
   readonly tuiMode?: TuiMode;
   readonly contextMode?: McodeContextMode;
+  /** `--ptc`: Programmatic Tool Calling for new Sessions in this process only. */
+  readonly ptc?: boolean;
   readonly lane?: string;
   readonly systemPromptOverrides?: SystemPromptOverrides;
 }
@@ -34,6 +36,7 @@ export interface RawTuiInteractiveOptions extends RawSystemPromptOptions {
   readonly resume?: string;
   readonly tuiMode?: TuiMode;
   readonly mode?: string;
+  readonly ptc?: boolean;
   readonly lane?: string;
   readonly env?: TuiBuildEnvironment;
 }
@@ -58,6 +61,12 @@ export function applyInteractiveCliContract(
     .addOption(
       new Option('--mode <mode>', 'Context mode: standard (default) or lightweight').argParser(
         parseContextMode,
+      ),
+    )
+    .addOption(
+      new Option(
+        '--ptc',
+        'use Programmatic Tool Calling (run_code) for Sessions this process creates or compacts; config.yaml is unchanged',
       ),
     )
     .addOption(new Option('--resume <id>').hideHelp());
@@ -117,6 +126,7 @@ export function resolveInteractiveLaunchRequest(
     ...(commandOptions.continue ? { continueLatestSession: true } : {}),
     ...(commandOptions.tuiMode ? { tuiMode: commandOptions.tuiMode } : {}),
     ...(commandOptions.mode === 'lightweight' ? { contextMode: 'lightweight' as const } : {}),
+    ...(commandOptions.ptc === true ? { ptc: true } : {}),
     ...(commandOptions.lane ? { lane: commandOptions.lane } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
@@ -147,6 +157,12 @@ export function applyExecCliContract(command: Command): Command {
     )
     .addOption(new Option('--session <id>', 'run in an existing active Session'))
     .addOption(new Option('--continue', 'continue the latest active Session in --cwd'))
+    .addOption(
+      new Option(
+        '--ptc',
+        'use Programmatic Tool Calling (run_code) for Sessions this process creates or compacts; config.yaml is unchanged',
+      ),
+    )
     .addOption(
       new Option('--config <path>', 'use an explicit Runtime config file for this process'),
     )

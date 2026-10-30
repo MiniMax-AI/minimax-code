@@ -53,7 +53,81 @@ export function renderTuiToolGallery(options: TuiToolGalleryOptions = {}): strin
   return options.plain ? stripVTControlCharacters(rendered) : rendered;
 }
 
+const PTC_PROGRAM = {
+  code: [
+    "const files = await tools.glob({ pattern: 'src/*.ts' });",
+    'for (const path of files) await tools.read({ path });',
+    "return tools.grep({ pattern: 'export' });",
+  ].join('\n'),
+  description: 'Count exported symbols',
+};
+
+const PTC_CHILDREN = [
+  { id: 'glob', name: 'glob', content: '{"pattern":"src/*.ts"}', detail: 'src/app.ts' },
+  { id: 'read-app', name: 'read', content: '{"path":"src/app.ts"}', detail: 'export {}' },
+  {
+    id: 'read-session',
+    name: 'read',
+    content: '{"path":"src/session.ts"}',
+    detail: 'ENOENT: no such file',
+  },
+  { id: 'grep', name: 'grep', content: '{"pattern":"export"}', detail: 'src/app.ts:1' },
+] as const;
+
+/** Child status per lifecycle: running streams, succeeded keeps a failure, failed is cut off. */
+const PTC_CHILD_STATUSES: Readonly<Record<TuiToolGalleryState, readonly TranscriptCellStatus[]>> = {
+  running: ['succeeded', 'succeeded', 'succeeded', 'running'],
+  succeeded: ['succeeded', 'succeeded', 'failed', 'succeeded'],
+  failed: ['succeeded', 'succeeded', 'succeeded', 'running'],
+};
+
 export function createGalleryCells(state: TuiToolGalleryState) {
+  return [...createToolCells(state), ...createPtcCells(state)];
+}
+
+function createPtcCells(state: TuiToolGalleryState) {
+  const turnId = `gallery:${state}`;
+  const programId = `gallery-ptc:${state}`;
+  const offset = CASES.length + 1;
+  return [
+    createTranscriptCell({
+      id: `gallery:${state}:run_code`,
+      kind: 'tool',
+      status: state,
+      title: 'run_code',
+      toolCallId: programId,
+      content: JSON.stringify(PTC_PROGRAM),
+      detail:
+        state === 'running'
+          ? ''
+          : state === 'failed'
+            ? 'wall_clock_exceeded: program stopped after 30s'
+            : 'src/app.ts: 1 export\nsrc/session.ts: unreadable\n1 export total\nDone',
+      ...(state === 'running' ? {} : { durationMs: 1_200 }),
+      turnId,
+      createdAtMs: offset,
+      updatedAtMs: offset,
+    }),
+    ...PTC_CHILDREN.map((child, index) => {
+      const status = PTC_CHILD_STATUSES[state][index] ?? 'succeeded';
+      return createTranscriptCell({
+        id: `gallery:${state}:run_code:${child.id}`,
+        kind: 'tool',
+        status,
+        title: child.name,
+        toolCallId: `${programId}:${child.id}`,
+        parentToolCallId: programId,
+        content: child.content,
+        detail: status === 'running' ? '' : child.detail,
+        turnId,
+        createdAtMs: offset + index + 1,
+        updatedAtMs: offset + index + 1,
+      });
+    }),
+  ];
+}
+
+function createToolCells(state: TuiToolGalleryState) {
   const status: TranscriptCellStatus = state;
   return CASES.map((fixture, index) =>
     createTranscriptCell({

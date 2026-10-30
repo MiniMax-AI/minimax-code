@@ -28,6 +28,7 @@ import type {
   TuiAccountStatusOptions,
   TuiActiveRunSnapshot,
   TuiBackgroundTask,
+  TuiPtcSetting,
   TuiBackgroundTaskListOptions,
   TuiCompactionResult,
   TuiDelegationSnapshot,
@@ -93,6 +94,13 @@ export interface TuiRuntimeAdapterOptions {
   accountIdentityGetter?: () => TuiAccountStatus["identity"];
   observability?: TuiObservability;
   contextMode?: McodeContextMode;
+  /** `--ptc` forced PTC on for this process. */
+  ptcLaunchOverride?: boolean;
+  /**
+   * Reads `beta.ptc` from config.yaml without the `--ptc` override; the
+   * Runtime only sees the overridden value. Required with `ptcLaunchOverride`.
+   */
+  readSavedPtc?: () => boolean;
   tokenPlanAccountStatusGetter?: (options?: {
     readonly forceRefresh?: boolean;
   }) => Promise<TuiTokenPlanAccountStatus>;
@@ -134,6 +142,8 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   private readonly feedback: TuiRuntimeAdapterOptions["feedback"];
   private readonly dailyCheckin: TuiRuntimeAdapterOptions["dailyCheckin"];
   private readonly contextMode: McodeContextMode;
+  private readonly ptcLaunchOverride: boolean;
+  private readonly readSavedPtc: (() => boolean) | undefined;
 
   constructor(cliService: CliService, options: TuiRuntimeAdapterOptions = {}) {
     this.cliService = cliService;
@@ -145,6 +155,8 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     this.feedback = options.feedback;
     this.dailyCheckin = options.dailyCheckin;
     this.contextMode = options.contextMode ?? "standard";
+    this.ptcLaunchOverride = options.ptcLaunchOverride === true;
+    this.readSavedPtc = options.readSavedPtc;
     this.conversationAccess = new TuiConversationAccess(cliService);
     this.pluginAccess = new TuiPluginAccess(cliService);
     this.context = new TuiRuntimeAccessContext({
@@ -455,6 +467,22 @@ export class TuiRuntimeAdapter implements TuiRuntime {
 
   setPromptSuggestionEnabled(enabled: boolean): Promise<boolean | undefined> {
     return this.productAccess.setPromptSuggestionEnabled(enabled);
+  }
+
+  async getPtcSetting(): Promise<TuiPtcSetting | undefined> {
+    return this.projectPtcSetting(await this.productAccess.getPtcEnabled());
+  }
+
+  async setPtcEnabled(enabled: boolean): Promise<TuiPtcSetting | undefined> {
+    return this.projectPtcSetting(await this.productAccess.setPtcEnabled(enabled));
+  }
+
+  private projectPtcSetting(enabled: boolean | undefined): TuiPtcSetting | undefined {
+    if (enabled === undefined) return undefined;
+    if (!this.ptcLaunchOverride) return { enabled, saved: enabled, launchOverride: false };
+    // The Runtime reads the overridden config, so the saved choice comes from the file.
+    const saved = this.readSavedPtc?.();
+    return saved === undefined ? undefined : { enabled, saved, launchOverride: true };
   }
   listModels(sessionId?: string): Promise<TuiModel[]> {
     return this.productAccess.listModels(sessionId);

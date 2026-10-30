@@ -25,6 +25,7 @@ import {
 } from './tool-definitions.js';
 import { isBackgroundBashTranscriptCell, presentTranscriptToolEvidence } from './tool-evidence.js';
 import { formatTuiToolSummary } from './presentation/tool-summary.js';
+import { highlightSyntaxLines } from './presentation/syntax-highlight.js';
 import { renderTuiAgentTeamSummary } from '../agent-team/summary.js';
 import { renderTuiStructuredPreview } from './presentation/structured-preview.js';
 import { renderTranscriptInspection } from './inspection.js';
@@ -52,6 +53,12 @@ const MIN_SHELL_COMMAND_WIDTH = 12;
  * that already sit in native scrollback, so frame cost stays bounded in long sessions.
  */
 const APPEND_ONLY_RETAINED_ROWS = { high: 3_000, low: 1_500 } as const;
+/** Child calls kept visible below a running `run_code` program in compact mode. */
+const PTC_RUNNING_CHILD_LIMIT = 3;
+/** Failed or interrupted child calls kept below a finished program in compact mode. */
+const PTC_PROBLEM_CHILD_LIMIT = 3;
+/** Leave room for the program description before giving up on keeping the row metadata. */
+const MIN_PTC_DESCRIPTION_WIDTH = 8;
 
 export class TranscriptView implements Component {
   private readonly unitCache = new Map<
@@ -244,14 +251,17 @@ export class TranscriptView implements Component {
       // units render independently of earlier ones, so the result is an exact suffix.
       const target = Math.min(stableRows, lines.length - this.retainedRows.low);
       let cutUnit = -1;
+      // A cut must never land between a run_code program and its child calls.
+      const safeCuts = ptcSafeCutUnits(units, projectedCells);
       for (let index = 1; index < units.length; index += 1) {
         if ((unitRowStarts[index] ?? Infinity) > target) break;
+        if (safeCuts && !safeCuts[index]) continue;
         cutUnit = index;
       }
       const cut = cutUnit > 0 ? units[cutUnit] : undefined;
       const cutRow = unitRowStarts[cutUnit] ?? 0;
       if (cut && cutRow > 0) {
-        this.trimmedBeforeCellId = cut.kind === 'cell' ? cut.cell.id : cut.cells[0]?.id;
+        this.trimmedBeforeCellId = renderUnitCells(cut)[0]?.id;
         this.discardedRows += cutRow;
         lines = lines.slice(cutRow);
         stableRows -= cutRow;
@@ -312,7 +322,9 @@ export class TranscriptView implements Component {
     renderedRows: number,
   ): number {
     if (isPendingSteerUnit(unit)) return 0;
-    const cells = unit.kind === 'cell' ? [unit.cell] : unit.cells;
+    // A PTC child left running under a settled program renders as interrupted,
+    // so only the program decides whether the group can still change.
+    const cells = unit.kind === 'ptc-group' ? [unit.cell] : renderUnitCells(unit);
     // A submitted prompt stays pending for the whole turn, but its rows do not
     // depend on that status.
     if (cells.some((cell) => cell.kind !== 'user' && isMutableCell(cell))) {
@@ -379,13 +391,21 @@ export class TranscriptView implements Component {
           ? renderReadGroup(unit.cells, width, connectedToNext, (cell) =>
               this.resolveDisplayMode(cell),
             )
-          : renderCell(
-              unit.cell,
-              width,
-              connectedToNext,
-              (cell) => this.resolveDisplayMode(cell),
-              this.workspaceDir,
-            );
+          : unit.kind === 'ptc-group'
+            ? renderPtcGroup(
+                unit.cell,
+                unit.children,
+                width,
+                connectedToNext,
+                resolvePtcGroupMode(unit.cell, this.resolveDisplayMode(unit.cell)),
+              )
+            : renderCell(
+                unit.cell,
+                width,
+                connectedToNext,
+                (cell) => this.resolveDisplayMode(cell),
+                this.workspaceDir,
+              );
     const rendered = content;
     this.unitCache.set(key, {
       signature,
@@ -431,7 +451,7 @@ export class TranscriptView implements Component {
   }
 
   private presentationSignature(unit: TranscriptRenderUnit): string {
-    const cells = unit.kind === 'cell' ? [unit.cell] : unit.cells;
+    const cells = renderUnitCells(unit);
     return cells.map((cell) => this.resolveDisplayMode(cell)).join(':');
   }
 
@@ -452,20 +472,27 @@ export class TranscriptView implements Component {
 
 type TranscriptRenderUnit =
   | { kind: 'cell'; cell: TranscriptCell }
-  | { kind: 'read-group'; cells: TranscriptCell[] };
+  | { kind: 'read-group'; cells: TranscriptCell[] }
+  /** A `run_code` program with the child Tool Calls it made, wherever they sit in the turn. */
+  | { kind: 'ptc-group'; cell: TranscriptCell; children: TranscriptCell[] };
+
+function renderUnitCells(unit: TranscriptRenderUnit): readonly TranscriptCell[] {
+  if (unit.kind === 'cell') return [unit.cell];
+  if (unit.kind === 'ptc-group') return [unit.cell, ...unit.children];
+  return unit.cells;
+}
 
 function renderUnitKey(unit: TranscriptRenderUnit): string {
-  return unit.kind === 'cell'
-    ? `cell:${unit.cell.id}`
-    : `read-group:${unit.cells[0]?.id ?? 'empty'}`;
+  if (unit.kind === 'cell') return `cell:${unit.cell.id}`;
+  if (unit.kind === 'ptc-group') return `ptc-group:${unit.cell.id}`;
+  return `read-group:${unit.cells[0]?.id ?? 'empty'}`;
 }
 
 function renderUnitSignature(
   unit: TranscriptRenderUnit,
   source?: TranscriptProjectionSource,
 ): string {
-  const cells = unit.kind === 'cell' ? [unit.cell] : unit.cells;
-  return cells
+  return renderUnitCells(unit)
     .map((cell) => {
       const revision = source?.cellRevision?.(cell);
       if (revision !== undefined) return JSON.stringify([cell.id, revision]);
@@ -480,6 +507,10 @@ function renderUnitSignature(
         cell.durationMs,
         cell.updatedAtMs,
         cell.turnId,
+        cell.toolCallId,
+        cell.parentToolCallId,
+        cell.ptcFoldedChildren,
+        cell.toolErrorCode,
         cell.expanded,
         cell.displayMode,
         cell.structuredPreview,
@@ -497,11 +528,20 @@ function isMutableCell(cell: TranscriptCell): boolean {
   return cell.status === 'pending' || cell.status === 'running' || cell.status === 'blocked';
 }
 
-function createRenderUnits(cells: readonly TranscriptCell[]): TranscriptRenderUnit[] {
+function createRenderUnits(projectedCells: readonly TranscriptCell[]): TranscriptRenderUnit[] {
+  const ptc = collectPtcGroups(projectedCells);
+  // PTC children render only under their program and never join a read group.
+  const cells = ptc ? projectedCells.filter((cell) => !ptc.absorbed.has(cell.id)) : projectedCells;
   const units: TranscriptRenderUnit[] = [];
   let index = 0;
   while (index < cells.length) {
     const cell = cells[index];
+    const ptcChildren = cell ? ptc?.children.get(cell.id) : undefined;
+    if (cell && ptcChildren) {
+      units.push({ kind: 'ptc-group', cell, children: ptcChildren });
+      index += 1;
+      continue;
+    }
     if (!cell || !isReadToolCell(cell)) {
       if (cell) units.push({ kind: 'cell', cell });
       index += 1;
@@ -621,6 +661,347 @@ function groupedToolEntries(
     const target = formatTuiToolSummary(cell.content) || 'file';
     return { cell, target };
   });
+}
+
+type PtcGroupMode = 'collapsed' | 'compact' | 'expanded';
+type PtcChildState = 'running' | 'succeeded' | 'failed' | 'interrupted';
+
+/**
+ * Group each `run_code` program with the child calls it made in the same turn.
+ * Children are matched by id, not position: permission receipts or other rows
+ * may sit between them in the store. A child whose program is not projected
+ * stays a regular row.
+ */
+function collectPtcGroups(cells: readonly TranscriptCell[]):
+  | {
+      readonly children: ReadonlyMap<string, TranscriptCell[]>;
+      readonly absorbed: ReadonlySet<string>;
+    }
+  | undefined {
+  const programs = new Map<string, TranscriptCell>();
+  for (const cell of cells) {
+    if (cell.kind === 'tool' && cell.toolCallId && isRunCodeCell(cell)) {
+      programs.set(ptcProgramKey(cell.turnId, cell.toolCallId), cell);
+    }
+  }
+  if (programs.size === 0) return undefined;
+  const children = new Map<string, TranscriptCell[]>();
+  for (const program of programs.values()) children.set(program.id, []);
+  const absorbed = new Set<string>();
+  for (const cell of cells) {
+    if (cell.kind !== 'tool' || !cell.parentToolCallId) continue;
+    const program = programs.get(ptcProgramKey(cell.turnId, cell.parentToolCallId));
+    if (!program || program === cell) continue;
+    children.get(program.id)?.push(cell);
+    absorbed.add(cell.id);
+  }
+  return { children, absorbed };
+}
+
+function ptcProgramKey(turnId: string | undefined, toolCallId: string): string {
+  return `${turnId ?? ''}\u0000${toolCallId}`;
+}
+
+function isRunCodeCell(cell: TranscriptCell): boolean {
+  return normalizeToolName(cell.title) === 'run_code';
+}
+
+/**
+ * Append-only trimming restarts the projection at the cut cell. A cut between a
+ * program and one of its later children would turn that child into a new
+ * top-level row, so such cuts are skipped.
+ */
+function ptcSafeCutUnits(
+  units: readonly TranscriptRenderUnit[],
+  cells: readonly TranscriptCell[],
+): boolean[] | undefined {
+  if (!units.some((unit) => unit.kind === 'ptc-group' && unit.children.length > 0)) {
+    return undefined;
+  }
+  const positions = new Map(cells.map((cell, index) => [cell.id, index] as const));
+  let lastChild = -1;
+  return units.map((unit) => {
+    const start = positions.get(renderUnitCells(unit)[0]?.id ?? '') ?? -1;
+    const safe = lastChild < start;
+    if (unit.kind === 'ptc-group') {
+      for (const child of unit.children) {
+        lastChild = Math.max(lastChild, positions.get(child.id) ?? -1);
+      }
+    }
+    return safe;
+  });
+}
+
+/**
+ * Compact is the default view of a program. The main presentation reports
+ * every compact Tool row as collapsed, so only an explicit cell choice
+ * reduces a program to its heading.
+ */
+function resolvePtcGroupMode(
+  cell: TranscriptCell,
+  resolved: ReturnType<typeof resolveTranscriptCellDisplayMode>,
+): PtcGroupMode {
+  if (resolved === 'expanded') return 'expanded';
+  if (cell.displayMode === 'collapsed' || cell.expanded === false) return 'collapsed';
+  return 'compact';
+}
+
+function resolvePtcChildState(child: TranscriptCell, program: TranscriptCell): PtcChildState {
+  if (child.status === 'failed') return 'failed';
+  if (child.status === 'cancelled') return 'interrupted';
+  if (child.status === 'succeeded' || child.status === 'resolved') return 'succeeded';
+  // History keeps the last snapshot of a child cut off by a crash or abort.
+  return isMutableCell(program) ? 'running' : 'interrupted';
+}
+
+function renderPtcGroup(
+  program: TranscriptCell,
+  children: readonly TranscriptCell[],
+  width: number,
+  connectedToNext: boolean,
+  mode: PtcGroupMode,
+): string[] {
+  const entries = children.map((cell) => ({ cell, state: resolvePtcChildState(cell, program) }));
+  const input = readRunCodeInput(program.content);
+  const lines = renderToolRow(
+    connectedToNext ? '├' : '└',
+    renderPtcHeader(program, entries, input.description, width),
+    width,
+  );
+  if (mode === 'collapsed') return lines;
+
+  const groupRail = connectedToNext ? '│ ' : '  ';
+  const blockRail = `${groupRail}  `;
+  const running = isMutableCell(program);
+
+  if (mode === 'expanded') {
+    if (input.code?.trim()) {
+      const prefix = chalk.hex(colors.dim)(blockRail);
+      lines.push(
+        ...highlightSyntaxLines(input.code.replace(/\n+$/u, ''), 'javascript').map((line) =>
+          truncateToWidth(`${prefix}${line}`, Math.max(0, width), chalk.hex(colors.muted)('…')),
+        ),
+      );
+    }
+    const foldedCalls = program.ptcFoldedChildren?.calls ?? 0;
+    if (foldedCalls > 0) {
+      lines.push(
+        truncateToWidth(
+          `${chalk.hex(colors.dim)(`${groupRail}${entries.length > 0 ? '├' : '└'} `)}${chalk.hex(
+            colors.muted,
+          )(`… ${foldedCalls} earlier ${foldedCalls === 1 ? 'call' : 'calls'} folded`)}`,
+          Math.max(0, width),
+          chalk.hex(colors.muted)('…'),
+        ),
+      );
+    }
+    entries.forEach(({ cell, state }, index) => {
+      const isLast = index === entries.length - 1;
+      lines.push(
+        renderPtcChildRow(cell, state, `${groupRail}${isLast ? '└' : '├'} `, width, false),
+      );
+      if (state === 'failed' && cell.detail?.trim()) {
+        lines.push(
+          ...renderExecutionDetail(cell.detail, width, `${groupRail}${isLast ? '  ' : '│ '}  `),
+        );
+      }
+    });
+    if (program.detail?.trim())
+      lines.push(...renderExecutionDetail(program.detail, width, blockRail));
+    return lines;
+  }
+
+  const rows: string[] = [];
+  if (running) {
+    const visible = entries.slice(-PTC_RUNNING_CHILD_LIMIT);
+    const earlier = entries.length - visible.length + (program.ptcFoldedChildren?.calls ?? 0);
+    if (earlier > 0) {
+      rows.push(
+        chalk.hex(colors.muted)(`… ${earlier} earlier ${earlier === 1 ? 'call' : 'calls'}`),
+      );
+    }
+    rows.push(...visible.map(({ cell, state }) => renderPtcChildLabel(cell, state, true)));
+  } else {
+    const problems = entries.filter(({ state }) => state === 'failed' || state === 'interrupted');
+    const visible = problems.slice(0, PTC_PROBLEM_CHILD_LIMIT);
+    rows.push(...visible.map(({ cell, state }) => renderPtcChildLabel(cell, state, true)));
+    const folded = program.ptcFoldedChildren;
+    const more =
+      problems.length - visible.length + (folded ? folded.failed + folded.interrupted : 0);
+    if (more > 0) rows.push(chalk.hex(colors.muted)(`… ${more} more`));
+  }
+  rows.forEach((row, index) => {
+    const connector = chalk.hex(colors.dim)(
+      `${groupRail}${index === rows.length - 1 ? '└' : '├'} `,
+    );
+    lines.push(
+      truncateToWidth(`${connector}${row}`, Math.max(0, width), chalk.hex(colors.muted)('…')),
+    );
+  });
+  if (!running && program.detail?.trim()) {
+    lines.push(
+      ...renderExecutionDetailPreview(
+        program.detail,
+        width,
+        blockRail,
+        previewLineLimit(program),
+        undefined,
+        program.status === 'succeeded' ? 'head' : 'tail',
+      ),
+    );
+  }
+  return lines;
+}
+
+function renderPtcHeader(
+  program: TranscriptCell,
+  entries: ReadonlyArray<{ readonly state: PtcChildState }>,
+  description: string | undefined,
+  width: number,
+): string {
+  const running = isMutableCell(program);
+  // A long turn may fold some children away; the summary still counts them.
+  const folded = program.ptcFoldedChildren;
+  const calls = entries.length + (folded?.calls ?? 0);
+  const failed = entries.filter(({ state }) => state === 'failed').length + (folded?.failed ?? 0);
+  const interrupted =
+    entries.filter(({ state }) => state === 'interrupted').length + (folded?.interrupted ?? 0);
+  const definition = resolveTranscriptToolDefinition(program.title);
+  const { marker, action } = running
+    ? {
+        marker: chalk.hex(colors.accent)('•'),
+        action: chalk.bold.hex(colors.text)(definition?.runningAction ?? 'Running code'),
+      }
+    : program.status === 'failed'
+      ? {
+          marker: chalk.hex(colors.error)('×'),
+          action: chalk.bold.hex(colors.error)(
+            definition
+              ? resolveTranscriptToolFailedAction(definition, program.toolErrorCode)
+              : 'Code failed',
+          ),
+        }
+      : program.status === 'cancelled'
+        ? {
+            marker: chalk.hex(colors.muted)('⊘'),
+            action: chalk.bold.hex(colors.muted)('Code interrupted'),
+          }
+        : {
+            marker:
+              failed + interrupted > 0
+                ? chalk.hex(colors.warning)('!')
+                : chalk.hex(colors.success)('•'),
+            action: chalk.bold.hex(colors.text)(definition?.completedAction ?? 'Ran code'),
+          };
+  const meta = running
+    ? ''
+    : [
+        calls > 0 ? chalk.hex(colors.muted)(` · ${calls} ${calls === 1 ? 'call' : 'calls'}`) : '',
+        failed > 0 ? chalk.hex(colors.error)(` · ${failed} failed`) : '',
+        interrupted > 0 ? chalk.hex(colors.muted)(` · ${interrupted} interrupted`) : '',
+        isPositiveFinite(program.durationMs)
+          ? chalk.hex(colors.muted)(` · ${formatDuration(program.durationMs)}`)
+          : '',
+      ].join('');
+  const subject = description || formatTuiToolSummary(program.content);
+  if (!subject) return `${marker} ${action}${meta}`;
+  const head = `${marker} ${action}`;
+  const available =
+    width -
+    TOOL_ROW_CONNECTOR_WIDTH -
+    visibleWidth(head) -
+    visibleWidth(meta) -
+    visibleWidth(' · ');
+  const fitted =
+    available >= MIN_PTC_DESCRIPTION_WIDTH ? truncateToWidth(subject, available, '…') : subject;
+  return `${head}${chalk.hex(colors.muted)(' · ')}${chalk.hex(colors.text)(fitted)}${meta}`;
+}
+
+function renderPtcChildRow(
+  cell: TranscriptCell,
+  state: PtcChildState,
+  rawPrefix: string,
+  width: number,
+  inlineError: boolean,
+): string {
+  return truncateToWidth(
+    `${chalk.hex(colors.dim)(rawPrefix)}${renderPtcChildLabel(cell, state, inlineError)}`,
+    Math.max(0, width),
+    chalk.hex(colors.muted)('…'),
+  );
+}
+
+function renderPtcChildLabel(
+  cell: TranscriptCell,
+  state: PtcChildState,
+  inlineError: boolean,
+): string {
+  // An interrupted call never finished, so it keeps its in-progress verb.
+  const action = formatToolAction(
+    cell.title,
+    state === 'running' || state === 'interrupted' ? 'running' : 'succeeded',
+    cell.content,
+  );
+  const summary = formatTuiToolSummary(cell.content);
+  if (state === 'interrupted') {
+    return chalk.hex(colors.muted)(`⊘ ${action}${summary ? ` ${summary}` : ''} · interrupted`);
+  }
+  const icon =
+    state === 'running'
+      ? chalk.hex(colors.accent)('…')
+      : state === 'failed'
+        ? chalk.hex(colors.error)('×')
+        : chalk.hex(colors.success)('✓');
+  const error = state === 'failed' && inlineError ? firstVisibleLine(cell.detail) : '';
+  return `${icon} ${chalk.hex(colors.text)(action)}${
+    summary ? chalk.hex(colors.muted)(` ${summary}`) : ''
+  }${error ? chalk.hex(colors.error)(` · ${error}`) : ''}`;
+}
+
+function readRunCodeInput(content: string): { description?: string; code?: string } {
+  const trimmed = content.trim();
+  if (!trimmed) return {};
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Readonly<Record<string, unknown>>;
+      return {
+        ...(typeof record.description === 'string'
+          ? { description: firstVisibleLine(record.description) }
+          : {}),
+        ...(typeof record.code === 'string' ? { code: record.code } : {}),
+      };
+    }
+    return {};
+  } catch {
+    // Arguments still streaming, or retained head-and-tail after the payload budget.
+    const description = readJsonStringField(trimmed, 'description');
+    const code = readJsonStringField(trimmed, 'code');
+    return {
+      ...(description !== undefined ? { description: firstVisibleLine(description) } : {}),
+      ...(code !== undefined ? { code } : {}),
+    };
+  }
+}
+
+function readJsonStringField(json: string, field: string): string | undefined {
+  const match = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, 'u').exec(json);
+  if (!match) return undefined;
+  try {
+    return JSON.parse(`"${match[1] ?? ''}"`) as string;
+  } catch {
+    return undefined;
+  }
+}
+
+function firstVisibleLine(value: string | undefined): string {
+  if (!value) return '';
+  return (
+    sanitizeTerminalText(value)
+      .split('\n')
+      .map((line) => line.trim())
+      .find(Boolean) ?? ''
+  );
 }
 
 function renderCell(

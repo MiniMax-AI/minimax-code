@@ -261,6 +261,22 @@ export interface TuiSessionForkPort {
   forkSession(input: ForkTuiSessionInput): Promise<TuiSessionForkResult>;
 }
 
+/**
+ * Programmatic Tool Calling as new Sessions see it. A Session keeps the mode it
+ * was created (or last compacted) with, so a change never rewrites a running one.
+ */
+export interface TuiPtcSetting {
+  /** Effective switch for this process: `beta.ptc`, the build default, or `--ptc`. */
+  readonly enabled: boolean;
+  /**
+   * What config.yaml (shared with Desktop) resolves to without `--ptc`: the
+   * value a switch shows and flips. Equals `enabled` when there is no override.
+   */
+  readonly saved: boolean;
+  /** `--ptc` keeps PTC on for this process whatever config.yaml says. */
+  readonly launchOverride: boolean;
+}
+
 export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   getRuntimeDiagnostics(): Promise<TuiRuntimeDiagnostics>;
   getInstructionSources(workspaceDir: string): Promise<readonly TuiInstructionSource[]>;
@@ -277,6 +293,13 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
    * undefined when the Runtime cannot persist it.
    */
   setPromptSuggestionEnabled?(enabled: boolean): Promise<boolean | undefined>;
+  /** Effective PTC switch for new Sessions; undefined when the Runtime has none. */
+  getPtcSetting?(): Promise<TuiPtcSetting | undefined>;
+  /**
+   * Persists `beta.ptc`; resolves the effective setting, or undefined when the
+   * Runtime cannot persist it.
+   */
+  setPtcEnabled?(enabled: boolean): Promise<TuiPtcSetting | undefined>;
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;
