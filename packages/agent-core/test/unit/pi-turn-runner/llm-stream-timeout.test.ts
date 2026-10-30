@@ -241,9 +241,9 @@ describe("withLLMStreamTimeouts", () => {
 });
 
 describe("resolveLLMStreamTimeouts", () => {
-  it("defaults both bounds to the previous effective transport wait", () => {
+  it("keeps the first-event bound at the transport headers wait and lets streams stay silent for an hour", () => {
     expect(LLM_FIRST_EVENT_TIMEOUT_MS).toBe(300_000);
-    expect(LLM_STREAM_IDLE_TIMEOUT_MS).toBe(300_000);
+    expect(LLM_STREAM_IDLE_TIMEOUT_MS).toBe(3_600_000);
   });
 
   it("uses defaults, then environment overrides, then explicit host config", () => {
@@ -272,8 +272,11 @@ describe("hung OpenAI-compatible provider (real HTTP transport)", () => {
   let baseUrl: string;
   /** Requests to leave unanswered (headers never sent) before answering normally. */
   let hangFirst: number;
+  /** Mimics a buffering gateway: headers, then only SSE comment heartbeats for this long. */
+  let heartbeatOnlyMs: number;
   let requests: number;
   const hung: ServerResponse[] = [];
+  const fixtureTimers: ReturnType<typeof setTimeout>[] = [];
 
   function respond(request: IncomingMessage, response: ServerResponse): void {
     requests += 1;
@@ -285,21 +288,37 @@ describe("hung OpenAI-compatible provider (real HTTP transport)", () => {
         return;
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.write(
-        `data: ${JSON.stringify({
-          id: "fixture",
-          object: "chat.completion.chunk",
-          model: "fixture-model",
-          choices: [{ index: 0, delta: { content: "PONG" }, finish_reason: null }],
-        })}\n\n`,
-      );
-      response.end(
-        `data: ${JSON.stringify({
-          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
-        })}\n\ndata: [DONE]\n\n`,
-      );
+      if (heartbeatOnlyMs > 0) {
+        response.flushHeaders();
+        const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 20);
+        fixtureTimers.push(
+          heartbeat,
+          setTimeout(() => {
+            clearInterval(heartbeat);
+            if (!response.destroyed) answer(response);
+          }, heartbeatOnlyMs),
+        );
+        return;
+      }
+      answer(response);
     });
+  }
+
+  function answer(response: ServerResponse): void {
+    response.write(
+      `data: ${JSON.stringify({
+        id: "fixture",
+        object: "chat.completion.chunk",
+        model: "fixture-model",
+        choices: [{ index: 0, delta: { content: "PONG" }, finish_reason: null }],
+      })}\n\n`,
+    );
+    response.end(
+      `data: ${JSON.stringify({
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+      })}\n\ndata: [DONE]\n\n`,
+    );
   }
 
   function model(provider: string): Model<"openai-completions"> {
@@ -320,6 +339,7 @@ describe("hung OpenAI-compatible provider (real HTTP transport)", () => {
   beforeEach(async () => {
     requests = 0;
     hangFirst = 0;
+    heartbeatOnlyMs = 0;
     hung.length = 0;
     server = createServer(respond);
     await new Promise<void>((resolve, reject) => {
@@ -330,6 +350,7 @@ describe("hung OpenAI-compatible provider (real HTTP transport)", () => {
   });
 
   afterEach(async () => {
+    fixtureTimers.splice(0).forEach((timer) => clearTimeout(timer));
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -364,6 +385,60 @@ describe("hung OpenAI-compatible provider (real HTTP transport)", () => {
       expect(elapsed).toBeLessThan(5_000);
     },
   );
+
+  it("keeps a heartbeat-only buffered stream open under the default idle bound", async () => {
+    heartbeatOnlyMs = 400;
+    const streamFn = withLLMRetry(
+      composeStreamFn({
+        model: model("custom_provider:fixture"),
+        apiKey: "synthetic",
+        firstEventTimeoutMs: 200,
+      }),
+      {
+        sessionId: "session-buffered",
+        turnId: "turn-1",
+        scope: "agent",
+        policy: { baseDelayMs: 10, maxDelayMs: 10 },
+      },
+    );
+    const started = Date.now();
+    const stream = await streamFn(
+      model("custom_provider:fixture"),
+      { messages: [{ role: "user", content: "ping", timestamp: 1 }] },
+      { apiKey: "synthetic" },
+    );
+    await collect(stream);
+    const final = await stream.result();
+
+    expect(final.stopReason).toBe("stop");
+    expect(final.content).toEqual([{ type: "text", text: "PONG" }]);
+    expect(requests).toBe(1);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(390);
+  });
+
+  it("does not count SSE comment heartbeats as stream activity", async () => {
+    heartbeatOnlyMs = 2_000;
+    const streamFn = composeStreamFn({
+      model: model("custom_provider:fixture"),
+      apiKey: "synthetic",
+      firstEventTimeoutMs: 2_000,
+      streamIdleTimeoutMs: 150,
+    });
+    const started = Date.now();
+    const stream = await streamFn(
+      model("custom_provider:fixture"),
+      { messages: [{ role: "user", content: "ping", timestamp: 1 }] },
+      { apiKey: "synthetic" },
+    );
+    const events = await collect(stream);
+    const final = await stream.result();
+
+    expect(events.map((event) => event.type)).toEqual(["start", "error"]);
+    expect(final.stopReason).toBe("error");
+    expect(final.errorMessage).toContain("idle for 150ms");
+    expect(requests).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
 
   it("fails the turn within the bound and the next turn on the same runner succeeds", async () => {
     hangFirst = Number.POSITIVE_INFINITY;

@@ -31,6 +31,7 @@ export {
   isSupportedNativeVideoMime,
   selectMultimodalAttachments,
   encodeAttachmentImage,
+  nativeMultimodalKindForMime,
   type AttachmentImageEncoding,
   type MultimodalAttachmentCapabilities,
   type MultimodalAttachmentKind,

@@ -207,6 +207,7 @@
       "packages/config/test/request-media-config.test.ts",
       "packages/agent-modules/context-manager/test/request-media.test.ts",
       "packages/agent-modules/context-manager/test/request-image-encoding.test.ts",
+      "packages/agent-modules/context-manager/test/request-image-processor-unavailable.test.ts",
       "packages/local-runtime-v2/src/service/model-system/resolution/byok-error-attribution.test.ts",
       "packages/agent-tools/test/desktop/local-bash-output.test.ts",
       "packages/agent-tools/test/desktop/local-bash-timeout.test.ts",

@@ -35,12 +35,19 @@ export const LLM_FIRST_EVENT_TIMEOUT_MS = 300 * 1000;
 
 /**
  * Default per-attempt maximum gap between provider stream events after the
- * first one. Kept at the undici body-timeout default so models that reason
- * silently for minutes are not cut off; the bound now also applies to custom
- * fetch implementations. Override with {@link LLM_STREAM_IDLE_TIMEOUT_ENV} or
+ * first one. Only parsed model events reset it; SSE comment heartbeats do not.
+ * A gateway that buffers the upstream response and sends only heartbeats
+ * until generation finishes therefore makes the whole generation look idle,
+ * and long-thinking models with large output budgets can generate for over
+ * 30 minutes that way. The default stays above that.
+ * On the default undici transport a connection that goes fully silent is
+ * still cut by its body timeout (300 s since the last byte), so this bound
+ * mainly catches streams whose transport stays alive without model events
+ * and custom fetch implementations without their own body timeout. Override
+ * with {@link LLM_STREAM_IDLE_TIMEOUT_ENV} or
  * `LLMModelConfig.streamIdleTimeoutMs`; `0` disables it.
  */
-export const LLM_STREAM_IDLE_TIMEOUT_MS = 300 * 1000;
+export const LLM_STREAM_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 
 /** Environment override (milliseconds) for {@link LLM_FIRST_EVENT_TIMEOUT_MS}. */
 export const LLM_FIRST_EVENT_TIMEOUT_ENV = 'MCODE_LLM_FIRST_EVENT_TIMEOUT_MS';

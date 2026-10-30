@@ -87,7 +87,10 @@ export type {
   RequestImage,
   RequestImageLimitResult,
 } from './request-image-limit.js';
-export { isLLMImageLimitMessage } from '@mavis/shared/llm-error-classifier';
+export {
+  isLLMImageLimitMessage,
+  isLLMRequestTooLargeMessage,
+} from '@mavis/shared/llm-error-classifier';
 export { toPiUserMessage } from './agent.js';
 export {
   createToolContextHistogramBucketsByName,

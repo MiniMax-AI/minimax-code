@@ -60,7 +60,7 @@ export class LocalBrowserUseService implements BrowserUseService {
     this.explicitBuiltinSkill =
       options.activationMode === 'explicit-config' ? readBrowserUseBuiltinSkillAsset() : undefined;
     this.screenshotPreprocessor = createBrowserScreenshotPreprocessor({
-      compressScreenshot: options.compressScreenshot,
+      getImageEncoding: options.getImageEncoding,
       registerGeneratedAsset: options.registerGeneratedAsset,
     });
   }

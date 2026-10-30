@@ -3868,7 +3868,6 @@ function defaultCompatibility(
       executor: { reportFailure: vi.fn() },
     } as never,
     generatedAssets: {
-      compressModelImage: vi.fn(() => undefined),
       registerGeneratedAsset: vi.fn(),
       ...generatedAssets,
     },

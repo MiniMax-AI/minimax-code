@@ -3,7 +3,6 @@ import type {
   PromptSnapshotSource,
 } from "@mavis/agent-runtime";
 import {
-  buildCompressedModelImageFromBuffer,
   closeAgentDb,
   createUserStopCascade,
   type UserStopCascade,
@@ -489,21 +488,6 @@ export function createV1RuntimeCompatibility(
           host.evalReporterFactory,
         ),
         generatedAssets: {
-          compressModelImage: (input) => {
-            const compressed = buildCompressedModelImageFromBuffer(
-              Buffer.from(input.bytes),
-              input.fileName,
-              undefined,
-              input.budget,
-            );
-            return compressed
-              ? {
-                  dataUrl: compressed.filePart.url,
-                  width: compressed.width,
-                  height: compressed.height,
-                }
-              : undefined;
-          },
           registerGeneratedAsset: async (input) => {
             const record = await registerLocalAsset({
               ...input,

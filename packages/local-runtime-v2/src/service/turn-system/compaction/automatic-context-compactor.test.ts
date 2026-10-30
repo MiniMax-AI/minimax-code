@@ -5,6 +5,7 @@ import {
   type AssistantMessageEventStream,
   type Model,
 } from '@earendil-works/pi-ai';
+import { createDefaultTokenEstimator, resolveCompactionTokenBudget } from '@mavis/context-manager';
 import { wrapInternalContext } from '@mavis/goal';
 import type { PromptReadSnapshot } from '@mavis/agent-runtime';
 import { describe, expect, it, vi } from 'vitest';
@@ -527,6 +528,61 @@ describe('AutomaticContextCompactor request media', () => {
         tools: [],
       } as never),
     ).toEqual({ type: 'continue' });
+  });
+
+  it('archives older tool images instead of checkpointing when images push the context over the trigger', async () => {
+    const { compactor, writeImageArtifact } = compactorWithImageDump();
+    const imageModel = { ...model, contextWindow: 60_000 };
+    const messages = screenshots(10);
+    const { automaticTriggerAt } = resolveCompactionTokenBudget({
+      contextWindow: imageModel.contextWindow,
+      configuredMaxOutputTokens: imageModel.maxTokens,
+    });
+    const { inputTokens } = createLocalContextFootprintMeasurer({
+      model: imageModel,
+      tools: baseInput.tools,
+    }).measure(messages);
+    const perImage = createDefaultTokenEstimator().estimateVisualTokens();
+    const kept = Math.floor((automaticTriggerAt - (inputTokens - 10 * perImage)) / perImage / 2);
+    expect(inputTokens).toBeGreaterThan(automaticTriggerAt);
+    expect(kept).toBeGreaterThanOrEqual(2);
+    expect(kept).toBeLessThan(10);
+
+    // No streamFn: falling through to an LLM checkpoint would reject.
+    const result = await compactor.compactBeforeLlm({ ...baseInput, model: imageModel, messages });
+
+    expect(result).toMatchObject({ status: 'completed', method: 'tool_archive' });
+    if (result.status !== 'completed') throw new Error('Expected durable image archive.');
+    const withImages = result.replacementMessages.filter((message) =>
+      JSON.stringify(message).includes('"type":"image"'),
+    );
+    expect(withImages).toHaveLength(kept);
+    expect(withImages.at(-1)).toBe(result.replacementMessages.at(-1));
+    expect(writeImageArtifact).toHaveBeenCalledTimes(10 - kept);
+  });
+
+  it('still checkpoints a context that exceeds the trigger without its images', async () => {
+    const { compactor, writeImageArtifact } = compactorWithImageDump();
+    const textModel = { ...model, contextWindow: 60_000 };
+    const { automaticTriggerAt } = resolveCompactionTokenBudget({
+      contextWindow: textModel.contextWindow,
+      configuredMaxOutputTokens: textModel.maxTokens,
+    });
+    const text = 'context '.repeat(automaticTriggerAt);
+    const messages: AgentMessage[] = [
+      { role: 'user', content: [{ type: 'text', text }], timestamp: 0 },
+      ...screenshots(4),
+    ];
+    const textTokens = createLocalContextFootprintMeasurer({
+      model: textModel,
+      tools: baseInput.tools,
+    }).measure(messages.slice(0, 1)).inputTokens;
+    expect(textTokens).toBeGreaterThan(automaticTriggerAt);
+
+    await expect(
+      compactor.compactBeforeLlm({ ...baseInput, model: textModel, messages }),
+    ).rejects.toThrow(/streamFn/i);
+    expect(writeImageArtifact).not.toHaveBeenCalled();
   });
 
   it('archives the older half of the rejected images when repeating a recovered request', async () => {

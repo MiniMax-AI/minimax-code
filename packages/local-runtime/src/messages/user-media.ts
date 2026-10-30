@@ -70,6 +70,8 @@ export async function loadUserMediaCandidatesForMessages(
   options: {
     readonly maxBytesPerImage?: number;
     readonly capabilities?: MultimodalAttachmentCapabilities;
+    /** `false` returns images as stored, for a host that encodes them itself. */
+    readonly preprocessImages?: boolean;
   } = {},
 ): Promise<LocalUserMediaCandidate[] | undefined> {
   const modelImageMessages = mergeTransientImageAttachments(rawMessages, registeredMessages);
@@ -84,7 +86,12 @@ export async function loadUserMediaCandidatesForMessages(
     const modelImageMessage = modelImageMessages[messageIndex];
     for (const [attachmentIndex, attachment] of message.attachments.entries()) {
       const imageAttachment = modelImageMessage?.attachments[attachmentIndex] ?? attachment;
-      const image = await loadUserImage(imageAttachment, maxBytesPerImage, options.capabilities);
+      const image = await loadUserImage(
+        imageAttachment,
+        maxBytesPerImage,
+        options.capabilities,
+        options.preprocessImages ?? true,
+      );
       if (image) {
         media.push(image);
         continue;
@@ -107,6 +114,7 @@ async function loadUserImage(
   attachment: LocalMessageAttachment,
   maxBytes: number,
   capabilities?: MultimodalAttachmentCapabilities,
+  preprocess = true,
 ): Promise<LocalUserMediaCandidate | undefined> {
   try {
     const nativeMime = resolveNativeImageMime(attachment);
@@ -122,6 +130,11 @@ async function loadUserImage(
         decoded.buffer.byteLength,
         fileName,
       );
+      if (!preprocess) {
+        return attachment.filePath
+          ? sourceCandidate
+          : { ...sourceCandidate, data: decoded.buffer.toString('base64') };
+      }
       if (shouldDeferImageBeforePreprocessing(sourceCandidate, nativeMime, capabilities)) {
         return sourceCandidate;
       }
@@ -159,6 +172,7 @@ async function loadUserImage(
     if (!info.isFile()) return undefined;
     const fileName = attachment.fileName || basename(attachment.filePath);
     const sourceCandidate = sourceImageCandidate(attachment, nativeMime, info.size, fileName);
+    if (!preprocess) return sourceCandidate;
     if (shouldDeferImageBeforePreprocessing(sourceCandidate, nativeMime, capabilities)) {
       return sourceCandidate;
     }

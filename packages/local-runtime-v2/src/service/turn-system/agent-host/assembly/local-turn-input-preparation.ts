@@ -48,9 +48,8 @@ export interface LocalTurnPreparedAttachment {
     readonly sizeBytes: number;
     readonly data?: string;
     /**
-     * Mime of the inlined payload when it differs from the stored file — image
-     * preprocessing may transcode a large PNG to JPEG to fit the inline budget.
-     * `mimeType` above keeps describing the stored asset.
+     * Mime detected from the inlined payload when it differs from the stored
+     * file's. `mimeType` above keeps describing the stored asset.
      */
     readonly mime?: string;
   };
@@ -62,10 +61,7 @@ export interface LocalTurnAttachmentMaterializer {
     readonly turnId: string;
     readonly messageIndex: number;
     readonly attachmentIndex: number;
-    /** Total image attachment count across this canonical user input. */
-    readonly imageAttachmentCount: number;
     readonly attachment: AgentHostInputAttachment;
-    readonly modelCapabilities?: LocalMultimodalAttachmentCapabilities;
   }): Promise<LocalTurnPreparedAttachment>;
 }
 
@@ -199,7 +195,6 @@ export class LocalTurnInputPreparer {
     } = await this.prepareInitialPromptBatch(input, projectAgentReferences);
     const attachments = await this.prepareAttachments({
       lease: input.lease,
-      preparation: input.preparation,
       messages: canonicalUserInput.messages,
       messageIndexOffset: 0,
     });
@@ -230,6 +225,7 @@ export class LocalTurnInputPreparer {
       attachments,
       selectedMedia.inlinedKeys,
       capabilities,
+      selectedMedia.dimensionNotes,
     );
     const skillBlock = buildSlashSkillReminder(canonicalUserInput, input.preparation.agentConfig);
     const channelContext = canonicalUserInput.messages.find(
@@ -365,7 +361,6 @@ export class LocalTurnInputPreparer {
     });
     const attachments = await this.prepareAttachments({
       lease: input.lease,
-      preparation: input.preparation,
       messages: canonical.messages,
       messageIndexOffset: input.messageIndexOffset,
     });
@@ -376,7 +371,12 @@ export class LocalTurnInputPreparer {
       this.options.getImageEncoding?.(),
     );
     const reminderBlocks = [
-      buildAttachmentReminder(attachments, selectedMedia.inlinedKeys, capabilities),
+      buildAttachmentReminder(
+        attachments,
+        selectedMedia.inlinedKeys,
+        capabilities,
+        selectedMedia.dimensionNotes,
+      ),
       buildSlashSkillReminder(canonical, input.preparation.agentConfig),
     ].filter((block): block is string => Boolean(block));
     const projected = await this.projectCanonicalUserInput({
@@ -473,7 +473,6 @@ export class LocalTurnInputPreparer {
 
   private async prepareAttachments(input: {
     readonly lease: AcceptedTurnLease;
-    readonly preparation: LocalTurnPreparation;
     readonly messages: AgentHostCanonicalUserInput['messages'];
     readonly messageIndexOffset: number;
   }): Promise<PreparedAttachmentEntry[]> {
@@ -485,11 +484,7 @@ export class LocalTurnInputPreparer {
       })),
     );
     if (raw.length === 0) return [];
-    const imageAttachmentCount = raw.filter(({ attachment }) =>
-      isImageAttachment(attachment),
-    ).length;
     const assets = this.options.assets;
-    const capabilities = modelCapabilities(input.preparation.agentConfig);
     assertAgentHostCapabilityAvailable(
       'attachment-materializer',
       typeof assets?.materialize === 'function',
@@ -506,9 +501,7 @@ export class LocalTurnInputPreparer {
             turnId: input.lease.turnId,
             messageIndex: entry.messageIndex,
             attachmentIndex: entry.attachmentIndex,
-            imageAttachmentCount,
             attachment: entry.attachment,
-            ...(capabilities ? { modelCapabilities: capabilities } : {}),
           }),
         ),
       })),
@@ -665,13 +658,17 @@ function buildAttachmentReminder(
   entries: readonly PreparedAttachmentEntry[],
   inlinedKeys: ReadonlySet<string>,
   capabilities: LocalMultimodalAttachmentCapabilities | undefined,
+  dimensionNotes: ReadonlyMap<string, string> = new Map(),
 ): string {
   if (entries.length === 0) return '';
   const lines = entries.map(({ messageIndex, prepared }) => {
-    const inline = inlinedKeys.has(attachmentKey(messageIndex, prepared)) ? 'true' : 'false';
+    const key = attachmentKey(messageIndex, prepared);
+    const inline = inlinedKeys.has(key) ? 'true' : 'false';
+    const dimensionNote = dimensionNotes.get(key);
     return [
       `<attachment name="${escapeAttribute(prepared.fileName)}" mime="${escapeAttribute(prepared.mimeType)}" path="${escapeAttribute(prepared.filePath)}" message_index="${messageIndex + 1}" kind="${prepared.kind}" inline="${inline}">`,
       attachmentWorkflowInstruction(prepared.kind, inline === 'true', capabilities),
+      ...(dimensionNote ? [dimensionNote] : []),
       '</attachment>',
     ].join('\n');
   });

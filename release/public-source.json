@@ -187,6 +187,7 @@
     "packages/agent-modules/context-manager/test/compaction-usage.test.ts",
     "packages/agent-modules/context-manager/test/provider-budget.test.ts",
     "packages/agent-modules/context-manager/test/request-image-encoding.test.ts",
+    "packages/agent-modules/context-manager/test/request-image-processor-unavailable.test.ts",
     "packages/agent-modules/context-manager/test/request-media.test.ts",
     "packages/agent-modules/conversation-contract/package.json",
     "packages/agent-modules/conversation-contract/src/index.ts",

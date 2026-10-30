@@ -53,6 +53,7 @@ export {
   fitRequestMedia,
   encodeRequestImage,
   encodeRequestImageBlocks,
+  encodeRequestImageDetails,
   halfRequestMediaBudget,
   isArchivableRequestImage,
   isRequestMediaRejection,
@@ -62,7 +63,9 @@ export {
   resolveRequestMediaBudget,
   selectImagesToArchive,
   selectRequestImages,
+  tokenRequestMediaBudget,
   type EncodedRequestImage,
+  type EncodedRequestImageDetails,
   type RequestImageEncoding,
   type RequestMediaBudget,
 } from './request-media.js';

@@ -13,6 +13,7 @@ import {
   fitRequestMedia,
   selectImagesToArchive,
   selectRequestImages,
+  tokenRequestMediaBudget,
 } from '../src/index.js';
 
 function image(bytes = 10) {
@@ -140,6 +141,42 @@ describe('recoveryRequestMediaBudget', () => {
   });
 });
 
+describe('tokenRequestMediaBudget', () => {
+  const budget = { maxImages: 100, maxImageBytes: 1_000_000 };
+
+  it('gives the images half of what the trigger leaves to the rest of the context', () => {
+    // 10 images × 1_000 + 2_000 other tokens; trigger 11_000 leaves 9_000 → 4 images.
+    expect(
+      tokenRequestMediaBudget(
+        history(10),
+        { inputTokens: 12_000, triggerAt: 11_000, perImage: 1_000 },
+        budget,
+      ),
+    ).toEqual({ maxImages: 4, maxImageBytes: 1_000_000 });
+  });
+
+  it('keeps the newest image when the rest of the context nearly fills the trigger', () => {
+    expect(
+      tokenRequestMediaBudget(
+        history(3),
+        { inputTokens: 12_500, triggerAt: 10_000, perImage: 1_000 },
+        budget,
+      )?.maxImages,
+    ).toBe(1);
+  });
+
+  it('gives no target within the trigger, without images to spare, or when text alone exceeds it', () => {
+    const tokens = { inputTokens: 12_000, triggerAt: 11_000, perImage: 1_000 };
+    expect(
+      tokenRequestMediaBudget(history(10), { ...tokens, inputTokens: 11_000 }, budget),
+    ).toBeUndefined();
+    expect(tokenRequestMediaBudget(history(1), tokens, budget)).toBeUndefined();
+    expect(
+      tokenRequestMediaBudget(history(2), { ...tokens, inputTokens: 13_000 }, budget),
+    ).toBeUndefined();
+  });
+});
+
 describe('selectImagesToArchive', () => {
   it('archives everything older than the newest images within the target', () => {
     const archived = selectImagesToArchive(
@@ -193,6 +230,8 @@ describe('isRequestMediaRejection', () => {
       'Request exceeds the maximum allowed size',
       'messages.0.content.1.image.source.base64: image exceeds 5 MB maximum',
       'At least one of the image dimensions exceed max allowed size for many-image requests',
+      '400 image dimensions exceed max allowed size: 8000 pixels',
+      '400 {"error":{"message":"gateway error 413 occurred"}}',
     ]) {
       expect(isRequestMediaRejection(rejection(text)), text).toBe(true);
     }

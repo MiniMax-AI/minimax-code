@@ -1,7 +1,5 @@
 import { basename, extname } from 'node:path';
 
-import type { MultimodalAttachmentCapabilities } from '@mavis/agent-tools';
-
 import {
   discardLocalAssetRegistrations,
   registerMessageAttachments,
@@ -13,7 +11,6 @@ import type { LocalRuntimeConfig } from '../config/types.js';
 import type { RemoteAssetTransport } from '../assets/remote-source.js';
 import {
   loadUserMediaCandidatesForMessages,
-  maxModelImageBytesForBatch,
   type LocalMessageAttachment,
 } from '../messages/input.js';
 
@@ -63,22 +60,23 @@ export function createHostedAttachmentCapabilities(host: HostedAttachmentCapabil
       readonly sessionId: string;
       readonly turnId: string;
       readonly attachmentIndex: number;
-      readonly imageAttachmentCount: number;
       readonly attachment: HostedAttachmentInput;
-      readonly modelCapabilities?: MultimodalAttachmentCapabilities;
     }) => materializeAttachment(host, input),
   } as const;
 }
 
+/**
+ * Registers one attachment and reports its stored bytes as the inline media
+ * source. Images are not resized here: the turn encodes them once, to
+ * `requestMedia.image`, like every other image entering the conversation.
+ */
 async function materializeAttachment(
   host: HostedAttachmentCapabilitiesHost,
   input: {
     readonly sessionId: string;
     readonly turnId: string;
     readonly attachmentIndex: number;
-    readonly imageAttachmentCount: number;
     readonly attachment: HostedAttachmentInput;
-    readonly modelCapabilities?: MultimodalAttachmentCapabilities;
   },
 ) {
   const raw = normalizeAttachment(input.attachment, input.attachmentIndex);
@@ -95,10 +93,7 @@ async function materializeAttachment(
   const media = await loadUserMediaCandidatesForMessages(
     [{ content: '', attachments: [raw] }],
     [{ content: '', attachments: [registered] }],
-    {
-      maxBytesPerImage: maxModelImageBytesForBatch(input.imageAttachmentCount),
-      ...(input.modelCapabilities ? { capabilities: input.modelCapabilities } : {}),
-    },
+    { preprocessImages: false },
   );
   const candidate = media?.[0];
   return {
@@ -114,8 +109,6 @@ async function materializeAttachment(
             id: candidate.id,
             sizeBytes: candidate.sizeBytes,
             ...(candidate.data ? { data: candidate.data } : {}),
-            // Preprocessing may transcode (e.g. PNG → JPEG) to fit the inline
-            // budget; the stored asset keeps `mimeType` above.
             ...(candidate.mime ? { mime: candidate.mime } : {}),
           },
         }

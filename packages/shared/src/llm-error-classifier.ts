@@ -156,13 +156,23 @@ const LLM_IMAGE_LIMIT_MESSAGE_RE =
 /** OpenAI/Anthropic-style error type for a request the provider will never accept as sent. */
 const LLM_INVALID_REQUEST_MESSAGE_RE = /\binvalid_request_error\b/i;
 /**
- * The request body is over a provider or client byte limit: HTTP 413 bodies
- * (`request_too_large`, "Request Entity Too Large", "Payload Too Large") and the
- * local pre-send check (`Request body too large: N bytes exceeds client limit`).
- * The same body is rejected again on every resend.
+ * The request is over a provider or client size limit: HTTP 413 bodies
+ * (`request_too_large`, "Request Entity Too Large", "Payload Too Large"), the
+ * local pre-send check (`Request body too large: N bytes exceeds client limit`),
+ * gateway rewrites (AWSB's "Input is too long."), a 413 a gateway reports inside
+ * another status, and per-image size or dimension limits. The same request is
+ * rejected again on every resend; fewer or smaller images may fit.
  */
-const LLM_REQUEST_TOO_LARGE_MESSAGE_RE =
-  /\brequest_too_large\b|\bREQUEST_BODY_TOO_LARGE\b|\brequest body too large\b|\brequest entity too large\b|\bpayload too large\b/i;
+const LLM_REQUEST_TOO_LARGE_MESSAGE_RES: readonly RegExp[] = [
+  /\brequest_too_large\b|\bREQUEST_BODY_TOO_LARGE\b/i,
+  /\brequest entity too large\b|\bpayload too large\b/i,
+  /\binput is too long\b/i,
+  /\b(?:request|body)(?: body)? (?:is )?too large\b/i,
+  /\bexceeds? (?:the )?max(?:imum)? (?:allowed )?(?:request |body |payload )?size\b/i,
+  /\b413\b/,
+  /\bimages? (?:exceeds?|is too large|too large)\b/i,
+  /\bimage dimensions? exceeds?\b/i,
+];
 /**
  * The prompt is over the model context window. Kept to unambiguous provider
  * shapes; MiniMax reports it as `invalid params, context window exceeds limit
@@ -218,7 +228,7 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
       const boundedVisible = sanitizeMessage(visibleMessage);
       if (LLM_IMAGE_LIMIT_MESSAGE_RE.test(boundedVisible)) signals.add('image_limit');
       if (LLM_INVALID_REQUEST_MESSAGE_RE.test(boundedVisible)) signals.add('invalid_request');
-      if (LLM_REQUEST_TOO_LARGE_MESSAGE_RE.test(boundedVisible)) signals.add('request_too_large');
+      if (isLLMRequestTooLargeMessage(boundedVisible)) signals.add('request_too_large');
       if (LLM_CONTEXT_OVERFLOW_MESSAGE_RE.test(boundedVisible)) signals.add('context_overflow');
     }
     applyNumericSignals(facts, signals);
@@ -234,6 +244,18 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
 /** True when an LLM error message reports that the request carried too many images. */
 export function isLLMImageLimitMessage(message: string | undefined): boolean {
   return typeof message === 'string' && LLM_IMAGE_LIMIT_MESSAGE_RE.test(message);
+}
+
+/**
+ * True when an LLM error message reports a request over a size limit. Retry
+ * classification and request media recovery both read it, so a rejection is
+ * either recovered at once or not treated as a size rejection at all.
+ */
+export function isLLMRequestTooLargeMessage(message: string | undefined): boolean {
+  return (
+    typeof message === 'string' &&
+    LLM_REQUEST_TOO_LARGE_MESSAGE_RES.some((pattern) => pattern.test(message))
+  );
 }
 
 /**
@@ -276,9 +298,8 @@ export function isLLMDeterministicRequestRejection(normalized: NormalizedLLMErro
 }
 
 /**
- * The request is too big to be accepted as sent: an HTTP 413, a byte-limit
- * rejection (`request_too_large`, the local pre-send body check) or a context
- * window overflow. Resending the same request fails again, so it must not be
+ * The request is too big to be accepted as sent: an HTTP 413, a size-limit
+ * rejection (`isLLMRequestTooLargeMessage`) or a context window overflow. Resending the same request fails again, so it must not be
  * retried.
  * Anything that also looks transient (timeout, network, 408/429/5xx) is excluded.
  */
@@ -594,7 +615,7 @@ function applyMessageSignals(
   if (/\bempty.?response/i.test(message)) signals.add('empty_response');
   if (LLM_IMAGE_LIMIT_MESSAGE_RE.test(message)) signals.add('image_limit');
   if (LLM_INVALID_REQUEST_MESSAGE_RE.test(message)) signals.add('invalid_request');
-  if (LLM_REQUEST_TOO_LARGE_MESSAGE_RE.test(message)) signals.add('request_too_large');
+  if (isLLMRequestTooLargeMessage(message)) signals.add('request_too_large');
   if (LLM_CONTEXT_OVERFLOW_MESSAGE_RE.test(message)) signals.add('context_overflow');
   const hasStructuredError =
     facts.existingProtocolCode !== undefined || effectiveHttpStatus(facts) !== undefined;

@@ -9,13 +9,14 @@
  */
 
 import {
-  encodeRequestImage,
-  type EncodedRequestImage,
+  encodeRequestImageDetails,
+  type EncodedRequestImageDetails,
   type RequestImageEncoding,
 } from '@mavis/context-manager';
 
 /** Hosts that may not depend on context-manager pass the image encoding through this name. */
 export type AttachmentImageEncoding = RequestImageEncoding;
+export type EncodedAttachmentImage = EncodedRequestImageDetails;
 
 export interface MultimodalAttachmentCapabilities {
   readonly support_image?: unknown;
@@ -128,8 +129,8 @@ export function encodeAttachmentImage(
   bytes: Uint8Array,
   mime: string,
   encoding?: AttachmentImageEncoding,
-): Promise<EncodedRequestImage | undefined> {
-  return encodeRequestImage(bytes, mime, encoding);
+): Promise<EncodedAttachmentImage | undefined> {
+  return encodeRequestImageDetails(bytes, mime, encoding);
 }
 
 export function selectMultimodalAttachments<T extends MultimodalAttachmentCandidate>(

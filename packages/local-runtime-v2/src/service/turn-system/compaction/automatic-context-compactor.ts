@@ -5,6 +5,7 @@ import { DEFAULT_COMPACTION_SETTINGS } from '@earendil-works/pi-coding-agent/com
 import type { PiBeforeLlmCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
 import {
   boundRequestMedia,
+  createDefaultTokenEstimator,
   fitRequestMedia,
   halfRequestMediaBudget,
   isArchivableRequestImage,
@@ -13,6 +14,7 @@ import {
   resolveRequestMediaBudget,
   selectImagesToArchive,
   selectRequestImages,
+  tokenRequestMediaBudget,
   type RequestMediaBudget,
 } from '@mavis/context-manager';
 
@@ -159,7 +161,11 @@ function prepareAutomaticCompaction(
   const normalTriggerMatched =
     footprint.inputTokens > automaticTriggerAt || serializedBytesExceeded;
   const imageArchiveTarget = archiver
-    ? resolveImageArchiveTarget(input, recoveryDivisor)
+    ? resolveImageArchiveTarget(input, recoveryDivisor, {
+        inputTokens: footprint.inputTokens,
+        triggerAt: automaticTriggerAt,
+        perImage: createDefaultTokenEstimator().estimateVisualTokens(),
+      })
     : undefined;
   return {
     measurer,
@@ -180,12 +186,15 @@ function prepareAutomaticCompaction(
  * Image budget the history is archived down to: 1/`recoveryDivisor` of what a
  * rejected request carried when repeating it, or the request guard's low
  * watermark once the guard would drop a tool result image, so tool images
- * leave the history instead of being dropped again on every request.
+ * leave the history instead of being dropped again on every request. When the
+ * images alone push the context over the automatic trigger, the stricter
+ * `tokenRequestMediaBudget` applies, so archiving them replaces a checkpoint.
  * `undefined` when no tool result image falls outside it.
  */
 function resolveImageArchiveTarget(
   input: AutomaticContextCompactionInput,
   recoveryDivisor: number | undefined,
+  tokens: Parameters<typeof tokenRequestMediaBudget>[1],
 ): RequestMediaBudget | undefined {
   const budget = resolveRequestMediaBudget(input);
   let target: RequestMediaBudget | undefined;
@@ -193,6 +202,15 @@ function resolveImageArchiveTarget(
     target = recoveryRequestMediaBudget(input.recovery.requestMessages, budget, recoveryDivisor);
   } else if (selectRequestImages(input.messages, budget).dropped.some(isArchivableRequestImage)) {
     target = halfRequestMediaBudget(budget);
+  }
+  const tokenTarget = tokenRequestMediaBudget(input.messages, tokens, budget);
+  if (tokenTarget) {
+    target = target
+      ? {
+          maxImages: Math.min(target.maxImages, tokenTarget.maxImages),
+          maxImageBytes: Math.min(target.maxImageBytes, tokenTarget.maxImageBytes),
+        }
+      : tokenTarget;
   }
   if (!target) return undefined;
   return selectImagesToArchive(input.messages, target, isArchivableRequestImage).length > 0

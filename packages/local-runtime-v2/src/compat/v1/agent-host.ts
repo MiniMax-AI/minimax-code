@@ -50,21 +50,6 @@ type HostedChannelTypingInput = Parameters<
   >["typing"]["start"]
 >[0];
 
-interface V1ModelImageCompressionInput {
-  readonly bytes: Uint8Array;
-  readonly fileName: string;
-  readonly budget: {
-    readonly maxBytes: number;
-    readonly maxEdgePx: number;
-  };
-}
-
-interface V1CompressedModelImage {
-  readonly dataUrl: string;
-  readonly width: number;
-  readonly height: number;
-}
-
 interface V1GeneratedAssetRegistrationInput {
   readonly fileName: string;
   readonly mimeType: string;
@@ -84,11 +69,8 @@ interface V1GeneratedAssetRegistration {
   readonly bytes: number;
 }
 
-/** Temporary neutral local asset/codec bridge; it contains no product policy. */
+/** Temporary neutral local asset bridge; it contains no product policy. */
 export interface V1GeneratedAssetInfrastructure {
-  readonly compressModelImage: (
-    input: V1ModelImageCompressionInput,
-  ) => V1CompressedModelImage | undefined;
   readonly registerGeneratedAsset: (
     input: V1GeneratedAssetRegistrationInput,
   ) => Promise<V1GeneratedAssetRegistration>;

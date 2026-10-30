@@ -840,8 +840,9 @@ function appendPostActionVisualSummary(
   const width = finiteNumber(capture.result.width);
   const height = finiteNumber(capture.result.height);
   const bytes = finiteNumber(capture.result.bytes);
-  const format =
-    capture.result.format === 'jpeg' || capture.result.format === 'jpg' ? 'jpeg' : 'png';
+  const format = screenshotFormat(capture.result.format);
+  const dimensionNote =
+    typeof capture.result.dimensionNote === 'string' ? capture.result.dimensionNote : undefined;
   return {
     ...result,
     visualObservation: {
@@ -857,6 +858,7 @@ function appendPostActionVisualSummary(
       ...(width === undefined ? {} : { width }),
       ...(height === undefined ? {} : { height }),
       ...(bytes === undefined ? {} : { bytes }),
+      ...(dimensionNote === undefined ? {} : { dimensionNote }),
       budget: {
         ...(isRecord(capture.result.visualBudget) ? capture.result.visualBudget : {}),
         maxImagesPerTurn: MAX_POST_ACTION_VISUALS_PER_TURN,
@@ -1427,12 +1429,16 @@ function summarizeScreenshotResult(result: unknown, imageAvailableToModel: boole
 function screenshotContent(result: unknown): ToolResultContent | undefined {
   if (!isRecord(result)) return undefined;
   if (typeof result.data !== 'string' || result.data.length === 0) return undefined;
-  const format = result.format === 'jpeg' || result.format === 'jpg' ? 'jpeg' : 'png';
   return {
     type: 'image',
     data: result.data,
-    mimeType: `image/${format}`,
+    mimeType: `image/${screenshotFormat(result.format)}`,
   };
+}
+
+function screenshotFormat(format: unknown): 'jpeg' | 'png' | 'webp' {
+  if (format === 'jpeg' || format === 'jpg') return 'jpeg';
+  return format === 'webp' ? 'webp' : 'png';
 }
 
 function sanitizeBrowserResult(value: unknown, omittedKeys?: ReadonlySet<string>): unknown {

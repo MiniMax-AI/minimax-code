@@ -5,9 +5,14 @@ import {
   type AssistantMessage,
   type Model,
 } from '@earendil-works/pi-ai';
-import { formatDimensionNote, resizeImage } from '@earendil-works/pi-coding-agent/image-resize';
+import {
+  formatDimensionNote,
+  ImageProcessorUnavailableError,
+  resizeImage,
+} from '@earendil-works/pi-coding-agent/image-resize';
 import {
   isLLMImageLimitMessage,
+  isLLMRequestTooLargeMessage,
   listRequestImages,
   replaceRequestImages,
   resolveMaxImagesPerRequest,
@@ -26,18 +31,6 @@ const IMAGE_SHARE_OF_REQUEST_BODY = 2 / 3;
 const RECOVERY_MIN_EVICTED_IMAGES = 4;
 /** A rejected request keeps 1/divisor of its images and their bytes. */
 export const DEFAULT_RECOVERY_DIVISOR = 2;
-// Size rejections Pi's isContextOverflow does not match: gateway rewrites
-// (AWSB's "Input is too long."), bare 413 statuses, and per-image size or
-// dimension limits.
-const REQUEST_SIZE_REJECTIONS: readonly RegExp[] = [
-  /request entity too large|payload too large/i,
-  /\binput is too long\b/i,
-  /\b(?:request|body)(?: body)? (?:is )?too large\b/i,
-  /\bexceeds? (?:the )?max(?:imum)? (?:allowed )?(?:request |body |payload )?size\b/i,
-  /\b413\b/,
-  /\bimages? (?:exceeds?|is too large|too large)\b/i,
-  /\bimage dimensions? exceeds?\b/i,
-];
 
 /** Images one provider request may carry. */
 export interface RequestMediaBudget {
@@ -121,6 +114,34 @@ export function boundRequestMedia<T extends AgentMessage>(
 }
 
 /**
+ * Image budget once `messages` exceed the automatic compaction trigger because
+ * of their images: they may then use half of what the trigger leaves to the
+ * rest of the context, keeping at least the newest one. Archiving the older
+ * images is enough to fall back below the trigger, so the history is not
+ * summarized away together with images the model has only just received.
+ * `undefined` when the context is within the trigger, has fewer than two
+ * images, or exceeds the trigger without them.
+ */
+export function tokenRequestMediaBudget(
+  messages: readonly AgentMessage[],
+  tokens: {
+    readonly inputTokens: number;
+    readonly triggerAt: number;
+    /** Tokens the context estimate counts for one image. */
+    readonly perImage: number;
+  },
+  budget: RequestMediaBudget,
+): RequestMediaBudget | undefined {
+  if (tokens.inputTokens <= tokens.triggerAt || tokens.perImage <= 0) return undefined;
+  const images = listRequestImages(messages).length;
+  if (images < 2) return undefined;
+  const otherTokens = Math.max(0, tokens.inputTokens - images * tokens.perImage);
+  if (otherTokens >= tokens.triggerAt) return undefined;
+  const maxImages = Math.max(1, Math.floor((tokens.triggerAt - otherTokens) / tokens.perImage / 2));
+  return maxImages < images ? { maxImages, maxImageBytes: budget.maxImageBytes } : undefined;
+}
+
+/**
  * Budget the repeated request must fall to after the provider rejected
  * `rejected`, a request that carried N images: the rejection shows the real
  * limit is below N, so keep 1/`divisor` of them and of their bytes, dropping at
@@ -195,14 +216,15 @@ export function fitRequestMedia<T extends AgentMessage>(
 
 /**
  * A provider rejection that fewer request images can fix: a context overflow
- * by tokens or request bytes, or an image count or size limit.
+ * by tokens or request bytes, or an image count or size limit. The retry layer
+ * reads the same classifier, so such a rejection is not resent unchanged first.
  */
 export function isRequestMediaRejection(message: AssistantMessage): boolean {
   return (
     message.stopReason === 'error' &&
     (isContextOverflow(message) ||
       isLLMImageLimitMessage(message.errorMessage) ||
-      REQUEST_SIZE_REJECTIONS.some((pattern) => pattern.test(message.errorMessage ?? '')))
+      isLLMRequestTooLargeMessage(message.errorMessage))
   );
 }
 
@@ -263,7 +285,7 @@ export interface RequestImageEncoding {
   readonly maxBase64Bytes: number;
 }
 
-/** The limits the Read tool applies to the images it returns. */
+/** Default `requestMedia.image`: the limits Pi's Read tool applies on its own. */
 export const DEFAULT_REQUEST_IMAGE_ENCODING: Readonly<RequestImageEncoding> = {
   maxWidth: 2_000,
   maxHeight: 2_000,
@@ -287,10 +309,33 @@ export async function encodeRequestImage(
   return (await encodeImage(bytes, mimeType, encoding))?.image;
 }
 
+export interface EncodedRequestImageDetails {
+  readonly image: EncodedRequestImage;
+  readonly width: number;
+  readonly height: number;
+  /** Maps coordinates on a shrunk image back to the original; absent when the size is unchanged. */
+  readonly dimensionNote?: string;
+}
+
+/** `encodeRequestImage` with the encoded size and its note on the original size. */
+export async function encodeRequestImageDetails(
+  bytes: Uint8Array,
+  mimeType: string,
+  encoding: RequestImageEncoding = DEFAULT_REQUEST_IMAGE_ENCODING,
+): Promise<EncodedRequestImageDetails | undefined> {
+  return encodeImage(bytes, mimeType, encoding);
+}
+
+/** The Read tool's note for an image over the limits while the image processor cannot load. */
+const IMAGE_PROCESSOR_UNAVAILABLE_NOTE =
+  '[Image omitted: image processing runtime is unavailable.]';
+
 /**
  * `encodeRequestImage` over every base64 image block; `undefined` when none
  * changed. A shrunk image is followed by the Read tool's note on its original
- * size, so coordinates read off it can be mapped back to the original.
+ * size, so coordinates read off it can be mapped back to the original. An
+ * image over the limits is replaced with `IMAGE_PROCESSOR_UNAVAILABLE_NOTE`
+ * when the image processor cannot load, as the Read tool did.
  */
 export async function encodeRequestImageBlocks<T extends { readonly type: string }>(
   blocks: readonly T[],
@@ -303,7 +348,15 @@ export async function encodeRequestImageBlocks<T extends { readonly type: string
       if (block.type !== 'image' || typeof data !== 'string' || typeof mimeType !== 'string') {
         return [block];
       }
-      const encodedImage = await encodeImage(Buffer.from(data, 'base64'), mimeType, encoding);
+      const encodedImage = await encodeImageOrUnavailable(
+        Buffer.from(data, 'base64'),
+        mimeType,
+        encoding,
+      );
+      if (encodedImage === PROCESSOR_UNAVAILABLE) {
+        changed = true;
+        return [{ type: 'text', text: IMAGE_PROCESSOR_UNAVAILABLE_NOTE } as unknown as T];
+      }
       if (!encodedImage) return [block];
       changed = true;
       const image = { ...block, ...encodedImage.image };
@@ -319,7 +372,18 @@ async function encodeImage(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding,
-): Promise<{ image: EncodedRequestImage; dimensionNote?: string } | undefined> {
+): Promise<EncodedRequestImageDetails | undefined> {
+  const encoded = await encodeImageOrUnavailable(bytes, mimeType, encoding);
+  return encoded === PROCESSOR_UNAVAILABLE ? undefined : encoded;
+}
+
+const PROCESSOR_UNAVAILABLE = Symbol('image processor unavailable');
+
+async function encodeImageOrUnavailable(
+  bytes: Uint8Array,
+  mimeType: string,
+  encoding: RequestImageEncoding,
+): Promise<EncodedRequestImageDetails | typeof PROCESSOR_UNAVAILABLE | undefined> {
   if (!mimeType.toLowerCase().startsWith('image/')) return undefined;
   try {
     const resized = await resizeImage(bytes, mimeType, {
@@ -328,13 +392,17 @@ async function encodeImage(
       maxBytes: encoding.maxBase64Bytes,
     });
     if (!resized?.wasResized) return undefined;
-    const image = { data: resized.data, mimeType: resized.mimeType };
+    const encoded = {
+      image: { data: resized.data, mimeType: resized.mimeType },
+      width: resized.width,
+      height: resized.height,
+    };
     const shrunk =
       resized.width !== resized.originalWidth || resized.height !== resized.originalHeight;
     const dimensionNote = shrunk ? formatDimensionNote(resized) : undefined;
-    return dimensionNote ? { image, dimensionNote } : { image };
-  } catch {
-    return undefined;
+    return dimensionNote ? { ...encoded, dimensionNote } : encoded;
+  } catch (error) {
+    return error instanceof ImageProcessorUnavailableError ? PROCESSOR_UNAVAILABLE : undefined;
   }
 }
 

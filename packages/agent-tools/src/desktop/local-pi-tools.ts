@@ -113,7 +113,9 @@ export class LocalReadTool implements ToolImpl<
   private readonly tool: AgentTool;
 
   constructor(private readonly workspaceRoot: string) {
-    this.tool = createReadTool(workspaceRoot);
+    // The host's request media extension encodes every tool result image to
+    // `requestMedia.image`; a second resize here would cap it and add a note.
+    this.tool = createReadTool(workspaceRoot, { autoResizeImages: false });
   }
 
   async execute(

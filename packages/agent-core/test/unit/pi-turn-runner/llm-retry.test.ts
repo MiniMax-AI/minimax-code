@@ -12,6 +12,7 @@ import {
   classifyLLMRequestRejectionMessage,
   isLLMDeterministicRequestRejection,
   isLLMImageLimitMessage,
+  isLLMRequestTooLargeMessage,
   normalizeLLMError,
 } from "@mavis/shared/llm-error-classifier";
 import {
@@ -595,6 +596,9 @@ describe("withLLMRetry", () => {
     ],
     ["custom_provider:work", "Input is too long for requested model."],
     ["minimax_api", "invalid params, context window exceeds limit"],
+    ["custom_provider:work", "400 image dimensions exceed max allowed size: 8000 pixels"],
+    ["custom_provider:work", '400 {"error":{"message":"gateway error 413 occurred"}}'],
+    ["custom_provider:work", "400 messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"],
   ])("does not retry a deterministic request rejection from %s: %s", async (provider, message) => {
     let attempts = 0;
     const sleep = vi.fn(async () => {});
@@ -646,6 +650,8 @@ describe("withLLMRetry", () => {
     "[Error] 400 Bad Request",
     "503 Service Unavailable: too many images queued, try again",
     "429 rate limited while processing images",
+    "503 payload too large for the upstream queue, try again",
+    "400 context window has 4130 tokens left",
   ])("keeps the BYOK retry-all budget for transient or unclassified errors: %s", async (message) => {
     let attempts = 0;
     const inner = (async () => {
@@ -1191,6 +1197,25 @@ describe("deterministic request rejection classification", () => {
     expect(rejection("Too many images", 413)).toBe(true);
     expect(rejection('400 {"type":"invalid_request_error","message":"bad"}')).toBe(true);
     expect(classifyLLMRequestRejectionMessage('400 {"type":"invalid_request_error"}')).toBe("invalid_request");
+  });
+
+  it("treats every size rejection request media recovery handles as terminal", () => {
+    for (const message of [
+      "Input is too long.",
+      "413 <html><body>nginx</body></html>",
+      "Request too large for gpt-4o",
+      "request body too large",
+      "Request exceeds the maximum allowed size",
+      "messages.0.content.1.image.source.base64: image exceeds 5 MB maximum",
+      "At least one of the image dimensions exceed max allowed size for many-image requests",
+      '{"error":{"message":"gateway error 413 occurred"}}',
+    ]) {
+      expect(isLLMRequestTooLargeMessage(message), message).toBe(true);
+      expect(rejection(message, 400), message).toBe(true);
+      expect(rejection(message), message).toBe(true);
+      expect(rejection(message, 503), message).toBe(false);
+    }
+    expect(isLLMRequestTooLargeMessage("context window has 4130 tokens left")).toBe(false);
   });
 
   it("classifies the BYOK-attributed form the retry loop actually sees", () => {
