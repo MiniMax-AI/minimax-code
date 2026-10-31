@@ -20,6 +20,12 @@ const skipped = new Set([
   ".pnpm-store",
   ".turbo",
   ".DS_Store",
+  // Local Python SDK environment and tool caches (packages/code-sdk-python).
+  ".venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
 ]);
 function filesIn(directory, prefix = "") {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
