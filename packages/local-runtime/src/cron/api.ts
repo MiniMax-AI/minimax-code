@@ -963,9 +963,16 @@ async function readCronConfigUpdateResponse(
 }
 
 function validationErrorResponse(err: unknown): Response {
+  // Prefer a short, single-line message from our own validation Errors; never
+  // forward multi-line / stack-shaped text to the client.
+  const raw = err instanceof Error ? err.message : '';
+  const message =
+    raw && !raw.includes('\n') && !raw.includes('\r') && raw.length <= 300
+      ? raw
+      : 'Invalid request';
   return json(
     {
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
       code: 'VALIDATION_ERROR',
     },
     { status: 400 },
@@ -1060,8 +1067,10 @@ function validateCronSchedule(config: CronConfig): Response | undefined {
 function cronErrorResponse(err: unknown): Response {
   const candidate = err as { statusCode?: unknown; code?: unknown; message?: unknown };
   const status = typeof candidate.statusCode === 'number' ? candidate.statusCode : 500;
-  const message = typeof candidate.message === 'string' ? candidate.message : String(err);
+  const rawMessage = typeof candidate.message === 'string' ? candidate.message : '';
   const code = typeof candidate.code === 'string' ? candidate.code : undefined;
+  // Duplicate / not-found detection still keys off the server-side message.
+  const message = rawMessage;
   // Duplicate detection is independent of the incoming statusCode — see
   // the same-shaped fix in `contract.ts:toCronContractError`. The
   // `agent-modules/cron` `AppError` throws with `statusCode = 409` and
@@ -1077,9 +1086,15 @@ function cronErrorResponse(err: unknown): Response {
   // `Cron task already registered: mavis/end-of-workday`. Keeps the same convention as
   // `packages/local-runtime/src/api/routes/agents.ts` (40901 conflict etc.).
   const errorCode = isDuplicate ? 40903 : undefined;
+  const publicMessage =
+    derivedStatus >= 500
+      ? 'Internal error'
+      : message && !message.includes('\n') && !message.includes('\r') && message.length <= 300
+        ? message
+        : 'Request failed';
   return json(
     {
-      error: message,
+      error: publicMessage,
       ...(code ? { code } : {}),
       ...(errorCode !== undefined ? { errorCode } : {}),
     },

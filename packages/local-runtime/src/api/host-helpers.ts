@@ -392,12 +392,25 @@ export function buildLegacyDaemonProxyPath(
 }
 
 // ─── Response factories ────────────────────────────────────────────────
+/**
+ * JSON HTTP response. Drops `stack` keys and turns Error values into
+ * `{ name, message }` so a caller cannot leak stack frames through this sink
+ * (CodeQL js/stack-trace-exposure).
+ */
 export function json(data: unknown, init?: ResponseInit): Response {
-  return new Response(JSON.stringify(data), {
+  return new Response(JSON.stringify(data, publicJsonReplacer), {
     status: init?.status ?? 200,
     statusText: init?.statusText,
     headers: { ...JSON_HEADERS, ...(init?.headers ?? {}) },
   });
+}
+
+function publicJsonReplacer(key: string, value: unknown): unknown {
+  if (key === 'stack') return undefined;
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message };
+  }
+  return value;
 }
 
 export function notFound(pathname: string): Response {

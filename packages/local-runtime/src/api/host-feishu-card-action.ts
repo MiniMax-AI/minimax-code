@@ -293,7 +293,7 @@ async function handleFormSubmit(input: {
     return json({
       ok: false,
       requestId,
-      error: err instanceof Error ? err.message : String(err),
+      error: 'QUESTIONNAIRE_SUBMIT_FAILED',
       toast: { type: 'error', content: '提交失败，请稍后再试' },
     });
   }
@@ -355,7 +355,7 @@ async function handleFormSubmit(input: {
     return json({
       ok: false,
       requestId,
-      error: err instanceof Error ? err.message : String(err),
+      error: 'QUESTIONNAIRE_SUBMIT_FAILED',
       toast: { type: 'error', content: '提交失败，请稍后再试' },
     });
   }

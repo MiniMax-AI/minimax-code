@@ -258,10 +258,10 @@ export function normalizeTaskError(error: unknown, fallbackCode = 'TASK_ERROR'):
     };
   }
   if (error instanceof Error) {
+    // Stack frames stay on the server log; TaskError is returned over HTTP.
     return {
       message: error.message,
       code: fallbackCode,
-      ...(error.stack ? { details: { stack: error.stack } } : {}),
     };
   }
   return {
