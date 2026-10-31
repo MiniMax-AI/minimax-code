@@ -1,11 +1,13 @@
-import type { BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
-import type { LocalSandboxBashOperationsFactory } from '@mavis/agent-tools/desktop';
+import type {
+  LocalBashEnvPolicySource,
+  LocalSandboxBashOperationsFactory,
+} from '@mavis/agent-tools/desktop';
 
 import { createLocalBackgroundBashExecutor } from './executor.js';
 
 export function initializeLocalBackgroundBashExecutor(
   operationsFactory: LocalSandboxBashOperationsFactory,
-  envPolicy: BashEnvPolicy,
+  envPolicy: LocalBashEnvPolicySource,
 ) {
   return createLocalBackgroundBashExecutor(operationsFactory, envPolicy);
 }

@@ -8,6 +8,7 @@ const MINIMAX_M3_FILE_API_CAPABILITIES: ModelCapabilitiesConfig = {
   max_video_bytes_inline: 52_428_800,
   max_request_body_bytes: 67_108_864,
   max_attachments_count: 4,
+  max_images_per_request: 20,
 };
 
 export const MINIMAX_MODELS: Record<string, ModelConfig> = {

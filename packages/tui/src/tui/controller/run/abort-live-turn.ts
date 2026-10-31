@@ -1,21 +1,48 @@
+import { CONVERSATION_STOP_CONFIG_DEFAULTS, type ConversationStopConfigRead } from '@mavis/config';
+
 import type { TuiConversationPort, TuiDelegationPort } from '../../../runtime/port.js';
 import { isTuiDelegatedSession } from '../../../runtime/delegation.js';
+import type { TuiObservability } from '../../../observability/index.js';
 import type { TuiRunProjection } from '../../state/run-projection.js';
 import type { TuiChatController } from '../chat-controller.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
 import { DEFAULT_CANCELLATION_SETTLEMENT_TIMEOUT_MS } from '../../../application/run-coordinator.js';
+
+/** What Esc needs from the `conversation` section of config.yaml. */
+export type TuiStopPolicy = Pick<
+  ConversationStopConfigRead,
+  'stopSubAgent' | 'policySource' | 'failure'
+>;
+
+const DELEGATED_AGENTS_KEEP_RUNNING =
+  'Delegated agents keep running in the background. To stop them with Esc, set conversation.stopSubAgent: true in config.yaml.';
+
+const RUNNING_ELSEWHERE =
+  'This Session is running in another MCode process and is read-only here. Stop it from that process.';
 
 export function createTuiAbortLiveTurn(options: {
   controller: TuiChatController;
   runProjection: TuiRunProjection;
   stopDelegation: TuiDelegationPort['stopDelegation'];
   abortSession: TuiConversationPort['abortSession'];
-  getActiveRun(sessionId: string): Promise<{ state: string; turnId?: string }>;
+  getActiveRun(
+    sessionId: string,
+  ): Promise<{ state: string; turnId?: string; runningElsewhere?: true }>;
   latestRuntimeTurnId(): string | undefined;
   setTransientHint(message: string | undefined): void;
   updateChrome(): void;
   requestRender(): void;
   append(message: string, kind: 'warning' | 'error'): void;
+  /**
+   * Reads `conversation.stopSubAgent` afresh, from the same config.yaml the
+   * embedded Runtime's own stop cascade reads (see app.ts). Synchronous on
+   * purpose: with the switch on, `stopDelegation` must still start before the
+   * root abort, exactly as it did before the switch existed.
+   */
+  readStopPolicy(): TuiStopPolicy;
+  /** Active delegated agents of the selected root, only to decide on the hint. */
+  activeDelegatedAgentCount?(): number;
+  observability?: Pick<TuiObservability, 'recordStopPolicy'>;
   /**
    * Invoked at most once per abort attempt after a confirmed stop of the
    * aborted turn, so the caller can return that turn's prompt to the
@@ -31,6 +58,20 @@ export function createTuiAbortLiveTurn(options: {
     const session = snapshot.session;
     const stopDelegatedAgents = async (): Promise<boolean> => {
       if (!session || isTuiDelegatedSession(session)) return false;
+      const { policy, readerThrew } = readStopPolicy(options);
+      recordStopPolicy(options, session.sessionId, policy, readerThrew);
+      if (!policy.stopSubAgent) {
+        // The Runtime applies the same switch from the same file to its own
+        // cascade: it neither stops nor silences these agents, so they finish and
+        // report back as usual. The root itself is still stopped by the caller
+        // (controller.abort / abortSession), and a foreground task child ends
+        // with that Turn through the tool call's abort signal, so nothing here
+        // needs `stopDelegation`.
+        if (hasActiveDelegatedAgents(options)) {
+          options.append(DELEGATED_AGENTS_KEEP_RUNNING, 'warning');
+        }
+        return false;
+      }
       let receipt;
       try {
         receipt = await options.stopDelegation(session.sessionId);
@@ -105,6 +146,15 @@ export function createTuiAbortLiveTurn(options: {
     const runtimeTurnId = options.latestRuntimeTurnId();
     if (!runtimeTurnId || !snapshot.session?.sessionId) return false;
     const sessionId = snapshot.session.sessionId;
+    // Another live MCode process owns this Turn: only that process can stop it,
+    // and stopping its delegated agents from here would cut into its work.
+    const owner = await options.getActiveRun(sessionId).catch(() => undefined);
+    if (owner?.runningElsewhere) {
+      options.append(RUNNING_ELSEWHERE, 'warning');
+      options.updateChrome();
+      options.requestRender();
+      return false;
+    }
     options.setTransientHint('Stopping the current response. Your draft is preserved.');
     options.runProjection.markRuntimeTurnStopping(runtimeTurnId);
     options.updateChrome();
@@ -155,6 +205,58 @@ export function createTuiAbortLiveTurn(options: {
       return false;
     }
   };
+}
+
+type AbortLiveTurnOptions = Parameters<typeof createTuiAbortLiveTurn>[0];
+
+function readStopPolicy(options: AbortLiveTurnOptions): {
+  readonly policy: TuiStopPolicy;
+  readonly readerThrew: boolean;
+} {
+  try {
+    return { policy: options.readStopPolicy(), readerThrew: false };
+  } catch {
+    // The shared reader never throws; an injected one might. Fall back exactly
+    // like an unreadable config.yaml: the documented default, so Esc still works.
+    return {
+      policy: {
+        stopSubAgent: CONVERSATION_STOP_CONFIG_DEFAULTS.stopSubAgent,
+        policySource: { stopSubAgent: 'read_failed', stopAsyncBash: 'read_failed' },
+        failure: { reason: 'read_error' },
+      },
+      readerThrew: true,
+    };
+  }
+}
+
+function recordStopPolicy(
+  options: AbortLiveTurnOptions,
+  sessionId: string,
+  policy: TuiStopPolicy,
+  readerThrew: boolean,
+): void {
+  const readFailure = readerThrew ? 'reader_threw' : policy.failure?.reason;
+  try {
+    options.observability?.recordStopPolicy?.({
+      sessionId,
+      stopSubAgent: policy.stopSubAgent,
+      policySource: policy.policySource,
+      delegationStop: policy.stopSubAgent ? 'requested' : 'skipped_by_policy',
+      ...(readFailure ? { readFailure } : {}),
+    });
+  } catch {
+    // Telemetry must never change what Esc does.
+  }
+}
+
+/** Without a count, show the hint: one line too many beats a silent surprise. */
+function hasActiveDelegatedAgents(options: AbortLiveTurnOptions): boolean {
+  if (!options.activeDelegatedAgentCount) return true;
+  try {
+    return options.activeDelegatedAgentCount() > 0;
+  } catch {
+    return true;
+  }
 }
 
 /**

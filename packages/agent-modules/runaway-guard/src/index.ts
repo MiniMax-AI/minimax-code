@@ -11,6 +11,7 @@ export {
   type RunawayGuardReplayInput,
   type RunawayGuardReplayResult,
   type RunawayGuardToolPolicy,
+  type RunawayGuardChildStep,
   type RunawayGuardObservation,
   type RunawayGuardSignalSummary,
   type RunawayGuardTurnSummary,

@@ -307,6 +307,9 @@
       "@mavis/shared/logging": [
         "./packages/shared/src/logging/index.ts"
       ],
+      "@mavis/shared/logging/redact-log-secret": [
+        "./packages/shared/src/logging/redact-log-secret.ts"
+      ],
       "@mavis/shared/mavis-tags": [
         "./packages/shared/src/mavis-tags.ts"
       ],
@@ -369,6 +372,9 @@
       ],
       "@mavis/shared/turn-identity": [
         "./packages/shared/src/turn-identity.ts"
+      ],
+      "@mavis/shared/turn-message-kind": [
+        "./packages/shared/src/turn-message-kind.ts"
       ],
       "@mavis/skills": [
         "./packages/agent-modules/skills/src/index.ts"

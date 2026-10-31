@@ -6,6 +6,7 @@ export {
   mergePluginHookDecisions,
   PluginHookRunner,
   renderPluginHookRejectionReminder,
+  resolvePluginDataDirectory,
 } from './runner.js';
 export {
   PluginHookCoordinator,

@@ -45,6 +45,8 @@ export function createHostedAgentPermissionCapabilities(
         readonly toolInput: Readonly<Record<string, unknown>>;
         readonly permissionMode?: 'default' | 'auto' | 'bypassPermissions' | 'off';
         readonly trustedExactWritePaths?: readonly string[];
+        readonly sessionOwnedReadablePaths?: readonly string[];
+        readonly nativeDeleteSnapshot?: boolean;
       }) => {
         const ctx = host.permissionRouteContext();
         const decision = await ctx.permissionService.checkPermission({
@@ -55,6 +57,10 @@ export function createHostedAgentPermissionCapabilities(
           permissionModeOverride:
             input.permissionMode ?? readLocalPermissionMode(ctx.configGetter().permissionMode),
           trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
+          sessionOwnedReadablePaths: [...(input.sessionOwnedReadablePaths ?? [])],
+          ...(input.nativeDeleteSnapshot !== undefined
+            ? { nativeDeleteSnapshot: input.nativeDeleteSnapshot }
+            : {}),
         });
         if (decision.behavior === 'deny') {
           return { behavior: 'deny' as const, reason: decision.reason };
@@ -87,6 +93,12 @@ export function createHostedAgentPermissionCapabilities(
         readonly reason: string;
         readonly ruleContents: readonly string[];
         readonly ruleMatchers?: readonly import('@mavis/permission').PermissionRuleMatcher[];
+        /** Trusted outer run_code identity for a PTC child approval. */
+        readonly parentToolCallId?: string;
+        /** User-visible outer run_code description for the approval surface. */
+        readonly parentToolDescription?: string;
+        /** A deny ends this PTC program, never the whole Turn. */
+        readonly stopPtcOnDeny?: boolean;
         readonly signal?: AbortSignal;
         readonly channelContext?: HostedPermissionChannelContext;
       }) => {
@@ -114,6 +126,11 @@ export function createHostedAgentPermissionCapabilities(
             ...(input.ruleMatchers ? { ruleMatchers: input.ruleMatchers } : {}),
             persistWholeToolRuleOnReply: true,
             reason: input.reason,
+            ...(input.parentToolCallId ? { parentToolCallId: input.parentToolCallId } : {}),
+            ...(input.parentToolDescription
+              ? { parentToolDescription: input.parentToolDescription }
+              : {}),
+            ...(input.stopPtcOnDeny ? { stopPtcOnDeny: true } : {}),
             ...(origin ? { origin } : {}),
           },
           input.signal,

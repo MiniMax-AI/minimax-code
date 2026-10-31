@@ -137,8 +137,15 @@ export interface ConversationMutationWorkflowDependencies {
   readonly mutationPlanState?: {
     readPlanState(sessionId: string): Promise<ConversationMutationPlanState>;
   };
+  /** Rejects Rewind/Edit while another live Runtime owns the active Turn. */
+  readonly activeTurn?: (
+    sessionId: string,
+  ) => Promise<{ readonly ownedByOtherRuntime?: true } | undefined>;
   readonly stream: ConversationMutationStreamPort;
-  readonly turn: Pick<TurnService, "abort" | "fork" | "rewind">;
+  readonly turn: Pick<
+    TurnService,
+    "abort" | "fork" | "inspectForkBoundary" | "rewind"
+  >;
   readonly trustedEditSubmission: {
     submit(
       input: ConversationEditAdmissionInput,
@@ -166,20 +173,13 @@ export function createProductionConversationMutationWorkflow(
         input.sessionFork,
         input.worktree,
         input.mutationPlanState,
+        fork,
       ),
     createSideSession: (request) => fork.forkSideSession(request),
     forkSession: (_ctx, request) => mapFork(request, fork, input),
-    getSessionRewindPreview: (_ctx, request) =>
-      mapRewindPreview(request, input),
-    rewindSession: (_ctx, request) =>
-      mapRewind(
-        request,
-        rewindEdit,
-        input.sessionFork,
-        input.mutationPlanState,
-      ),
-    editSessionMessage: (_ctx, request) =>
-      mapEdit(request, rewindEdit, input.sessionFork, input.mutationPlanState),
+    getSessionRewindPreview: (_ctx, request) => mapRewindPreview(request, input),
+    rewindSession: (_ctx, request) => mapRewind(request, rewindEdit, input.sessionFork, input),
+    editSessionMessage: (_ctx, request) => mapEdit(request, rewindEdit, input.sessionFork, input),
   };
 }
 
@@ -240,6 +240,9 @@ function createForkService(
         const result = await input.turn.fork(request);
         return { historyRevision: result.historyRevision };
       },
+      ...(input.turn.inspectForkBoundary
+        ? { inspectBoundary: input.turn.inspectForkBoundary.bind(input.turn) }
+        : {}),
     },
   });
 }
@@ -515,7 +518,8 @@ async function getForkOptions(
   request: GetSessionForkOptionsReq,
   capability: ConversationMutationForkCapability,
   worktree: ForkWorktreePort,
-  planStateReader?: ConversationMutationWorkflowDependencies["mutationPlanState"],
+  planStateReader: ConversationMutationWorkflowDependencies["mutationPlanState"],
+  historyPreflight: Pick<ForkService, "isHistoryBoundarySettled">,
 ): Promise<GetSessionForkOptionsResp> {
   const source = await capability.sessions.get(request.id);
   if (!source) return missingForkSourceOptions();
@@ -534,10 +538,11 @@ async function getForkOptions(
       : { assistantDisplayMessageId: request.assistantMessageId }),
   });
   const planState = await planStateReader?.readPlanState(request.id);
-  const boundaryAvailability = forkBoundaryAvailability(
+  const boundaryAvailability = await confirmForkHistoryBoundary(
+    forkBoundaryAvailability(boundary, source.status, planState?.active),
+    request.id,
     boundary,
-    source.status,
-    planState?.active,
+    historyPreflight,
   );
   const suggestion = await suggestForkTitle(source, capability.sessions);
   const worktreeEligible =
@@ -593,6 +598,29 @@ function forkBoundaryAvailability(
 
 function isCanonicalForkBoundaryMissing(boundary: ForkBoundary): boolean {
   return !boundary.canonicalBoundaryReachable;
+}
+
+/** Downgrades an available boundary that `history.fork` would reject, e.g. a split tool call. */
+async function confirmForkHistoryBoundary(
+  availability: Pick<GetSessionForkOptionsResp, 'canFork' | 'unavailableReason'>,
+  sessionId: string,
+  boundary: ForkBoundary | undefined,
+  historyPreflight: Pick<ForkService, 'isHistoryBoundarySettled'>,
+): Promise<Pick<GetSessionForkOptionsResp, 'canFork' | 'unavailableReason'>> {
+  if (!availability.canFork || !boundary) return availability;
+  try {
+    if (await historyPreflight.isHistoryBoundarySettled(sessionId, boundary)) return availability;
+    return { canFork: false, unavailableReason: 'message-boundary-invalid' };
+  } catch (error) {
+    if (!(error instanceof HistoryMutationError)) throw error;
+    return {
+      canFork: false,
+      unavailableReason:
+        error.code === 'boundary-not-found'
+          ? 'message-boundary-not-found'
+          : 'message-boundary-invalid',
+    };
+  }
 }
 
 function isForkBoundaryAvailable(
@@ -696,14 +724,21 @@ function toForkRequest(
   };
 }
 
+/** Preconditions shared by Rewind and Edit before history is rewritten. */
+type RewindEditGuards = Pick<
+  ConversationMutationWorkflowDependencies,
+  'mutationPlanState' | 'activeTurn'
+>;
+
 async function mapRewind(
   request: RewindSessionReq,
   service: RewindEditService,
   capability: ConversationMutationForkCapability,
-  planStateReader?: ConversationMutationWorkflowDependencies["mutationPlanState"],
+  guards: RewindEditGuards,
 ): Promise<RewindSessionResp> {
   try {
-    await requirePlanInactive(request.id, planStateReader);
+    await requirePlanInactive(request.id, guards.mutationPlanState);
+    await requireTurnNotOwnedByOtherRuntime(request.id, guards.activeTurn);
     await requireMutationEligibleSession(request.id, capability);
     const result = await service.rewind({
       sessionId: request.id,
@@ -735,10 +770,11 @@ async function mapEdit(
   request: EditSessionMessageReq,
   service: RewindEditService,
   capability: ConversationMutationForkCapability,
-  planStateReader?: ConversationMutationWorkflowDependencies["mutationPlanState"],
+  guards: RewindEditGuards,
 ): Promise<EditSessionMessageResp> {
   try {
-    await requirePlanInactive(request.id, planStateReader);
+    await requirePlanInactive(request.id, guards.mutationPlanState);
+    await requireTurnNotOwnedByOtherRuntime(request.id, guards.activeTurn);
     await requireMutationEligibleSession(request.id, capability);
     const result = await service.edit({
       sessionId: request.id,
@@ -790,6 +826,22 @@ async function requirePlanInactive(
   throw toApplicationError(
     CONVERSATION_MUTATION_BUSY,
     "Rewind and Edit are unavailable while Plan Mode or Plan lifecycle is active",
+  );
+}
+
+/**
+ * Rewind/Edit abort the active Turn before rewriting history. A Turn owned by
+ * another Runtime cannot be aborted from here, so rewriting would race its
+ * appends; reject instead of treating the remote Turn as stopped.
+ */
+async function requireTurnNotOwnedByOtherRuntime(
+  sessionId: string,
+  activeTurn?: ConversationMutationWorkflowDependencies['activeTurn'],
+): Promise<void> {
+  if (!(await activeTurn?.(sessionId))?.ownedByOtherRuntime) return;
+  throw toApplicationError(
+    CONVERSATION_MUTATION_BUSY,
+    'Rewind and Edit are unavailable while the Session is running in another MCode process',
   );
 }
 

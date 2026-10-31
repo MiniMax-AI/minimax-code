@@ -108,12 +108,16 @@ export interface ThreadGoalRuntimeEventPayloadMap {
     occurrences: number;
     /** Persisted same-reply observations after the first reply. */
     streak: number;
-    /** Observed tool activity for the settling Turn; `unknown` is an observation gap. */
-    toolActivity: 'used' | 'absent' | 'unknown';
-    /** Persisted consecutive main turns that ended without any tool call. */
+    /**
+     * Observed tool activity for the settling Turn; `repeated` and `rerun` only
+     * re-ran recent calls with the same result (`rerun` with possible side
+     * effects), `unknown` is an observation gap.
+     */
+    toolActivity: 'used' | 'repeated' | 'rerun' | 'absent' | 'unknown';
+    /** Persisted consecutive main turns that ended without new tool progress. */
     noToolStreak: number;
     /** Which independent condition decided a non-`none` action. */
-    cause?: 'repeated_reply' | 'no_tool';
+    cause?: 'repeated_reply' | 'no_tool' | 'repeated_tool';
   };
   'goal.verification_dispatched': {
     goalId: string;

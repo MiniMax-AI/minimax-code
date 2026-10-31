@@ -1,5 +1,14 @@
-export { createUserStopCascade, type UserStopCascade } from "./background-task/index.js";
-export { resolveAgentBashEnvPolicy } from "./infra/ensure-rm-shim.js";
+export {
+  backgroundTaskNotificationReceiptId,
+  createUserStopCascade,
+  isTaskDeliverySuppressed,
+  type UserStopCascade,
+} from "./background-task/index.js";
+export {
+  ensureRmShim,
+  resolveAgentBashEnvPolicy,
+  resolveRmShimDir,
+} from "./infra/ensure-rm-shim.js";
 export {
   ManagedWorktreeService,
   type ManagedWorktreeServicePort,
@@ -17,7 +26,10 @@ export {
 } from "./persistence/sqlite-persistence.js";
 export { closeAgentDb } from "./agent/db.js";
 export { resolveTaskTarget } from "./agent/port.js";
-export { withAgentNameConflictMigrationLock } from "./persistence/migration/agent-name-conflict-migration.js";
+export {
+  withAgentNameConflictMigrationScope,
+  type AgentNameConflictMigrationResult,
+} from "./persistence/migration/agent-name-conflict-migration.js";
 export {
   createDeferredLocalAgentRuntimePort,
   type DeferredLocalAgentRuntimePort,

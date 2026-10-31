@@ -29,7 +29,7 @@ export function createV2AgentProfileSource(
   capabilityProfile: 'cli' | undefined,
 ): LocalAgentProfileSource {
   return {
-    render: async ({ session, agent, agentBinding, promptRead }) => {
+    render: async ({ session, agent, agentBinding, promptRead, ptcRequested }) => {
       const definition = requireCurrentDefinition(session, agentBinding);
       const metadata = agent.metadata ?? {};
       // Freeze one config snapshot for the complete profile render so a live
@@ -52,11 +52,22 @@ export function createV2AgentProfileSource(
         memoryEnabled: isCommandLineRuntimeOwner(runtimeOwnerKind) ? false : config.memory?.enabled,
         cronEnabled: !isCommandLineRuntimeOwner(runtimeOwnerKind),
         dataDirToken: config.dataDir,
-        ...(promptRead ? { promptReadContext: promptRead } : {}),
+        ...turnScopedRequest(promptRead, ptcRequested),
       } as const;
       const profile = await renderProfile(agentService, request, definition);
       return toLocalAgentExecutionProfile(applySourcePromptPolicy(profile, runtimeOwnerKind));
     },
+  };
+}
+
+/** Facts that belong to this one Turn, never to the Agent definition. */
+function turnScopedRequest(
+  promptRead: Parameters<LocalAgentProfileSource['render']>[0]['promptRead'],
+  ptcRequested: boolean | undefined,
+): Pick<Parameters<LocalAgentService['renderProfile']>[0], 'promptReadContext' | 'ptcRequested'> {
+  return {
+    ...(promptRead ? { promptReadContext: promptRead } : {}),
+    ...(ptcRequested ? { ptcRequested: true } : {}),
   };
 }
 

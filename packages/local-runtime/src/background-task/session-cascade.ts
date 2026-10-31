@@ -15,6 +15,7 @@ import {
   scopeToOwnerTurn,
   type CascadeChildScope,
 } from './session-cascade-targets.js';
+import { applyRootStopPolicy, type CascadeKindPolicy } from './user-stop-policy.js';
 
 /**
  * Session-level cascade: stop every piece of background work a Session owns.
@@ -85,6 +86,13 @@ export interface StopSessionBackgroundWorkInput {
    * is left untouched.
    */
   readonly childScope?: CascadeChildScope;
+  /**
+   * Root sweep only: which kinds of the stopped conversation's OWN work this stop
+   * may touch (the user-stop switches). Omitted = every kind: direct callers, and
+   * the future `owner_close`, which will pass the same switches.
+   * Never forwarded to a child sweep, see `sweepChildSession`.
+   */
+  readonly rootPolicy?: CascadeKindPolicy;
 }
 
 export async function stopSessionBackgroundWork(
@@ -110,11 +118,19 @@ export async function stopSessionBackgroundWork(
   }
   ctx.visited.add(visitKey);
 
+  // A child sweep is never filtered by kind, whatever a caller passes: see
+  // `sweepChildSession`.
+  const rootPolicy = childScope ? undefined : input.rootPolicy;
   const [collectedTargets, collectedReadSubagents] = await Promise.all([
     collectCascadeTargets(host, sessionId, boundaryMs),
-    collectReadSubagents(host, sessionId, boundaryMs),
+    // Subagents off: a read subagent's child Session belongs to that subagent, so
+    // it is not swept either, and the rows are not even listed.
+    rootPolicy?.stopSubAgent === false ? [] : collectReadSubagents(host, sessionId, boundaryMs),
   ]);
-  const scopedTargets = scopeToOwnerTurn(collectedTargets, childScope);
+  const scopedTargets = scopeToOwnerTurn(
+    applyRootStopPolicy(sessionId, collectedTargets, rootPolicy),
+    childScope,
+  );
   const scopedReadSubagents = scopeToOwnerTurn(collectedReadSubagents, childScope);
   if (childScope) {
     // One summary per child sweep; per-task lines would drown the stop in noise.
@@ -339,6 +355,11 @@ async function sweepChildSession(input: {
     return;
   }
   try {
+    // Deliberately no `rootPolicy`: a subagent and everything in its child
+    // Session are one unit, owned by the subagent switch, and reaching this sweep
+    // means that switch let the subagent be stopped (or it had already ended). The
+    // bash switch only covers bash the stopped conversation started itself;
+    // keeping this child's bash alive would leave processes nobody owns any more.
     await stopSessionBackgroundWork({
       host,
       sessionId: childSessionId,

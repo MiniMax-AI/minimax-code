@@ -116,6 +116,7 @@ export interface ForkSessionPort {
     readonly isDefaultWorkspace?: SessionRecord['isDefaultWorkspace'];
     readonly title: string;
     readonly appMode?: SessionRecord['appMode'];
+    readonly toolCallMode?: SessionRecord['toolCallMode'];
     readonly runLocation?: SessionRecord['runLocation'];
     readonly effectiveModel?: SessionRecord['effectiveModel'];
     readonly effectiveModelVariant?: SessionRecord['effectiveModelVariant'];
@@ -159,6 +160,16 @@ export interface ForkDisplayPort {
 }
 
 export interface ForkHistoryPort {
+  /**
+   * Optional read-only preflight using the exact prefix rule of `fork()`. `settled: false`
+   * means `fork()` would reject the boundary, so callers can refuse before creating a child.
+   */
+  inspectBoundary?(input: {
+    readonly sourceSessionId: string;
+    readonly throughAssistantMessageId?: string;
+    readonly throughMessageId?: string;
+    readonly beforeUserMessageId?: UserMessageId;
+  }): Promise<{ readonly settled: boolean }>;
   fork(input: {
     readonly sourceSessionId: string;
     readonly targetSessionId: string;

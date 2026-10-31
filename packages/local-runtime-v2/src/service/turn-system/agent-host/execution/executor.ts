@@ -17,14 +17,23 @@ import {
 } from '@mavis/agent-core/pi-turn-runner';
 import { type RuntimeTool, type ToolExecutionContext } from '@mavis/agent-core/tools';
 import { prepareBashTurnTools } from '../assembly/local-turn-tool-catalog.js';
-import { buildCompletedTerminalStatusEvent } from '@mavis/agent-core/event-bridge';
+import { createPluginAgentRoster } from '../assembly/turn-capability-lifecycle.js';
+import {
+  buildCompletedTerminalStatusEvent,
+  buildRuntimeWarningEvent,
+} from '@mavis/agent-core/event-bridge';
+import { withPtcCompactionReminder } from './ptc/compaction-reminder.js';
+import {
+  createPtcTurnCompactionReminder,
+  observePtcTurnAdmission,
+  preparePtcExecution,
+} from './ptc/turn-preparation.js';
 import {
   beginLocalPluginHookTurn,
   createLocalPluginHookEventReporter,
   emitLocalPluginHookWarnings,
   localPluginHookCoordinator as pluginHookCoordinator,
 } from '../assembly/local-turn-plugin-hooks.js';
-import type { HistoryReconcileIntent } from '../history/contracts.js';
 import { copyCanonicalHistoryForPiCompatibility } from '../history/canonical-history-validation.js';
 import type { AgentExecutionSnapshot, TurnOutputContract } from '../preparation/contracts.js';
 import type {
@@ -47,7 +56,6 @@ import {
 } from '../events/runtime-event-writer.js';
 import { AgentEventAssociationError } from '../local-agent-host.js';
 import { inputReviewRunnerOptions } from '../runner/policy/input-review-runner-options.js';
-import { createLocalCuScreenshotPruner } from '../runner/local-cu-screenshot-pruner.js';
 import { applyProcessLocalToolResultPolicy } from '../runner/policy/process-local-tool-result-policy.js';
 import type {
   LocalContextUsagePromptRange,
@@ -74,7 +82,15 @@ import {
 import { withPluginAutomaticCompactionLifecycle } from './plugin-hook-compaction-lifecycle.js';
 import { createControlledToolHooks } from './plugin-hook-tool-lifecycle.js';
 import { createExecutionBudgetReminder } from '../runner/execution-budget-reminder.js';
+import {
+  createTurnPromptSuggestionCapture,
+  PromptSuggestionCommitRelay,
+  readPromptSuggestionScope,
+  withPromptSuggestionHooks,
+  type PromptSuggestionScope,
+} from '../runner/prompt-suggestion/capture.js';
 import { withExecutionObservability } from './execution-observability.js';
+import type { HistoryReconcileIntent } from '../history/contracts.js';
 import {
   ackCommittedToolResultTailClaims,
   attachCommittedFacts,
@@ -128,6 +144,9 @@ export class LocalRuntimeTurnExecutor<
   TAgent extends AgentExecutionSnapshot = AgentExecutionSnapshot,
   TContext extends ToolExecutionContext = ToolExecutionContext,
 > implements LocalTurnExecutor<TAgent> {
+  private readonly promptSuggestions = new PromptSuggestionCommitRelay(
+    () => this.options.promptSuggestion,
+  );
   constructor(private readonly options: LocalRuntimeTurnExecutorOptions<TAgent, TContext>) {
     validateOptions(options);
   }
@@ -315,6 +334,9 @@ export class LocalRuntimeTurnExecutor<
     );
     const toolSafetyGuard = this.options.createTurnToolSafetyGuard?.();
     const payloadTransforms = buildTurnPayloadTransforms(input, outputContract, this.options);
+    // Short-lived internal state. When the feature is off nothing is captured
+    // and no extra Hook is installed, so the main Turn behaves exactly as before.
+    const promptSuggestion = createTurnPromptSuggestionCapture(input, prepared, this.options);
     const childBash = this.options.createChildBashLifecycle?.({
       session: input.session,
       turnId: input.lease.turnId,
@@ -350,21 +372,26 @@ export class LocalRuntimeTurnExecutor<
         history: prepared.history,
         signal: input.lease.signal,
         tools: prepared.tools,
+        ...(prepared.ptcTools ? { ptcTools: prepared.ptcTools } : {}),
         disableBuiltinToolFallback: prepared.toolResolution.disableBuiltinToolFallback,
         toolContext: prepared.toolContext,
         hooks: withExecutionObservability(
-          mergeHooks({
-            input,
-            toolResolution: prepared.toolResolution,
-            pendingToolResultTailClaims,
-            hostBeforeLlmCallHooks: prepared.beforeLlmCallHooks,
-            readTaskOutputTaskIds,
-            terminalTaskOutputReadIds,
-            toolsDisabled: this.options.disableTools === true,
-            toolSafetyGuard,
-            toolPolicyGuard: this.options.toolPolicyGuard,
-            finalizeToolResultForHistory: this.options.finalizeToolResultForHistory,
-          }),
+          withPromptSuggestionHooks(
+            mergeHooks({
+              input,
+              toolResolution: prepared.toolResolution,
+              pendingToolResultTailClaims,
+              hostBeforeLlmCallHooks: prepared.beforeLlmCallHooks,
+              readTaskOutputTaskIds,
+              terminalTaskOutputReadIds,
+              toolsDisabled: this.options.disableTools === true,
+              toolSafetyGuard,
+              toolPolicyGuard: this.options.toolPolicyGuard,
+              finalizeToolResultForHistory: this.options.finalizeToolResultForHistory,
+              ptcFactCollector: prepared.ptcFactCollector,
+            }),
+            promptSuggestion?.capture,
+          ),
           input.request.provenance.sourceContext?.executionDiagnostics === true,
         ),
         caller: prepared.caller,
@@ -429,7 +456,18 @@ export class LocalRuntimeTurnExecutor<
       prepared,
       readTaskOutputTaskIds,
       runnerResult,
+      promptSuggestion: readPromptSuggestionScope(
+        input,
+        prepared,
+        promptSuggestion?.capture,
+        runnerResult?.outcome?.replyMessageId,
+      ),
     };
+  }
+
+  /** Fires the optional next-message suggestion once the Host durably committed the Turn. */
+  afterSuccessfulCommit(outcome: AgentHostTurnOutcome): void {
+    this.promptSuggestions.committed(outcome);
   }
 
   private async settleTurn(
@@ -444,7 +482,13 @@ export class LocalRuntimeTurnExecutor<
           ? { assistantMessageId: settled.runnerResult.outcome.messageId }
           : {}),
       });
-      return attachCommittedFacts(settled.outcome, observation, settled.readTaskOutputTaskIds);
+      const committed = attachCommittedFacts(
+        settled.outcome,
+        observation,
+        settled.readTaskOutputTaskIds,
+      );
+      this.promptSuggestions.remember(committed, settled.promptSuggestion);
+      return committed;
     } catch (error) {
       return this.throwWithFileFailure(input, error);
     }
@@ -487,20 +531,22 @@ export class LocalRuntimeTurnExecutor<
       validateRoutedTurnTools(input.assembly.tools),
       this.options.cliProductPolicy === true,
     );
-    const canConsumeBackgroundBashOutput = admittedTools.some(
-      (tool) =>
-        tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
+    const ptc = preparePtcExecution(input.assembly.tools, admittedTools, this.options, input);
+    const canConsumeBackgroundBashOutput = ptc.canConsumeNativeTaskOutput;
+    const standardTools = prepareBashTurnTools(
+      admittedTools,
+      canConsumeBackgroundBashOutput,
+      this.options.nativeDelete?.() === true,
     );
-    const standardTools = prepareBashTurnTools(admittedTools, canConsumeBackgroundBashOutput);
     const toolContext = {
       ...toolResolution.context,
-      ...(input.pluginHooks?.length
-        ? { pluginSubagentLifecycle: createPluginSubagentLifecycle(input) }
-        : {}),
+      ...pluginToolContext(input),
       // Use admitted tools, including frozen selectors and final routing. A
       // configured/MCP namesake cannot read the native background task store.
       allowBashAutoPromotion: canConsumeBackgroundBashOutput,
       canConsumeBackgroundBashOutput,
+      canConsumeBackgroundTaskOutput: canConsumeBackgroundBashOutput,
+      ...ptc.context,
     } as TContext;
     const caller = preparedExecution.caller;
     const standardSystemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
@@ -521,6 +567,7 @@ export class LocalRuntimeTurnExecutor<
       tools,
       contextUsagePromptRanges,
     } = providerContext;
+    observePtcTurnAdmission(input, ptc, this.options, { systemPrompt, tools });
     input.onContextUsagePromptRangesResolved?.(contextUsagePromptRanges);
     const userPromptPrefix = joinUserPrompt(
       input.assembly.userPromptPrefix,
@@ -575,14 +622,17 @@ export class LocalRuntimeTurnExecutor<
     });
     const beforeLlmCallHooks = await this.resolveBeforeLlmCallHooks(
       input,
-      afterCompactionReminderHooks(
-        createExecutionBudgetReminder(
-          input.request.executionDeadlineAtMs,
-          this.options.nowMs,
-          this.options.canAppendExecutionBudgetReminder,
-          this.options.logger,
+      withPtcCompactionReminder(
+        createPtcTurnCompactionReminder(input, this.options),
+        afterCompactionReminderHooks(
+          createExecutionBudgetReminder(
+            input.request.executionDeadlineAtMs,
+            this.options.nowMs,
+            this.options.canAppendExecutionBudgetReminder,
+            this.options.logger,
+          ),
+          backgroundReminder?.hook,
         ),
-        backgroundReminder?.hook,
       ),
     );
     validateResolvedInput({
@@ -604,6 +654,7 @@ export class LocalRuntimeTurnExecutor<
         ...beforeBatchMessages,
       ],
       tools,
+      ...(ptc.ptcTools ? { ptcTools: ptc.ptcTools } : {}),
       toolResolution,
       toolContext,
       beforeLlmCallHooks,
@@ -620,6 +671,7 @@ export class LocalRuntimeTurnExecutor<
           }
         : {}),
       readTaskOutputTaskIds,
+      ptcFactCollector: ptc.ptcFactCollector,
       prepareSteering: preparedExecution.prepareSteering ?? preparePlainSteering,
     };
   }
@@ -630,7 +682,6 @@ export class LocalRuntimeTurnExecutor<
   ): Promise<readonly PiBeforeLlmCallHook[]> {
     return [
       ...((await this.options.resolveBeforeLlmCallHooks?.(input)) ?? []),
-      createLocalCuScreenshotPruner(2),
       ...(input.contextCompactionHook
         ? [withPluginAutomaticCompactionLifecycle(input.contextCompactionHook, input)]
         : []),
@@ -680,6 +731,19 @@ export class LocalRuntimeTurnExecutor<
       // Diagnostic reporting cannot replace the owning Turn failure.
     }
   }
+}
+
+function pluginToolContext<TAgent extends AgentExecutionSnapshot>(
+  input: LocalTurnExecutionInput<TAgent>,
+) {
+  return {
+    ...(input.pluginHooks?.length
+      ? { pluginSubagentLifecycle: createPluginSubagentLifecycle(input) }
+      : {}),
+    ...(input.desktopCapabilities?.agents?.length
+      ? { pluginAgents: createPluginAgentRoster(input.desktopCapabilities.agents) }
+      : {}),
+  };
 }
 
 function createPluginSubagentLifecycle<TAgent extends AgentExecutionSnapshot>(
@@ -777,11 +841,10 @@ function pluginHookTranscriptCleanup(
 }
 
 /**
- * Order is load-bearing: `runBeforeLLM` ends the before-LLM decision pipeline
- * as soon as a hook returns `appendMessage`, so a request-only reminder placed
- * after an appending hook is silently skipped for that request. The budget
- * reminder is request-only and therefore always precedes the background
- * cadence reminder, which appends.
+ * `runBeforeLLM` accumulates `appendMessage` decisions, so later hooks still
+ * run. The budget reminder stays before the background cadence reminder so
+ * its request-only marker precedes the durable background marker and the
+ * reminder admission sees the request before that marker is registered.
  */
 function afterCompactionReminderHooks(
   budgetReminder: PiBeforeLlmCallHook | undefined,
@@ -800,6 +863,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly history: PiAgentMessage[];
   readonly beforeUserMessages: NonNullable<RunTurnInput['beforeUserMessages']>;
   readonly tools: readonly RuntimeTool[];
+  readonly ptcTools?: readonly RuntimeTool[];
   readonly toolResolution: LocalTurnPermissionResolution<TContext>;
   readonly toolContext: TContext;
   readonly beforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
@@ -808,6 +872,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
   readonly contextUsageRequiresProviderAnchor?: boolean;
   readonly readTaskOutputTaskIds: Set<string>;
+  readonly ptcFactCollector: import('@mavis/agent-core/tools').PtcToolFactCollector;
   readonly prepareSteering: (
     input: AgentHostSteeringMessage,
   ) => Promise<PreparedSteeringUserMessage>;
@@ -818,6 +883,7 @@ interface SettledRuntimeTurn<TContext extends ToolExecutionContext> {
   readonly prepared: PreparedRunnerInput<TContext>;
   readonly readTaskOutputTaskIds: ReadonlySet<string>;
   readonly runnerResult: LocalRuntimeTurnRunnerResult | void;
+  readonly promptSuggestion?: PromptSuggestionScope;
 }
 
 /**
@@ -856,6 +922,7 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolSafetyGuard,
     toolPolicyGuard,
     finalizeToolResultForHistory,
+    ptcFactCollector,
   } = options;
   const toolHooks = createControlledToolHooks({
     input,
@@ -867,6 +934,7 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolSafetyGuard,
     toolPolicyGuard,
     finalizeToolResultForHistory,
+    ...(ptcFactCollector ? { ptcFactCollector } : {}),
   });
   return {
     ...input.assembly.hooks,

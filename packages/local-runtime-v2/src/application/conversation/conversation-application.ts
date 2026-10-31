@@ -107,6 +107,9 @@ export interface ConversationApplicationOptions {
           readonly status: SessionStatus;
           /** Read only to gate Slash Review, which is coding-mode only. */
           readonly appMode?: "coding" | "work";
+          readonly sessionType?: "root" | "branch";
+          readonly sessionKind?: string;
+          readonly parentSessionId?: string | null;
         }
       | undefined
     >;
@@ -154,7 +157,7 @@ export class ConversationApplication {
   }
 
   async sendMessage(
-    _ctx: ProcessLocalContext,
+    ctx: ProcessLocalContext,
     req: ConversationSendMessageRequest,
     options: ConversationSendOptions = {},
   ): Promise<
@@ -164,10 +167,7 @@ export class ConversationApplication {
     if (gateError) return gateError;
     let prepared: PreparedDirectSendInput;
     try {
-      prepared = await toDirectSendInput(
-        req,
-        this.options.attachmentRegistration,
-      );
+      prepared = await toDirectSendInput(req, this.options.attachmentRegistration);
     } catch (error) {
       const mapped = sendMessagePreparationError(error);
       if (mapped) {
@@ -349,6 +349,13 @@ export class ConversationApplication {
     const result = await this.withSessionLifecycle("abort", async () => {
       if (!(await this.options.sessionReader.find(req.id)))
         throw sessionNotFound(req.id);
+      if ((await this.getActiveTurn(req.id))?.ownedByOtherRuntime) {
+        // Only the Runtime holding the lease can stop this Turn. Leaving the
+        // Session is a no-op here; an explicit stop must not report success or
+        // pause a Goal that the other Runtime is still driving.
+        if (abortSource === "session_leave") return { status: "not-running" as const };
+        throw turnOwnedByOtherRuntimeError();
+      }
       return this.options.turn.abort({
         sessionId: req.id,
         ...(req.turnId ? { turnId: req.turnId } : {}),
@@ -1041,6 +1048,15 @@ function sessionNotFound(sessionId: string): ApplicationError {
     404,
     "local_session_not_found",
     `Session not found: ${sessionId}`,
+  );
+}
+
+/** Reuses the existing busy key so every client already recognizes it. */
+function turnOwnedByOtherRuntimeError(): ApplicationError {
+  return new ApplicationError(
+    409,
+    'local_session_busy',
+    'Session is running in another MCode process. Stop it from that process.',
   );
 }
 

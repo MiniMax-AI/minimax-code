@@ -11,7 +11,11 @@ import type { TuiComposerDraft } from '../../features/composer/draft.js';
 import type { TuiWorkspaceRoots } from '../../features/composer/workspace-roots.js';
 import { TuiLoginRegionPicker } from '../../features/auth/login-region-picker.js';
 import { TuiPermissionModePicker } from '../../features/interaction/permission-mode-picker.js';
-import { TuiSettingsPicker } from '../../features/settings/picker.js';
+import {
+  TuiSettingsPicker,
+  type TuiSettingsSwitch,
+  type TuiSettingsSwitchState,
+} from '../../features/settings/picker.js';
 import { TuiHotkeysPicker } from '../../features/settings/hotkeys-picker.js';
 import { submittedEditorContent, submittedEditorTransport, type Editor } from '../../widgets/editor/editor.js';
 import type { TuiInteractionSurface } from '../../shell/interaction-surface.js';
@@ -50,7 +54,7 @@ import {
 import { rebuildSessionMutationTransport } from '../../features/session-mutation/transport.js';
 import { toTuiTranscriptAttachments } from '../../features/composer/attachments.js';
 import { resolveTuiRuntimeFailure } from '../runtime/runtime-error-presentation.js';
-import type { TuiEditMessageAttachment, TuiSession } from '../../../runtime/port.js';
+import type { TuiEditMessageAttachment, TuiPtcSetting, TuiSession } from '../../../runtime/port.js';
 import type { TuiAttachment, TuiTransportAttachment } from '../../../types/invocation.js';
 import { sessionMutationText } from '../../features/session-mutation/copy.js';
 import { parseTuiBashInput } from '../../commands/bash-input.js';
@@ -78,6 +82,22 @@ export interface TuiCommandFlowOptions {
   readonly goalFlow?: Pick<TuiGoalFlow, 'execute' | 'resumeBlocked'>;
   readonly planModeFlow?: TuiPlanModeFlow;
   readonly permissionModeFlow?: TuiPermissionModeFlow;
+  /**
+   * Global next-message suggestion switch; absent, or resolving undefined, when
+   * the Runtime cannot read or persist it.
+   */
+  readonly promptSuggestionSetting?: {
+    read(): Promise<boolean | undefined>;
+    write(enabled: boolean): Promise<boolean | undefined>;
+  };
+  /**
+   * Programmatic Tool Calling switch (`beta.ptc`, shared with Desktop); absent,
+   * or resolving undefined, when the Runtime cannot read or persist it.
+   */
+  readonly ptcSetting?: {
+    read(): Promise<TuiPtcSetting | undefined>;
+    write(enabled: boolean): Promise<TuiPtcSetting | undefined>;
+  };
   readonly auth?: McodeAuthPort;
   readonly openExternalTarget?: TuiExternalTargetOpener;
   readonly interactionFlow: TuiInteractionFlow;
@@ -493,6 +513,9 @@ export class TuiCommandFlow {
         this.options.onChanged();
         return 'consumed';
       }
+    }
+    if (await this.holdSubmissionWhileRunningElsewhere()) {
+      return this.restoreSeed(seed, input);
     }
     if (this.options.interactionFlow.hasPending()) {
       if (command && !seed) {
@@ -996,6 +1019,41 @@ export class TuiCommandFlow {
     );
   }
 
+  /**
+   * Another live MCode process owns the running Turn, so this process can only
+   * watch it: messages would fail as steer or pile up behind it. Runtime events
+   * from that process never reach this one, so re-read the run on each attempt;
+   * once it has ended, refresh the transcript and keep the draft for an explicit
+   * resend instead of sending it automatically.
+   */
+  private async holdSubmissionWhileRunningElsewhere(): Promise<boolean> {
+    const activeRunFlow = this.options.activeRunFlow;
+    if (!activeRunFlow.currentSnapshot?.()?.runningElsewhere) return false;
+    const sessionId = this.options.controller.snapshot().session?.sessionId;
+    await activeRunFlow.refresh(true);
+    const current = activeRunFlow.currentSnapshot();
+    const ended =
+      current !== undefined &&
+      current.sessionId === sessionId &&
+      current.state !== 'running' &&
+      current.state !== 'decision-blocked';
+    if (!ended) {
+      if (current && !current.runningElsewhere) return false;
+      this.options.setHint(
+        'This Session is running in another MCode process and is read-only here. Your draft is preserved.',
+      );
+      this.options.onChanged();
+      return true;
+    }
+    this.options.runProjection.reconcileRuntimeTurn(undefined);
+    await this.options.controller.reconcileOwnerHistory().catch(() => undefined);
+    this.options.setHint(
+      'The other MCode process finished; Session refreshed. Press Enter to send your draft.',
+    );
+    this.options.onChanged();
+    return true;
+  }
+
   private async restorePreparedSubmission(
     seed: TuiSubmissionSeed | undefined,
     submission: TuiSubmissionSnapshot,
@@ -1266,6 +1324,45 @@ export class TuiCommandFlow {
           return 'retained';
         }
         await this.options.permissionModeFlow.set(mode);
+      },
+      suggestions: async ({ args }) => {
+        const setting = this.options.promptSuggestionSetting;
+        const reportUnavailable = () =>
+          this.options.append('Next-message suggestions are unavailable in this host.', 'warning');
+        if (!setting) {
+          reportUnavailable();
+          return;
+        }
+        const action = args.trim().toLocaleLowerCase();
+        if (action && action !== 'on' && action !== 'off') {
+          this.options.append('Usage: /suggestions [on | off]', 'warning');
+          return 'retained';
+        }
+        let enabled: boolean | undefined;
+        try {
+          enabled = action ? await setting.write(action === 'on') : await setting.read();
+        } catch (error) {
+          this.options.append(
+            formatTuiActionFailure(error, {
+              summary: action
+                ? "Couldn't save the next-message suggestion setting."
+                : "Couldn't read the next-message suggestion setting.",
+              nextStep: 'Check config.yaml syntax and permissions, then retry.',
+            }),
+            'error',
+          );
+          return 'retained';
+        }
+        if (enabled === undefined) {
+          reportUnavailable();
+          return;
+        }
+        this.options.setHint(
+          enabled
+            ? 'Next-message suggestions on · shown after each turn · /suggestions off to stop'
+            : 'Next-message suggestions off · /suggestions on to resume',
+        );
+        this.options.onChanged();
       },
       login: () => {
         this.pendingLoginContinuation = undefined;
@@ -1635,9 +1732,47 @@ export class TuiCommandFlow {
         this.options.surface.close(picker);
         if (this.settingsPicker === picker) this.settingsPicker = undefined;
       },
+      {
+        switches: this.settingsSwitches(),
+        onChanged: () => this.options.onChanged(),
+        onClosedFailure: (message) => this.options.append(message, 'warning'),
+      },
     );
     this.settingsPicker = picker;
     this.options.surface.show(picker);
+  }
+
+  /** On/off preferences owned by the Runtime; a host without one leaves its row out. */
+  private settingsSwitches(): TuiSettingsSwitch[] {
+    const switches: TuiSettingsSwitch[] = [];
+    const suggestions = this.options.promptSuggestionSetting;
+    if (suggestions) {
+      const project = (enabled: boolean | undefined) =>
+        enabled === undefined ? undefined : { enabled };
+      switches.push({
+        id: 'prompt-suggestions',
+        label: 'Next-message suggestions',
+        description: 'Suggest a next message after each Turn; Tab accepts it.',
+        read: async () => project(await suggestions.read()),
+        write: async (enabled) => project(await suggestions.write(enabled)),
+        describeFailure: (action) =>
+          `Couldn't ${action === 'read' ? 'read' : 'save'} this setting. Check config.yaml, then retry.`,
+      });
+    }
+    const ptc = this.options.ptcSetting;
+    if (ptc) {
+      switches.push({
+        id: 'ptc',
+        label: 'Programmatic Tool Calling',
+        tag: 'Beta',
+        description: 'The Agent composes tool calls in run_code programs. Shared with Desktop.',
+        read: async () => projectPtcSwitch(await ptc.read()),
+        write: async (enabled) => projectPtcSwitch(await ptc.write(enabled)),
+        describeFailure: (action) =>
+          `Couldn't ${action === 'read' ? 'read' : 'save'} beta.ptc. Check config.yaml, then retry.`,
+      });
+    }
+    return switches;
   }
 
   private showHotkeysPicker(): void {
@@ -1895,4 +2030,22 @@ function isBareSlashCommand(input: string): boolean {
 function isAvailableWhileStopping(input: string, catalog: TuiCommandCatalog): boolean {
   const command = catalog.resolve(input)?.name;
   return command === 'help' || command === 'quit' || command === 'stop';
+}
+
+/**
+ * A Session keeps the tool call mode it was created (or last compacted) with,
+ * so the switch always says where a change applies instead of implying it is live.
+ */
+export function projectPtcSwitch(
+  setting: TuiPtcSetting | undefined,
+): TuiSettingsSwitchState | undefined {
+  if (!setting) return undefined;
+  // The switch shows and flips the saved choice; --ptc only adds a note.
+  return {
+    enabled: setting.saved,
+    note:
+      setting.launchOverride && !setting.saved
+        ? 'Saved off; --ptc keeps PTC on in this process anyway.'
+        : 'Applies to new Sessions and after /compact; this Session keeps its mode.',
+  };
 }

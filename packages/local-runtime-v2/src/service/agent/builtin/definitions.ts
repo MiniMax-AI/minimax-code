@@ -31,6 +31,13 @@ export interface BuiltinRenderInput {
   readonly dataDirToken?: string;
   /** One immutable Prompt directory selected before the enclosing model call starts. */
   readonly promptReadContext?: BuiltinPromptReadScope;
+  /** Present only when PTC is really on for this Turn (isPtcTurnEnabled). */
+  readonly ptc?: BuiltinPtcRender;
+}
+
+/** The rendered `_v2/PTC_TOOL_CALLS.md.hbs` section for a PTC Turn. */
+export interface BuiltinPtcRender {
+  readonly section: string;
 }
 
 export interface BuiltinSurfaceRenderInput {
@@ -49,6 +56,7 @@ export interface BuiltinSurfaceRenderInput {
   readonly agentConfigDir?: string;
   /** One immutable Prompt directory selected before the enclosing model call starts. */
   readonly promptReadContext?: BuiltinPromptReadScope;
+  readonly ptc?: BuiltinPtcRender;
 }
 
 export const PRIMARY_AGENT_NAME = 'mavis';
@@ -62,6 +70,11 @@ export const FEATURE_FILES = {
   cron: 'cron.md.hbs',
   memory: 'memory.md.hbs',
 } as const;
+/**
+ * Local-only V2 section rendered for a PTC Turn and inserted before
+ * `# Harness` via the `ptc.section` context field (prompt-exemptions.json).
+ */
+export const PTC_SECTION_FILE = '_v2/PTC_TOOL_CALLS.md.hbs';
 
 export interface SurfacePromptFiles {
   readonly template: string;
@@ -97,6 +110,7 @@ export function toSurfaceRenderInput(input: BuiltinSurfaceRenderInput): BuiltinR
     ...(input.promptReadContext === undefined
       ? {}
       : { promptReadContext: input.promptReadContext }),
+    ...(input.ptc === undefined ? {} : { ptc: input.ptc }),
   };
 }
 

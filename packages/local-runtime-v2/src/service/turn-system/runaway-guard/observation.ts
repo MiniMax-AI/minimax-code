@@ -40,6 +40,7 @@ export function createRunawayGuardObserver(options: RunawayGuardObserverOptions)
         : {
             step_count: observation.stepCount,
             projection_skipped_count: observation.projectionSkippedCount,
+            child_steps_projected: observation.childStepsProjected,
             reminder_injected: observation.reminderInjected,
             signals: observation.signals,
           }),

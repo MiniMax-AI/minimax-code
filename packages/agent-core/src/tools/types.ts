@@ -28,6 +28,12 @@ import type { AgentToolUpdateCallback, ToolExecutionMode } from '@earendil-works
 import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 import type { Static, TSchema } from '@sinclair/typebox';
 import type { IPluginCapabilityProvenance } from '@mavis/protocol';
+import type {
+  PtcChildDeadline,
+  PtcToolExecutor,
+  PtcToolFactCollector,
+  PtcToolResultProjection,
+} from './ptc.js';
 
 export type RuntimeToolSource = 'builtin' | 'builtin-matrix' | 'configured';
 
@@ -75,6 +81,43 @@ export interface ToolDefinition<S extends TSchema = TSchema> {
 }
 
 /**
+ * A tool's own statement about whether its text output is complete on this
+ * return path. Programmatic (PTC) hosts trust it only from verified native
+ * tools; a missing statement means "unknown", never "complete".
+ */
+export interface ProgrammaticToolCompleteness {
+  /** True when this output dropped content (page, byte cap, match limit, cut lines, ...). */
+  readonly truncated: boolean;
+  /**
+   * The source has more beyond this page although nothing was cut, for
+   * example a `read` that stopped at the caller's `limit`.
+   */
+  readonly hasMore?: boolean;
+  readonly nextOffset?: number;
+  readonly offsetUnit?: 'line' | 'match' | 'file';
+}
+
+/**
+ * Machine-readable side channel for programmatic (PTC) callers only. The Pi
+ * tool adapter never copies it into `content` or `details`, so it reaches no
+ * model history, display record or persisted detail; the PTC executor reads it
+ * from the tool's own return value and drops it when a hook rewrote the result.
+ */
+export interface ProgrammaticToolResult {
+  /** Structured value; always a JSON object and never more than the text output shows. */
+  readonly data?: Readonly<Record<string, unknown>>;
+  readonly completeness?: ProgrammaticToolCompleteness;
+  /** Raw protocol or connection error of a third-party call; hosts never branch on it. */
+  readonly errorRaw?: unknown;
+  /**
+   * PTC child calls only: a model-visible output cap that a direct call of the
+   * same tool applies would have cut this output, and the tool returned it in
+   * full instead. Hosts only count it for logs; it never changes the result.
+   */
+  readonly uncappedOutput?: boolean;
+}
+
+/**
  * Tool result. `content` stays compatible with pi `AgentToolResult` (a single text segment is
  * sufficient); `details` holds structured byproducts (read by the UI / caller, not the LLM);
  * `terminate` maps to Pi `AgentToolResult.terminate`; `output` is a legacy field retained only for
@@ -88,6 +131,8 @@ export interface ToolResult {
   details?: Record<string, unknown>;
   output?: Record<string, unknown>;
   terminate?: boolean;
+  /** PTC-only payload; see `ProgrammaticToolResult`. Model calls ignore it. */
+  programmatic?: ProgrammaticToolResult;
 }
 
 /**
@@ -103,6 +148,22 @@ export interface ToolExecutionContext {
   readonly toolCallId?: string;
   /** Assistant message carrying this tool call; supplied by the runtime bridge when available. */
   readonly assistantMessageId?: string;
+  /** Parent run_code tool call for a PTC child invocation. */
+  readonly parentToolCallId?: string;
+  /** User-visible run_code description for a PTC child approval. */
+  readonly ptcParentDescription?: string;
+  /**
+   * Set only on PTC child contexts. Foreground Bash bounds its timeout by the
+   * time left until this deadline so a command cannot outlive its program;
+   * ordinary top-level calls never carry it and keep their own timeouts.
+   */
+  readonly ptcDeadline?: PtcChildDeadline;
+  /** Runner-owned PTC capability, available only while the turn is executing. */
+  ptcExecutor?: PtcToolExecutor;
+  /** Trusted host projection for PTC child facts; guest code cannot supply this. */
+  readonly ptcResultProjection?: PtcToolResultProjection;
+  /** Turn-local host fact collector for PTC plugin and approval outcomes. */
+  readonly ptcFactCollector?: PtcToolFactCollector;
 }
 
 /**

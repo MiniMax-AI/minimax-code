@@ -83,6 +83,50 @@ describe("TuiComposer", () => {
     );
   });
 
+  it("renders a next-message suggestion in muted placeholder text with a Tab hint", () => {
+    const input = new Editor(
+      { terminal: { rows: 24 }, requestRender: () => undefined },
+      tuiEditorTheme,
+    );
+    const suggestion = "Run the parser tests and fix any failures";
+    const composer = new TuiComposer(input, {
+      mode: "message",
+      surface: "conversation",
+      draftCharacterCount: 0,
+      placeholder: suggestion,
+      promptSuggestion: suggestion,
+    });
+
+    const lines = composer.render(80);
+    const rendered = lines.map(stripAnsi).join("\n");
+
+    expect(rendered).toContain("Suggested next message · Tab accept");
+    expect(rendered).toContain(suggestion);
+    // Everything after the cursor cell uses the editor's muted placeholder style.
+    expect(lines.join("\n")).toContain(tuiEditorTheme.placeholder!(suggestion.slice(1)));
+  });
+
+  it("ends a suggestion wider than the editor with an ellipsis", () => {
+    const input = new Editor(
+      { terminal: { rows: 24 }, requestRender: () => undefined },
+      tuiEditorTheme,
+      { paddingX: 1 },
+    );
+    const suggestion = "Run every parser test, then fix each failure and summarize the root causes";
+    const composer = new TuiComposer(input, {
+      mode: "message",
+      surface: "conversation",
+      draftCharacterCount: 0,
+      placeholder: suggestion,
+      promptSuggestion: suggestion,
+    });
+
+    const rendered = composer.render(40).map(stripAnsi).join("\n");
+
+    expect(rendered).toContain("…");
+    expect(rendered).not.toContain(suggestion);
+  });
+
   it("hides the placeholder as soon as the draft has content", () => {
     const input = new Editor(
       { terminal: { rows: 24 }, requestRender: () => undefined },

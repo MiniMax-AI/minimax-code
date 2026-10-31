@@ -3,9 +3,22 @@ import {
   hasConversationTaskModelSelection,
   type ConversationModelThinkingSelection,
   type ConversationModelSelection,
+  type ConversationPluginAgentDefinition,
   type ConversationTaskModelSelection,
 } from '@mavis/conversation-contract';
-import type { AgentExecutionProfile, LocalAgentService } from '../../service/agent/index.js';
+import {
+  bindPluginAgentMcpSelectors,
+  pluginAgentSource,
+  renderPluginAgentProfile,
+  type CapturedPluginAgentSource,
+} from './plugin-agent-capture.js';
+import {
+  FROZEN_MCP_SERVERS_NONE,
+  FROZEN_SELECTOR_VERSION,
+  FROZEN_TOOLS_ALL_SCOPE_MARKER,
+  type AgentExecutionProfile,
+  type LocalAgentService,
+} from '../../service/agent/index.js';
 import {
   resolveEffectiveAgentModelSelection,
   modelConfigForRef,
@@ -28,6 +41,8 @@ import type {
 } from '../../service/session-system/index.js';
 import {
   filterLocalTurnCapabilityInventory,
+  isAgentSelectorMcpToolName,
+  resolveToolsAllowlistScope,
   resolveAgentPromptSurface,
   type AgentHostTurnCapabilityView,
   type LocalTurnAgentProfileFacts,
@@ -56,6 +71,8 @@ interface TaskAgentBindingCaptureInput {
   readonly parentModel?: FrozenAgentExecutionDefinition['model'];
   /** A V1 mirror whose prompt and capability snapshot is authoritative. */
   readonly legacyDefinition?: LegacyFrozenAgentExecutionDefinition;
+  /** Trusted Plugin Agent from the parent Turn lease; replaces Agent row lookup. */
+  readonly pluginAgent?: ConversationPluginAgentDefinition;
 }
 
 export interface TaskAgentBindingCaptureOptions {
@@ -125,21 +142,11 @@ async function captureDefinition(
   const session = input.session ?? input.parent;
   if (!session) throw new Error('Session Agent definition capture requires a Session.');
   const config = options.config();
-  const profile = await renderSessionProfile({
-    options,
-    config,
-    agentName: input.agentName,
-    session,
-    appMode: input.appMode,
-    legacyTaskSurface: input.session === undefined,
-  });
+  const profile = await renderCaptureProfile({ options, config, session, input, historical });
   const frozenSurface = input.legacyDefinition ?? {
     systemPrompt: profile.agentSystemPrompt ?? '',
     ...(profile.promptSnapshot ? { promptSnapshot: profile.promptSnapshot } : {}),
-    capabilities: freezeSelectorCapabilities(
-      profile,
-      await options.inventory.capture({ session, profile }),
-    ),
+    capabilities: await freezeCapturedCapabilities(options, session, profile, input.pluginAgent),
   };
   const selection = resolveCapturedModel({
     config,
@@ -153,7 +160,6 @@ async function captureDefinition(
   const effectiveModel = `${selection.providerId}/${selection.modelId}`;
   const variant = resolvedModelVariant({ selection, session, parent: input.parent });
   const thinking = resolvedThinkingSelection({ selection, session, parent: input.parent });
-  const ownerInstanceId = await captureOwnerInstanceId(options.agentService, profile);
   return buildCapturedDefinition({
     profile,
     frozenSurface,
@@ -162,8 +168,71 @@ async function captureDefinition(
     effectiveModel,
     variant,
     thinking,
-    ownerInstanceId,
+    ...(await captureOwnerFields(options, profile, input.pluginAgent)),
   });
+}
+
+async function freezeCapturedCapabilities(
+  options: TaskAgentBindingCaptureOptions,
+  session: SessionRecord,
+  profile: AgentExecutionProfile,
+  pluginAgent: ConversationPluginAgentDefinition | undefined,
+) {
+  const ready = await options.inventory.capture({ session, profile });
+  const bindings = ready.desktopCapabilities?.runtimeToolBindings ?? [];
+  const inventoryToolNames = [
+    ...ready.sources.nativeTools,
+    ...ready.sources.mcpEntries.map(({ tool }) => tool),
+    ...ready.sources.threadGoalTools,
+    ...(ready.desktopCapabilities?.runtimeTools ?? []),
+  ].map((tool) => tool.def.name);
+  return freezeSelectorCapabilities(
+    bindPluginAgentMcpSelectors(profile, pluginAgent, bindings, inventoryToolNames),
+    ready,
+    // Decided from the list the author wrote: rebinding may replace a Plugin's
+    // `mcp__*` selectors with nothing, which must not turn it into a native list.
+    resolveToolsAllowlistScope(profile.configSelection?.tools),
+  );
+}
+
+async function renderCaptureProfile(input: {
+  readonly options: TaskAgentBindingCaptureOptions;
+  readonly config: LocalConversationRuntimeConfig;
+  readonly session: SessionRecord;
+  readonly input: TaskAgentBindingCaptureInput;
+  readonly historical: boolean;
+}): Promise<AgentExecutionProfile> {
+  const { options, config, session } = input;
+  const pluginAgent = input.input.pluginAgent;
+  if (!pluginAgent) {
+    return renderSessionProfile({
+      options,
+      config,
+      agentName: input.input.agentName,
+      session,
+      appMode: input.input.appMode,
+      legacyTaskSurface: input.input.session === undefined,
+    });
+  }
+  if (input.historical || input.input.session?.sessionKind !== 'task' || !input.input.parent) {
+    throw new Error('Plugin Agent definitions are captured only for new Task Sessions.');
+  }
+  return renderPluginAgentProfile({
+    agentService: options.agentService,
+    agent: pluginAgent,
+    request: profileRequest(options, config, session, input.input.appMode),
+  });
+}
+
+/** Plugin Agents have no Agent row, so they carry their source instead of an instance id. */
+async function captureOwnerFields(
+  options: TaskAgentBindingCaptureOptions,
+  profile: AgentExecutionProfile,
+  pluginAgent: TaskAgentBindingCaptureInput['pluginAgent'],
+): Promise<{ ownerInstanceId?: string; pluginSource?: CapturedPluginAgentSource }> {
+  if (pluginAgent) return { pluginSource: pluginAgentSource(pluginAgent) };
+  const ownerInstanceId = await captureOwnerInstanceId(options.agentService, profile);
+  return ownerInstanceId ? { ownerInstanceId } : {};
 }
 
 function resolveCapturedModel(input: {
@@ -269,6 +338,7 @@ function buildCapturedDefinition(input: {
   readonly variant?: string;
   readonly thinking?: ConversationModelThinkingSelection;
   readonly ownerInstanceId?: string;
+  readonly pluginSource?: CapturedPluginAgentSource;
 }) {
   const agentDefinition = buildAgentDefinition(input);
   return {
@@ -297,12 +367,14 @@ function buildAgentDefinition(input: {
   readonly variant?: string;
   readonly thinking?: ConversationModelThinkingSelection;
   readonly ownerInstanceId?: string;
+  readonly pluginSource?: CapturedPluginAgentSource;
 }) {
   return {
     definition: {
       definitionVersion: 2 as const,
       exactOwnerName: input.profile.exactOwnerName,
       ...(input.ownerInstanceId ? { ownerInstanceId: input.ownerInstanceId } : {}),
+      ...(input.pluginSource ? { pluginSource: input.pluginSource } : {}),
       systemPrompt: input.frozenSurface.systemPrompt,
       ...(input.frozenSurface.promptSnapshot
         ? { promptSnapshot: input.frozenSurface.promptSnapshot }
@@ -339,27 +411,38 @@ async function renderSessionProfile(input: {
   readonly appMode?: SessionRecord['appMode'];
   readonly legacyTaskSurface: boolean;
 }): Promise<AgentExecutionProfile> {
-  const configuredCapabilities = input.config.agents?.default;
-  const capabilities =
-    input.options.capabilityProfile === 'cli'
-      ? {
-          ...configuredCapabilities,
-          features: { ...configuredCapabilities?.features, mavis: false },
-        }
-      : configuredCapabilities;
   return input.options.agentService.renderProfile({
     exactOwnerName: input.agentName,
     surface: input.legacyTaskSurface
       ? 'task-child'
       : resolveAgentPromptSurface(input.session, input.options.runtimeOwnerKind),
-    promptProfile: input.options.runtimeOwnerKind === 'tui' ? 'tui' : 'desktop',
-    appMode: input.appMode ?? input.session.appMode ?? 'coding',
+    ...profileRequest(input.options, input.config, input.session, input.appMode),
+  });
+}
+
+function profileRequest(
+  options: TaskAgentBindingCaptureOptions,
+  config: LocalConversationRuntimeConfig,
+  session: SessionRecord,
+  appMode: SessionRecord['appMode'] | undefined,
+) {
+  const configuredCapabilities = config.agents?.default;
+  const capabilities =
+    options.capabilityProfile === 'cli'
+      ? {
+          ...configuredCapabilities,
+          features: { ...configuredCapabilities?.features, mavis: false },
+        }
+      : configuredCapabilities;
+  return {
+    promptProfile: options.runtimeOwnerKind === 'tui' ? ('tui' as const) : ('desktop' as const),
+    appMode: appMode ?? session.appMode ?? 'coding',
     capabilities,
     memoryEnabled:
-      !isCommandLineRuntimeOwner(input.options.runtimeOwnerKind) && input.config.memory?.enabled,
-    cronEnabled: !isCommandLineRuntimeOwner(input.options.runtimeOwnerKind),
-    dataDirToken: input.config.dataDir,
-  });
+      !isCommandLineRuntimeOwner(options.runtimeOwnerKind) && config.memory?.enabled,
+    cronEnabled: !isCommandLineRuntimeOwner(options.runtimeOwnerKind),
+    dataDirToken: config.dataDir,
+  };
 }
 
 /** V1 compatibility: historical Task prompt/capability recovery never reselects a model. */
@@ -662,50 +745,107 @@ function taskTargetModelSelection(
 function freezeSelectorCapabilities(
   profile: AgentExecutionProfile,
   ready: TaskAgentReadyCapabilityInventory,
+  authorToolsAllowlistScope?: LocalTurnAgentProfileFacts['toolsAllowlistScope'],
 ) {
+  const facts = toTurnProfileFacts(profile);
+  const toolsAllowlistScope =
+    authorToolsAllowlistScope ?? resolveToolsAllowlistScope(profile.configSelection?.tools);
   const filtered = filterLocalTurnCapabilityInventory({
     sources: ready.sources,
-    agentProfile: toTurnProfileFacts(profile),
+    agentProfile: { ...facts, toolsAllowlistScope },
     ...(ready.desktopCapabilities ? { desktopCapabilities: ready.desktopCapabilities } : {}),
   });
-  const tools = uniqueNames([
-    ...filtered.nativeTools.map((tool) => tool.def.name),
-    ...filtered.mcpEntries.map(({ tool }) => tool.def.name),
-    ...filtered.threadGoalTools.map((tool) => tool.def.name),
-    ...(filtered.desktopCapabilities?.runtimeTools.map((tool) => tool.def.name) ?? []),
-  ]);
-  const mcpServers = uniqueNames([
-    ...filtered.mcpEntries.flatMap((entry) => (entry.serverName ? [entry.serverName] : [])),
-    ...(filtered.desktopCapabilities?.runtimeToolBindings.flatMap((binding) =>
-      binding.kind === 'mcp' ? [binding.source] : [],
-    ) ?? []),
-  ]);
-  const skills = uniqueNames(
-    ready.skills
+  // This projection does not ship Computer Use, so no deferred native ceiling
+  // is captured here; the Agent's own selectors still apply on every Turn.
+  const tools = frozenToolNames(
+    filtered,
+    [],
+    toolsAllowlistScope,
+    profile.configSelection?.tools,
+  );
+  // The Skill reader checks both allowlists for Desktop Plugin Skills, so a
+  // frozen Plugin Skill must be named in `skills` as well as `extensionSkills`.
+  const desktopSkills = (filtered.desktopCapabilities?.skills ?? [])
+    .filter((skill) => filtered.selector.allowsExtensionSkill(skill.pluginName, skill.name))
+    .map((skill) => ({ ...skill, runtimeName: `${skill.pluginName}:${skill.name}` }));
+  const skills = uniqueNames([
+    ...ready.skills
       .filter((skill) => filtered.selector.allowsSkill(skill.name))
       .map((skill) => skill.name),
-  );
+    ...desktopSkills
+      .filter(
+        (skill) =>
+          filtered.selector.allowsSkill(skill.name) ||
+          filtered.selector.allowsSkill(skill.runtimeName),
+      )
+      .map((skill) => skill.runtimeName),
+  ]);
   const extensionSkills = uniqueNames([
     ...ready.skills
       .filter((skill) => !isBuiltinRuntimeSkill(skill))
       .filter((skill) => filtered.selector.allowsSkill(skill.name))
       .filter((skill) => filtered.selector.allowsExtensionSkill('', skill.name))
       .map((skill) => skill.name),
-    ...(filtered.desktopCapabilities?.skills ?? [])
-      .filter((skill) => filtered.selector.allowsExtensionSkill(skill.pluginName, skill.name))
-      .map((skill) => `${skill.pluginName}:${skill.name}`),
+    ...desktopSkills.map((skill) => skill.runtimeName),
   ]);
   const disallowedTools = profile.configSelection?.disallowedTools ?? [];
   return {
-    // Undefined canonical selectors resolve to the current ready inventory at
-    // Task creation. Persisting every bucket turns the snapshot into a true
-    // upper bound: later installs can only be removed by current runtime gates.
+    // The snapshot is an upper bound for internal tools and Skills only:
+    // undefined selectors resolve to the ready inventory at Task creation, and
+    // later installs can only be removed by current runtime gates. MCP and
+    // Plugin tools are not bounded by it; they follow the Agent's `mcpServers`
+    // and `disallowedTools` on every Turn.
     tools,
     disallowedTools: [...disallowedTools],
-    mcpServers,
+    // The Agent's own selector, not the servers ready now, so a server configured
+    // or recovered after capture stays reachable by the running Task.
+    mcpServers: frozenMcpServerSelector(profile.configSelection?.mcpServers),
     skills,
     extensionSkills,
+    selectorVersion: FROZEN_SELECTOR_VERSION,
   };
+}
+
+/**
+ * Version 2 encoding of the Agent's `mcpServers` in a field releases up to
+ * v3.1.4 require: unset → `[]` (unrestricted), `[]` → `[":none"]` (no MCP),
+ * server names as written.
+ */
+function frozenMcpServerSelector(selection: readonly string[] | undefined): readonly string[] {
+  if (selection === undefined) return [];
+  const names = uniqueNames(selection);
+  return names.length > 0 ? names : [FROZEN_MCP_SERVERS_NONE];
+}
+
+/**
+ * A `native` list bounds internal tools only, so the snapshot names no MCP or
+ * Plugin tool. An `all` list (one that names `mcp__*` tools) keeps every
+ * admitted name plus the `mcp__*` selectors themselves, even for tools not
+ * ready at capture, so later Turns still read it as `all` from its content.
+ * `selected` is the list after Plugin alias rebinding. When rebinding left no
+ * `mcp__*` name, those tools are unavailable: the author's names could match a
+ * same-named configured server, so only `FROZEN_TOOLS_ALL_SCOPE_MARKER` is
+ * added, which matches no tool and keeps the list read as `all`.
+ */
+function frozenToolNames(
+  filtered: ReturnType<typeof filterLocalTurnCapabilityInventory>,
+  deferredComputerTools: readonly string[],
+  scope: NonNullable<LocalTurnAgentProfileFacts['toolsAllowlistScope']>,
+  selected: readonly string[] | undefined,
+): readonly string[] {
+  const all = scope === 'all';
+  const admitted = uniqueNames([
+    ...deferredComputerTools,
+    ...filtered.nativeTools.map((tool) => tool.def.name),
+    ...filtered.mcpEntries
+      .map(({ tool }) => tool.def.name)
+      .filter((name) => all || !isAgentSelectorMcpToolName(name)),
+    ...filtered.threadGoalTools.map((tool) => tool.def.name),
+    ...(all ? (filtered.desktopCapabilities?.runtimeTools.map((tool) => tool.def.name) ?? []) : []),
+  ]);
+  if (!all) return admitted;
+  const named = uniqueNames([...admitted, ...(selected ?? []).filter(isAgentSelectorMcpToolName)]);
+  return named.some(isAgentSelectorMcpToolName) ? named : [...named, FROZEN_TOOLS_ALL_SCOPE_MARKER];
 }
 
 function isBuiltinRuntimeSkill(

@@ -24,7 +24,7 @@ describe('MiniMax login gate', () => {
     await expect(requireTuiAgentAccess({ getAccountStatus }, 'session-1')).resolves.toBe(
       account,
     );
-    expect(getAccountStatus).toHaveBeenCalledWith('session-1', undefined);
+    expect(getAccountStatus).toHaveBeenCalledWith('session-1', { includeMembership: false });
     expect(tuiAccountNeedsLoginPrompt(account)).toBe(false);
   });
 

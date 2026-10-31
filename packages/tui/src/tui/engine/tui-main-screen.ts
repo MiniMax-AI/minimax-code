@@ -12,6 +12,14 @@ const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
 // carry 133;B/133;C displaces the emulator cursor during differential updates. Fullscreen
 // rendering already strips them before every write; regular mode mirrors that contract.
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
+// Differential rendering moves the cursor by logical rows, so a rendered line must never
+// occupy two physical rows. Terminals can draw a cluster wider than visibleWidth() measures
+// (e.g. xterm.js in VS Code draws ZWJ emoji as separate glyphs); with autowrap on, a
+// full-width padded line then soft-wraps and every later frame lands one row lower.
+// Disable autowrap only inside each frame, as the fullscreen renderer already does, so
+// the terminal is back in its default state between frames and after exit.
+const BEGIN_RENDER_FRAME = "\x1b[?2026h\x1b[?7l";
+const END_RENDER_FRAME = "\x1b[?7h\x1b[?2026l";
 
 /**
  * Streams terminal output in bounded chunks so a large render never forms one
@@ -458,7 +466,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				: 0;
 			this.fullRedrawCount += 1;
 			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-			output.append("\x1b[?2026h"); // Begin synchronized output
+			output.append(BEGIN_RENDER_FRAME); // Begin synchronized output
 			if (clear) {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
 				if (viewportOnly) {
@@ -501,7 +509,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			this.previousViewportTop = Math.max(start, newLines.length - height);
 			this.positionHardwareCursor(cursorPos, newLines.length, output);
-			output.append("\x1b[?2026l"); // Present only after restoring the input cursor.
+			output.append(END_RENDER_FRAME); // Present only after restoring the input cursor.
 			output.flush();
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
@@ -653,7 +661,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		if (firstChanged >= newLines.length) {
 			if (this.previousLines.length > newLines.length) {
 				const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-				output.append("\x1b[?2026h");
+				output.append(BEGIN_RENDER_FRAME);
 				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
@@ -688,7 +696,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 				this.positionHardwareCursor(cursorPos, newLines.length, output);
-				output.append("\x1b[?2026l");
+				output.append(END_RENDER_FRAME);
 				output.flush();
 			}
 			this.previousLines = newLines;
@@ -719,7 +727,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Render from first changed line to end
 		// Keep updates wrapped in synchronized output while writing bounded chunks.
 		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-		output.append("\x1b[?2026h"); // Begin synchronized output
+		output.append(BEGIN_RENDER_FRAME); // Begin synchronized output
 		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
@@ -864,7 +872,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Restore the IME anchor before presenting the frame, including cursor visibility.
 		this.positionHardwareCursor(cursorPos, newLines.length, output);
-		output.append("\x1b[?2026l");
+		output.append(END_RENDER_FRAME);
 		output.flush();
 
 		this.previousLines = newLines;

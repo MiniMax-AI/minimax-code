@@ -39,6 +39,18 @@ export interface McodeBusinessEventMap {
     readonly duration_bucket: McodeDurationBucket;
     readonly exit_reason: '' | 'ctrl_c' | 'ctrl_d' | 'navigation' | 'replaced';
   };
+  /**
+   * TUI-only metric, in the shape Desktop used before it moved to the
+   * `prompt_suggestion_*` events. The text is never reported.
+   */
+  readonly prompt_suggestion: {
+    readonly session_id: string;
+    readonly turn_id: string;
+    readonly prompt_version: string;
+    readonly elapsed_ms: number;
+    readonly action: 'shown' | 'accepted' | 'sent';
+    readonly edited?: boolean;
+  };
   readonly chat_send: ChatContextProperties & {
     readonly is_first_message: 0 | 1;
     readonly is_attachment: 'text' | 'attachment';
@@ -114,6 +126,14 @@ const EVENT_PROPERTY_KEYS = {
   logout_click: [],
   login_result: ['source', 'result_type', 'fail_reason', 'login_type'],
   btw_session_lifecycle: ['phase', 'duration_bucket', 'exit_reason'],
+  prompt_suggestion: [
+    'session_id',
+    'turn_id',
+    'prompt_version',
+    'elapsed_ms',
+    'action',
+    'edited',
+  ],
   chat_send: ['chat_type', 'is_first_message', 'is_attachment'],
   slash_command_menu_view: ['chat_type'],
   slash_command_click: ['chat_type', 'command_type'],

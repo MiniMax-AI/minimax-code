@@ -53,11 +53,16 @@ import {
   recordCheckpointAttemptBestEffort,
 } from './context-compaction.js';
 import {
+  recordSharedPrefixFallbackBestEffort,
+  resolveCheckpointRequestShape,
+} from './checkpoint-request-shape.js';
+import {
   createCompactionLifecycleMetadata,
   createManualCompactionChange,
 } from './compaction-history.js';
 import {
   joinPrompt,
+  readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
   resolveProviderContextMode,
 } from '../execution/prompt.js';
@@ -191,6 +196,10 @@ interface ManualCompactionRequestPlan {
   readonly payloadTransform: ManualContextCompactionInput['payloadTransform'];
   readonly systemPrompt: ManualContextCompactionInput['systemPrompt'];
   readonly tools: ManualContextCompactionInput['tools'];
+  readonly contextUsagePromptRanges: ManualContextCompactionInput['contextUsagePromptRanges'];
+  readonly checkpointRequestShape: NonNullable<
+    ManualContextCompactionInput['checkpointRequestShape']
+  >;
 }
 
 async function preCompactHookRejection(
@@ -511,18 +520,22 @@ export class AgentHostCompactionExecutor<
         sessionId: input.lease.sessionId,
         signal: input.lease.signal,
       });
+      const baseSystemPrompt = readPreparedSystemPrompt(preparation.agentConfig);
+      const contextUsagePromptRanges = readPreparedContextUsagePromptRanges(
+        preparation.agentConfig,
+        assembly.systemPromptPrefix,
+        baseSystemPrompt,
+      );
       const providerContext = resolveProviderContextMode(
         session,
         {
-          systemPrompt: joinPrompt(
-            assembly.systemPromptPrefix,
-            readPreparedSystemPrompt(preparation.agentConfig),
-          ),
+          systemPrompt: joinPrompt(assembly.systemPromptPrefix, baseSystemPrompt),
           tools: assembly.tools.map(({ def }) => ({
             name: def.name,
             description: def.description,
             parameters: def.schema,
           })),
+          ...(contextUsagePromptRanges === undefined ? {} : { contextUsagePromptRanges }),
         },
         'compaction',
       );
@@ -537,6 +550,11 @@ export class AgentHostCompactionExecutor<
             payloadTransform,
             systemPrompt: providerContext.systemPrompt,
             tools: [...providerContext.tools],
+            contextUsagePromptRanges: providerContext.contextUsagePromptRanges,
+            checkpointRequestShape: resolveCheckpointRequestShape(
+              preparation.llm,
+              compactionDependencies.checkpointSharedPrefixEnabled,
+            ),
           }),
           {
             onStarted: () =>
@@ -565,6 +583,18 @@ export class AgentHostCompactionExecutor<
                   phase: 'manual',
                   thinkingLevel,
                   checkpoint: metadata,
+                },
+              ),
+            onCheckpointSharedPrefixFallback: (reason) =>
+              recordSharedPrefixFallbackBestEffort(
+                this.dependencies.logger,
+                compactionDependencies.metricsClient,
+                {
+                  context,
+                  attemptId,
+                  phase: 'manual',
+                  api: preparation.llm.model.api,
+                  reason,
                 },
               ),
             onProviderRequestSettled: state.tokenUsage.observe,
@@ -710,6 +740,12 @@ function createManualCompactionRequest(
     ...(input.customInstructions ? { customInstructions: input.customInstructions } : {}),
     systemPrompt,
     tools: plan.tools,
+    ...(plan.contextUsagePromptRanges === undefined
+      ? {}
+      : { contextUsagePromptRanges: plan.contextUsagePromptRanges }),
+    ...(plan.checkpointRequestShape === 'isolated'
+      ? {}
+      : { checkpointRequestShape: plan.checkpointRequestShape }),
   };
 }
 

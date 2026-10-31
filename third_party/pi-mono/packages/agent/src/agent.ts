@@ -19,6 +19,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolCall,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	QueueMode,
@@ -105,6 +106,8 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	onToolExecutionStart?: (context: BeforeToolCallContext) => void;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	missingToolMessage?: (toolName: string) => string | undefined;
+	resolveMissingTool?: (toolCall: AgentToolCall) => AgentTool<any> | undefined;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -193,6 +196,8 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public missingToolMessage?: (toolName: string) => string | undefined;
+	public resolveMissingTool?: (toolCall: AgentToolCall) => AgentTool<any> | undefined;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -223,6 +228,8 @@ export class Agent {
 		this.beforeToolCall = options.beforeToolCall;
 		this.onToolExecutionStart = options.onToolExecutionStart;
 		this.afterToolCall = options.afterToolCall;
+		this.missingToolMessage = options.missingToolMessage;
+		this.resolveMissingTool = options.resolveMissingTool;
 		this.prepareNextTurn = options.prepareNextTurn;
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
 		this.shouldStopAfterSteering = options.shouldStopAfterSteering;
@@ -458,6 +465,8 @@ export class Agent {
 			beforeToolCall: this.beforeToolCall,
 			onToolExecutionStart: this.onToolExecutionStart,
 			afterToolCall: this.afterToolCall,
+			missingToolMessage: this.missingToolMessage,
+			resolveMissingTool: this.resolveMissingTool,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
 			shouldStopAfterTurn: this.shouldStopAfterTurn,
 			shouldStopAfterSteering: this.shouldStopAfterSteering,

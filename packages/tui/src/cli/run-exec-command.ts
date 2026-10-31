@@ -72,6 +72,7 @@ export async function runTuiExecCommand(
         version,
         ...(invocation.configPath ? { configPath: invocation.configPath } : {}),
         surface: 'headless',
+        ...(invocation.ptc ? { ptcLaunchOverride: true } : {}),
         promptMode: invocation.promptMode ?? 'tui',
         ...(invocation.systemPromptOverrides
           ? { systemPromptOverrides: invocation.systemPromptOverrides }

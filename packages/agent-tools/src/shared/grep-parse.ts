@@ -156,14 +156,47 @@ export interface ParsedGrepOutput {
     readonly numLines?: number;
     readonly numMatches?: number;
     readonly totalFiles?: number;
+    /** count mode: the page's per-file counts, exactly as listed in the text. */
+    readonly counts?: readonly GrepCountEntry[];
   };
   /** Zero-based output line indexes that originated from actual rg matches. */
   matchLineIndexes?: readonly number[];
+  /**
+   * content mode: the retained match lines (no context lines) with their
+   * output line index. `text` is cut where the output line is cut, so it
+   * never carries more than the model-visible text.
+   */
+  matchEntries?: readonly GrepMatchEntry[];
+  /** content mode with `uncapped`: a line or page cap would have cut this output. */
+  uncappedOutput?: boolean;
+}
+
+export interface GrepMatchEntry {
+  readonly lineIndex: number;
+  readonly path: string;
+  readonly line: number;
+  readonly text: string;
+}
+
+export interface GrepCountEntry {
+  readonly path: string;
+  readonly count: number;
 }
 
 export function parseGrepOutput(
   stdout: string,
-  opts: { limit: number; offset?: number; partitionContext?: boolean },
+  opts: {
+    limit: number;
+    offset?: number;
+    partitionContext?: boolean;
+    /**
+     * Keep whole lines and the whole page: the caller is a PTC child whose
+     * result goes to a program, not to the model (agent-tools
+     * desktop/output-limit.ts isPtcChildCall). `limit` paging and ripgrep's
+     * own stdout byte cap still apply.
+     */
+    uncapped?: boolean;
+  },
 ): ParsedGrepOutput {
   const offset = opts.offset && opts.offset > 0 ? Math.floor(opts.offset) : 0;
   const limitedOutput = limitGrepOutput(stdout, opts.limit, offset, {
@@ -173,6 +206,7 @@ export function parseGrepOutput(
   const details: Record<string, unknown> = {};
   let bytesTruncated = false;
   let linesTruncated = false;
+  let capSkipped = false;
 
   const rawLines = output.length > 0 ? output.split('\n') : [];
   if (limitedOutput.matchLimitReached) {
@@ -183,6 +217,10 @@ export function parseGrepOutput(
     .map((line) => {
       const restored = restoreNulSeparator(line).replace(/^\.\//, '');
       if (restored.length > MAX_LINE_LENGTH) {
+        if (opts.uncapped) {
+          capSkipped = true;
+          return restored;
+        }
         linesTruncated = true;
         return `${restored.slice(0, MAX_LINE_LENGTH)}...`;
       }
@@ -190,7 +228,9 @@ export function parseGrepOutput(
     })
     .join('\n');
 
-  if (Buffer.byteLength(output, 'utf-8') > MAX_TOTAL_BYTES) {
+  if (opts.uncapped && Buffer.byteLength(output, 'utf-8') > MAX_TOTAL_BYTES) {
+    capSkipped = true;
+  } else if (Buffer.byteLength(output, 'utf-8') > MAX_TOTAL_BYTES) {
     // Cutting at a raw byte offset lands mid-line: the tail row is torn and
     // may end on a partial multi-byte sequence (→ U+FFFD). Drop everything
     // after the last complete line so the model never sees a half path/match
@@ -206,6 +246,13 @@ export function parseGrepOutput(
   const matchLineIndexes = retainedRawLines.flatMap((line, index) =>
     isRipgrepMatchLine(line) ? [index] : [],
   );
+  const matchEntries = matchLineIndexes.flatMap((index) => {
+    const entry = parseMatchLine(
+      retainedRawLines[index] ?? '',
+      opts.uncapped ? Number.POSITIVE_INFINITY : MAX_LINE_LENGTH,
+    );
+    return entry ? [{ lineIndex: index, ...entry }] : [];
+  });
   const filenames = uniqueStrings(retainedRawLines.flatMap(ripgrepLinePath));
   if (linesTruncated) details.linesTruncated = true;
 
@@ -225,6 +272,8 @@ export function parseGrepOutput(
     text: output,
     details,
     matchLineIndexes,
+    matchEntries,
+    ...(capSkipped ? { uncappedOutput: true } : {}),
     facts: {
       filenames,
       numFiles: filenames.length,
@@ -316,9 +365,7 @@ export function parseCountOutput(
   const pageEntries = page.flatMap((entry) => {
     const idx = entry.lastIndexOf(':');
     const count = Number.parseInt(entry.slice(idx + 1), 10);
-    return idx > 0 && !Number.isNaN(count)
-      ? [{ filename: entry.slice(0, idx), count }]
-      : [];
+    return idx > 0 && !Number.isNaN(count) ? [{ filename: entry.slice(0, idx), count }] : [];
   });
   const truncated = entries.length > offset + page.length;
   let text = page.join('\n');
@@ -335,8 +382,28 @@ export function parseCountOutput(
       numFiles: pageEntries.length,
       numMatches: pageEntries.reduce((sum, { count }) => sum + count, 0),
       totalFiles: fileCount,
+      counts: pageEntries.map(({ filename, count }) => ({ path: filename, count })),
     },
   };
+}
+
+/**
+ * Splits one rg match line (`path\0line:text`, or legacy `path:line:text`)
+ * the way the output shows it: `./` dropped and the text cut so that
+ * `path:line:text` stays within MAX_LINE_LENGTH, like the model-visible line.
+ */
+function parseMatchLine(
+  raw: string,
+  maxLineLength: number,
+): { readonly path: string; readonly line: number; readonly text: string } | undefined {
+  const nul = raw.indexOf('\u0000');
+  const located = nul > 0 ? raw.slice(nul + 1).match(/^(\d+):/) : raw.match(/^(.+?):(\d+):/);
+  if (!located) return undefined;
+  const path = (nul > 0 ? raw.slice(0, nul) : (located[1] ?? '')).replace(/^\.\//, '');
+  const line = Number(nul > 0 ? located[1] : located[2]);
+  const text = nul > 0 ? raw.slice(nul + 1 + located[0].length) : raw.slice(located[0].length);
+  const prefixLength = `${path}:${line}:`.length;
+  return { path, line, text: text.slice(0, Math.max(0, maxLineLength - prefixLength)) };
 }
 
 function ripgrepLinePath(line: string): string[] {

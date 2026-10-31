@@ -13,7 +13,14 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { McpConnectionPool } from '../src/runtime/connection-pool.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+
+import { describeMcpCallError } from '../src/runtime/call-error.js';
+import {
+  McpConnectionPool,
+  McpToolCallNotDispatchedError,
+  McpToolCallTimeoutError,
+} from '../src/runtime/connection-pool.js';
 import type {
   McpConnection,
   McpToolCallResult,
@@ -543,5 +550,92 @@ describe('McpConnectionPool.callTool — abort propagation', () => {
     await secondPromise;
 
     await pool.shutdown();
+  });
+});
+
+describe('McpConnectionPool.callTool — server timeout', () => {
+  const server: ResolvedMcpServer = {
+    name: 'slow',
+    enabled: true,
+    transport: { type: 'http', url: 'https://example.com/mcp' },
+    timeout: 20,
+  };
+
+  it('reports the pool bound firing as a typed timeout of a dispatched call', async () => {
+    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
+    seedFakeConnection(pool, 'slow', () => new Promise<never>(() => undefined), []);
+
+    const failure = await pool.callTool('slow', 'search', {}).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(McpToolCallTimeoutError);
+    expect(failure).toMatchObject({ timeoutMs: 20, message: expect.stringContaining('timed out') });
+  });
+
+  it('reports the SDK request timeout the same way', async () => {
+    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
+    seedFakeConnection(
+      pool,
+      'slow',
+      async () => {
+        throw new McpError(ErrorCode.RequestTimeout, 'Request timed out');
+      },
+      [],
+    );
+
+    await expect(pool.callTool('slow', 'search', {})).rejects.toBeInstanceOf(
+      McpToolCallTimeoutError,
+    );
+  });
+
+  it('keeps other failures and caller aborts untyped', async () => {
+    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
+    seedFakeConnection(
+      pool,
+      'slow',
+      async () => {
+        throw new Error('socket hang up');
+      },
+      [],
+    );
+
+    const failure = await pool.callTool('slow', 'search', {}).catch((error: unknown) => error);
+
+    expect(failure).not.toBeInstanceOf(McpToolCallTimeoutError);
+    expect(failure).toMatchObject({ message: 'MCP tool call failed: socket hang up' });
+  });
+
+  it('keeps the SDK or pool timeout as the cause that raw-error callers describe', async () => {
+    const sdkTimeout = new McpError(ErrorCode.RequestTimeout, 'Request timed out');
+    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
+    seedFakeConnection(
+      pool,
+      'slow',
+      async () => {
+        throw sdkTimeout;
+      },
+      [],
+    );
+
+    const sdkFailure = await pool.callTool('slow', 'search', {}).catch((error: unknown) => error);
+
+    expect(sdkFailure).toBeInstanceOf(McpToolCallTimeoutError);
+    expect((sdkFailure as Error).cause).toBe(sdkTimeout);
+    expect(describeMcpCallError(sdkFailure)).toEqual({
+      code: ErrorCode.RequestTimeout,
+      message: 'Request timed out',
+    });
+
+    const boundPool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
+    seedFakeConnection(boundPool, 'slow', () => new Promise<never>(() => undefined), []);
+
+    const boundFailure = await boundPool
+      .callTool('slow', 'search', {})
+      .catch((error: unknown) => error);
+
+    expect(boundFailure).toBeInstanceOf(McpToolCallTimeoutError);
+    expect(describeMcpCallError(boundFailure)).toEqual({
+      name: 'Error',
+      message: 'MCP tool call "search" on "slow" timed out after 20ms',
+    });
   });
 });

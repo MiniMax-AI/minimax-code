@@ -614,6 +614,37 @@ function registerCustomProviderPrefixFallbackTests(): void {
       }),
     ).toMatchObject({ providerId: 'mafia', modelId: 'model' });
   });
+
+  it('resolves an Agent save whose catalog model id contains a slash', () => {
+    const slashConfig: LocalConversationRuntimeConfig = {
+      ...config,
+      custom_provider: {
+        loomy: { models: { 'acc-loomy/qwen-3.8-max': { limit: { context: 64_000 } } } },
+      },
+    };
+    const save = (model: string) =>
+      resolveEffectiveAgentModelSelection({
+        config: slashConfig,
+        sources: [
+          {
+            source: 'agent-config-save',
+            selection: { model },
+            requireCatalog: true,
+            allowCustomProviderPrefixFallback: true,
+            defaultMissingEffortOff: true,
+          },
+        ],
+      });
+
+    expect(save('custom_provider:loomy/acc-loomy/qwen-3.8-max')).toMatchObject({
+      providerId: 'custom_provider:loomy',
+      modelId: 'acc-loomy/qwen-3.8-max',
+      contextWindow: 64_000,
+    });
+    expect(() => save('custom_provider:loomy/acc-loomy/missing')).toThrow(
+      'Model custom_provider:loomy/acc-loomy/missing',
+    );
+  });
 }
 
 function registerAgentModelInputValidationTests(): void {

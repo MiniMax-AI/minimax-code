@@ -26,6 +26,7 @@ import {
   BUILTIN_ROSTER_FILE,
   FEATURE_FILES,
   PRIMARY_AGENT_NAME,
+  PTC_SECTION_FILE,
   canonicalBuiltinName,
   defaultLocale,
   legacyNamesFor,
@@ -72,7 +73,11 @@ export interface BuiltinCanonicalContent {
   readonly systemPrompt?: string;
 }
 
-export type { BuiltinRenderInput, BuiltinSurfaceRenderInput } from './definitions.js';
+export type {
+  BuiltinPtcRender,
+  BuiltinRenderInput,
+  BuiltinSurfaceRenderInput,
+} from './definitions.js';
 
 interface ModeAssetInput {
   readonly agentName: string;
@@ -197,6 +202,19 @@ export class BuiltinAgentCatalog {
         }
       : undefined;
     return { persona, coreTemplate, agentPrompt, promptSnapshot };
+  }
+
+  /**
+   * Renders the PTC section with the Turn's own context (tool switches) before
+   * the main templates insert it. Read from the bundled assets only, never from
+   * a remote Prompt version: it is exempt from desktop_agent delivery, so a
+   * remote bundle never has to carry it and no older client ever sees it.
+   */
+  async renderPtcSection(input: BuiltinRenderInput): Promise<string> {
+    const template = await this.readPromptAssetFile(undefined, PTC_SECTION_FILE);
+    if (template === undefined)
+      throw new Error(`Mandatory V2 PTC prompt is missing: ${PTC_SECTION_FILE}.`);
+    return this.renderTemplate(template, this.context(input, {}), PTC_SECTION_FILE).trim();
   }
 
   renderPromptSnapshot(

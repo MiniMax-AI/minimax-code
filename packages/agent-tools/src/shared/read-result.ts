@@ -52,7 +52,7 @@ export function readErrorResult(toolName: string, message: string): ToolResult {
 export function piReadResultToToolResult(
   toolName: string,
   res: AgentToolResult<Record<string, unknown>>,
-  opts: { offset?: number } = {},
+  opts: { offset?: number; maxLineChars?: number } = {},
 ): ToolResult {
   const content = res.content as ToolResultContent[];
   const details = { ...((res.details ?? {}) as Record<string, unknown>) };

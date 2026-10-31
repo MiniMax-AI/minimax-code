@@ -1,10 +1,11 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
-import type {
-  AssistantMessage,
-  AssistantMessageEvent,
-  AssistantMessageEventStream,
-  ProviderResponse,
-  SimpleStreamOptions,
+import {
+  isContextOverflow,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  type ProviderResponse,
+  type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import {
   isLLMDeterministicRequestRejection,
@@ -572,11 +573,20 @@ function failureResult(input: {
   nowMs: () => number;
   retryAllErrors?: boolean;
 }): PreflightResult {
+  // A 2xx response status only says the stream opened; a gateway that reports
+  // the rejection inside the stream (an SSE `error` event after HTTP 200) has
+  // no HTTP status for it. Classify such a failure by its own payload, so a
+  // wrapped size rejection is not vetoed as "status 200" and resent.
+  const responseStatus = input.response?.status;
+  const failureStatus =
+    responseStatus !== undefined && (responseStatus < 200 || responseStatus >= 300)
+      ? responseStatus
+      : undefined;
   const normalized = normalizeLLMError({
     ...(input.thrown !== undefined ? { raw: input.thrown } : {}),
     ...(input.final?.stopReason ? { finishReason: input.final.stopReason } : {}),
     ...(input.final?.errorMessage ? { errorMessage: input.final.errorMessage } : {}),
-    ...(input.response ? { statusCode: input.response.status } : {}),
+    ...(failureStatus !== undefined ? { statusCode: failureStatus } : {}),
     explicitAbort: input.final?.stopReason === 'aborted',
   });
   // BYOK retries every pre-output failure because custom gateways report errors
@@ -585,12 +595,14 @@ function failureResult(input: {
   // 400 `invalid_request_error`). Retrying those only re-sends the same request,
   // repeats (and may re-bill) the rejection and delays the actionable error by
   // the whole backoff window. The deterministic check excludes anything that
-  // also looks transient (timeout, network, 408/429/5xx).
+  // also looks transient (timeout, network, 408/429/5xx). A context overflow,
+  // by tokens or by request bytes, is left to context management as in Pi.
   const decision =
     input.retryAllErrors &&
     !normalized.facts.explicitAbort &&
     !normalized.facts.signals.has('refusal') &&
-    !isLLMDeterministicRequestRejection(normalized)
+    !isLLMDeterministicRequestRejection(normalized) &&
+    !(input.final && isContextOverflow(input.final))
       ? { retryable: true, reason: 'network' as const }
       : toLLMRetryDecision(normalized);
   if (!decision.retryable) {

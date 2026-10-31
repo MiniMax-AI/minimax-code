@@ -84,6 +84,16 @@ export interface SteeringRequeue {
     readonly timeoutMs?: number;
   }) => Promise<void>;
   /**
+   * Read-only: true while this exact Turn still has a discarded batch that is
+   * not durable yet (neither committed into the conversation nor returned to
+   * the Queue). The execution coordinator keeps the Turn's in-process
+   * ownership in that case when terminal settlement could not be persisted.
+   */
+  readonly hasPendingForTurn: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+  }) => boolean;
+  /**
    * Resolves once every scheduled requeue has finished persisting. Shutdown
    * must await this before the SessionSystem and database close, or an
    * admitted-and-acknowledged user message dies with the process. The wake
@@ -259,6 +269,12 @@ export function createSteeringRequeue(options: SteeringRequeueOptions): Steering
       }
       if (waits.length === 0) return;
       await boundedSettle(Promise.all(waits), timeoutMs ?? PRERELEASE_COMMIT_TIMEOUT_MS);
+    },
+    hasPendingForTurn({ sessionId, turnId }) {
+      for (const retry of pending.values()) {
+        if (retry.batch.sessionId === sessionId && retry.batch.turnId === turnId) return true;
+      }
+      return false;
     },
     async drain() {
       await Promise.all([...inflight.values()]);

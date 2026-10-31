@@ -19,7 +19,7 @@ import {
   cleanupFailedV1Startup,
   createDeferredAgentRuntimeTelemetry,
   createV1RuntimeCompatibility,
-  withAgentStorageLock,
+  withAgentStorageScope,
   type V1RuntimeCompatibility,
 } from "./compat/v1/runtime.js";
 import { createV2AgentRuntimeManagementPort } from "./local/agent-runtime-port.js";
@@ -126,13 +126,17 @@ async function createLocalRuntimeHostV2Internal(
   let v1: V1CreatedLocalRuntimeHost | undefined;
   let legacyClose: (() => Promise<void>) | undefined;
   let ownerRuntime: InitializedOwnerRuntime | undefined;
-  const agentRuntimePort: DeferredLocalAgentRuntimePort =
-    createDeferredLocalAgentRuntimePort();
-  const sandboxOperationsFactory =
-    createDeferredLocalSandboxBashOperationsFactory(
-      () => options.configGetter?.().sandbox?.enabled ?? false,
-      resolveAgentBashEnvPolicy(options.dataDir),
-    );
+  const agentRuntimePort: DeferredLocalAgentRuntimePort = createDeferredLocalAgentRuntimePort();
+  const getConfig = () => v1?.apiHost.configGetter() ?? options.configGetter?.();
+  const sandboxOperationsFactory = createDeferredLocalSandboxBashOperationsFactory(
+    () => options.configGetter?.().sandbox?.enabled ?? false,
+    (plan) =>
+      resolveAgentBashEnvPolicy(
+        options.dataDir,
+        process.platform,
+        plan?.nativeDelete ?? getConfig()?.permission?.nativeDelete === true,
+      ),
+  );
   const agentTelemetry = createDeferredAgentRuntimeTelemetry();
   let database: DatabaseClient | undefined;
   let preparedServices: PreparedRuntimeServices | undefined;
@@ -168,6 +172,7 @@ async function createLocalRuntimeHostV2Internal(
     // (a 17G dataDir starved the 600s bootstrap watchdog six times in a row).
     // The rootless-v2-generation module remains for the CLI, which acquires
     // its own operation fence.
+
     // Layout migration must complete before the authoritative V2 target is
     // opened.  The services composition below gates all legacy access on the
     // target Agent row count.
@@ -217,7 +222,7 @@ async function createLocalRuntimeHostV2Internal(
           : {}),
         ...(options.nowMs ? { nowMs: options.nowMs } : {}),
         withAgentStorageLock: (operation) =>
-          withAgentStorageLock(options.dataDir, operation),
+          withAgentStorageScope(options.dataDir, operation),
         reportCutover: reportAgentCutover,
         reportIdentityDetach: reportAgentIdentityDetach,
         reportLegacyCustomMaterialization:
@@ -354,7 +359,7 @@ async function createLocalRuntimeHostV2Internal(
     ownerCompromiseGuard.publish();
     ownerRuntime?.background.startMaintenance();
 
-    return createStartedHost(v1, ownerRuntime, cliService, v1.ready);
+    return createStartedHost(v1, ownerRuntime, v1.ready);
   } catch (error) {
     compatibility?.failConversation(error);
     await cleanupFailedStartup({
@@ -430,9 +435,9 @@ function reportDetachedOwnerChannelStartupTiming(
 function createStartedHost(
   v1: V1CreatedLocalRuntimeHost,
   ownerRuntime: InitializedOwnerRuntime | undefined,
-  cliService: ReturnType<typeof createCliService> | undefined,
   ready: Promise<void>,
 ): CreatedLocalRuntimeHost {
+  const cliService = ownerRuntime ? createCliService(ownerRuntime.services) : undefined;
   return {
     ...v1,
     ...(ownerRuntime ? { application: ownerRuntime.services.application } : {}),
@@ -871,6 +876,8 @@ async function initializeOwnerRuntime(input: {
       capabilityProfile: options.capabilityProfile,
       systemPromptOverrides: options.systemPromptOverrides,
       getRunawayGuardConfig: options.getRunawayGuardConfig,
+      getPromptSuggestionPolicy: options.getPromptSuggestionPolicy,
+      promptSuggestionSurface: options.promptSuggestionSurface,
       ...(options.getToolResultCompactionConfig
         ? {
             getToolResultCompactionConfig:

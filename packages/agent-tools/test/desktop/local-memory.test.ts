@@ -58,6 +58,19 @@ describe('LocalMemoryTool output limit', () => {
       expect(result.text).toBe(text);
       expect(result.content).toEqual([{ type: 'text', text }]);
       expect(result.details).toEqual({ kind: 'memory', ok: true });
+      expect(result.isError).toBeUndefined();
     },
   );
+
+  it('marks a failed operation as an error result with unchanged text and details', async () => {
+    const text = 'memory tool failed [MISSING_FIELD]: query is required';
+    const tool = new LocalMemoryTool({
+      execute: async () => ({ text, details: { ok: false, code: 'MISSING_FIELD' } }),
+    });
+    const result = await tool.execute(context, { target: 'main', operation: 'search' });
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(text);
+    expect(result.content).toEqual([{ type: 'text', text }]);
+    expect(result.details).toEqual({ kind: 'memory', ok: false, code: 'MISSING_FIELD' });
+  });
 });

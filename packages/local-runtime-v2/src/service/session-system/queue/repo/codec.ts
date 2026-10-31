@@ -33,10 +33,21 @@ export function decodeQueueRow(row: QueueStorageRow): QueueItem {
 function parseQueueItem(raw: string): QueueItem | undefined {
   try {
     const value: unknown = JSON.parse(raw);
-    return isQueueItem(value) ? value : undefined;
+    return isQueueItem(value) ? withoutRetiredFields(value) : undefined;
   } catch {
     return undefined;
   }
+}
+/**
+ * Rows written before PTC followed the Session mode alone may carry the retired
+ * `ptcEligible` ingress marker. Nothing reads it any more, so it is dropped
+ * whatever its value instead of failing the row.
+ */
+function withoutRetiredFields(item: QueueItem): QueueItem {
+  if (!Object.hasOwn(item, 'ptcEligible')) return item;
+  const { ptcEligible, ...rest } = item as QueueItem & { readonly ptcEligible?: unknown };
+  void ptcEligible;
+  return rest;
 }
 export function isQueueItem(value: unknown): value is QueueItem {
   if (!hasBase(value)) return false;

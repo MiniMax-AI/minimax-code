@@ -144,6 +144,8 @@ export interface RuntimeProtocolError extends Omit<IProtocolError, 'code'> {
 export interface RuntimeToolCall {
   tool_name: string;
   tool_call_id: string;
+  /** Optional parent run_code id for a host-executed PTC child call. */
+  parent_tool_call_id?: string;
   status: RuntimeToolCallStatus;
   args?: Record<string, unknown>;
   /**

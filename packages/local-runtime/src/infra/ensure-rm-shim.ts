@@ -18,11 +18,18 @@
  *
  * WHY NOT `<dataDir>/bin`
  * ----------------------
- * `ensurePathIntegration` appends `<dataDir>/bin` to the USER's `~/.zshrc` /
- * `~/.bashrc`. Dropping an `rm` in there would silently replace `rm` in the
- * user's own interactive terminal, which we must never do. `<dataDir>/shims` is
+ * `<dataDir>/bin` holds user-facing tools such as `mcode-tools` and may be on
+ * the user's own PATH (installers or older releases wrote it to `~/.zshrc` /
+ * `~/.bashrc`). Dropping an `rm` in there would silently replace `rm` in the
+ * user's interactive terminal, which we must never do. `<dataDir>/shims` is
  * injected only into the agent's bash environment (see `BashEnvPolicy.
  * prependPath`), never into a user-facing shell.
+ *
+ * `<dataDir>/bin` IS prepended for agent bash (see `resolveAgentBashEnvPolicy`),
+ * but that is a different concern from placing an `rm` there: prepending moves
+ * host-owned command names to the front of the agent's PATH only, so a stale
+ * same-named binary elsewhere cannot shadow them. It never reaches a user-facing
+ * shell, because `prependPath` is applied when the subprocess env is built.
  *
  * Windows is intentionally skipped: it has no sandbox, and PowerShell resolves
  * `rm` as an alias for `Remove-Item` rather than through PATH, so recoverable
@@ -60,12 +67,21 @@ if [ ! -x "$trash_bin" ]; then
   echo "rm: refusing to fall back to an unrecoverable delete" >&2
   exit 1
 fi
-exec "$trash_bin" "$@"
+exec "$trash_bin" --rm-compatible "$@"
 `;
 
 /** Absolute path of the directory injected at the front of the agent's PATH. */
 export function resolveRmShimDir(dataDir: string): string {
   return path.join(dataDir, 'shims');
+}
+
+/**
+ * Absolute path of the host-owned launcher directory injected at the front of
+ * the agent's PATH.
+ * @internal Exported only for focused tests.
+ */
+export function resolveManagedBinDir(dataDir: string): string {
+  return path.join(dataDir, 'bin');
 }
 
 /**
@@ -75,19 +91,42 @@ export function resolveRmShimDir(dataDir: string): string {
  * missing or lost its execute bit (cache cleaner, restored backup, chmod), the
  * preflight first re-seeds it in place — `ensureRmShim` is idempotent — and
  * only refuses the spawn when that repair also fails (e.g. read-only dataDir).
- * A silent fall-through to `/bin/rm` is never possible. Without a dataDir
- * there is no shim to install, and Windows never uses the shim (see
- * `ensureRmShim`), so both return the shared resolver unchanged.
+ * Native deletion removes this profile's inherited shim path and skips the
+ * preflight entirely; the recoverable scripts on disk are left unchanged.
+ * Without a dataDir there is no shim to install, and Windows never injects
+ * the shim (see `ensureRmShim`).
+ *
+ * `<dataDir>/bin` is prepended on every platform and in every delete mode, so a
+ * host-owned command always wins name resolution inside agent bash. `mcode-tools`
+ * is the case that made this load-bearing: the npm CLI package `@minimax/code`
+ * exports a bin of the same name, and npm's global bin directory (nvm,
+ * Homebrew, `~/.local/bin`) normally precedes `<dataDir>/bin` on the user's
+ * PATH. That copy is the *embedded* CLI, which aborts unless the host injected
+ * `MCODE_AUTH_PROVIDER=shared-broker`, so a shadowed lookup failed every App
+ * call with `error: Embedded mcode-tools requires MCODE_AUTH_PROVIDER=…`.
+ * `mavis`, `minimax` and `mavis-trash` gain the same protection. `ensureBinInProcessPath`
+ * prepends the same directory into `process.env.PATH`, but that happens too
+ * early: a login shell re-running the user's rc files can reorder it back.
+ *
+ * Unlike the rm shim, a missing launcher deliberately has NO spawn preflight.
+ * Blocking every bash spawn because `<dataDir>/bin` is absent would be far worse
+ * than letting the command fail with its own `not found`.
  */
 export function resolveAgentBashEnvPolicy(
   dataDir?: string,
   platform: NodeJS.Platform = process.platform,
+  nativeDelete = false,
 ): BashEnvPolicy {
-  if (!dataDir || platform === 'win32') return resolveBashEnvPolicy({});
+  if (!dataDir) return resolveBashEnvPolicy({});
+  const managedBinDir = resolveManagedBinDir(dataDir);
   const shimDir = resolveRmShimDir(dataDir);
+  if (nativeDelete) {
+    return resolveBashEnvPolicy({ prependPath: [managedBinDir], removePath: [shimDir] });
+  }
+  if (platform === 'win32') return resolveBashEnvPolicy({ prependPath: [managedBinDir] });
   const shimPath = path.join(shimDir, 'rm');
   return resolveBashEnvPolicy({
-    prependPath: [shimDir],
+    prependPath: [managedBinDir, shimDir],
     spawnPreflight: () => {
       try {
         accessSync(shimPath, constants.X_OK);

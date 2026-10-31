@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { readOfficialAppReference } from '../../app/reader.js';
+import { readAppReference } from '../../app/reader.js';
 import { readOfficialMcpFile } from '../../mcp/config.js';
 import { readPluginSkill } from '../../skill/reader.js';
 import {
@@ -9,15 +9,19 @@ import {
   resolvePluginFile,
   type CanonicalPluginRoot,
 } from './filesystem.js';
+import { readMiniMaxPluginAgents } from './agent/minimax.js';
 import { readOptionalMiniAppContribution } from './miniapp/reader.js';
-import { readerFail } from './reader-errors.js';
+import { PluginPackageContractError } from './package-contract.js';
+import { ignoredManifestFieldDiagnostics, PluginReaderError, readerFail } from './reader-errors.js';
 import { readPluginHooks } from './hook/reader.js';
 import {
   MARKETPLACE_CATEGORY_NAMES,
   type MarketplaceCategoryName,
+  type PluginAppReference,
   type PluginHostBinding,
   type PluginHostBindingSurface,
   type PluginPackageSource,
+  type PluginReaderDiagnostic,
   type ReadPluginPackage,
 } from './types.js';
 
@@ -29,6 +33,7 @@ const ICON_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:png|jpe?g|webp)$/u
 const APP_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.app\.json$/u;
 const MCP_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.mcp\.json$/u;
 const SKILL_PATH = /^skills\/[A-Za-z0-9._-]+\/SKILL\.md$/u;
+const AGENT_PATH = /^agents\/[a-z][a-z0-9_-]*\.md$/u;
 const HOOK_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.json$/u;
 const HOST_BINDING_PATH = /^bindings\/[A-Za-z0-9._-]+\.binding\.json$/u;
 const HOST_BINDING_IDENTIFIER = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/u;
@@ -60,6 +65,7 @@ const MANIFEST_FIELDS = new Set([
   'skills',
   'hooks',
   'hostBindings',
+  'agents',
 ]);
 
 export async function readMiniMaxPluginPackage(
@@ -78,12 +84,8 @@ export async function readMiniMaxPluginPackage(
   const darkIconPath = manifest.darkIcon
     ? await resolvePluginFile(root, manifest.darkIcon, { portable: true })
     : undefined;
-  const apps =
-    options.source === 'OFFICIAL'
-      ? await Promise.all(
-          manifest.apps.map((relativePath) => readOfficialAppReference(root, relativePath)),
-        )
-      : [];
+  const appResult = await readManifestApps(root, manifest.apps, options.source);
+  const apps = appResult.apps;
   const mcpGroups = await Promise.all(
     manifest.mcpServers.map((relativePath) => readOfficialMcpFile(root, relativePath)),
   );
@@ -114,6 +116,11 @@ export async function readMiniMaxPluginPackage(
     declared: manifest.hooks,
     sourceFormat: 'MINIMAX',
   });
+  const agentResult = await readMiniMaxPluginAgents(root, {
+    pluginName: manifest.name,
+    declared: manifest.agents,
+    skills,
+  });
   const miniapp = await readOptionalMiniAppContribution(
     root.path,
     mcpServers.map((server) => server.name),
@@ -124,11 +131,12 @@ export async function readMiniMaxPluginPackage(
       mcpServers.length +
       skills.length +
       hostBindings.length +
-      hookResult.hooks.length ===
+      hookResult.hooks.length +
+      agentResult.agents.length ===
       0 &&
     !miniapp
   ) {
-    readerFail('MANIFEST_SCHEMA_INVALID', 'MiniMax Plugin has no executable capability');
+    failWithoutCapability(appResult.diagnostics);
   }
 
   return {
@@ -150,9 +158,68 @@ export async function readMiniMaxPluginPackage(
     skills,
     hostBindings,
     hooks: hookResult.hooks,
+    ...(agentResult.agents.length > 0 ? { agents: agentResult.agents } : {}),
     ...(miniapp ? { miniapp } : {}),
-    diagnostics: hookResult.diagnostics,
+    diagnostics: [
+      ...appResult.diagnostics,
+      ...hookResult.diagnostics,
+      ...agentResult.diagnostics,
+      ...ignoredManifestFieldDiagnostics(value, MANIFEST_FIELDS),
+    ],
   };
+}
+
+/** An App-only package whose every reference was skipped reports why, not just emptiness. */
+function failWithoutCapability(appDiagnostics: readonly PluginReaderDiagnostic[]): never {
+  const skippedApp = appDiagnostics[0];
+  if (!skippedApp) {
+    readerFail('MANIFEST_SCHEMA_INVALID', 'MiniMax Plugin has no executable capability');
+  }
+  readerFail(
+    skippedApp.code,
+    `MiniMax Plugin has no executable capability after skipping App reference ${skippedApp.name}`,
+  );
+}
+
+/**
+ * Official packages are release-validated, so a broken App reference rejects the package. A local
+ * package keeps its other capabilities and records each skipped reference, including a repeated
+ * provider, as a diagnostic.
+ */
+async function readManifestApps(
+  root: CanonicalPluginRoot,
+  relativePaths: readonly string[],
+  source: Extract<PluginPackageSource, 'OFFICIAL' | 'LOCAL_MINIMAX'>,
+): Promise<{ apps: PluginAppReference[]; diagnostics: PluginReaderDiagnostic[] }> {
+  if (source === 'OFFICIAL') {
+    return {
+      apps: await Promise.all(
+        relativePaths.map((relativePath) => readAppReference(root, relativePath)),
+      ),
+      diagnostics: [],
+    };
+  }
+  const apps: PluginAppReference[] = [];
+  const diagnostics: PluginReaderDiagnostic[] = [];
+  for (const relativePath of relativePaths) {
+    let app: PluginAppReference;
+    try {
+      app = await readAppReference(root, relativePath);
+    } catch (error) {
+      // Portable-path violations come from the package contract layer, not the reader.
+      if (!(error instanceof PluginReaderError || error instanceof PluginPackageContractError)) {
+        throw error;
+      }
+      diagnostics.push({ code: error.code, capability: 'APP', name: relativePath });
+      continue;
+    }
+    if (apps.some(({ provider }) => provider === app.provider)) {
+      diagnostics.push({ code: 'APP_PROVIDER_DUPLICATE', capability: 'APP', name: app.provider });
+      continue;
+    }
+    apps.push(app);
+  }
+  return { apps, diagnostics };
 }
 
 function assertRequiredMiniApp(
@@ -289,6 +356,7 @@ interface MiniMaxManifest {
   readonly skills: string[];
   readonly hooks: string[];
   readonly hostBindings: string[];
+  readonly agents: string[];
 }
 
 function readManifest(value: Record<string, unknown>): MiniMaxManifest {
@@ -300,6 +368,8 @@ function readManifest(value: Record<string, unknown>): MiniMaxManifest {
   const category = readManifestCategory(value.category);
   const exampleQueries = readExampleQueries(value.exampleQueries);
   const capabilities = readManifestCapabilities(value);
+  const agents =
+    value.agents === undefined ? [] : referenceArray(value.agents, 'agents', AGENT_PATH);
   return {
     ...identity,
     icon,
@@ -307,12 +377,14 @@ function readManifest(value: Record<string, unknown>): MiniMaxManifest {
     category,
     exampleQueries,
     ...capabilities,
+    agents,
   };
 }
 
 function assertManifestEnvelope(value: Record<string, unknown>): void {
-  if (Object.keys(value).some((key) => !MANIFEST_FIELDS.has(key))) {
-    readerFail('MANIFEST_SCHEMA_INVALID', 'MiniMax manifest contains an unknown field');
+  // Host capabilities are granted only through Host Bindings, never by a manifest claim.
+  if (Object.hasOwn(value, 'hostCapabilities')) {
+    readerFail('MANIFEST_SCHEMA_INVALID', 'MiniMax manifest cannot declare host capabilities');
   }
   if (
     (value.$schema !== undefined && typeof value.$schema !== 'string') ||

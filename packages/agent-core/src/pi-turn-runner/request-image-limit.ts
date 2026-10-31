@@ -1,3 +1,4 @@
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Message, Model } from '@earendil-works/pi-ai';
 
 /**
@@ -69,6 +70,21 @@ export function resolveMaxImagesPerRequest(model: Model<Api> | undefined): numbe
   return declared ?? DEFAULT_MAX_IMAGES_PER_REQUEST;
 }
 
+// Model id marker of the Messages API model family, escaped like other vendor
+// names in this repo.
+const PREFIX_CACHED_MODEL_ID = /\x63\x6c\x61\x75\x64\x65/iu;
+
+/**
+ * Messages API models (direct, Bedrock or behind a gateway) cache the prompt by
+ * its exact prefix, so dropping an earlier image from one request re-bills
+ * every later message and degrades the cached context. Requests to them carry
+ * every image in history; only context compaction removes images, once,
+ * durably.
+ */
+export function keepsRequestImages(model: Pick<Model<Api>, 'id'> | undefined): boolean {
+  return model !== undefined && PREFIX_CACHED_MODEL_ID.test(model.id);
+}
+
 export interface RequestImageLimitResult {
   readonly messages: Message[];
   /** Number of image blocks replaced by a placeholder in this request copy. */
@@ -89,29 +105,90 @@ export function limitRequestImages(
   maxImages: number,
 ): RequestImageLimitResult {
   const limit = Math.max(0, Math.floor(maxImages));
-  let total = 0;
-  for (const message of messages) total += imageBlockCount(message);
-  if (total <= limit) return { messages: [...messages], omittedCount: 0 };
+  const images = listRequestImages(messages);
+  if (images.length <= limit) return { messages: [...messages], omittedCount: 0 };
+  const omitted = new Set(images.slice(0, images.length - limit).map((image) => image.key));
+  return {
+    messages: replaceRequestImages(messages, (image) =>
+      omitted.has(image.key) ? omittedImageText(limit, image.path) : undefined,
+    ),
+    omittedCount: omitted.size,
+  };
+}
 
-  let toOmit = total - limit;
-  const toolCallPaths = collectToolCallPaths(messages);
-  const projected = messages.map((message) => {
-    if (toOmit === 0) return message;
+/** One image block of a request, in history order. */
+export interface RequestImage {
+  /** `${messageIndex}:${blockIndex}`; stable for the same messages. */
+  readonly key: string;
+  readonly messageIndex: number;
+  readonly blockIndex: number;
+  readonly role: Message['role'];
+  /** Base64 length of the image data. */
+  readonly base64Bytes: number;
+  readonly mimeType?: string;
+  /** Source file of the image, when the history names one. */
+  readonly path?: string;
+}
+
+/**
+ * Every image block of `messages` (user messages and tool results), oldest
+ * first, with the file each one came from when the attachment reminder or the
+ * producing tool call names it.
+ */
+export function listRequestImages(messages: readonly AgentMessage[]): RequestImage[] {
+  const toolCallPaths = collectToolCallPaths(messages as readonly Message[]);
+  const images: RequestImage[] = [];
+  messages.forEach((agentMessage, messageIndex) => {
+    const message = agentMessage as Message;
     const count = imageBlockCount(message);
-    if (count === 0) return message;
+    if (count === 0) return;
     const paths = imagePathsForMessage(message, count, toolCallPaths);
     let imageIndex = 0;
-    const content = (message.content as Array<{ type?: unknown }>).map((block) => {
-      if (!isImageBlock(block)) return block;
+    (message.content as unknown[]).forEach((block, blockIndex) => {
+      if (!isImageBlock(block)) return;
+      const { data, mimeType } = block as { data?: unknown; mimeType?: unknown };
       const path = paths[imageIndex];
       imageIndex += 1;
-      if (toOmit === 0) return block;
-      toOmit -= 1;
-      return { type: 'text' as const, text: omittedImageText(limit, path) };
+      images.push({
+        key: `${messageIndex}:${blockIndex}`,
+        messageIndex,
+        blockIndex,
+        role: message.role,
+        base64Bytes: typeof data === 'string' ? data.length : 0,
+        ...(typeof mimeType === 'string' ? { mimeType } : {}),
+        ...(path ? { path } : {}),
+      });
     });
-    return { ...message, content } as Message;
   });
-  return { messages: projected, omittedCount: total - limit };
+  return images;
+}
+
+/**
+ * Replace each image block for which `replacement` returns text with that
+ * text block. Messages without a replaced image keep their identity.
+ */
+export function replaceRequestImages<T extends AgentMessage>(
+  messages: readonly T[],
+  replacement: (image: RequestImage) => string | undefined,
+): T[] {
+  const texts = new Map<string, string>();
+  for (const image of listRequestImages(messages)) {
+    const text = replacement(image);
+    if (text !== undefined) texts.set(image.key, text);
+  }
+  if (texts.size === 0) return [...messages];
+  return messages.map((message, messageIndex) => {
+    const blocks = (message as { content?: unknown }).content;
+    if (!Array.isArray(blocks)) return message;
+    let changed = false;
+    const content = (blocks as unknown[]).map((block, blockIndex) => {
+      const text = texts.get(`${messageIndex}:${blockIndex}`);
+      if (text === undefined) return block;
+      changed = true;
+      return { type: 'text' as const, text };
+    });
+    return changed ? ({ ...message, content } as T) : message;
+  });
 }
 
 function omittedImageText(limit: number, path: string | undefined): string {
@@ -123,6 +200,12 @@ function omittedImageText(limit: number, path: string | undefined): string {
 
 function isImageBlock(block: unknown): boolean {
   return Boolean(block) && typeof block === 'object' && (block as { type?: unknown }).type === 'image';
+}
+
+function textOf(block: unknown): string | undefined {
+  if (!block || typeof block !== 'object') return undefined;
+  const { type, text } = block as { type?: unknown; text?: unknown };
+  return type === 'text' && typeof text === 'string' ? text : undefined;
 }
 
 function imageBlockCount(message: Message): number {
@@ -149,9 +232,10 @@ function imagePathsForMessage(
   // images are the ones sent as image blocks. Only trust the mapping when the
   // counts agree, otherwise fall back to a placeholder without a path.
   const inlineImagePaths: string[] = [];
-  for (const block of message.content) {
-    if (block.type !== 'text') continue;
-    for (const attributes of attachmentTagAttributes(block.text)) {
+  for (const block of message.content as unknown[]) {
+    const text = textOf(block);
+    if (text === undefined) continue;
+    for (const attributes of attachmentTagAttributes(text)) {
       const path = attributes.get('path');
       if (attributes.get('inline') !== 'true' || !path) continue;
       const kind = attributes.get('kind');
@@ -169,7 +253,13 @@ function collectToolCallPaths(messages: readonly Message[]): Map<string, string>
   for (const message of messages) {
     if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
     for (const block of message.content) {
-      if (block.type !== 'toolCall' || !block.arguments || typeof block.arguments !== 'object') {
+      if (
+        !block ||
+        typeof block !== 'object' ||
+        block.type !== 'toolCall' ||
+        !block.arguments ||
+        typeof block.arguments !== 'object'
+      ) {
         continue;
       }
       for (const key of PATH_ARGUMENT_KEYS) {

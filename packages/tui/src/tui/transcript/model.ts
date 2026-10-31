@@ -138,6 +138,13 @@ export interface TranscriptInspectionReport {
   readonly visualization?: TranscriptInspectionVisualization;
 }
 
+/** Child calls of a PTC program hidden by the turn fold. */
+export interface TranscriptPtcFoldedChildren {
+  readonly calls: number;
+  readonly failed: number;
+  readonly interrupted: number;
+}
+
 export interface TranscriptCell {
   id: string;
   kind: TranscriptCellKind;
@@ -155,6 +162,15 @@ export interface TranscriptCell {
   title?: string;
   detail?: string;
   toolErrorCode?: string;
+  /** Runtime Tool Call id of a `tool` cell. */
+  toolCallId?: string;
+  /** Outer `run_code` Tool Call id when this tool ran inside a PTC program. */
+  parentToolCallId?: string;
+  /**
+   * Projection only: child calls of this `run_code` program that a long turn
+   * folded away, so its summary still counts every call and failure.
+   */
+  ptcFoldedChildren?: TranscriptPtcFoldedChildren;
   toolPayloadBudget?: TranscriptToolPayloadBudget;
   durationMs?: number;
   outputTokensPerSecond?: number;
@@ -190,6 +206,10 @@ export interface CreateTranscriptCellInput {
   title?: string;
   detail?: string;
   toolErrorCode?: string;
+  /** Runtime Tool Call id of a `tool` cell. */
+  toolCallId?: string;
+  /** Outer `run_code` Tool Call id when this tool ran inside a PTC program. */
+  parentToolCallId?: string;
   toolPayloadBudget?: TranscriptToolPayloadBudget;
   durationMs?: number;
   outputTokensPerSecond?: number;

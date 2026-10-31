@@ -330,7 +330,12 @@ function applyLocalConfigUpdate(raw: Record<string, unknown>, body: Record<strin
       return;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'put')) {
-      if (field === 'review.mode' || field === 'worktreeRefreshBeforeCreate') {
+      if (
+        field === 'review.mode' ||
+        field === 'permission.nativeDelete' ||
+        field === 'worktreeRefreshBeforeCreate' ||
+        field === 'promptSuggestion.enabled'
+      ) {
         throw new LocalConfigValidationError(`Unsupported config update operation for ${field}`);
       }
       const [target, key] = resolvePath(raw, field);
@@ -451,6 +456,7 @@ function deepMergeRecord(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
+    if (isUnsafeConfigKey(key)) continue;
     out[key] =
       isPlainRecord(value) && isPlainRecord(out[key]) ? deepMergeRecord(out[key], value) : value;
   }
@@ -462,14 +468,22 @@ function resolvePath(
   field: string,
 ): [Record<string, unknown>, string] {
   const parts = field.split('.');
+  if (parts.some(isUnsafeConfigKey)) {
+    throw new LocalConfigValidationError(`Unsupported config field: ${field}`);
+  }
   const target = parts.slice(0, -1).reduce(ensurePlainRecordChild, raw);
   return [target, parts.at(-1) ?? field];
+}
+
+function isUnsafeConfigKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 function ensurePlainRecordChild(
   target: Record<string, unknown>,
   key: string,
 ): Record<string, unknown> {
+  if (isUnsafeConfigKey(key)) throw new LocalConfigValidationError(`Unsupported config field: ${key}`);
   const value = Object.prototype.hasOwnProperty.call(target, key) ? target[key] : undefined;
   if (isPlainRecord(value)) return value;
   const child: Record<string, unknown> = {};

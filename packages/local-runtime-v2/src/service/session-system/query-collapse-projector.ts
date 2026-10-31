@@ -152,5 +152,5 @@ function terminalStatus(event: RuntimeEvent): RuntimeEventStatus | undefined {
 }
 
 function isForceExpansionReconciliation(kind: string): boolean {
-  return kind === 'output-recall' || kind === 'network-reconcile';
+  return kind === 'output-recall' || kind === 'network-reconcile' || kind === 'safety-reconcile';
 }

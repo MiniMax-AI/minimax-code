@@ -277,6 +277,15 @@ export type LegacyCustomAgentMaterializationEvent =
       readonly receiptCompleted: boolean;
     };
 
+/**
+ * Result of a startup repair of a corrupted Builtin source. `skipped` means the
+ * file was valid or missing again when the repair took its lock, so nothing
+ * was archived or written.
+ */
+export type BuiltinCorruptedConfigRepair =
+  | { readonly archiveFile: string }
+  | { readonly skipped: 'now_valid' | 'missing' };
+
 /** Public Agent persistence port implemented by the V2 storage adapter. */
 export interface AgentStorePort {
   /**
@@ -345,10 +354,28 @@ export interface AgentStorePort {
     config: Omit<CanonicalAgentConfig, 'diagnostics'>,
   ): Promise<void>;
   getBuiltinCanonicalConfig?(name: string): Promise<CanonicalAgentConfig>;
+  /** Writes only when the file is absent; `already-exists` means nothing was written. */
   writeBuiltinCanonicalConfig?(
     name: string,
     config: BuiltinCanonicalAgentConfigForWrite,
-  ): Promise<void>;
+  ): Promise<'published' | 'already-exists' | void>;
+  /**
+   * Startup-only: replaces a valid Builtin source with `config` when it still
+   * has `expectedRevision`; identical bytes are not rewritten.
+   */
+  rewriteBuiltinCanonicalConfig?(
+    name: string,
+    config: BuiltinCanonicalAgentConfigForWrite,
+    expectedRevision: string,
+  ): Promise<'rewritten' | 'unchanged' | 'conflict'>;
+  /**
+   * Startup-only: archives a Builtin source that is still corrupted, then
+   * rewrites it from `config`.
+   */
+  replaceCorruptedBuiltinCanonicalConfig?(
+    name: string,
+    config: BuiltinCanonicalAgentConfigForWrite,
+  ): Promise<BuiltinCorruptedConfigRepair>;
   removeBuiltinCanonicalConfig?(name: string): Promise<boolean>;
   materializeLegacyCustomAgent?(
     name: string,
@@ -455,6 +482,11 @@ export interface AgentProfileRequest {
   readonly dataDirToken?: string;
   /** Immutable prompt version captured before this model call starts. */
   readonly promptReadContext?: PromptReadContext | PromptReadScope;
+  /**
+   * The Session runs in PTC mode (`toolCallMode: 'ptc'`). The prompt gets the PTC section when
+   * isPtcTurnEnabled accepts it, exactly as the tool catalog decides from the same Session mode.
+   */
+  readonly ptcRequested?: boolean;
 }
 
 export interface AgentCapabilityCeiling {
@@ -480,7 +512,30 @@ export interface AgentConfigurationSelection {
   readonly mcpServers?: readonly string[];
   readonly skills?: readonly string[];
   readonly extensionSkills?: readonly string[];
+  /**
+   * Set only on profiles rendered from a Task snapshot, for diagnostics: its
+   * `selectorVersion`, or `legacy` when it has none. Never persisted.
+   */
+  readonly frozenSelectorVersion?: typeof FROZEN_SELECTOR_VERSION | 'legacy';
 }
+
+/** `capabilities.selectorVersion` of Task snapshots captured with the current selector rules. */
+export const FROZEN_SELECTOR_VERSION = 2 as const;
+
+/**
+ * Frozen `mcpServers` of a version 2 snapshot whose Agent wrote `mcpServers: []`
+ * (no MCP); there an empty list means unrestricted. See README "Desktop Local Agent 定义".
+ */
+export const FROZEN_MCP_SERVERS_NONE = ':none';
+
+/**
+ * Placeholder kept in frozen `tools` when a compatible Plugin Agent named
+ * `mcp__*` tools but alias rebinding left none (its server published no
+ * tools, or a name collides): those tools are unavailable. It names no tool
+ * (runtime MCP names never contain `:`); it only keeps the list read as a
+ * complete list. See README "Desktop Local Agent 定义".
+ */
+export const FROZEN_TOOLS_ALL_SCOPE_MARKER = 'mcp__:none';
 
 /**
  * Durable Task snapshot supplied by Session binding storage. It intentionally
@@ -494,7 +549,7 @@ export interface FrozenAgentExecutionDefinition {
   readonly capabilities: Pick<
     AgentConfigurationSelection,
     'tools' | 'disallowedTools' | 'mcpServers' | 'skills' | 'extensionSkills'
-  >;
+  > & { readonly selectorVersion?: typeof FROZEN_SELECTOR_VERSION };
 }
 
 export interface AgentExecutionProfile {

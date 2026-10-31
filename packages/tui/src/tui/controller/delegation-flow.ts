@@ -10,7 +10,6 @@ import type {
   TuiBackgroundTask,
   TuiBackgroundTaskCapability,
 } from '../../runtime/port.js';
-import type { ExecResultV1 } from '../../application/exec-result.js';
 import { isActiveTuiDelegatedAgent, isTuiDelegatedSession } from '../../runtime/delegation.js';
 import { TuiAgentTeamProjection, type TuiAgentTeamSnapshot } from '../agent-team/model.js';
 import { TuiAgentTeamPanel } from '../agent-team/panel.js';
@@ -45,6 +44,12 @@ export interface TuiDelegationFlowOptions {
   readonly openSession?: (sessionId: string) => Promise<void>;
   readonly onAgentTeamChanged?: (snapshot: TuiAgentTeamSnapshot) => void;
   readonly onBackgroundTasksChanged?: (tasks: readonly TuiBackgroundTask[]) => void;
+  /**
+   * `[V]` machine status is shown: list sub-Agent Tasks and their Runtime notification facts so
+   * `agentCounts()` and `backgroundTaskCount()` can wait for undelivered reports. Other TUIs
+   * never read those counts and skip the notification ledger.
+   */
+  readonly machineStatus?: boolean;
   readonly onChanged: () => void;
   readonly onError?: (error: unknown) => void;
 }
@@ -68,12 +73,9 @@ export class TuiDelegationFlow {
   private backgroundTaskPollInFlight = false;
   private backgroundTaskTerminalPollPending = false;
   private backgroundTaskRequestSequence = 0;
+  /** Every root Task the Runtime lists, sub-Agent Tasks included. */
   private backgroundTasks: readonly TuiBackgroundTask[] = [];
   private rootRunActive = false;
-  private backgroundTaskIdsByMember = new Map<string, string>();
-  private settledBackgroundDeliveryTaskIds = new Set<string>();
-  private backgroundDeliveryTaskIdsByTurn = new Map<string, Set<string>>();
-  private settledRootTurnKeys = new Set<string>();
   /**
    * Request sequence a successful Task list must exceed before a settled root Turn may report
    * zero background Tasks: a command yielded just before settle may postdate the last list.
@@ -92,12 +94,17 @@ export class TuiDelegationFlow {
     this.resetProjection();
   }
 
-  /** Machine-status counts for the currently selected root Session. */
+  /**
+   * Machine-status counts for the currently selected root Session. A member is active while it
+   * is queued, running or waiting, and its sub-Agent Task stays active until the Runtime reports
+   * its root notification settled, so a finished child never reads as done before a parent Turn
+   * has taken the report. From then on the parent Turn's own state carries the wait.
+   */
   agentCounts(): { readonly active: number; readonly total: number } {
     const current = this.options.currentSession();
     const snapshot = this.projection.snapshot();
     if (!current || snapshot.rootSessionId !== current.sessionId) return { active: 0, total: 0 };
-    const unsettledMemberIds = new Set(
+    const activeKeys = new Set(
       snapshot.members
         .filter(
           (member) =>
@@ -107,32 +114,32 @@ export class TuiDelegationFlow {
         )
         .map((member) => member.sessionId),
     );
-    for (const member of snapshot.members) {
-      const taskId = this.backgroundTaskIdsByMember.get(member.sessionId);
-      if (taskId && !this.settledBackgroundDeliveryTaskIds.has(taskId)) {
-        unsettledMemberIds.add(member.sessionId);
+    for (const task of this.backgroundTasks) {
+      if (task.kind !== 'subagent') continue;
+      // A child not created yet has no member to pair with; the spawning root Turn covers it.
+      if (isActiveTaskStatus(task.status) ? task.childSessionId : owesNotification(task)) {
+        activeKeys.add(task.childSessionId ?? `task:${task.taskId}`);
       }
     }
     return {
-      active: unsettledMemberIds.size,
+      active: activeKeys.size,
       total: snapshot.summary.total,
     };
   }
 
   /**
-   * Machine-status count of the root's active background Tasks (bash/workflow/custom): queued,
-   * running or stopping, as listed by the Runtime. Bash still owned by its foreground tool call is
-   * not counted, and sub-Agent Tasks stay in `agentCounts()`.
+   * Machine-status count of the root's background Tasks (bash/workflow/custom) that are still
+   * queued, running or stopping, or terminal with a root notification the Runtime has not
+   * settled. Bash still owned by its foreground tool call is not counted, and sub-Agent Tasks
+   * stay in `agentCounts()`.
    */
   backgroundTaskCount(): number {
     const current = this.options.currentSession();
     if (!current || this.rootSessionId !== current.sessionId) return 0;
-    const active = this.backgroundTasks.filter(
-      (task) =>
-        !task.foreground &&
-        (task.status === 'queued' || task.status === 'running' || task.status === 'stopping'),
+    const unsettled = this.rootBackgroundTasks().filter(
+      (task) => !task.foreground && (isActiveTaskStatus(task.status) || owesNotification(task)),
     ).length;
-    return this.backgroundTaskListBarrier === undefined ? active : Math.max(active, 1);
+    return this.backgroundTaskListBarrier === undefined ? unsettled : Math.max(unsettled, 1);
   }
 
   snapshot(): TuiAgentTeamSnapshot {
@@ -207,18 +214,10 @@ export class TuiDelegationFlow {
     );
     if (!this.isCurrent(sequence, current.sessionId)) return;
 
-    if (this.rootSessionId !== rootSessionId) {
-      this.settledBackgroundDeliveryTaskIds.clear();
-      this.backgroundTasks = [];
-    }
+    if (this.rootSessionId !== rootSessionId) this.backgroundTasks = [];
     this.rootSessionId = rootSessionId;
     this.memberIds = new Set(snapshot.members.map((member) => member.sessionId));
     const nowMs = Date.now();
-    this.backgroundTaskIdsByMember = new Map(
-      snapshot.members.flatMap((member) =>
-        member.backgroundTaskId ? [[member.sessionId, member.backgroundTaskId]] : [],
-      ),
-    );
     this.projection.replace(rootSessionId, snapshot.members, activeRuns, nowMs);
     for (const [sessionId, turnId] of durableSuccessfulTurns) {
       this.projection.markDone(sessionId, turnId, nowMs);
@@ -266,7 +265,7 @@ export class TuiDelegationFlow {
     let handle: TuiFeatureScreenHandle | undefined;
     const panel = new TuiBackgroundWorkPanel({
       agentTeam: () => this.projection.snapshot(),
-      backgroundTasks: () => this.backgroundTasks,
+      backgroundTasks: () => this.rootBackgroundTasks(),
       activeSessionId: () => this.options.currentSession()?.sessionId,
       onOpenAgent: (sessionId) => this.openAgentTranscript(sessionId, screenGeneration),
       onCancel: () => {
@@ -391,16 +390,6 @@ export class TuiDelegationFlow {
       this.scheduleBackgroundTaskPoll(current.sessionId);
     }
     if (
-      event.type === 'session.start' &&
-      event.sessionId === current.sessionId &&
-      event.runSource === 'background-task-delivery' &&
-      event.taskId &&
-      event.turnId
-    ) {
-      this.bindBackgroundDeliveryTask(event.sessionId, event.turnId, event.taskId);
-      return;
-    }
-    if (
       event.type === 'session.created' &&
       (event.parentSessionId === current.sessionId ||
         event.parentSessionId === this.rootSessionId ||
@@ -440,73 +429,6 @@ export class TuiDelegationFlow {
     ) {
       await this.refresh();
     }
-  }
-
-  /** Settles Tasks steered into a foreground Turn only after its result is durable. */
-  handleAutomationResultPublished(result: Pick<ExecResultV1, 'sessionId' | 'turnId'>): void {
-    const current = this.options.currentSession();
-    if (!current || result.sessionId !== current.sessionId) return;
-    this.settledRootTurnKeys.add(backgroundDeliveryTurnKey(result.sessionId, result.turnId));
-    this.settleBackgroundDeliveryTurn(result.sessionId, result.turnId);
-  }
-
-  /** Marks a background report delivered only after its root Turn result is durable. */
-  handleSettledRuntimeEvent(event: TuiRuntimeEvent): void {
-    const current = this.options.currentSession();
-    if (
-      (event.type !== 'session.finish' &&
-        event.type !== 'session.error' &&
-        event.type !== 'session.abort') ||
-      !current ||
-      event.sessionId !== current.sessionId
-    ) {
-      return;
-    }
-    if (event.turnId) {
-      this.settledRootTurnKeys.add(backgroundDeliveryTurnKey(event.sessionId, event.turnId));
-    }
-    const taskIds = event.turnId
-      ? this.takeBackgroundDeliveryTaskIds(event.sessionId, event.turnId)
-      : new Set<string>();
-    if (
-      event.runSource === 'background-task-delivery' &&
-      event.taskId &&
-      [...this.backgroundTaskIdsByMember.values()].includes(event.taskId)
-    ) {
-      taskIds.add(event.taskId);
-    }
-    this.settleBackgroundDeliveryTasks(taskIds);
-  }
-
-  private bindBackgroundDeliveryTask(sessionId: string, turnId: string, taskId: string): void {
-    // Delivery uses taskId as its idempotency key. Once durable, replayed or late
-    // start events cannot reopen the same Task.
-    if (this.settledBackgroundDeliveryTaskIds.has(taskId)) return;
-    const key = backgroundDeliveryTurnKey(sessionId, turnId);
-    if (this.settledRootTurnKeys.has(key)) {
-      this.settleBackgroundDeliveryTasks(new Set([taskId]));
-      return;
-    }
-    const taskIds = this.backgroundDeliveryTaskIdsByTurn.get(key) ?? new Set<string>();
-    taskIds.add(taskId);
-    this.backgroundDeliveryTaskIdsByTurn.set(key, taskIds);
-  }
-
-  private settleBackgroundDeliveryTurn(sessionId: string, turnId: string): void {
-    this.settleBackgroundDeliveryTasks(this.takeBackgroundDeliveryTaskIds(sessionId, turnId));
-  }
-
-  private takeBackgroundDeliveryTaskIds(sessionId: string, turnId: string): Set<string> {
-    const key = backgroundDeliveryTurnKey(sessionId, turnId);
-    const taskIds = this.backgroundDeliveryTaskIdsByTurn.get(key) ?? new Set<string>();
-    this.backgroundDeliveryTaskIdsByTurn.delete(key);
-    return taskIds;
-  }
-
-  private settleBackgroundDeliveryTasks(taskIds: ReadonlySet<string>): void {
-    const previousSize = this.settledBackgroundDeliveryTaskIds.size;
-    for (const taskId of taskIds) this.settledBackgroundDeliveryTaskIds.add(taskId);
-    if (this.settledBackgroundDeliveryTaskIds.size !== previousSize) this.options.onChanged();
   }
 
   private reconcileWatchers(
@@ -656,8 +578,13 @@ export class TuiDelegationFlow {
 
   private publishProjection(): void {
     this.options.onAgentTeamChanged?.(this.projection.snapshot());
-    this.options.onBackgroundTasksChanged?.(this.backgroundTasks);
+    this.options.onBackgroundTasksChanged?.(this.rootBackgroundTasks());
     this.options.onChanged();
+  }
+
+  /** Human surfaces list sub-Agents as Agent Team members, not as Tasks. */
+  private rootBackgroundTasks(): readonly TuiBackgroundTask[] {
+    return this.backgroundTasks.filter((task) => task.kind !== 'subagent');
   }
 
   private async refreshBackgroundTasks(
@@ -669,7 +596,9 @@ export class TuiDelegationFlow {
     const requestSequence = ++this.backgroundTaskRequestSequence;
     let tasks: readonly TuiBackgroundTask[];
     try {
-      tasks = await list.call(this.options.runtime, rootSessionId);
+      tasks = await (this.options.machineStatus
+        ? list.call(this.options.runtime, rootSessionId, { machineStatus: true })
+        : list.call(this.options.runtime, rootSessionId));
     } catch {
       return false;
     }
@@ -785,10 +714,6 @@ export class TuiDelegationFlow {
     this.memberIds = new Set();
     this.backgroundTasks = [];
     this.rootRunActive = false;
-    this.backgroundTaskIdsByMember = new Map();
-    this.settledBackgroundDeliveryTaskIds.clear();
-    this.backgroundDeliveryTaskIdsByTurn.clear();
-    this.settledRootTurnKeys.clear();
     this.backgroundTaskListBarrier = undefined;
     this.clearWatcherRetry();
     this.clearBackgroundTaskPoll();
@@ -806,10 +731,6 @@ export class TuiDelegationFlow {
     this.refreshErrorReported = true;
     this.options.onError?.(error);
   }
-}
-
-function backgroundDeliveryTurnKey(sessionId: string, turnId: string): string {
-  return `${sessionId}\0${turnId}`;
 }
 
 function isSessionLifecycleEvent(
@@ -850,13 +771,17 @@ function sameBackgroundTasks(
       return (
         candidate !== undefined &&
         task.taskId === candidate.taskId &&
+        task.kind === candidate.kind &&
         task.status === candidate.status &&
         task.description === candidate.description &&
         task.command === candidate.command &&
         task.updatedAtMs === candidate.updatedAtMs &&
         task.deliveredAtMs === candidate.deliveredAtMs &&
         task.lastError === candidate.lastError &&
-        task.foreground === candidate.foreground
+        task.foreground === candidate.foreground &&
+        task.childSessionId === candidate.childSessionId &&
+        task.notification?.state === candidate.notification?.state &&
+        task.notification?.turnId === candidate.notification?.turnId
       );
     })
   );
@@ -865,9 +790,16 @@ function sameBackgroundTasks(
 function hasPendingBackgroundTaskAttention(tasks: readonly TuiBackgroundTask[]): boolean {
   return tasks.some(
     (task) =>
-      task.status === 'queued' ||
-      task.status === 'running' ||
-      task.status === 'stopping' ||
-      task.deliveredAtMs === undefined,
+      isActiveTaskStatus(task.status) ||
+      (task.notification ? owesNotification(task) : task.deliveredAtMs === undefined),
   );
+}
+
+function isActiveTaskStatus(status: TuiBackgroundTask['status']): boolean {
+  return status === 'queued' || status === 'running' || status === 'stopping';
+}
+
+/** Terminal Task whose root notification is not settled yet. */
+function owesNotification(task: TuiBackgroundTask): boolean {
+  return task.notification?.state === 'pending';
 }

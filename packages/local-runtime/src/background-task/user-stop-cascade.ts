@@ -1,6 +1,7 @@
+import { readConversationStopConfig, type ConversationStopConfigRead } from '@mavis/config';
+
 import type { LocalTaskRunnerHostWithSessionLookup } from '../api/local-task-host.js';
 import { logger } from '../common/logger.js';
-import { isLocalChildWorkerSession } from '../sessions/session-policy.js';
 import { stopSessionBackgroundWork, type StoppedTaskRecord } from './session-cascade.js';
 import {
   isUserStopWindowOpen,
@@ -8,6 +9,13 @@ import {
   runSerializedUserStop,
   type UserStopWindowHandle,
 } from './user-stop-suppression.js';
+import {
+  isCascadeDisabledByPolicy,
+  logUserStopPolicy,
+  readUserStopPolicy,
+  type CascadeKindPolicy,
+} from './user-stop-policy.js';
+import { resolveUserStopScope, type UserStopScope } from './user-stop-scope.js';
 
 /**
  * User-stop cascade orchestration.
@@ -15,9 +23,13 @@ import {
  * `begin` runs synchronously inside the stop request, before the Turn abort:
  * it decides whether this stop cascades at all and opens the delivery suppression
  * window. `accept` pauses the Thread Goal once the stop is accepted (never for a
- * stop the controller rejects). `complete` runs detached AFTER the abort
- * answered, so the stop request never waits for background teardown, and it is
- * also where the target boundary is taken (see `complete`).
+ * stop the controller rejects). `markBoundary` fixes the target boundary at the
+ * stopped Turn's release (see `complete`). `complete` runs detached AFTER the
+ * abort answered, so the stop request never waits for background teardown.
+ *
+ * What a stop may tear down is set by the user-stop switches in config.yaml
+ * (`conversation.stopSubAgent`, default off; `conversation.stopAsyncBash`,
+ * default on), read once per stop in `begin`; see `user-stop-policy.ts`.
  *
  * Everything here is best effort. The hard rule is that any failure degrades to
  * "no cascade happened", never to something worse than today: the window always
@@ -50,6 +62,13 @@ export interface UserStopCascadeDependencies {
    * through its "background work" gate and start a fresh Turn immediately.
    */
   readonly pauseActiveGoal?: (sessionId: string) => Promise<void>;
+  /**
+   * Reads the user-stop switches from config.yaml. Called once per stop, in
+   * `begin`. Defaults to `readConversationStopConfig`: the file at
+   * `getConfigPath()`, read afresh and never cached. Tests inject their own so a
+   * stop never depends on the developer's real config.
+   */
+  readonly readStopPolicy?: () => ConversationStopConfigRead;
 }
 
 /**
@@ -57,6 +76,15 @@ export interface UserStopCascadeDependencies {
  * identity check passed (it runs `onAccepted`), or nothing was running at all.
  */
 export type UserStopAcceptance = 'controller_accepted' | 'not_running';
+
+/**
+ * Where the target boundary was fixed: the stopped Turn released the Session, or
+ * the controller reported that nothing was running.
+ */
+export type UserStopBoundarySource = 'released' | 'not_running';
+
+/** `complete` means no earlier mark arrived: an `abort-timeout`, or a missed release. */
+type BoundarySource = UserStopBoundarySource | 'complete';
 
 export interface UserStopCascadeHandle {
   /**
@@ -66,6 +94,13 @@ export interface UserStopCascadeHandle {
    * after the pause attempt so the caller can order it before the cascade.
    */
   accept(how: UserStopAcceptance): Promise<void>;
+  /**
+   * Fixes the target boundary now: at the stopped Turn's release, or at the
+   * controller's `not-running` report — the last moment before the next Turn can
+   * be admitted. Synchronous (it runs inside the Turn release); the first
+   * boundary wins and any later one is logged and ignored; never throws.
+   */
+  markBoundary(source: UserStopBoundarySource): void;
   /** Detached; never throws and never blocks the caller. */
   complete(result: UserStopAbortResult): void;
   /**
@@ -76,32 +111,31 @@ export interface UserStopCascadeHandle {
 }
 
 export interface UserStopCascade {
-  begin(sessionId: string): Promise<UserStopCascadeHandle | undefined>;
+  begin(sessionId: string): UserStopCascadeHandle | undefined;
 }
 
 export function createUserStopCascade(deps: UserStopCascadeDependencies): UserStopCascade {
   const { host } = deps;
   return {
-    begin: async (sessionId) => {
+    begin: (sessionId) => {
       let window: UserStopWindowHandle | undefined;
       try {
-        const session = await host.getSessionById(sessionId);
-        if (!session) {
-          log('user_stop_cascade_session_missing', { sessionId });
-          return undefined;
+        // Synchronous on purpose: TurnExecution hands the stop to the controller
+        // immediately after this returns, so the controller sees the Turn that was
+        // running at arrival. The window therefore opens before the Session lookup.
+        const policy = readUserStopPolicy(
+          deps.readStopPolicy ?? readConversationStopConfig,
+          sessionId,
+        );
+        if (!isCascadeDisabledByPolicy(policy)) {
+          window = openUserStopWindow(host, sessionId, host.nowMs());
         }
-        // Only a main conversation cascades. A child worker Session is never woken
-        // by delivery in the first place (delivery skips it), so stopping one alone
-        // keeps today's behaviour: its own terminal still notifies its parent once.
-        if (isLocalChildWorkerSession(session)) {
-          log('cascade_skipped_child_session', { sessionId });
-          return undefined;
-        }
-        // Only the window here. The Goal is paused in `accept`, once the stop is
-        // known to be accepted: `begin` runs before the controller's identity
-        // check, and a stop it then rejects must not have paused anything.
-        window = openUserStopWindow(host, sessionId, host.nowMs());
-        return createCascadeHandle(deps, sessionId, window);
+        const scope = settleScope(resolveUserStopScope(host, sessionId), {
+          sessionId,
+          policy,
+          window,
+        });
+        return createCascadeHandle(deps, sessionId, window, policy, scope);
       } catch (error) {
         // A stop must never fail because its cascade could not start. A window we
         // already opened has no owner once we return undefined, so release it here
@@ -114,20 +148,63 @@ export function createUserStopCascade(deps: UserStopCascadeDependencies): UserSt
   };
 }
 
+function settleScope(
+  scope: Promise<UserStopScope>,
+  input: {
+    readonly sessionId: string;
+    readonly policy: ConversationStopConfigRead;
+    readonly window: UserStopWindowHandle | undefined;
+  },
+): Promise<UserStopScope> {
+  return scope.then((resolved) => {
+    if (resolved === 'root') {
+      logUserStopPolicy(input.sessionId, input.policy);
+      if (isCascadeDisabledByPolicy(input.policy)) {
+        log('user_stop_cascade_disabled_by_config', { sessionId: input.sessionId });
+      }
+    } else {
+      input.window?.close('cancelled');
+      log('user_stop_cascade_scope_skipped', { sessionId: input.sessionId, scope: resolved });
+    }
+    return resolved;
+  });
+}
+
 /**
  * Exactly one of `complete` / `cancel` takes effect per handle, and every path
  * releases this handle's own window hold: that is what guarantees a failed or
  * duplicated stop can never pin the Session's deliveries as `busy`.
+ *
+ * A handle without a window belongs to a stop whose switches are both off: it
+ * cascades nothing, and its only side effect is the Goal pause in `accept`. One
+ * handle type for both keeps `accept` / `cancel` (idempotent, never after a
+ * rejected stop) identical for every stop.
  */
 function createCascadeHandle(
   deps: UserStopCascadeDependencies,
   sessionId: string,
-  window: UserStopWindowHandle,
+  window: UserStopWindowHandle | undefined,
+  policy: CascadeKindPolicy,
+  scope: Promise<UserStopScope>,
 ): UserStopCascadeHandle {
   const { host } = deps;
   let settled = false;
   let cancelled = false;
   let acceptance: Promise<void> | undefined;
+  // Fixed once, by whichever comes first: `markBoundary`, else `complete`. Logged
+  // as `boundarySource`: the logger reserves `source` for the caller location.
+  let boundary: { readonly ms: number; readonly source: BoundarySource } | undefined;
+  const fixBoundary = (source: BoundarySource, abortStatus?: UserStopAbortResult['status']) => {
+    const fixed = { ms: host.nowMs(), source };
+    boundary = fixed;
+    log('user_stop_cascade_boundary_fixed', {
+      sessionId,
+      boundarySource: source,
+      boundaryMs: fixed.ms,
+      ...(abortStatus ? { abortStatus } : {}),
+    });
+    return fixed;
+  };
   return {
     accept: (how) => {
       if (cancelled) {
@@ -141,8 +218,43 @@ function createCascadeHandle(
       }
       log('user_stop_cascade_accepted', { sessionId, how });
       // `pauseGoal` swallows and logs its own failure, so this never rejects.
-      acceptance = pauseGoal(deps, sessionId);
+      acceptance = scope.then((resolved) =>
+        resolved === 'root' ? pauseGoal(deps, sessionId) : undefined,
+      );
       return acceptance;
+    },
+    markBoundary: (source) => {
+      if (!window) {
+        // Both switches off: nothing will be collected, so there is no boundary.
+        log('user_stop_cascade_boundary_ignored', {
+          sessionId,
+          boundarySource: source,
+          reason: 'disabled_by_config',
+        });
+        return;
+      }
+      if (cancelled || boundary) {
+        // The first boundary stands: a release reported after an `abort-timeout`
+        // `complete` already fixed it, a second mark, or a stop that was cancelled.
+        log('user_stop_cascade_boundary_ignored', {
+          sessionId,
+          boundarySource: source,
+          ...(boundary
+            ? { boundaryMs: boundary.ms, fixedBy: boundary.source }
+            : { reason: 'cancelled' }),
+        });
+        return;
+      }
+      try {
+        fixBoundary(source);
+      } catch (error) {
+        // The boundary stays open, so `complete` takes it: the pre-mark behaviour.
+        log('user_stop_cascade_mark_boundary_failed', {
+          sessionId,
+          boundarySource: source,
+          error: errorMessage(error),
+        });
+      }
     },
     complete: (result) => {
       if (settled) {
@@ -150,18 +262,39 @@ function createCascadeHandle(
         return;
       }
       settled = true;
-      // The boundary is read HERE, synchronously, before the first await:
-      // `complete` runs after `controller.abort` returned, so the stopped
-      // Turn has already released the Session (except on `abort-timeout`,
-      // see below). Reading it in `begin`
-      // instead would miss a task the dying Turn created while it was
-      // still winding down — background bash and background subagents do
-      // not observe the parent signal, so a tool call in flight can still
-      // insert a row after the stop request was accepted. Those rows must
-      // be targets. Nothing newer can exist yet: the Session lock keeps
-      // the next Turn from starting until this point.
-      const boundaryMs = host.nowMs();
-      // Known limit (documented in docs/tui-capabilities.md): on
+      if (!window) {
+        // Both switches off (see `begin`): the Goal pause in `accept` was this
+        // stop's only side effect. Logged anyway, so every stop still ends in a
+        // completion line that says why nothing was stopped.
+        void scope.then((resolved) =>
+          log('user_stop_cascade_completed', {
+            sessionId,
+            targetCount: 0,
+            abortStatus: result.status,
+            disabledByConfig: true,
+            ...(resolved === 'root' ? {} : { scope: resolved }),
+            ...(result.turnId ? { turnId: result.turnId } : {}),
+          }),
+        );
+        return;
+      }
+      // The boundary is the stopped Turn's release (or the controller's
+      // `not-running` report), fixed by `markBoundary` at that very moment. It is
+      // NOT read here: `complete` only runs once the abort returned, and the abort
+      // still awaits the Goal pause (a storage write) after the release. Neither
+      // holds the Session lock, so the next Turn can be admitted in between and
+      // spawn background work, which a boundary read here would stop and suppress
+      // as if this stop owned it. The release moment still covers everything the
+      // stopped Turn created while winding down — background bash and background
+      // subagents do not observe the parent signal, so a tool call in flight can
+      // still insert a row after the stop was accepted, and those rows must be
+      // targets.
+      //
+      // Only an `abort-timeout` reaches this point unmarked by design: the stopped
+      // Turn has not released, so no newer Turn can start yet and the boundary is
+      // taken now. A release reported later cannot move it: the first one wins.
+      const boundaryMs = (boundary ?? fixBoundary('complete', result.status)).ms;
+      // Known limit: on
       // `abort-timeout` the stopped Turn has NOT released yet, so the boundary
       // above can precede the end of its wind-down. Anything it creates after
       // this point is neither stopped nor suppressed — it runs and is delivered
@@ -178,7 +311,7 @@ function createCascadeHandle(
       // with its OWN boundary. The window is released after this stop's own run
       // (and again, idempotently, inside `completeCascade`), whatever happened.
       const { settled: cascadeSettled, queued } = runSerializedUserStop(host, sessionId, () =>
-        completeCascade(deps, sessionId, boundaryMs, window, result),
+        completeScopedCascade({ deps, sessionId, boundaryMs, window, result, policy, scope }),
       );
       if (queued) log('user_stop_cascade_queued', { sessionId, boundaryMs });
       void cascadeSettled
@@ -195,9 +328,32 @@ function createCascadeHandle(
       settled = true;
       cancelled = true;
       log('user_stop_cascade_cancelled', { sessionId, reason });
-      window.close('cancelled');
+      window?.close('cancelled');
     },
   };
+}
+
+async function completeScopedCascade(input: {
+  readonly deps: UserStopCascadeDependencies;
+  readonly sessionId: string;
+  readonly boundaryMs: number;
+  readonly window: UserStopWindowHandle;
+  readonly result: UserStopAbortResult;
+  readonly policy: CascadeKindPolicy;
+  readonly scope: Promise<UserStopScope>;
+}): Promise<void> {
+  const scope = await input.scope;
+  if (scope !== 'root') {
+    log('user_stop_cascade_completed', {
+      sessionId: input.sessionId,
+      targetCount: 0,
+      abortStatus: input.result.status,
+      scope,
+      ...(input.result.turnId ? { turnId: input.result.turnId } : {}),
+    });
+    return;
+  }
+  await completeCascade(input);
 }
 
 async function pauseGoal(deps: UserStopCascadeDependencies, sessionId: string): Promise<void> {
@@ -211,13 +367,16 @@ async function pauseGoal(deps: UserStopCascadeDependencies, sessionId: string): 
   }
 }
 
-async function completeCascade(
-  deps: UserStopCascadeDependencies,
-  sessionId: string,
-  boundaryMs: number,
-  window: UserStopWindowHandle,
-  result: UserStopAbortResult,
-): Promise<void> {
+async function completeCascade(input: {
+  readonly deps: UserStopCascadeDependencies;
+  readonly sessionId: string;
+  readonly boundaryMs: number;
+  readonly window: UserStopWindowHandle;
+  readonly result: UserStopAbortResult;
+  /** The switches `begin` read for this stop; applied to the root sweep only. */
+  readonly policy: CascadeKindPolicy;
+}): Promise<void> {
+  const { deps, sessionId, boundaryMs, window, result, policy } = input;
   let targets: StoppedTaskRecord[] = [];
   log('user_stop_cascade_started', {
     sessionId,
@@ -232,6 +391,7 @@ async function completeCascade(
         sessionId,
         reason: 'owner_abort',
         boundaryMs,
+        rootPolicy: policy,
         ctx: {
           depth: 0,
           visited: new Set<string>(),

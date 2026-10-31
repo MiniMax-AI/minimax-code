@@ -41,6 +41,9 @@ export interface PermissionConfig {
    * false so an ASK decision fails closed instead of waiting forever.
    */
   userConfirmationEnabled: boolean;
+
+  /** Use the selected shell's native deletion instead of enforcing recoverable deletion. */
+  nativeDelete: boolean;
 }
 
 export const PERMISSION_CONFIG_DEFAULTS: PermissionConfig = {
@@ -48,6 +51,7 @@ export const PERMISSION_CONFIG_DEFAULTS: PermissionConfig = {
   storageWriteVersion: 2,
   classifierTimeoutMs: 60_000,
   userConfirmationEnabled: true,
+  nativeDelete: false,
 };
 
 /**
@@ -83,5 +87,12 @@ export function parsePermissionConfig(
     typeof obj.userConfirmationEnabled === 'boolean'
       ? obj.userConfirmationEnabled
       : defaults.userConfirmationEnabled;
-  return { policyOwner, storageWriteVersion, classifierTimeoutMs, userConfirmationEnabled };
+  const nativeDelete = obj.nativeDelete === true;
+  return {
+    policyOwner,
+    storageWriteVersion,
+    classifierTimeoutMs,
+    userConfirmationEnabled,
+    nativeDelete,
+  };
 }

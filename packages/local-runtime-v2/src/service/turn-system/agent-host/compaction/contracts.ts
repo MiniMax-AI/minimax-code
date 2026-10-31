@@ -4,7 +4,7 @@ import type {
   PiBeforeLlmCallHookInput,
   LLMRequestSettledEvent,
 } from '@mavis/agent-core/pi-turn-runner';
-import type { ContextUsageSnapshot } from '@mavis/agent-core/protocol';
+import type { ContextUsagePromptRange, ContextUsageSnapshot } from '@mavis/agent-core/protocol';
 
 import type { AgentEventContext } from '../events/contracts.js';
 import type { CanonicalHistoryMessages } from '../history/contracts.js';
@@ -13,10 +13,21 @@ import type { AcceptedCompactionLease, AgentHostCloseResult } from '../runner/co
 export type CheckpointResponseContentKind = 'text' | 'thinking' | 'toolCall' | 'unknown';
 export type CheckpointStopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted';
 
+/**
+ * `shared_prefix` repeats the main request's system prompt, tools and history
+ * so the Provider prompt cache is read; `isolated` sends the checkpoint
+ * protocol as its own system prompt without tools.
+ */
+export type CheckpointRequestShape = 'shared_prefix' | 'isolated';
+/** Why a shared-prefix attempt was re-sent in the isolated shape. */
+export type CheckpointSharedPrefixFallbackReason = 'tool_call' | 'input_overflow';
+
 export interface CheckpointGenerationMetadata {
   readonly responseContentKinds: readonly CheckpointResponseContentKind[];
   readonly stopReason: CheckpointStopReason;
   readonly outputTokens: number;
+  /** Present only when the invocation offered a shared prefix. */
+  readonly requestShape?: CheckpointRequestShape;
 }
 
 export type CheckpointCandidate = 'h0' | 'htrim' | 'hall' | 'hvideo' | 'hmid' | 'hmin';
@@ -97,6 +108,10 @@ export interface ManualContextCompactionInput {
   readonly payloadTransform?: PiBeforeLlmCallHookInput['payloadTransform'];
   readonly systemPrompt?: PiBeforeLlmCallHookInput['systemPrompt'];
   readonly tools?: PiBeforeLlmCallHookInput['tools'];
+  /** Attribution ranges in the final system prompt, including its assembly prefix. */
+  readonly contextUsagePromptRanges?: readonly ContextUsagePromptRange[];
+  /** Host-selected checkpoint request shape; absent means `isolated`. */
+  readonly checkpointRequestShape?: CheckpointRequestShape;
   readonly signal?: AbortSignal;
   readonly customInstructions?: string;
 }
@@ -181,6 +196,10 @@ export interface ContextCompactionHooks {
   readonly onCheckpointAttemptSettled?: (metadata: CheckpointAttemptMetadata) => void;
   /** Safe terminal generation metadata; checkpoint prose and thinking are never exposed. */
   readonly onCheckpointGenerated?: (metadata: CheckpointGenerationMetadata) => void;
+  /** A shared-prefix checkpoint attempt was re-sent in the isolated shape. */
+  readonly onCheckpointSharedPrefixFallback?: (
+    reason: CheckpointSharedPrefixFallbackReason,
+  ) => void;
   /** Every physical Provider request in this compact invocation. */
   readonly onProviderRequestSettled?: (event: LLMRequestSettledEvent) => void;
   /** Returns the invocation-wide Provider usage snapshot, if a request ran. */
@@ -204,8 +223,11 @@ export type AutomaticContextCompactionInput = Readonly<
     | 'tools'
     | 'thinkingLevel'
     | 'signal'
+    | 'recovery'
   > & {
     readonly maxSerializedInputBytes?: number;
+    /** Host-selected checkpoint request shape; absent means `isolated`. */
+    readonly checkpointRequestShape?: CheckpointRequestShape;
   }
 >;
 

@@ -182,20 +182,35 @@ export class TranscriptProjectionWindow {
         visitedCells += 1;
         if (cell) tail.push(cell);
       }
-      projected.push(
+      const parents = foldedPtcParents(
+        source,
         first,
-        {
-          id: `projection-fold:${turn}:${tail[0]?.id ?? first.id}`,
-          kind: 'final-summary',
-          status: 'succeeded',
-          content: `… ${hidden} earlier steps folded`,
-          createdAtMs: first.createdAtMs,
-          updatedAtMs: tail[0]?.updatedAtMs ?? first.updatedAtMs,
-          ...(first.turnId ? { turnId: first.turnId } : {}),
-        },
+        range.start + 1,
+        range.start + 1 + hidden,
+        tail,
+      );
+      visitedCells += parents.visited;
+      const folded = hidden - parents.cells.length - parents.children.length;
+      projected.push(
+        parents.first,
+        ...(folded > 0
+          ? [
+              {
+                id: `projection-fold:${turn}:${tail[0]?.id ?? first.id}`,
+                kind: 'final-summary' as const,
+                status: 'succeeded' as const,
+                content: `… ${folded} earlier steps folded`,
+                createdAtMs: first.createdAtMs,
+                updatedAtMs: tail[0]?.updatedAtMs ?? first.updatedAtMs,
+                ...(first.turnId ? { turnId: first.turnId } : {}),
+              },
+            ]
+          : []),
+        ...parents.cells,
+        ...parents.children,
         ...tail,
       );
-      foldedCells += hidden;
+      foldedCells += folded;
     }
     return {
       cells: projected,
@@ -247,6 +262,93 @@ class ArrayTranscriptProjectionSource implements TranscriptProjectionSource {
       end: this.turnStarts[turnIndex + 1] ?? this.cells.length,
     };
   }
+}
+
+/** Failed or interrupted child calls kept per program when a turn is folded. */
+const FOLDED_PTC_PROBLEM_CHILD_LIMIT = 3;
+
+/**
+ * A PTC program can make more child calls than one turn keeps visible. Keep the
+ * outer `run_code` cell of a visible child so the children still render under
+ * their program instead of as unrelated top-level rows. Its folded children
+ * stay counted on the kept program, and the failed or interrupted ones stay
+ * visible, so a fold never turns a failed program into a clean summary.
+ */
+function foldedPtcParents(
+  source: TranscriptProjectionSource,
+  first: TranscriptCell,
+  start: number,
+  end: number,
+  tail: readonly TranscriptCell[],
+): {
+  readonly first: TranscriptCell;
+  readonly cells: TranscriptCell[];
+  readonly children: TranscriptCell[];
+  readonly visited: number;
+} {
+  const visible = new Set(tail.flatMap((cell) => (cell.toolCallId ? [cell.toolCallId] : [])));
+  const missing = new Set(
+    tail.flatMap((cell) =>
+      cell.parentToolCallId && !visible.has(cell.parentToolCallId) ? [cell.parentToolCallId] : [],
+    ),
+  );
+  if (missing.size === 0) return { first, cells: [], children: [], visited: 0 };
+  const programs = new Map<string, { cell: TranscriptCell; kept: number } & Counts>();
+  // The turn's first cell always stays projected, and it may be the program itself.
+  if (first.toolCallId && missing.has(first.toolCallId)) {
+    programs.set(first.toolCallId, { cell: first, kept: 0, calls: 0, failed: 0, interrupted: 0 });
+  }
+  const children: TranscriptCell[] = [];
+  let visited = 0;
+  // Children follow their program, so one pass sees the program first.
+  for (let index = start; index < end; index += 1) {
+    const cell = source.cellAt(index);
+    visited += 1;
+    if (!cell) continue;
+    if (cell.toolCallId && missing.has(cell.toolCallId)) {
+      programs.set(cell.toolCallId, { cell, kept: 0, calls: 0, failed: 0, interrupted: 0 });
+      continue;
+    }
+    const program = cell.parentToolCallId ? programs.get(cell.parentToolCallId) : undefined;
+    if (!program) continue;
+    const problem = foldedChildProblem(cell, program.cell);
+    if (problem && program.kept < FOLDED_PTC_PROBLEM_CHILD_LIMIT) {
+      program.kept += 1;
+      children.push(cell);
+      continue;
+    }
+    program.calls += 1;
+    if (problem === 'failed') program.failed += 1;
+    if (problem === 'interrupted') program.interrupted += 1;
+  }
+  const annotate = ({ cell, calls, failed, interrupted }: { cell: TranscriptCell } & Counts) =>
+    calls > 0 ? { ...cell, ptcFoldedChildren: { calls, failed, interrupted } } : cell;
+  let projectedFirst = first;
+  const cells: TranscriptCell[] = [];
+  for (const program of programs.values()) {
+    if (program.cell === first) projectedFirst = annotate(program);
+    else cells.push(annotate(program));
+  }
+  return { first: projectedFirst, cells, children, visited };
+}
+
+interface Counts {
+  calls: number;
+  failed: number;
+  interrupted: number;
+}
+
+function foldedChildProblem(
+  child: TranscriptCell,
+  program: TranscriptCell,
+): 'failed' | 'interrupted' | undefined {
+  if (child.status === 'failed') return 'failed';
+  if (child.status === 'cancelled') return 'interrupted';
+  const childOpen =
+    child.status === 'pending' || child.status === 'running' || child.status === 'blocked';
+  const programOpen =
+    program.status === 'pending' || program.status === 'running' || program.status === 'blocked';
+  return childOpen && !programOpen ? 'interrupted' : undefined;
 }
 
 function turnKey(cell: TranscriptCell): string {

@@ -1,6 +1,6 @@
 # TUI capability coverage
 
-The current capability target is **TUI 0.6.3**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
+The current capability target is **TUI 0.7.2**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
 ## Output speed
 
@@ -356,6 +356,77 @@ existing diagnostic-counts projection; raw error text, stacks and session IDs
 are not added to the uploaded ZIP. Offline tests cover persisted tool histories,
 archives, concurrent parent output, side-session cleanup and local diagnostics;
 this does not establish native-terminal or live-model acceptance.
+
+## Programmatic Tool Calling
+
+Programmatic Tool Calling (PTC, beta) lets the Agent write a `run_code` program that
+combines `read`, `grep`, `bash` and other tool calls and returns only the filtered
+results to the model, which suits bulk file reads and multi-step tasks. It is off by
+default and stored as `beta.ptc` in `config.yaml`; turn it on under Preferences in
+`/settings`, or enable it for one process with `mcode --ptc` or `mcode exec --ptc`.
+
+PTC applies to new Sessions and to the next compaction of an existing one, never to a
+running turn. Whether it applies is decided only by the Session's tool-call mode, set
+when the Session is created or after a compaction, so the prompt prefix of a Session
+stays stable between turns and subagents follow their own Session mode. Tool
+permissions, approvals and cancellation behave as they do for direct calls, read-only
+subagents such as Explore still call tools directly, and time spent waiting for an
+approval does not count toward the program's own time limit.
+
+In the transcript `run_code` lists its child calls as a group, collapses to call and
+failure counts when it finishes, and reopens with `Ctrl+O`. Child calls receive their
+full result inside the program, while reading a Session returns tool-call summaries by
+default. Denying a child call fails only that call, like a native denial; stopping the
+turn stops the whole program.
+
+## Prompt suggestions
+
+When a turn you started finishes and the Composer is empty, it shows a likely next
+message as placeholder text; press `Tab` to fill it in. Suggestions are on by default
+for users who never chose, and a remote policy can change that default, narrow the
+eligible share of Sessions, or stop generation entirely. Your own choice under
+Preferences in `/settings`, stored as `promptSuggestion.enabled`, always wins.
+
+Suggestions are generated after a turn settles and are not produced in Plan Mode, Goal
+turns, subagent Sessions, `mcode exec`, ACP or the App Server. With BYOK models the
+suggestion is not sent to content review.
+
+## Local delete and the trash
+
+Deleting files from a Bash command moves them to the trash by default, on macOS,
+Windows and Linux, and keeps the command's own semantics: `-f` survives, a redirect
+such as `2>&1` is not treated as a file to delete, and a missing or repeated target no
+longer stops the commands that follow `&&`. Directory deletion still requires `-r`,
+real failures return a nonzero exit status, and protected paths stay blocked. Inside the
+sandbox a name conflict in the trash gets a suffix instead of overwriting, and on macOS
+the Finder sound no longer plays for every file.
+
+`permission.nativeDelete` in `config.yaml` opts new Bash calls into the shell's native
+delete commands, where deleted files may not be recoverable. Normal permission modes,
+sandboxing and the root/home recursive-delete protection remain active. Targets that
+cannot be resolved statically, such as shell variables, pipelines or paths outside the
+workspace, go through normal permission approval instead of being rejected, while drive
+roots, Windows system directories and recursive deletion of home stay rejected in every
+mode. `skipWindowsHardSafetyChecks` in `config.yaml` opts a Windows installation out of
+the command-text and path checks that can reject valid scripts; it requires a restart and
+weakens those checks.
+
+## Request media budget
+
+`requestMedia` in `config.yaml` is read on every use, so changes need no restart.
+`requestMedia.image.max_width`, `max_height` and `max_base64_bytes` set the size every
+image entering the conversation is encoded to, for tool results and attachments alike,
+and it is the only resize applied to Read tool images, attached images and browser
+screenshots. `requestMedia.recoveryDivisor` sets how much of the images a rejected
+request keeps when it is resent. Invalid values fall back to the defaults field by field.
+
+Each request also stays within an image-count and request-body budget. When a provider
+rejects a request for carrying too many images or too many bytes, the turn drops the
+older images and resends once instead of failing every later request the same way; the
+newest image is always kept. Dropped tool result images are saved to the Session's
+`reports/tool-outputs/` folder and replaced with a note giving the path, so `read` can
+load them again. Compaction summaries describe images by their saved path instead of
+sending them to the summary model.
 
 ## Select a plugin for a message
 

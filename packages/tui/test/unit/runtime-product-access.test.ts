@@ -6,6 +6,7 @@ import type { CliService } from "@mavis/local-runtime-v2/cli-service";
 import { describe, expect, it, vi } from "vitest";
 
 import { TuiRuntimeAdapter } from "../../src/runtime/adapter.js";
+import { projectAccountDisplayIdentity } from "../../src/account/display-identity.js";
 import { buildTuiSkillCommands } from "../../src/tui/controller/run/active-run-flow.js";
 
 describe("TuiRuntimeAdapter product access", () => {
@@ -285,11 +286,51 @@ describe("TuiRuntimeAdapter product access", () => {
     });
     const adapter = new TuiRuntimeAdapter(cliService);
 
-    await expect(adapter.getActiveRun("session-1")).resolves.toMatchObject({
+    const snapshot = await adapter.getActiveRun("session-1");
+    expect(snapshot).toMatchObject({
       state: "running",
       turnId: "turn-foreign",
       actions: { steer: false },
     });
+    // Not yet registered locally is not the same as owned elsewhere.
+    expect(snapshot).not.toHaveProperty("runningElsewhere");
+  });
+
+  it("marks a running Turn owned by another live MCode process as running elsewhere", async () => {
+    const cliService = cliServiceFixture();
+    vi.mocked(cliService.getActiveTurn).mockResolvedValueOnce({
+      turnId: "turn-foreign",
+      busyReason: "turn",
+      locallyOwned: false,
+      ownedByOtherRuntime: true,
+    });
+    const adapter = new TuiRuntimeAdapter(cliService);
+
+    await expect(adapter.getActiveRun("session-1")).resolves.toMatchObject({
+      state: "running",
+      turnId: "turn-foreign",
+      actions: { steer: false },
+      runningElsewhere: true,
+    });
+  });
+
+  it("reports the next-message suggestion switch, or that the Runtime has none", async () => {
+    const setPromptSuggestionEnabled = vi.fn(async (enabled: boolean) => enabled);
+    const supported = new TuiRuntimeAdapter({
+      getPromptSuggestionEnabled: vi.fn(async () => true),
+      setPromptSuggestionEnabled,
+    } as never);
+    await expect(supported.getPromptSuggestionEnabled()).resolves.toBe(true);
+    await expect(supported.setPromptSuggestionEnabled(false)).resolves.toBe(false);
+    expect(setPromptSuggestionEnabled).toHaveBeenCalledWith(false);
+
+    // CliService answers undefined when its host cannot read or persist the switch.
+    const unsupported = new TuiRuntimeAdapter({
+      getPromptSuggestionEnabled: vi.fn(() => undefined),
+      setPromptSuggestionEnabled: vi.fn(() => undefined),
+    } as never);
+    await expect(unsupported.getPromptSuggestionEnabled()).resolves.toBeUndefined();
+    await expect(unsupported.setPromptSuggestionEnabled(true)).resolves.toBeUndefined();
   });
 
   it("routes peripheral product capabilities through CliService", async () => {
@@ -371,6 +412,64 @@ describe("TuiRuntimeAdapter product access", () => {
       (await adapter.getAccountStatus(undefined, { includeMembership: false }))
         .identity,
     ).toBeUndefined();
+  });
+
+  it("re-reads the account name only for explicit refreshed inspections", async () => {
+    const accountIdentityRefresher = vi.fn(async () => ({ name: "Renamed" }));
+    const adapter = new TuiRuntimeAdapter(cliServiceFixture(), {
+      tokenPlanAccountStatusGetter: async () => ({
+        quotaState: "available" as const,
+      }),
+      accountIdentityGetter: () => ({ name: "Registered" }),
+      accountIdentityRefresher,
+    });
+
+    expect((await adapter.getAccountStatus()).identity).toEqual({
+      name: "Registered",
+    });
+    expect(
+      (await adapter.getAccountStatus(undefined, { forceRefresh: true }))
+        .identity,
+    ).toEqual({ name: "Registered" });
+    expect(accountIdentityRefresher).not.toHaveBeenCalled();
+
+    const inspected = await adapter.getAccountStatus(undefined, {
+      includeMembership: true,
+      forceRefresh: true,
+    });
+    expect(inspected).toMatchObject({
+      identity: { name: "Renamed" },
+      tokenPlanQuotaState: "available",
+    });
+    expect(accountIdentityRefresher).toHaveBeenCalledOnce();
+
+    accountIdentityRefresher.mockRejectedValueOnce(
+      new TypeError("fetch failed"),
+    );
+    expect(
+      (
+        await adapter.getAccountStatus(undefined, {
+          includeMembership: true,
+          forceRefresh: true,
+        })
+      ).identity,
+    ).toEqual({ name: "Registered" });
+  });
+
+  it("prefers the editable profile name over the registration name", () => {
+    expect(
+      projectAccountDisplayIdentity({
+        userEmail: " dev@example.com ",
+        userName: "Registered",
+        subUserName: "令酱",
+      }),
+    ).toEqual({ email: "dev@example.com", name: "令酱" });
+    expect(
+      projectAccountDisplayIdentity({
+        userName: "Registered",
+        subUserName: "  ",
+      }),
+    ).toEqual({ name: "Registered" });
   });
 
   it("keeps BYOK usable while account-only actions surface unavailable OAuth", async () => {

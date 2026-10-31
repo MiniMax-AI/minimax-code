@@ -28,6 +28,8 @@ import type {
   TuiAccountStatusOptions,
   TuiActiveRunSnapshot,
   TuiBackgroundTask,
+  TuiPtcSetting,
+  TuiBackgroundTaskListOptions,
   TuiCompactionResult,
   TuiDelegationSnapshot,
   TuiDelegationStopReceipt,
@@ -90,8 +92,21 @@ export interface TuiRuntimeAdapterOptions {
   workspaceDir?: string;
   synchronizeAuth?: () => Promise<void>;
   accountIdentityGetter?: () => TuiAccountStatus["identity"];
+  /**
+   * Re-reads the account profile from the server. Used only by explicit,
+   * force-refreshed inspections so a name changed elsewhere shows up without a
+   * new login; failures fall back to `accountIdentityGetter`.
+   */
+  accountIdentityRefresher?: () => Promise<TuiAccountStatus["identity"]>;
   observability?: TuiObservability;
   contextMode?: McodeContextMode;
+  /** `--ptc` forced PTC on for this process. */
+  ptcLaunchOverride?: boolean;
+  /**
+   * Reads `beta.ptc` from config.yaml without the `--ptc` override; the
+   * Runtime only sees the overridden value. Required with `ptcLaunchOverride`.
+   */
+  readSavedPtc?: () => boolean;
   tokenPlanAccountStatusGetter?: (options?: {
     readonly forceRefresh?: boolean;
   }) => Promise<TuiTokenPlanAccountStatus>;
@@ -130,9 +145,12 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     | undefined;
   private readonly synchronizeAuth: TuiRuntimeAdapterOptions["synchronizeAuth"];
   private readonly accountIdentityGetter: TuiRuntimeAdapterOptions["accountIdentityGetter"];
+  private readonly accountIdentityRefresher: TuiRuntimeAdapterOptions["accountIdentityRefresher"];
   private readonly feedback: TuiRuntimeAdapterOptions["feedback"];
   private readonly dailyCheckin: TuiRuntimeAdapterOptions["dailyCheckin"];
   private readonly contextMode: McodeContextMode;
+  private readonly ptcLaunchOverride: boolean;
+  private readonly readSavedPtc: (() => boolean) | undefined;
 
   constructor(cliService: CliService, options: TuiRuntimeAdapterOptions = {}) {
     this.cliService = cliService;
@@ -141,9 +159,12 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     this.tokenPlanAccountStatusGetter = options.tokenPlanAccountStatusGetter;
     this.synchronizeAuth = options.synchronizeAuth;
     this.accountIdentityGetter = options.accountIdentityGetter;
+    this.accountIdentityRefresher = options.accountIdentityRefresher;
     this.feedback = options.feedback;
     this.dailyCheckin = options.dailyCheckin;
     this.contextMode = options.contextMode ?? "standard";
+    this.ptcLaunchOverride = options.ptcLaunchOverride === true;
+    this.readSavedPtc = options.readSavedPtc;
     this.conversationAccess = new TuiConversationAccess(cliService);
     this.pluginAccess = new TuiPluginAccess(cliService);
     this.context = new TuiRuntimeAccessContext({
@@ -193,7 +214,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
 
   async createSession(input: CreateTuiSessionInput): Promise<TuiSession> {
     const sessionInput =
-      this.contextMode === "lightweight" && !input.parentSessionId && !input.purpose
+      this.contextMode === "lightweight" &&
+      !input.parentSessionId &&
+      !input.purpose
         ? { ...input, purpose: LIGHTWEIGHT_SESSION_PURPOSE }
         : input;
     const defaultModel = await this.productAccess
@@ -368,16 +391,18 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       await this.synchronizeAuth();
       account = await this.productAccess.getAccountStatus(sessionId, options);
     }
-    const identity = account.managedTokenPresent
-      ? this.accountIdentityGetter?.()
-      : undefined;
-    if (identity)
-      account = {
-        ...account,
-        identity: { email: identity.email, name: identity.name },
-      };
     const membershipRequested = options?.includeMembership !== false;
     const explicitUsageInspection = options?.includeMembership === true;
+    // Starts before the Token Plan request so an explicit refresh adds no serial latency.
+    const identityRequest = account.managedTokenPresent
+      ? this.resolveAccountIdentity(explicitUsageInspection && options?.forceRefresh === true)
+      : Promise.resolve(undefined);
+    const withIdentity = async (): Promise<TuiAccountStatus> => {
+      const identity = await identityRequest;
+      return identity
+        ? { ...account, identity: { email: identity.email, name: identity.name } }
+        : account;
+    };
     if (
       !membershipRequested ||
       (!explicitUsageInspection &&
@@ -385,13 +410,16 @@ export class TuiRuntimeAdapter implements TuiRuntime {
           account.managedTokenPresent !== true)) ||
       !this.tokenPlanAccountStatusGetter
     ) {
-      return account;
+      return withIdentity();
     }
-    const tokenPlan = await (
-      options?.forceRefresh
+    const [identifiedAccount, tokenPlan] = await Promise.all([
+      withIdentity(),
+      (options?.forceRefresh
         ? this.tokenPlanAccountStatusGetter({ forceRefresh: true })
         : this.tokenPlanAccountStatusGetter()
-    ).catch(() => undefined);
+      ).catch(() => undefined),
+    ]);
+    account = identifiedAccount;
     if (!tokenPlan) return account;
     return {
       ...account,
@@ -403,6 +431,17 @@ export class TuiRuntimeAdapter implements TuiRuntime {
         ? { tokenPlanSummary: tokenPlan.summary }
         : {}),
     };
+  }
+  private async resolveAccountIdentity(
+    refresh: boolean,
+  ): Promise<TuiAccountStatus["identity"]> {
+    if (refresh && this.accountIdentityRefresher) {
+      const refreshed = await this.accountIdentityRefresher().catch(
+        () => undefined,
+      );
+      if (refreshed) return refreshed;
+    }
+    return this.accountIdentityGetter?.();
   }
   getRuntimeDiagnostics(): Promise<TuiRuntimeDiagnostics> {
     return this.productAccess.getRuntimeDiagnostics();
@@ -445,6 +484,30 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode> {
     return this.productAccess.setPermissionMode(mode);
   }
+
+  getPromptSuggestionEnabled(): Promise<boolean | undefined> {
+    return this.productAccess.getPromptSuggestionEnabled();
+  }
+
+  setPromptSuggestionEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.productAccess.setPromptSuggestionEnabled(enabled);
+  }
+
+  async getPtcSetting(): Promise<TuiPtcSetting | undefined> {
+    return this.projectPtcSetting(await this.productAccess.getPtcEnabled());
+  }
+
+  async setPtcEnabled(enabled: boolean): Promise<TuiPtcSetting | undefined> {
+    return this.projectPtcSetting(await this.productAccess.setPtcEnabled(enabled));
+  }
+
+  private projectPtcSetting(enabled: boolean | undefined): TuiPtcSetting | undefined {
+    if (enabled === undefined) return undefined;
+    if (!this.ptcLaunchOverride) return { enabled, saved: enabled, launchOverride: false };
+    // The Runtime reads the overridden config, so the saved choice comes from the file.
+    const saved = this.readSavedPtc?.();
+    return saved === undefined ? undefined : { enabled, saved, launchOverride: true };
+  }
   listModels(sessionId?: string): Promise<TuiModel[]> {
     return this.productAccess.listModels(sessionId);
   }
@@ -457,7 +520,10 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   ): Promise<boolean> {
     return this.productAccess.selectSessionModel(model, sessionId);
   }
-  setModelFavorite(model: TuiModelSelection, favorite: boolean): Promise<boolean> {
+  setModelFavorite(
+    model: TuiModelSelection,
+    favorite: boolean,
+  ): Promise<boolean> {
     return this.productAccess.setModelFavorite(model, favorite);
   }
   listUserModelProviders() {
@@ -703,6 +769,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
 
   async listBackgroundTasks(
     ownerSessionId: string,
+    options: TuiBackgroundTaskListOptions = {},
   ): Promise<readonly TuiBackgroundTask[]> {
     const activeStatuses = ["queued", "running", "stopping"] as const;
     const terminalStatuses = [
@@ -711,17 +778,23 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       "canceled",
       "lost",
     ] as const;
+    const query = options.machineStatus
+      ? {
+          kinds: ["bash", "subagent", "workflow", "custom"] as const,
+          includeNotification: true,
+        }
+      : { kinds: ["bash", "workflow", "custom"] as const };
     const [active, terminal] = await Promise.all([
       this.cliService.listBackgroundTasks({
         ownerSessionId,
         statuses: activeStatuses,
-        kinds: ["bash", "workflow", "custom"],
+        ...query,
         limit: 100,
       }),
       this.cliService.listBackgroundTasks({
         ownerSessionId,
         statuses: terminalStatuses,
-        kinds: ["bash", "workflow", "custom"],
+        ...query,
         limit: 100,
       }),
     ]);
@@ -729,12 +802,6 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       [...active, ...terminal].map((task) => [task.taskId, task]),
     );
     return [...tasks.values()]
-      .filter(
-        (
-          task,
-        ): task is typeof task & { readonly kind: TuiBackgroundTask["kind"] } =>
-          task.kind !== "subagent",
-      )
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .map((task) => ({
         taskId: task.taskId,
@@ -757,8 +824,23 @@ export class TuiRuntimeAdapter implements TuiRuntime {
         ...(task.lastError?.message
           ? { lastError: task.lastError.message }
           : {}),
-        ...(task.kind === 'bash' && task.metadata?.executionMode === 'managed_foreground'
+        ...(task.kind === "bash" &&
+        task.metadata?.executionMode === "managed_foreground"
           ? { foreground: true as const }
+          : {}),
+        ...(task.kind === "subagent" &&
+        typeof task.metadata?.childSessionId === "string"
+          ? { childSessionId: task.metadata.childSessionId }
+          : {}),
+        ...(task.notification
+          ? {
+              notification: {
+                state: task.notification.state,
+                ...(task.notification.turnId
+                  ? { turnId: task.notification.turnId }
+                  : {}),
+              },
+            }
           : {}),
       }));
   }

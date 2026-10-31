@@ -22,10 +22,23 @@ import type { PiEventWriter } from './types.js';
 
 export type PiBeforeLlmCallPhase = 'initial' | 'iteration';
 
+export interface PiLlmCallRecovery {
+  readonly reason: string;
+  /** Provider error text of the response that was dropped. */
+  readonly errorMessage: string;
+  /** Request view the provider rejected, before any hook of the repeated call. */
+  readonly requestMessages: readonly AgentMessage[];
+}
+
 export interface PiBeforeLlmCallHookInput {
   sessionId: string;
   turnId: string;
   phase: PiBeforeLlmCallPhase;
+  /**
+   * Set when this call repeats a provider request that an afterLlmCall hook
+   * recovered from; the failed response is already gone from `messages`.
+   */
+  recovery?: PiLlmCallRecovery;
   /** Current provider request view after request-only hook transforms. */
   messages: AgentMessage[];
   /** Current durable history, updated only by canonical replacements. */
@@ -77,6 +90,13 @@ export interface PiBeforeLlmCallReplaceMetadata {
   replacementSourceIndexes?: number[];
   /** Reserved lineage for a placement-owned exact current-user tail. */
   currentUserSourceIndex?: number;
+  /**
+   * Reserved count of hidden markers placed immediately before the
+   * placement-owned current-user tail. Maintained by the runner alongside
+   * `currentUserSourceIndex`; hooks must not set it. Absent means 1 when
+   * `currentUserSourceIndex` is present, keeping older persisted metadata valid.
+   */
+  placedMarkerCount?: number;
 }
 
 export type PiBeforeLlmCallAppendMessage = Omit<CustomMessage, 'content' | 'display'> & {
@@ -109,7 +129,11 @@ export type PiBeforeLlmCallHookDecision =
   | {
       /**
        * Durably appends one hidden typed context message before the Provider request.
-       * A successful append ends the before-LLM decision pipeline.
+       * Appends accumulate: later hooks still run and receive the registered
+       * markers in `messages` and `canonicalMessages`. All markers are committed
+       * once after the pipeline (placed markers inside the durable replacement,
+       * tail markers in registration order with one history flush). A durable
+       * `replaceMessages` after a registered append aborts the request.
        */
       type: 'appendMessage';
       message: PiBeforeLlmCallAppendMessage;
@@ -180,6 +204,14 @@ export type PiAfterLlmCallHookDecision =
    */
   | { type: 'replaceText'; text: string }
   | { type: 'retry'; reason: string; prompt: string }
+  /**
+   * Drops a provider error response and repeats the same provider request
+   * once per LLM call. Only honoured for `stopReason: 'error'`; the repeated
+   * call's beforeLlmCall input carries `recovery` so a hook can shrink the
+   * context first. Ignored for other responses or when the repeated request
+   * fails again.
+   */
+  | { type: 'recover'; reason: string }
   | { type: 'fail'; reason: string };
 
 export type PiAfterLlmCallHook = (

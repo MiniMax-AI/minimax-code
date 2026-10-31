@@ -1,4 +1,9 @@
-import type { QueueEnqueueInput, QueueUpdateInput, QueueItem } from './contract.js';
+import type {
+  QueueClaimRecoveryScope,
+  QueueEnqueueInput,
+  QueueUpdateInput,
+  QueueItem,
+} from './contract.js';
 import { queueRoutingFingerprint } from '../routing.js';
 import { isQueueMessageInput, isQueueMessageSource, isQueueImmediateSendBatch } from './codec.js';
 

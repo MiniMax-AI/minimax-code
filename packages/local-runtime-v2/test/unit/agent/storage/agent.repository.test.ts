@@ -1475,7 +1475,7 @@ describe("DrizzleAgentRepository Desktop Agent directory safety", () => {
         features: { mavis: false, delegation: false, webSearch: true },
         systemPrompt: "Builtin prompt",
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe("published");
     await expect(
       readFile(join(outsideDir, "explore", "agent.md"), "utf8"),
     ).resolves.toContain("name: explore");

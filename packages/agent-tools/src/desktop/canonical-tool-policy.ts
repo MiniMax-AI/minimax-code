@@ -1,6 +1,5 @@
 import type { RuntimeTool } from '@mavis/agent-core/tools';
 
-import { MatrixWebSearchToolDef } from '../cloud/matrix-tools/tool-defs.js';
 import { isCanonicalSubagentRole } from './subagent-roles.js';
 
 /**
@@ -47,28 +46,6 @@ export function filterCanonicalNativeToolCeiling<T extends RuntimeTool>(
       !isComputerUseRuntimeToolName(tool.def.name) &&
       (canonicalRole !== 'explore' ||
         !['task_query', 'task_output', 'task_stop'].includes(tool.def.name)),
-  );
-}
-
-/**
- * Apply the canonical builtin role MCP ceiling to source-tagged entries.
- * Explore and Verifier retain only Matrix web search; Worker and custom or
- * untrusted agents retain the configured entry set.
- */
-export function filterCanonicalBuiltinMcpEntries<
-  T extends { readonly source: string; readonly tool: RuntimeTool },
->(entries: readonly T[], canonicalRole?: string, builtinAgent?: boolean): T[] {
-  if (
-    builtinAgent !== true ||
-    canonicalRole === undefined ||
-    !isCanonicalSubagentRole(canonicalRole) ||
-    (canonicalRole !== 'explore' && canonicalRole !== 'verifier')
-  ) {
-    return [...entries];
-  }
-  return entries.filter(
-    (entry) =>
-      entry.source === 'builtin-matrix' && entry.tool.def.name === MatrixWebSearchToolDef.name,
   );
 }
 

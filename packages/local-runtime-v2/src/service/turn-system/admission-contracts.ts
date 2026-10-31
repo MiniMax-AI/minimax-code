@@ -78,6 +78,12 @@ export interface TurnIngressReceipt {
   readonly acceptedSequence: number;
 }
 
+/** One client request id and the Turn it was durably admitted to or steered into. */
+export interface TurnClientRequestBinding {
+  readonly clientRequestId: string;
+  readonly turnId: string;
+}
+
 export interface TurnSessionAdmissionCapability {
   rejectionInTransaction(
     db: AppDb,

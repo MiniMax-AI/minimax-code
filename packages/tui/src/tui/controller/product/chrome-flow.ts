@@ -29,6 +29,7 @@ import {
 import { resolveTuiComposerInputIntent } from '../../commands/input-intent.js';
 import { formatTuiTerminalTitle } from '../../platform/terminal-title.js';
 import type { TuiProgramStatus } from '../../platform/terminal-program-status.js';
+import type { TuiPromptSuggestionStore } from '../../features/composer/prompt-suggestion.js';
 
 type PresentationSink<K extends keyof TuiVisiblePresentation> = {
   setState(state: TuiVisiblePresentation[K]): void;
@@ -79,6 +80,8 @@ export class TuiChromeFlow {
       readonly sessionState?: () => Pick<TuiState, 'sessions'>;
       /** Earliest observed start of a Turn, kept across Session projection switches. */
       readonly turnStartedAtMs?: (turnId: string) => number | undefined;
+      /** Next-message suggestion source; the projection decides whether it is visible. */
+      readonly promptSuggestion?: Pick<TuiPromptSuggestionStore, 'candidate' | 'markShown'>;
       readonly welcome: PresentationSink<'shell'>;
       readonly status: PresentationSink<'shell'>;
       readonly activity: PresentationSink<'activity'>;
@@ -170,6 +173,7 @@ export class TuiChromeFlow {
       this.options.shouldResumeDraftAfterLogin()
         ? 'conversation'
         : 'welcome';
+    const promptSuggestion = this.options.promptSuggestion?.candidate(snapshot.session?.sessionId);
     const presentation = resolveTuiVisiblePresentation({
       snapshot,
       connection,
@@ -204,6 +208,7 @@ export class TuiChromeFlow {
         return sideConversation ? { sideConversation } : {};
       })(),
       ...(this.options.turnStartedAtMs ? { turnStartedAtMs: this.options.turnStartedAtMs } : {}),
+      ...(promptSuggestion ? { promptSuggestion: promptSuggestion.text } : {}),
     });
     const agentCounts = this.options.agentCounts?.();
     const backgroundTasks = this.options.backgroundTaskCount?.();
@@ -265,8 +270,24 @@ export class TuiChromeFlow {
       surface === 'welcome' && this.welcomeTip
         ? { ...baseComposer, contextualTip: this.welcomeTip }
         : baseComposer;
-    this.options.composer.setState(
-      this.startupHint ? { ...composer, hint: this.startupHint, headerHidden: false } : composer,
-    );
+    if (this.startupHint) {
+      this.options.composer.setState({
+        ...withoutPromptSuggestion(composer),
+        hint: this.startupHint,
+        headerHidden: false,
+      });
+      return;
+    }
+    this.options.composer.setState(composer);
+    if (promptSuggestion && composer.promptSuggestion) {
+      this.options.promptSuggestion?.markShown(promptSuggestion);
+    }
   }
+}
+
+/** Drops a visible suggestion and the placeholder it occupied. */
+function withoutPromptSuggestion(composer: TuiComposerState): TuiComposerState {
+  if (!composer.promptSuggestion) return composer;
+  const { promptSuggestion: _suggestion, placeholder: _placeholder, ...rest } = composer;
+  return rest;
 }

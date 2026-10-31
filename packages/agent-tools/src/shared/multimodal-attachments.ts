@@ -1,12 +1,22 @@
 /**
  * Shared native multimodal attachment selection for local/cloud hosts.
  *
- * Hosts own IO (download, local asset registration, optional image
- * compression). This helper owns the provider-facing contract: supported MIME
- * allowlists, capability gates, and request/body caps. Keeping that logic here
- * prevents local-runtime and cloud-runtime from drifting on video/image
- * attachment behavior.
+ * Hosts own IO (download, local asset registration). This helper owns the
+ * provider-facing contract: supported MIME allowlists, capability gates,
+ * request/body caps, and the image encoding inline attachments share with
+ * tool result images. Keeping that logic here prevents local-runtime and
+ * cloud-runtime from drifting on video/image attachment behavior.
  */
+
+import {
+  encodeRequestImageDetails,
+  type EncodedRequestImageDetails,
+  type RequestImageEncoding,
+} from '@mavis/context-manager';
+
+/** Hosts that may not depend on context-manager pass the image encoding through this name. */
+export type AttachmentImageEncoding = RequestImageEncoding;
+export type EncodedAttachmentImage = EncodedRequestImageDetails;
 
 export interface MultimodalAttachmentCapabilities {
   readonly support_image?: unknown;
@@ -109,6 +119,19 @@ export function isMediaMime(mime: string | undefined): boolean {
 
 export function base64EncodedSize(rawBytes: number): number {
   return Math.ceil(Math.max(0, rawBytes) / 3) * 4;
+}
+
+/**
+ * Encode an inline image attachment like a tool result image, so it fits every
+ * provider the session may switch to. `undefined` keeps the original bytes;
+ * `'undecodable'` means the bytes must not be inlined.
+ */
+export function encodeAttachmentImage(
+  bytes: Uint8Array,
+  mime: string,
+  encoding?: AttachmentImageEncoding,
+): Promise<EncodedAttachmentImage | 'undecodable' | undefined> {
+  return encodeRequestImageDetails(bytes, mime, encoding);
 }
 
 export function selectMultimodalAttachments<T extends MultimodalAttachmentCandidate>(

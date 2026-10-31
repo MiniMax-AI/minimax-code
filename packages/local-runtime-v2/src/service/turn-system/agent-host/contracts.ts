@@ -1,3 +1,4 @@
+import type { PromptSuggestionTurnPort } from './runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   AgentRuntime,
   AssemblyResult,
@@ -152,6 +153,16 @@ export function parseBackgroundTaskOriginMetadata(
   };
 }
 
+/** Display snapshots stay on the queue message; AgentHost receives only execution metadata. */
+export function parseBackgroundTaskDeliveryOrigin(
+  value: unknown,
+): BackgroundTaskOriginMetadata | undefined {
+  if (!isProtocolRecord(value)) return undefined;
+  const metadata = { ...value };
+  delete metadata.tasks;
+  return parseBackgroundTaskOriginMetadata(metadata);
+}
+
 function readNonEmptyTaskIds(value: unknown): readonly string[] | undefined {
   if (
     !Array.isArray(value) ||
@@ -203,6 +214,12 @@ export interface AgentHostCompactionDependencies<
   readonly control: AgentHostCompactionControl;
   readonly lifecycle: ContextCompactionLifecycle;
   readonly observer?: ContextCompactionObserver;
+  /**
+   * Remote switch for the cache-sharing checkpoint request on non-managed
+   * Providers, read once per Turn and per manual compaction. Absent: every
+   * checkpoint request keeps the isolated shape.
+   */
+  readonly checkpointSharedPrefixEnabled?: () => boolean;
   readonly metricsClient?: {
     counter(name: string, value: number, labels?: Record<string, string>): void;
     histogram(name: string, value: number, labels?: Record<string, string>): void;
@@ -252,6 +269,11 @@ export interface AgentHostDependencies<
   readonly turnCapabilities?: AgentHostTurnCapabilityLifecycle;
   /** Observes the exact immutable assembly selected for this accepted Turn. */
   readonly assemblyObserver?: AgentHostAssemblyObserver;
+  /**
+   * Optional next-message suggestion seam: told when a Turn starts, and
+   * forwarded to the Turn executor for the post-commit generation.
+   */
+  readonly promptSuggestion?: PromptSuggestionTurnPort;
   /** Best-effort structured diagnostics; production binds the persistent local-runtime logger. */
   readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'>;
   /** Request-scoped payload transform shared by normal and manual Provider calls. */
@@ -313,6 +335,7 @@ export type {
   CompactionOutcome,
   ContextCompactionHooks,
   ManualContextCompactionInput,
+  PostCompactionContextUsage,
   ContextCompactionResult,
   ContextCompactor,
 } from './compaction/contracts.js';

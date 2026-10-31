@@ -262,7 +262,33 @@ const tuiHighlightTheme = createSyntaxHighlightTheme(
   () => renderThemeSnapshot.appearance,
 );
 
+/**
+ * Highlighting guardrails, shaped after Codex's (512 KB / 10,000 lines / 4 KiB per line) with
+ * the total-size and line limits scaled down 8x: highlight.js + parse5 grows superlinearly past
+ * ~64K characters (about 80 ms there, 1.8 s at 256K), and a streaming open fence is highlighted
+ * again on every frame. Larger input renders as plain code text.
+ */
+export const MAX_HIGHLIGHT_CHARS = 64 * 1024;
+export const MAX_HIGHLIGHT_LINES = 1_250;
+export const MAX_HIGHLIGHT_LINE_CHARS = 4 * 1024;
+
+function exceedsHighlightLimits(code: string): boolean {
+  if (code.length > MAX_HIGHLIGHT_CHARS) return true;
+  let lines = 1;
+  let lineStart = 0;
+  for (let index = code.indexOf('\n'); index >= 0; index = code.indexOf('\n', index + 1)) {
+    if (++lines > MAX_HIGHLIGHT_LINES || index - lineStart > MAX_HIGHLIGHT_LINE_CHARS) return true;
+    lineStart = index + 1;
+  }
+  return code.length - lineStart > MAX_HIGHLIGHT_LINE_CHARS;
+}
+
+function plainTuiCodeLines(code: string): string[] {
+  return code.split('\n').map((line) => tuiChalk.hex(tuiColors.text)(line));
+}
+
 export function highlightTuiCode(code: string, language: string): string[] {
+  if (exceedsHighlightLimits(code)) return plainTuiCodeLines(code);
   const normalizedLanguage = language.trim().toLowerCase();
   const resolvedLanguage = supportsLanguage(normalizedLanguage) ? normalizedLanguage : 'text';
   try {
@@ -272,7 +298,7 @@ export function highlightTuiCode(code: string, language: string): string[] {
       theme: tuiHighlightTheme,
     }).split('\n');
   } catch {
-    return code.split('\n').map((line) => tuiChalk.hex(tuiColors.text)(line));
+    return plainTuiCodeLines(code);
   }
 }
 

@@ -370,8 +370,20 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
   },
   {
     name: 'settings',
-    description: 'Configure the MCode terminal interface',
+    description: 'Configure TUI mode, suggestions, and other on/off preferences',
     category: 'Application',
+  },
+  {
+    name: 'suggestions',
+    description: 'Turn next-message suggestions on or off',
+    category: 'Application',
+    // Kept for scripts and habit; /settings is the discoverable home for switches.
+    discoverability: 'search-only',
+    argumentHint: '[on | off]',
+    getArgumentCompletions: argumentCompleter([
+      ['on', 'Suggest a next message after each turn'],
+      ['off', 'Stop suggesting next messages'],
+    ]),
   },
   {
     name: 'statusline',

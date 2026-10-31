@@ -31,9 +31,10 @@ import {
   type messageIDAllocator,
 } from './turn.js';
 import { setToolHooks } from './tools.js';
+import { createPtcToolExecutor } from './ptc-tool-executor.js';
+import type { PtcToolExecutor, ToolExecutionContext } from '../tools/index.js';
 import type { ToolContextSizeEstimator } from './tool-context-size.js';
 import type { PiTurnRunnerLogger, RunTurnInput as PiRunTurnInput } from './types.js';
-import type { ToolExecutionContext } from '../tools/index.js';
 
 export { LLM_REQUEST_TIMEOUT_MS } from './defaults.js';
 export { _computeFailureTerminationReasonForTest, wrapStreamFnWithTimeout };
@@ -127,6 +128,7 @@ export class PiTurnRunner {
     let termination: TurnTerminationReason | undefined;
     let llmCapture: LlmCaptureRecorder | undefined;
     let unsubscribeCaptureRelay: (() => void) | undefined;
+    let ptcExecutor: PtcToolExecutor | undefined;
     try {
       // Step 1: Build state for a single turn. `newTurn` resolves model config and creates all
       // objects that cannot be reused across turns: the tool list, composed streamFn, EventBridge
@@ -186,6 +188,13 @@ export class PiTurnRunner {
       // RuntimeEvent ordering identical to the old monolithic runner. The later `events.drain()`
       // waits for this queue.
       const events = subscribeEvents(agent, turn, history, this.now);
+      ptcExecutor = createPtcToolExecutor({
+        agent,
+        turn,
+        emit: events.dispatch,
+        nowMs: this.now,
+      });
+      input.toolConfig.context.ptcExecutor = ptcExecutor;
 
       // Step 6: Wire cancellation. If the caller's signal is already aborted, do not start
       // the Agent: unsubscribe, drain queued events, and emit the terminal `aborted` frame. Otherwise,
@@ -230,6 +239,9 @@ export class PiTurnRunner {
       termination = reason ?? events.forcedTermination() ?? { kind: 'completed' };
       await emitTerminal(turn, termination);
     } finally {
+      if (input.toolConfig.context.ptcExecutor === ptcExecutor) {
+        delete input.toolConfig.context.ptcExecutor;
+      }
       unsubscribeCaptureRelay?.();
       unsubscribeCaptureRelay = undefined;
       if (llmCapture?.drain) {

@@ -102,10 +102,9 @@ async function capture(
       cuModeActive: input.product.turnRuntimeFacts.snapshot().cuModeActive,
       ...(lease.capabilities ? { desktopCapabilities: lease.capabilities } : {}),
     });
-    const runtimeSkills = await input.product.preparation.configBuilder.skills.listRuntimeSkills({
-      agentName: profile.resourceReadRef,
-      workspaceDir: session.workspaceDir,
-    });
+    const runtimeSkills = await input.product.preparation.configBuilder.skills.listRuntimeSkills(
+      skillReadScope(session, profile),
+    );
     return {
       sources,
       ...(lease.capabilities ? { desktopCapabilities: lease.capabilities } : {}),
@@ -117,4 +116,14 @@ async function capture(
   } finally {
     lease.release();
   }
+}
+
+/** A frozen owner without an Agent row (Plugin Agent) must not resolve Agent resources. */
+function skillReadScope(session: SessionRecord, profile: AgentExecutionProfile) {
+  return {
+    agentName: profile.resourceReadRef,
+    workspaceDir: session.workspaceDir,
+    ...(profile.excludeAgentResources ? { excludeAgentResources: true } : {}),
+    ...(profile.skipAgentResolution ? { skipAgentResolution: true } : {}),
+  };
 }

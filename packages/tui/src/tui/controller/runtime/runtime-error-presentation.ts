@@ -2,7 +2,11 @@ import {
   classifyLLMRequestRejectionMessage,
   LLM_ERROR_CODES,
 } from '@mavis/shared/llm-error-classifier';
-import { tuiErrorDiagnostic } from '../../../user-facing-failure.js';
+import {
+  isOutputLimitExhaustedFailure,
+  OUTPUT_LIMIT_EXHAUSTED_SUMMARY,
+  tuiErrorDiagnostic,
+} from '../../../user-facing-failure.js';
 
 const AUTH_ERROR_CODES = new Set<number>([401, LLM_ERROR_CODES.LLM_AUTH_ERROR]);
 const RATE_LIMIT_ERROR_CODES = new Set<number>([
@@ -61,6 +65,16 @@ export function resolveTuiRuntimeFailure(
   const retryable =
     (errorCode !== undefined && FORCE_RETRY_ERROR_CODES.has(errorCode)) ||
     metadata.retryable !== false;
+  if (isOutputLimitExhaustedFailure(message)) {
+    return {
+      content: `${OUTPUT_LIMIT_EXHAUSTED_SUMMARY}${provider}${code}\n${
+        retryable
+          ? 'Lower the effort level, then run /retry to resend your last message.'
+          : 'Lower the effort level before sending the message again.'
+      } Your prompt is preserved.`,
+      retryable,
+    };
+  }
   if (errorCode === 403) {
     return {
       content: `Access denied.${diagnostics}${code}\nCheck account and model permissions before sending again. Your prompt is preserved.`,

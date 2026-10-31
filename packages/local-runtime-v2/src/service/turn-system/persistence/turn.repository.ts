@@ -10,7 +10,6 @@ import {
 } from '../../../infra/db/schema/turn.js';
 import {
   COMPACTION_DELETING_OWNER_KIND,
-  createRecoveredTerminalFact,
   DELETION_FENCE_EXPIRES_AT_MS,
   MAINTENANCE_DELETING_OWNER_KIND,
   MAINTENANCE_OWNER_KIND,
@@ -28,11 +27,22 @@ import type {
   TurnRepository,
   TurnRepositoryOptions,
 } from './contracts.js';
+import type { QueueCommittedFact } from '../../session-system/index.js';
+import {
+  pendingSettlementOf,
+  recoverAdmissionPendingSettlementInTransaction,
+  recoverPendingSettlementInTransaction,
+  releaseOrPromoteDeletionFence,
+  samePendingSettlement,
+  type PendingSettlement,
+} from './pending-settlement-recovery.js';
 import { createPluginHookSessionPersistence } from './plugin-hook-session.repository.js';
 import {
+  findClientRequestBindings,
+  insertReceiptAliases,
   persistedTurnConsumesQueuePause,
   publishQueueFacts,
-} from './turn-queue-pause-persistence.js';
+} from './turn-ingress-persistence.js';
 
 const DEFAULT_LEASE_MS = 30 * 60 * 1_000;
 const LEGACY_TURN_LEASE_STALL_MS = 30_000;
@@ -139,11 +149,7 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
       return updated.changes === 1;
     },
     settle: async (input) => {
-      const pending: PendingSettlement = {
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        leaseId: input.leaseId,
-      };
+      const pending = pendingSettlementOf(input);
       try {
         const committed = options.db.transaction(
           (tx) => {
@@ -215,12 +221,16 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
     completeSessionDeletion: (sessionId) =>
       completeTurnSessionDeletion(options, sessionId, isLeaseOwnerCurrent),
     findReceipt: (turnId) => findTurnReceipt(options, turnId),
-    findActiveTurn: async (sessionId) => findActiveTurn(options.db, sessionId, nowMs()),
+    findActiveTurn: async (sessionId) =>
+      findActiveTurn(options.db, sessionId, nowMs(), (ownerId) =>
+        isOwnedByOtherLiveRuntime(ownerId, { isLeaseOwnerAlive, isLeaseOwnerCurrent }),
+      ),
     findLatestTurnActivity: async (sessionId) => findLatestTurnActivity(options.db, sessionId),
     ...pluginHookSessionPersistence,
     findSteeringReceipt: (input) => findSteeringReceipt(options, input),
     reserveSteeringReceipt: (input) => reserveSteeringReceipt(options, input),
     releaseSteeringReceipt: (input) => releaseSteeringReceipt(options, input),
+    findClientRequestBindings: async (input) => findClientRequestBindings(options.db, input),
     revokeAdmission: (input) => revokeAdmission(options, input, nowMs()),
     isAcceptedInTransaction: (db, query) => Boolean(findAcceptedQueueTurn(db, query)),
     markAcknowledgedInTransaction: (db, query) => {
@@ -249,13 +259,16 @@ async function admitRepositoryTurn(
   const pending = dependencies.pendingSettlements.get(input.sessionId);
   const committed = options.db.transaction(
     (tx) => {
+      // Recovery runs even when this candidate is rejected; its facts still commit.
+      const recoveryQueueFacts: QueueCommittedFact[] = [];
       const result = admitTurnInTransaction(tx, options, input, {
         pending,
         nowMs: dependencies.nowMs(),
         makeLeaseId: dependencies.makeLeaseId,
         leaseMs: dependencies.leaseMs,
+        recoveryQueueFacts,
       });
-      if (result.status !== 'accepted') return { result, facts: [] };
+      if (result.status !== 'accepted') return { result, facts: recoveryQueueFacts };
       const effect = options.priorityFence.acceptedInTransaction(tx, {
         sessionId: input.sessionId,
         consumeQueuePause: input.consumeQueuePause === true,
@@ -269,7 +282,7 @@ async function admitRepositoryTurn(
                 ...(effect.revokeToken ? { queuePauseRevokeToken: effect.revokeToken } : {}),
               }
             : result,
-        facts: effect.facts,
+        facts: [...recoveryQueueFacts, ...effect.facts],
       };
     },
     { behavior: 'immediate' },
@@ -532,9 +545,29 @@ async function findTurnReceipt(
   };
 }
 
-function findActiveTurn(db: RepositoryDb, sessionId: string, nowMs: number) {
+/**
+ * True only for a lock positively owned by another live Runtime. Unknown or
+ * dead owners stay false so recovery and the current-process admission window
+ * keep their existing behavior.
+ */
+function isOwnedByOtherLiveRuntime(
+  ownerId: string,
+  liveness: {
+    readonly isLeaseOwnerAlive: (ownerId: string) => boolean | undefined;
+    readonly isLeaseOwnerCurrent: (ownerId: string) => boolean;
+  },
+): boolean {
+  return !liveness.isLeaseOwnerCurrent(ownerId) && liveness.isLeaseOwnerAlive(ownerId) === true;
+}
+
+function findActiveTurn(
+  db: RepositoryDb,
+  sessionId: string,
+  nowMs: number,
+  isOwnedByOtherRuntime: (ownerId: string) => boolean,
+) {
   const lock = db
-    .select({ ownerKind: sessionLocks.ownerKind })
+    .select({ ownerId: sessionLocks.ownerId, ownerKind: sessionLocks.ownerKind })
     .from(sessionLocks)
     .where(
       and(
@@ -557,7 +590,12 @@ function findActiveTurn(db: RepositoryDb, sessionId: string, nowMs: number) {
     .orderBy(desc(turnIngress.acceptedSequence))
     .get();
   const busyReason = accepted ? storedBusyReason(accepted.busyReason) : undefined;
-  return accepted && busyReason ? { turnId: accepted.turnId, busyReason } : undefined;
+  if (!accepted || !busyReason) return undefined;
+  return {
+    turnId: accepted.turnId,
+    busyReason,
+    ...(isOwnedByOtherRuntime(lock.ownerId) ? { ownedByOtherRuntime: true as const } : {}),
+  };
 }
 
 async function findSteeringReceipt(
@@ -614,6 +652,7 @@ async function reserveSteeringReceipt(
           ordinal: 0,
         })
         .run();
+      insertReceiptAliases(tx, input);
       return { status: 'reserved' as const };
     },
     { behavior: 'immediate' },
@@ -630,7 +669,10 @@ async function releaseSteeringReceipt(
         .where(
           and(
             eq(turnIngressClientRequests.sessionId, input.sessionId),
-            eq(turnIngressClientRequests.clientRequestId, input.clientRequestId),
+            inArray(turnIngressClientRequests.clientRequestId, [
+              input.clientRequestId,
+              ...(input.receiptAliases ?? []),
+            ]),
             eq(turnIngressClientRequests.turnId, input.turnId),
           ),
         )
@@ -698,24 +740,29 @@ function storedBusyReason(value: string): AdmitTurnInput['busyReason'] | undefin
 
 type Transaction = Parameters<Parameters<TurnRepositoryOptions['db']['transaction']>[0]>[0];
 type SettleTurnInput = Parameters<TurnRepository['settle']>[0];
-type PendingSettlement = Pick<SettleTurnInput, 'sessionId' | 'turnId' | 'leaseId'>;
 type QueueAcceptanceQuery = Parameters<TurnRepository['isAcceptedInTransaction']>[1];
 type QueueLookupDb = Parameters<TurnRepository['isAcceptedInTransaction']>[0] | Transaction;
 type RepositoryDb = TurnRepositoryOptions['db'] | Transaction;
 
 function recoverAdmissionTerminalFacts(
   tx: Transaction,
+  options: TurnRepositoryOptions,
   input: Pick<AdmitTurnInput, 'sessionId'>,
-  pending: PendingSettlement | undefined,
-  nowMs: number,
+  context: {
+    readonly pending: PendingSettlement | undefined;
+    readonly nowMs: number;
+    readonly recoveryQueueFacts: QueueCommittedFact[];
+  },
 ): readonly TurnRecoveryTerminalFact[] {
+  const { pending, nowMs } = context;
   const pendingRecovery = pending
-    ? recoverPendingSettlementInTransaction(tx, pending, nowMs)
+    ? recoverAdmissionPendingSettlementInTransaction(tx, options.priorityFence, pending, nowMs)
     : undefined;
+  if (pendingRecovery) context.recoveryQueueFacts.push(...pendingRecovery.queueFacts);
   const expiredRecovery = recoverExpiredInTransaction(tx, input.sessionId, nowMs);
   const legacyRecovery = recoverDeadLegacyOwnerInTransaction(tx, input.sessionId, nowMs);
   return [
-    ...(pendingRecovery ? [pendingRecovery] : []),
+    ...(pendingRecovery?.terminalFact ? [pendingRecovery.terminalFact] : []),
     ...expiredRecovery.terminalFacts,
     ...legacyRecovery.terminalFacts,
   ];
@@ -730,6 +777,7 @@ function admitTurnInTransaction(
     readonly nowMs: number;
     readonly makeLeaseId: () => string;
     readonly leaseMs: number;
+    readonly recoveryQueueFacts: QueueCommittedFact[];
   },
 ): AdmitTurnResult {
   const sessionRejection = options.sessionAdmission.rejectionInTransaction(tx, {
@@ -738,7 +786,7 @@ function admitTurnInTransaction(
   if (blocksAdmission(sessionRejection, input.bypassSessionMutation)) {
     return { status: 'rejected', reason: sessionRejection };
   }
-  const terminalFacts = recoverAdmissionTerminalFacts(tx, input, context.pending, context.nowMs);
+  const terminalFacts = recoverAdmissionTerminalFacts(tx, options, input, context);
   const lock = findSessionLock(tx, input.sessionId);
   if (lock && isDeletionOwnerKind(lock.ownerKind)) {
     return withRecoveredTerminalFacts(
@@ -984,17 +1032,6 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function samePendingSettlement(
-  left: PendingSettlement | undefined,
-  right: PendingSettlement,
-): boolean {
-  return (
-    left?.sessionId === right.sessionId &&
-    left.turnId === right.turnId &&
-    left.leaseId === right.leaseId
-  );
-}
-
 function withRecoveredTerminalFacts<T extends object>(
   result: T,
   terminalFacts: readonly TurnRecoveryTerminalFact[],
@@ -1038,78 +1075,6 @@ function settleInTransaction(tx: Transaction, input: SettleTurnInput, completedA
     throw new Error(`Turn settlement lost ownership: ${input.sessionId}/${input.turnId}`);
   }
   return { status: 'settled' as const, completedAtMs, outcome: input.outcome };
-}
-
-function recoverPendingSettlementInTransaction(
-  tx: Transaction,
-  pending: PendingSettlement,
-  completedAtMs: number,
-): TurnRecoveryTerminalFact | undefined {
-  const lock = tx
-    .select({ ownerId: sessionLocks.ownerId, ownerKind: sessionLocks.ownerKind })
-    .from(sessionLocks)
-    .where(eq(sessionLocks.sessionId, pending.sessionId))
-    .get();
-  const receipt = tx
-    .select({ status: turnIngress.status })
-    .from(turnIngress)
-    .where(
-      and(eq(turnIngress.sessionId, pending.sessionId), eq(turnIngress.turnId, pending.turnId)),
-    )
-    .get();
-  if (lock?.ownerId !== pending.leaseId || receipt?.status !== 'accepted') return undefined;
-  tx.update(turnIngress)
-    .set({ status: 'failed', completedAtMs })
-    .where(
-      and(
-        eq(turnIngress.sessionId, pending.sessionId),
-        eq(turnIngress.turnId, pending.turnId),
-        eq(turnIngress.status, 'accepted'),
-      ),
-    )
-    .run();
-  releaseOrPromoteDeletionFence(tx, {
-    sessionId: pending.sessionId,
-    leaseId: pending.leaseId,
-    ownerKind: lock.ownerKind,
-    completedAtMs,
-  });
-  return createRecoveredTerminalFact(
-    pending.sessionId,
-    pending.turnId,
-    completedAtMs,
-    'settlement-retry',
-  );
-}
-
-function releaseOrPromoteDeletionFence(
-  tx: Transaction,
-  input: {
-    readonly sessionId: string;
-    readonly leaseId: string;
-    readonly ownerKind: string;
-    readonly completedAtMs: number;
-  },
-) {
-  const ownership = and(
-    eq(sessionLocks.sessionId, input.sessionId),
-    eq(sessionLocks.ownerId, input.leaseId),
-  );
-  if (
-    input.ownerKind === TURN_DELETING_OWNER_KIND ||
-    input.ownerKind === COMPACTION_DELETING_OWNER_KIND
-  ) {
-    return tx
-      .update(sessionLocks)
-      .set({
-        ownerKind: SESSION_DELETION_OWNER_KIND,
-        acquiredAtMs: input.completedAtMs,
-        expiresAtMs: DELETION_FENCE_EXPIRES_AT_MS,
-      })
-      .where(ownership)
-      .run();
-  }
-  return tx.delete(sessionLocks).where(ownership).run();
 }
 
 function findDuplicate(tx: Transaction, input: AdmitTurnInput): AdmitTurnResult | undefined {
@@ -1208,6 +1173,7 @@ function insertAdmission(
         ordinal: 0,
       })
       .run();
+    insertReceiptAliases(tx, input);
   }
   return { status: 'accepted', leaseId, acceptedSequence: sequence, acceptedAtMs: nowMs };
 }

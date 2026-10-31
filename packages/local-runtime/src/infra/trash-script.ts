@@ -38,6 +38,19 @@ if [ -n "\${HOME:-}" ] && [ -d "$HOME" ]; then
   START_HOME="$(cd -P "$HOME" 2>/dev/null && pwd -P)"
 fi
 
+# rm-compatible calls receive argv after the caller shell has expanded it.
+# Direct mavis-trash keeps its existing recursive, verbose interface.
+rm_compatible=false
+recursive=true
+interactive=false
+verbose=true
+if [ "\${1:-}" = "--rm-compatible" ]; then
+  shift
+  rm_compatible=true
+  recursive=false
+  verbose=false
+fi
+
 args=()
 no_preserve=false
 no_preserve_root=false
@@ -45,6 +58,33 @@ force=false
 options_ended=false
 for arg in "$@"; do
   if $options_ended; then
+    args+=("$arg")
+    continue
+  fi
+  if $rm_compatible; then
+    case "$arg" in
+      --) options_ended=true; continue ;;
+      --force) force=true; interactive=false; continue ;;
+      --recursive) recursive=true; continue ;;
+      --verbose) verbose=true; continue ;;
+      --interactive|--interactive=always) interactive=true; force=false; continue ;;
+      --interactive=never) interactive=false; continue ;;
+      --preserve-root) continue ;;
+      --*) argument_error "unsupported rm option: $arg" ;;
+      -?*)
+        flags="\${arg#-}"
+        for ((flag_index = 0; flag_index < \${#flags}; flag_index++)); do
+          case "\${flags:$flag_index:1}" in
+            f) force=true; interactive=false ;;
+            r|R) recursive=true ;;
+            i) interactive=true; force=false ;;
+            v) verbose=true ;;
+            *) argument_error "unsupported rm option: -\${flags:$flag_index:1}" ;;
+          esac
+        done
+        continue
+        ;;
+    esac
     args+=("$arg")
     continue
   fi
@@ -218,6 +258,12 @@ protected_modes=()
 preflight_failed=0
 
 for target in "\${args[@]}"; do
+  if [ -z "$target" ]; then
+    if $force; then continue; fi
+    echo "mavis-trash: '': No such file or directory" >&2
+    preflight_failed=1
+    continue
+  fi
   absolute_path="$(resolve_absolute_path "$target")" || true
   if [ -z "$absolute_path" ]; then
     if $force; then
@@ -247,6 +293,12 @@ for target in "\${args[@]}"; do
   is_directory=false
   if [ -d "$absolute_path" ]; then
     is_directory=true
+  fi
+
+  if $rm_compatible && ! $recursive && $is_directory && [ ! -L "$absolute_path" ]; then
+    echo "mavis-trash: '$target': is a directory (rm requires -r)" >&2
+    preflight_failed=1
+    continue
   fi
 
   original_paths+=("$target")
@@ -312,36 +364,80 @@ trash_file() {
 
   # The path was already validated during phase 1. Re-check only to turn a
   # race between preflight and execution into an ordinary runtime failure.
+  # With -f, duplicates and children of an already moved directory are absent
+  # by design. Only absence is ignored; backend move errors still fail.
   if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    if $force; then return 0; fi
     echo "mavis-trash: '$file': No such file or directory" >&2
     return 1
   fi
 
   case "$(uname -s)" in
     Darwin)
-      # macOS: prefer the Finder trash (it records "Put Back" metadata).
-      # Inside the sandbox MAVIS_TRASH_FORCE_MV is set: Finder would perform
-      # the unlink from its own unsandboxed process, so the kernel would never
-      # evaluate unlinkAllowOnly and delete_guard would silently not hold.
-      if [ -z "\${MAVIS_TRASH_FORCE_MV:-}" ]; then
-        # Escape backslashes and double-quotes to prevent AppleScript injection
-        local escaped_file
-        escaped_file="\${file//\\\\/\\\\\\\\}"
-        escaped_file="\${escaped_file//\\"/\\\\\\"}"
-        if osascript -e "tell application \\"Finder\\" to delete POSIX file \\"$escaped_file\\"" >/dev/null 2>&1; then
-          return 0
-        fi
+      # The sandbox must move the item in its own restricted process. Neither
+      # native recycling API may be used to delegate an unlink outside it.
+      local mode="trash"
+      if [ -n "\${MAVIS_TRASH_FORCE_MV:-}" ]; then mode="move"; fi
+      if osascript -l JavaScript -e '
+function moveWithoutOverwrite(source, trashDir) {
+  ObjC.import("Foundation");
+  ObjC.bindFunction("renamex_np", ["int", ["char *", "char *", "unsigned int"]]);
+  ObjC.bindFunction("__error", ["int *", []]);
+  var name = source.slice(source.lastIndexOf("/") + 1);
+  for (var attempt = 0; attempt < 16; attempt++) {
+    var suffix = attempt === 0 ? "" : "." + ObjC.unwrap($.NSUUID.UUID.UUIDString);
+    // RENAME_EXCL atomically refuses existing files, directories and symlinks.
+    if ($.renamex_np(source, trashDir + "/" + name + suffix, 4) === 0) return;
+    var error = $.__error()[0];
+    if (error !== 17) throw new Error("exclusive trash move failed: errno " + error);
+  }
+  throw new Error("exclusive trash move failed: too many name conflicts");
+}
+function trashWithFileManager(source) {
+  ObjC.import("Foundation");
+  var error = Ref();
+  if (!$.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError(
+    $.NSURL.fileURLWithPath(source), null, error
+  )) throw new Error("FileManager trash failed: " + ObjC.unwrap(error[0].localizedDescription));
+}
+function trashWithCoreServices(source) {
+  // Only framework/symbol unavailability permits the modern API fallback.
+  // Keep Foundation initialization out of the successful CoreServices path:
+  // preserve the Put Back behavior validated on macOS 14.
+  try {
+    ObjC.import("CoreServices");
+    ObjC.bindFunction("FSPathMakeRefWithOptions", ["int", ["char *", "unsigned int", "void *", "void *"]]);
+    ObjC.bindFunction("FSMoveObjectToTrashSync", ["int", ["void *", "void *", "unsigned int"]]);
+  } catch (unavailable) {
+    return false;
+  }
+  ObjC.bindFunction("calloc", ["void *", ["unsigned long", "unsigned long"]]);
+  ObjC.bindFunction("free", ["void", ["void *"]]);
+  // FSRef is an opaque 80-byte struct. Option 1 preserves a leaf symlink.
+  var ref = $.calloc(1, 80);
+  try {
+    var status = $.FSPathMakeRefWithOptions(source, 1, ref, null);
+    if (status === 0) status = $.FSMoveObjectToTrashSync(ref, null, 0);
+    // unimpErr / errFSOperationNotSupported; permission and other failures
+    // must not be retried through another backend.
+    if (status === -4 || status === -1426) return false;
+    if (status !== 0) throw new Error("CoreServices trash failed: OSStatus " + status);
+    return true;
+  } finally {
+    $.free(ref);
+  }
+}
+function run(argv) {
+  if (argv[1] === "move") {
+    moveWithoutOverwrite(argv[0], argv[2]);
+  } else if (!trashWithCoreServices(argv[0])) {
+    trashWithFileManager(argv[0]);
+  }
+}' -- "$file" "$mode" "$HOME/.Trash" >/dev/null; then
+        return 0
       fi
-      # In-sandbox path (and fallback): mv to ~/.Trash/
-      local basename
-      basename="$(basename "$file")"
-      local dest="$HOME/.Trash/$basename"
-      if [ -e "$dest" ]; then
-        dest="$HOME/.Trash/\${basename}.$(date +%s)"
-      fi
-      mv "$file" "$dest" 2>/dev/null && return 0
-      if [ -n "\${MAVIS_TRASH_FORCE_MV:-}" ]; then
-        echo "mavis-trash: '$file': the sandbox denied moving this file to the trash (deleting this path is not allowed in the current sandbox mode)" >&2
+      if [ "$mode" = "move" ]; then
+        echo "mavis-trash: failed to move '$file' to the trash within the sandbox; no unsafe fallback was attempted" >&2
       else
         echo "mavis-trash: failed to trash '$file'" >&2
       fi
@@ -393,8 +489,14 @@ TRASHINFO
 # I/O failures retain the existing per-target behavior and return status 1.
 exit_code=0
 for ((i = 0; i < \${#execution_paths[@]}; i++)); do
+  if $interactive; then
+    printf "rm: move '%s' to trash? " "\${original_paths[$i]}" >&2
+    reply=""
+    read -r reply || true
+    case "$reply" in [yY]|[yY][eE][sS]) ;; *) continue ;; esac
+  fi
   if trash_file "\${execution_paths[$i]}"; then
-    echo "mavis-trash: moved to trash: '\${original_paths[$i]}'"
+    if $verbose; then echo "mavis-trash: moved to trash: '\${original_paths[$i]}'"; fi
   else
     exit_code=1
   fi

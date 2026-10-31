@@ -5,7 +5,7 @@ import type { PluginAppReference } from '../plugin/package/types.js';
 const APP_FIELDS = new Set(['$schema', 'schemaVersion', 'provider']);
 const CONNECTOR_PROVIDER = /^[a-z0-9_-]{1,64}$/u;
 
-export async function readOfficialAppReference(
+export async function readAppReference(
   root: CanonicalPluginRoot,
   relativePath: string,
 ): Promise<PluginAppReference> {

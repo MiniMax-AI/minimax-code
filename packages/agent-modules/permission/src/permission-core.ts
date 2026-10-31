@@ -100,13 +100,17 @@ export type PermissionEvidence =
   | { kind: 'legacy-reason'; value: unknown }
   | { kind: 'legacy-deny'; reason: string };
 
-export type ExecutionTransform = { type: 'recoverable-delete'; targets: string[] };
+export type ExecutionTransform =
+  | { type: 'recoverable-delete'; targets: string[] }
+  | { type: 'recoverable-shell-delete'; launcher: string };
 
 export type ExecutionPlan = {
   originalInput: Record<string, unknown>;
   effectiveInput: Record<string, unknown>;
   intents: CommandIntent[];
   transforms: ExecutionTransform[];
+  /** Permission.nativeDelete captured when the decision was made. */
+  nativeDelete?: boolean;
 };
 
 export type PermissionModeProfile = {
@@ -222,6 +226,7 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
       ruleMatchers: resolveRuleMatchers(checkerResult),
       candidateScopes: resolveCandidateScopes(checkerResult),
       bypassImmune: true,
+      rewrittenInput: checkerResult.rewrittenInput,
       skipAutoClassifier: checkerResult.skipAutoClassifier,
     };
   }

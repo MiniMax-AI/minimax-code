@@ -643,23 +643,87 @@ describe('compactContext historical video recovery', () => {
   });
 });
 
-describe('compactContext provider image-limit recovery (#425)', () => {
-  function userWithImage(text: string, data: string, timestamp: number): AgentMessage {
-    return {
-      role: 'user',
-      content: [
-        { type: 'text', text },
-        { type: 'image', data, mimeType: 'image/png' },
-      ],
-      timestamp,
-    };
-  }
+describe('compactContext checkpoint images', () => {
+  it('sends every image as a line naming its file, saving the ones without one once', async () => {
+    const shot = { type: 'image' as const, data: 'secret-image-1', mimeType: 'image/png' };
+    const h0: AgentMessage[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '<attachment path="/a/cat.png" kind="image" inline="true">' },
+          { type: 'image', data: 'secret-image-0', mimeType: 'image/png' },
+        ],
+        timestamp: 0,
+      },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'shot-1', name: 'screenshot', arguments: {} }],
+        stopReason: 'toolUse',
+        timestamp: 1,
+      } as unknown as AgentMessage,
+      { ...toolResultNamed('shot-1', 'screenshot', 2), content: [shot] } as AgentMessage,
+      Object.assign(user('display wrapper', 3), { genuineUserQueryText: 'latest query' }),
+    ];
+    const generate = vi.fn<CheckpointSession['generate']>().mockResolvedValue(generation());
+    const writeImageFile = vi.fn(async () => '/artifacts/shot-1.png');
 
+    await compactContext({
+      ...policyInput(h0, { generate, fits: () => true }),
+      writeImageFile,
+    });
+
+    const sent = JSON.stringify(generate.mock.calls[0]?.[0]?.messages);
+    expect(sent).not.toMatch(/secret-image-|"type":"image"/u);
+    expect(sent).toContain('File: /a/cat.png');
+    expect(sent).toContain('File: /artifacts/shot-1.png');
+    expect(writeImageFile).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(h0)).toContain('secret-image-1');
+  });
+});
+
+describe('compactContext earlier files', () => {
+  const h0 = () => [
+    user('first', 0),
+    assistantText('done', 1),
+    Object.assign(user('display wrapper', 2), { genuineUserQueryText: 'latest query' }),
+  ];
+
+  it('names the earlier-file directories after the checkpoint summary', async () => {
+    const generate = vi.fn<CheckpointSession['generate']>().mockResolvedValue(generation());
+
+    const decision = await compactContext({
+      ...policyInput(h0(), { generate, fits: () => true }),
+      resolveEarlierFiles: async () => ({ snapshots: '/s/snapshots', toolOutputs: '/s/tools' }),
+    });
+
+    const summary = String(Reflect.get(decision.replacementMessages[0] ?? {}, 'summary'));
+    expect(summary).toContain('/s/snapshots');
+    expect(summary).toContain('/s/tools');
+  });
+
+  it('keeps the checkpoint when the directories cannot be resolved', async () => {
+    const generate = vi.fn<CheckpointSession['generate']>().mockResolvedValue(generation());
+
+    const decision = await compactContext({
+      ...policyInput(h0(), { generate, fits: () => true }),
+      resolveEarlierFiles: async () => {
+        throw new Error('Session not found');
+      },
+    });
+
+    expect(decision.method).toBe('llm_checkpoint');
+    expect(String(Reflect.get(decision.replacementMessages[0] ?? {}, 'summary'))).not.toContain(
+      'Files from before this compaction',
+    );
+  });
+});
+
+describe('compactContext provider image-limit recovery (#425)', () => {
   it('falls back to the attachment-free candidate when the Provider rejects too many images', async () => {
     const h0 = [
-      userWithImage('screenshot one', 'secret-image-1', 0),
+      userWithVideo('screenshot one', 'secret-video-1', 0),
       assistantText('seen one', 1),
-      userWithImage('screenshot two', 'secret-image-2', 2),
+      userWithVideo('screenshot two', 'secret-video-2', 2),
       assistantText('seen two', 3),
       Object.assign(user('display wrapper', 4), { genuineUserQueryText: 'latest query' }),
     ];
@@ -682,7 +746,7 @@ describe('compactContext provider image-limit recovery (#425)', () => {
     expect(decision).toMatchObject({ method: 'llm_checkpoint', generationAttempts: 2 });
     expect(generate).toHaveBeenCalledTimes(2);
     const fallback = JSON.stringify(generate.mock.calls[1]?.[0]?.messages);
-    expect(fallback).not.toContain('secret-image-');
+    expect(fallback).not.toContain('secret-video-');
     expect(fallback).not.toMatch(/"type":"image"/);
     expect(fallback).toContain('screenshot one');
     expect(attempts.map(({ candidate, attemptNumber, outcome }) => `${candidate}:${attemptNumber}:${outcome}`)).toEqual([
@@ -690,12 +754,12 @@ describe('compactContext provider image-limit recovery (#425)', () => {
       'hvideo:2:generated',
     ]);
     // Canonical history is never rewritten.
-    expect(JSON.stringify(h0)).toContain('secret-image-1');
+    expect(JSON.stringify(h0)).toContain('secret-video-1');
   });
 
   it('continues down the attachment-free ladder when the image-free candidate overflows', async () => {
     const h0 = [
-      userWithImage('old query', 'secret-image-1', 0),
+      userWithVideo('old query', 'secret-video-1', 0),
       ...threeRounds(),
       Object.assign(user('display wrapper', 7), { genuineUserQueryText: 'latest query' }),
     ];
@@ -718,14 +782,14 @@ describe('compactContext provider image-limit recovery (#425)', () => {
 
     expect(decision).toMatchObject({ method: 'llm_checkpoint' });
     const last = JSON.stringify(generate.mock.calls.at(-1)?.[0]?.messages);
-    expect(last).not.toContain('secret-image-1');
+    expect(last).not.toContain('secret-video-1');
     // Hall clears the tool bodies, so its attachment-free form is a new, smaller request.
     expect(attempts.map(({ candidate }) => candidate)).toEqual(['h0', 'hvideo', 'hvideo']);
   });
 
   it('does not resend an identical attachment-free history after it overflows', async () => {
     const h0 = [
-      userWithImage('old query', 'secret-image-1', 0),
+      userWithVideo('old query', 'secret-video-1', 0),
       assistantText('answer', 1),
       Object.assign(user('display wrapper', 2), { genuineUserQueryText: 'latest query' }),
     ];
@@ -764,7 +828,7 @@ describe('compactContext provider image-limit recovery (#425)', () => {
 
   it('fails as a Provider failure when the image-free candidate is rejected again', async () => {
     const h0 = [
-      userWithImage('old query', 'secret-image-1', 0),
+      userWithVideo('old query', 'secret-video-1', 0),
       Object.assign(user('display wrapper', 1), { genuineUserQueryText: 'latest query' }),
     ];
     const generate = vi

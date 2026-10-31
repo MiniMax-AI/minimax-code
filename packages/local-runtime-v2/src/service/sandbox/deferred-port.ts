@@ -1,6 +1,11 @@
-import { createLocalBashOperations, type BashOperations } from '@earendil-works/pi-coding-agent/tools';
-import type { BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
-import type { LocalSandboxBashOperationsFactory } from '@mavis/agent-tools/desktop';
+import {
+  createLocalBashOperations,
+  type BashOperations,
+} from '@earendil-works/pi-coding-agent/tools';
+import type {
+  LocalBashEnvPolicySource,
+  LocalSandboxBashOperationsFactory,
+} from '@mavis/agent-tools/desktop';
 
 import { initializeLocalBackgroundBashExecutor } from '../background-bash/index.js';
 import type { DeferredLocalSandboxBashOperationsFactory } from './contracts.js';
@@ -20,7 +25,7 @@ import type { SandboxInvocationOutcome } from './observability/contracts.js';
 export function createDeferredLocalSandboxBashOperationsFactory(
   desiredEnabled: () => boolean,
   /** Carries the runtime's PATH shims into background bash; see ensureRmShim. */
-  envPolicy: BashEnvPolicy,
+  envPolicy: LocalBashEnvPolicySource,
 ): DeferredLocalSandboxBashOperationsFactory {
   let current: LocalSandboxBashOperationsFactory | undefined;
   const fallback = createUnavailableSandboxBashOperationsFactory(desiredEnabled);

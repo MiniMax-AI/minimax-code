@@ -29,22 +29,12 @@ export interface BrowserTurnContextCapability {
   clearSession(sessionId: string): void;
 }
 
-interface BrowserScreenshotVisualBudget {
-  readonly maxBytes: number;
-  readonly maxEdgePx: number;
+/** `requestMedia.image`, the limits every image entering the conversation is encoded to. */
+export interface BrowserScreenshotImageEncoding {
+  readonly maxWidth: number;
+  readonly maxHeight: number;
+  readonly maxBase64Bytes: number;
 }
-
-interface BrowserCompressedScreenshot {
-  readonly dataUrl: string;
-  readonly width: number;
-  readonly height: number;
-}
-
-type BrowserScreenshotCompressionPort = (input: {
-  readonly bytes: Uint8Array;
-  readonly fileName: string;
-  readonly budget: BrowserScreenshotVisualBudget;
-}) => BrowserCompressedScreenshot | undefined;
 
 interface BrowserGeneratedScreenshotAsset {
   readonly assetId: string;
@@ -69,7 +59,7 @@ export interface BrowserUseServiceOptions {
   readonly adapter?: LocalBrowserAdapter;
   readonly toolExposure?: LocalBrowserToolExposure;
   readonly readConfig: () => BrowserUseConfigSnapshot;
-  readonly compressScreenshot: BrowserScreenshotCompressionPort;
+  readonly getImageEncoding: () => BrowserScreenshotImageEncoding;
   readonly registerGeneratedAsset: BrowserGeneratedAssetRegistrar;
   /** Desktop is Plugin-managed; CLI/TUI retain explicit config enablement. */
   readonly activationMode: 'desktop-plugin' | 'explicit-config';

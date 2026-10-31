@@ -347,6 +347,46 @@
       "homepage": "https://github.com/npm/fs-minipass#readme"
     },
     {
+      "name": "@jitl/quickjs-ffi-types",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
+    },
+    {
+      "name": "@jitl/quickjs-wasmfile-debug-asyncify",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
+    },
+    {
+      "name": "@jitl/quickjs-wasmfile-debug-sync",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
+    },
+    {
+      "name": "@jitl/quickjs-wasmfile-release-asyncify",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
+    },
+    {
+      "name": "@jitl/quickjs-wasmfile-release-sync",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
+    },
+    {
       "name": "@jridgewell/resolve-uri",
       "versions": [
         "3.1.2"
@@ -4105,6 +4145,22 @@
       ],
       "license": "MIT",
       "homepage": "https://github.com/davidmarkclements/quick-format#readme"
+    },
+    {
+      "name": "quickjs-emscripten",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
+    },
+    {
+      "name": "quickjs-emscripten-core",
+      "versions": [
+        "0.31.0"
+      ],
+      "license": "MIT",
+      "homepage": "https://github.com/justjake/quickjs-emscripten#readme"
     },
     {
       "name": "range-parser",

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { atomicWritePrivateFile } from './fs/atomic-write.js';
 import type { AuthBuildEnv, AuthRegion } from './contracts.js';
 import type { PersistedCredentialStoreKind } from './credential-store/types.js';
+import type { RefreshOwner } from './refresh-owner.js';
 
 export const AUTH_STATE_SCHEMA_VERSION = 2 as const;
 export const AUTH_STATE_MIN_SUPPORTED_SCHEMA_VERSION = 1 as const;
@@ -29,6 +30,8 @@ export interface AuthState {
   region?: AuthRegion;
   expiresAtMs?: number;
   generation: number;
+  /** Non-secret fence: this generation's predecessor must never be refreshed again. */
+  refresh?: { id: string; owner?: RefreshOwner };
   authorization?: {
     leaseId: string;
     leaseExpiresAtMs: number;
@@ -84,7 +87,8 @@ function parseState(value: unknown): AuthState {
       (typeof state.expiresAtMs === 'number' && Number.isFinite(state.expiresAtMs))) &&
     Number.isSafeInteger(state.generation) &&
     (state.generation as number) >= 0 &&
-    (state.authorization === undefined || isAuthorizationLease(state.authorization));
+    (state.authorization === undefined || isAuthorizationLease(state.authorization)) &&
+    (state.refresh === undefined || isRefreshTransaction(state.refresh));
   if (!valid) throw new TypeError('Invalid OAuth state.');
   assertNoSensitiveKeys(state);
   return state as unknown as AuthState;
@@ -95,6 +99,21 @@ function isOptionalAuthScope(buildEnv: unknown, region: unknown): boolean {
   return (
     (buildEnv === 'dev' || buildEnv === 'test' || buildEnv === 'staging' || buildEnv === 'prod') &&
     (region === 'cn' || region === 'en')
+  );
+}
+
+function isRefreshTransaction(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const transaction = value as Record<string, unknown>;
+  if (typeof transaction.id !== 'string' || !transaction.id.length) return false;
+  if (transaction.owner === undefined) return true;
+  if (typeof transaction.owner !== 'object' || transaction.owner === null) return false;
+  const owner = transaction.owner as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(owner.pid) &&
+    (owner.pid as number) > 0 &&
+    Number.isSafeInteger(owner.startedAtMs) &&
+    (owner.startedAtMs as number) > 0
   );
 }
 

@@ -14,7 +14,13 @@ import {
   buildAbortedTerminalStatusEvent,
 } from '@mavis/agent-core/event-bridge';
 import { getRuntimeBuildEnv } from '@mavis/config';
-import { RuntimeEventStatus, RuntimeEventType } from '@mavis/protocol';
+import type { RuntimeTool } from '@mavis/agent-core/tools';
+import { RespDataType } from '@mavis/agent-core/protocol/agent-message';
+import {
+  RUNTIME_EVENT_SCHEMA,
+  RuntimeEventStatus,
+  RuntimeEventType,
+} from '@mavis/protocol';
 import type { MetricsClient } from '@mavis/shared/metrics-proxy';
 
 import {
@@ -30,11 +36,20 @@ import type {
   LocalRuntimeTurnRunnerResult,
   LocalRuntimeTurnToolContext,
 } from '../execution/executor.js';
-import { LocalOutputSafetyEventWriter } from './output-safety-event-writer.js';
+import {
+  LocalOutputSafetyEventWriter,
+  SAFETY_REVIEW_SLOW_READ_MS,
+} from './output-safety-event-writer.js';
 import { runWithLocalEvalReporter, type LocalEvalReporterFactoryPort } from './eval-reporter.js';
 import { deriveLocalTurnRuntimeOutcome } from './turn-outcome.js';
 import { appendSafetyReplacement } from './safety-replacement.js';
 import { DEFAULT_OUTPUT_REVISION_INSTRUCTION } from '../preparation/config/prompt-templates.js';
+import { readPtcChildTools } from '../execution/ptc/catalog.js';
+import {
+  prepareDirectCallArguments,
+  withDirectCallArguments,
+} from './ptc/direct-call-arguments.js';
+import { createDirectCallReminder, type DirectCallReminder } from './ptc/direct-call-reminder.js';
 
 export interface LocalPiTurnRunner {
   runTurn(input: RunTurnInput<LocalRuntimeTurnToolContext>): Promise<void>;
@@ -106,6 +121,8 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       );
     } finally {
       if (isUserTurn) this.recordRegenerations(input, observation.regenerations);
+      // A PTC Turn ends with one `ptc turn summary` line; no-op on other Turns.
+      input.toolContext?.ptcObserver?.finishTurn();
     }
   }
 
@@ -251,6 +268,7 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       ...(input.persistApprovedPartialOnNetworkStop === false
         ? { persistApprovedPartialOnNetworkStop: false }
         : {}),
+      ptcEnabled: input.ptcTools !== undefined || readPtcChildTools(input.tools) !== undefined,
     });
   }
 
@@ -275,8 +293,11 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
     state.pendingRevisionInstruction = undefined;
     observeLlmAttempt(input, scope.attemptIndex, systemPrompt);
     const contextUsageAttempt = this.prepareContextUsageAttempt(input, observedLlm, safetyWriter);
+    const ptcTools = input.ptcTools ?? readPtcChildTools(input.tools);
+    const direct = directPtcChildCallWiring(input, ptcTools, toolContext);
     await this.piRunner.runTurn({
       ...toPiRunTurnInput(input),
+      ...direct.input,
       llm: contextUsageAttempt?.llm ?? observedLlm,
       systemPrompt,
       eventWriter: contextUsageAttempt?.eventWriter ?? safetyWriter,
@@ -286,6 +307,8 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       runtimeSeqGenerator: state.runtimeSeqGenerator,
       toolConfig: {
         tools: input.tools ?? [],
+        ...direct.toolConfig,
+        missingToolMessage: (toolName) => missingTurnToolMessage(toolName, ptcTools),
         disableBuiltinToolFallback: input.disableBuiltinToolFallback ?? true,
         context: toolContext,
       },
@@ -333,6 +356,7 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       await appendCancelledTurn(input, state);
       return 'break';
     }
+    if (await this.settlePtcSafetyStop(input, state, safetyWriter)) return 'break';
     if (state.inputRejected) return 'break';
     const inputCorrection = await settleInputCorrection(
       input,
@@ -356,6 +380,23 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
     state.pendingRevisionInstruction = safetyWriter.guidePrompt;
     await recallAttempt(input, safetyWriter, attemptIndex + 1);
     return 'continue';
+  }
+
+  private async settlePtcSafetyStop(
+    input: LocalRuntimeTurnRunnerInput,
+    state: MutableRunnerState,
+    writer: LocalOutputSafetyEventWriter,
+  ): Promise<boolean> {
+    if (!writer.hasPtcChildCalls() || !requiresSafetyStop(state, writer)) return false;
+    const inputSafetyStopped = state.inputRejected || state.inputCorrectionPending;
+    state.ptcSafetyStopped = true;
+    state.inputCorrectionPending = false;
+    if (writer.networkStopped) await settleNetworkStop(input, state, writer);
+    else if (!state.inputRejected) {
+      await settleOutputRetraction(input, state);
+      if (inputSafetyStopped) state.retractionSource = 'input-review';
+    }
+    return true;
   }
 
   private async settleInputReview(
@@ -415,6 +456,120 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
   }
 }
 
+function missingTurnToolMessage(
+  toolName: string,
+  childTools: readonly RuntimeTool[] | undefined,
+): string | undefined {
+  if (!childTools && toolName === 'run_code')
+    return 'run_code is disabled for this turn. Use the current native tool catalog.';
+  return undefined;
+}
+
+type PiRunTurnInput = RunTurnInput<LocalRuntimeTurnToolContext>;
+
+/**
+ * PTC-Turn wiring for direct calls of run_code children: the resolver, and the reminder
+ * hook placed after every other after-tool hook so it ends the final result. Empty when
+ * the Turn has no PTC.
+ */
+function directPtcChildCallWiring(
+  input: LocalRuntimeTurnRunnerInput,
+  ptcTools: readonly RuntimeTool[] | undefined,
+  context: LocalRuntimeTurnToolContext,
+): {
+  readonly input: Pick<PiRunTurnInput, 'hooks'>;
+  readonly toolConfig: Pick<PiRunTurnInput['toolConfig'], 'ptcTools' | 'resolveMissingTool'>;
+} {
+  if (!ptcTools) return { input: {}, toolConfig: {} };
+  const reminder = createDirectCallReminder((fields) => {
+    writePtcDirectCallEvent(context, 'ptc hidden tool reminder', fields);
+    context.ptcObserver?.directCallSettled(fields.tool, fields.tool_call_id, fields.appended);
+  });
+  return {
+    input: {
+      hooks: {
+        ...input.hooks,
+        afterToolCallHook: [...(input.hooks?.afterToolCallHook ?? []), reminder.afterToolCall],
+      },
+    },
+    toolConfig: {
+      ptcTools,
+      resolveMissingTool: (toolCall) =>
+        resolveDirectPtcChildTool(toolCall, ptcTools, context, reminder),
+    },
+  };
+}
+
+/**
+ * A run_code child the model called directly although the top-level catalog omits it runs
+ * as that native tool, as it would with PTC off, after the argument repair in
+ * `ptc/direct-call-arguments.ts`; the last such call of a reply gets the reminder of
+ * `ptc/direct-call-reminder.ts`. The events name the tool, the call, the repair kinds and
+ * whether the reminder was appended, never argument values or content.
+ */
+function resolveDirectPtcChildTool(
+  toolCall: { readonly id: string; readonly name: string; readonly arguments: unknown },
+  childTools: readonly RuntimeTool[],
+  context: LocalRuntimeTurnToolContext,
+  reminder: DirectCallReminder,
+): RuntimeTool | undefined {
+  const tool = childTools.find((candidate) => candidate.def.name === toolCall.name);
+  if (!tool) return undefined;
+  const call = { tool: toolCall.name, tool_call_id: toolCall.id };
+  writePtcDirectCallEvent(context, 'ptc hidden tool called directly', call);
+  let prepared: { readonly fixes: readonly string[]; readonly valid: boolean };
+  try {
+    prepared = prepareDirectCallArguments(tool, toolCall.arguments);
+  } catch {
+    // The tool's own preparation threw; Pi reports that error when it prepares the call.
+    prepared = { fixes: [], valid: false };
+  }
+  writePtcDirectCallEvent(context, 'ptc hidden tool arguments prepared', {
+    ...call,
+    fixes: [...prepared.fixes],
+    valid: prepared.valid,
+  });
+  // Before noteResolved: an invalid call is settled (and logged) inside it.
+  context.ptcObserver?.directCallResolved(toolCall.id, prepared.valid);
+  reminder.noteResolved(toolCall, prepared.valid);
+  return withDirectCallArguments(tool);
+}
+
+function writePtcDirectCallEvent(
+  context: LocalRuntimeTurnToolContext,
+  event: string,
+  fields: Readonly<Record<string, unknown>>,
+): void {
+  try {
+    context.ptcLogger?.info?.(
+      { session_id: context.sessionId, turn_id: context.turnId, ...fields },
+      event,
+    );
+  } catch {
+    // Diagnostics must not change the tool call.
+  }
+}
+
+function requiresSafetyStop(
+  state: MutableRunnerState,
+  writer: LocalOutputSafetyEventWriter,
+): boolean {
+  return (
+    state.inputRejected || state.inputCorrectionPending || writer.blocked || writer.networkStopped
+  );
+}
+
+function isSlowReview(startMs: number): boolean {
+  return Date.now() - startMs >= SAFETY_REVIEW_SLOW_READ_MS;
+}
+
+/** 审核返回（或抛错）时看耗时：等了 15 秒以上先通知慢送审，再把是否慢交给调用方。 */
+function observeReviewElapsed(startMs: number, observeSlowReview: () => void): boolean {
+  const slow = isSlowReview(startMs);
+  if (slow) observeSlowReview();
+  return slow;
+}
+
 function reportInputReviewResolution(input: LocalRuntimeTurnRunnerInput, rejected: boolean): void {
   if (input.deferInputReviewResolution !== true) {
     input.onInputReviewResolved?.(rejected);
@@ -460,6 +615,7 @@ interface MutableRunnerState {
   retracted: boolean;
   networkStopped: boolean;
   inputSafetyReviewUnknown: boolean;
+  ptcSafetyStopped: boolean;
   approvedPartial?: LocalRuntimeTurnRunnerResult['approvedPartial'];
   retractionVariant?: LocalRuntimeTurnRunnerResult['retractionVariant'];
   retractionSource?: 'input-review' | 'output-review';
@@ -479,6 +635,7 @@ function createMutableRunnerState(input: LocalRuntimeTurnRunnerInput): MutableRu
     retracted: false,
     networkStopped: false,
     inputSafetyReviewUnknown: false,
+    ptcSafetyStopped: false,
     finalAttemptEventStart: (input.eventWriter.outcome?.eventCount ?? input.eventWriter.events.length),
     eventIdGenerator:
       input.eventIdGenerator ??
@@ -735,6 +892,7 @@ function deriveReconcile(
   state: MutableRunnerState,
   status: LocalAgentTurnRunnerResult['outcome']['status'],
 ): LocalRuntimeTurnRunnerResult['reconcile'] {
+  if (state.ptcSafetyStopped) return { kind: 'safety-reconcile', approvedContent: '' };
   if (state.retracted) {
     return {
       kind: 'output-recall',

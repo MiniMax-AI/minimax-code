@@ -7,6 +7,7 @@ import type {
 } from './business-telemetry.js';
 import { bucketMcodeDuration } from './business-telemetry.js';
 import type { AutocompleteItem, AutocompleteSuggestions } from '../tui/widgets/autocomplete.js';
+import type { TuiPromptSuggestionMetric } from '../tui/features/composer/prompt-suggestion.js';
 
 export interface TuiBusinessEventContext {
   readonly chatType: () => McodeChatType;
@@ -48,6 +49,18 @@ export class TuiBusinessEventTracker {
         openedAt === undefined ? 0 : Math.max(0, Date.now() - openedAt),
       ),
       exit_reason: input.exitReason,
+    });
+  }
+
+  trackPromptSuggestion(metric: TuiPromptSuggestionMetric): void {
+    const { suggestion } = metric;
+    this.track('prompt_suggestion', {
+      session_id: suggestion.sessionId,
+      turn_id: suggestion.turnId,
+      prompt_version: suggestion.promptVersion ?? '',
+      elapsed_ms: suggestion.elapsedMs ?? 0,
+      action: metric.action,
+      ...(metric.action === 'sent' ? { edited: metric.edited } : {}),
     });
   }
 

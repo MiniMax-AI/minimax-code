@@ -11,9 +11,12 @@ import {
   asString,
   cdp,
   delay,
+  type CdpExceptionDetails,
+  describeCdpException,
   evaluate,
   resolveBrowserSnapshotElement,
   stringArray,
+  type Rect,
   type BrowserSessionState as SessionState,
 } from './browser-state.js';
 import type { CDPEditableState, CDPRenderedState } from './cdp-helper-contracts.js';
@@ -414,7 +417,7 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
     const clickCount = Math.max(1, Math.floor(asNumber(input.clickCount ?? input.click_count, 1)));
     await session.beforePointerAction?.(
       {
-        action: clickCount > 1 ? 'double_click' : 'click',
+        action: clickCount > 2 ? 'triple_click' : clickCount > 1 ? 'double_click' : 'click',
         point: { x: target.x, y: target.y },
       },
       session.commandSignal,
@@ -518,11 +521,16 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
         result.success = true;
       }
     }
-    if (navigationDetected) {
-      result.success = false;
-      result.code = 'UNEXPECTED_NAVIGATION';
-      result.error = 'Ordinary click changed the page URL; inspect the new page before continuing.';
-      result.recovery = 'Inspect the current page and use a newly observed ref.';
+    if (navigationDetected && result.code !== 'DOWNLOAD_CANCELED') {
+      // The click was dispatched and the page observably navigated. Clicking a
+      // link is the most common way to navigate, so this is a completed action,
+      // not a failure (eval: 139 false failures on successful link clicks).
+      // Keep the navigation facts explicit because every earlier ref is now
+      // invalid; the caller must observe the new page before acting on it.
+      result.success = true;
+      result.message =
+        'The click navigated the page. Refs from earlier snapshots are no longer valid.';
+      result.recovery = 'Inspect or query the new page before the next interaction.';
     }
     return result;
   }
@@ -675,12 +683,32 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
     let inputDispatched = false;
     if (session.generation !== beforeGeneration) return unexpectedNavigation(false);
     if (target.backendNodeId === undefined) {
-      const normalizedCoordinateTarget =
-        input.normalized_position !== undefined &&
-        input.position === undefined &&
+      // Coordinate locators (absolute or normalized) focus the field under the
+      // point with a real click, then type into whatever received focus.
+      const coordinateTarget =
+        (input.normalized_position !== undefined || input.position !== undefined) &&
         !asString(input.ref) &&
         !asString(input.selector);
-      if (!normalizedCoordinateTarget) throw new Error('TYPE_REQUIRES_ELEMENT_REF');
+      if (!coordinateTarget) throw new Error('TYPE_REQUIRES_ELEMENT_REF');
+      // A point on a native date/time/range control must take the same value
+      // path as a ref: click + insertText is exactly what failed on these
+      // controls in eval 761096, and here it would fail silently (verified:false).
+      const pointedInput = await this.resolveControlAtPoint(session, target, 'input');
+      if (session.generation !== beforeGeneration) return unexpectedNavigation(false);
+      if (pointedInput !== undefined) {
+        const pointedValueControl = await this.readValueControlType(session, pointedInput);
+        if (session.generation !== beforeGeneration) return unexpectedNavigation(false);
+        if (pointedValueControl) {
+          return this.applyValueControl(session, {
+            backendNodeId: pointedInput,
+            inputType: pointedValueControl,
+            text,
+            rect: target.rect,
+            startedAt,
+            beforeGeneration,
+          });
+        }
+      }
       await session.beforePointerAction?.(
         { action: 'type', point: { x: target.x, y: target.y } },
         session.commandSignal,
@@ -740,6 +768,24 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
       ? (resolveBrowserSnapshotElement(session, ref)?.element ??
         session.elementMap.getElementByOpaqueRef(ref))
       : null;
+    if (target.virtualEditor !== true) {
+      // Refs carry the inspected input type, so the common path costs no extra
+      // CDP round trip; only selector targets read it from the live node.
+      const valueControlType = observedElement
+        ? valueControlTypeOf(observedElement.tag, observedElement.attributes.type)
+        : await this.readValueControlType(session, backendNodeId);
+      if (session.generation !== beforeGeneration) return unexpectedNavigation(false);
+      if (valueControlType) {
+        return this.applyValueControl(session, {
+          backendNodeId,
+          inputType: valueControlType,
+          text,
+          rect: target.rect,
+          startedAt,
+          beforeGeneration,
+        });
+      }
+    }
     const inspectionOptions = {
       ...(session.commandSignal ? { signal: session.commandSignal } : {}),
       ...(session.commandTimeoutMs ? { timeoutMs: session.commandTimeoutMs } : {}),
@@ -776,6 +822,9 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
         'contentEditable' in before
           ? before.contentEditable
           : observedElement?.attributes.contenteditable === 'true',
+      ...(observedElement?.attributes.type
+        ? { inputType: observedElement.attributes.type.toLowerCase() }
+        : {}),
       ...(target.virtualEditor === true ? { virtual: true } : {}),
       rect: target.rect,
     };
@@ -833,8 +882,15 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
         ...(session.commandTimeoutMs ? { timeoutMs: session.commandTimeoutMs } : {}),
       });
       if (session.generation !== beforeGeneration) return unexpectedNavigation(inputDispatched);
-      await this.dispatchKey(session, 'Backspace', []);
-      if (session.generation !== beforeGeneration) return unexpectedNavigation(inputDispatched);
+      // Native inputs replace the selection with the inserted text in one input
+      // event. Deleting first exposes an empty intermediate value that
+      // controlled number fields reset to "0", so fill "13" produced "013"
+      // (eval 762809). Only an empty replacement still needs Backspace; virtual
+      // editors keep the explicit delete because their key path is not insertText.
+      if (target.virtualEditor === true || text.length === 0) {
+        await this.dispatchKey(session, 'Backspace', []);
+        if (session.generation !== beforeGeneration) return unexpectedNavigation(inputDispatched);
+      }
     }
     if (target.virtualEditor === true) {
       for (const char of text) {
@@ -968,6 +1024,137 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
     return result;
   }
 
+  /**
+   * Native date/time/color/range inputs ignore Input.insertText: their editors
+   * are segmented or non-textual, so keystroke text never becomes the value
+   * (eval 761096: 16 ACTION_EFFECT_MISMATCH + 5 NOT_OBSERVED on date fields).
+   * Like Playwright's fill, set the canonical value through the native setter
+   * and dispatch input/change so framework listeners observe it.
+   */
+  private async readValueControlType(
+    session: SessionState,
+    backendNodeId: number,
+  ): Promise<ValueControlType | undefined> {
+    let objectId: string | undefined;
+    try {
+      const resolved = await cdp<{ object?: { objectId?: string } }>(session, 'DOM.resolveNode', {
+        backendNodeId,
+      });
+      objectId = resolved.object?.objectId;
+      if (!objectId) return undefined;
+      const state = await cdp<{ result?: { value?: unknown } }>(session, 'Runtime.callFunctionOn', {
+        objectId,
+        functionDeclaration: `function () {
+          return this instanceof HTMLInputElement ? String(this.type || '').toLowerCase() : '';
+        }`,
+        returnByValue: true,
+      });
+      const type = state.result?.value;
+      return valueControlTypeOf('input', typeof type === 'string' ? type : undefined);
+    } catch (error) {
+      if (isBrowserOperationInterruption(error)) throw error;
+      return undefined;
+    } finally {
+      if (objectId) {
+        await cdp(session, 'Runtime.releaseObject', { objectId }).catch(() => undefined);
+      }
+    }
+  }
+
+  private async applyValueControl(
+    session: SessionState,
+    request: {
+      backendNodeId: number;
+      inputType: ValueControlType;
+      text: string;
+      rect: Rect | undefined;
+      startedAt: number;
+      beforeGeneration: number;
+    },
+  ): Promise<Record<string, unknown>> {
+    const { backendNodeId, inputType, text, startedAt } = request;
+    const resolved = await cdp<{ object?: { objectId?: string } }>(session, 'DOM.resolveNode', {
+      backendNodeId,
+    });
+    const objectId = resolved.object?.objectId;
+    if (!objectId) {
+      throw new Error(
+        'STALE_ELEMENT_REF: the inspected element was replaced or removed; inspect again and use the new ref',
+      );
+    }
+    let applied: { value?: unknown; disabled?: unknown } | undefined;
+    try {
+      const response = await cdp<{ result?: { value?: unknown } }>(
+        session,
+        'Runtime.callFunctionOn',
+        {
+          objectId,
+          functionDeclaration: `function (value) {
+            if (this.disabled || this.readOnly) return { disabled: true, value: String(this.value) };
+            this.focus();
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+            if (setter && setter.set) setter.set.call(this, value);
+            else this.value = value;
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+            return { disabled: false, value: String(this.value) };
+          }`,
+          arguments: [{ value: text }],
+          returnByValue: true,
+        },
+      );
+      applied = response.result?.value as typeof applied;
+    } finally {
+      await cdp(session, 'Runtime.releaseObject', { objectId }).catch(() => undefined);
+    }
+    const generationChanged = session.generation !== request.beforeGeneration;
+    this.invalidateObservation(session);
+    const actual = typeof applied?.value === 'string' ? applied.value : '';
+    const disabled = applied?.disabled === true;
+    const matches =
+      inputType === 'color'
+        ? actual.toLowerCase() === text.toLowerCase()
+        : inputType === 'range'
+          ? Number(actual) === Number(text)
+          : inputType === 'time' || inputType === 'datetime-local'
+            ? // Clearing is a valid fill; only a non-empty value the browser
+              // rejected (sanitized to '') counts as a mismatch.
+              text.trim() === ''
+              ? actual === ''
+              : actual !== '' && canonicalTemporalValue(actual) === canonicalTemporalValue(text)
+            : actual === text;
+    const verified = !disabled && matches;
+    const format = VALUE_CONTROL_FORMATS[inputType];
+    const result: Record<string, unknown> = {
+      success: verified,
+      durationMs: Date.now() - startedAt,
+      target: { resolved: true, tag: 'input', inputType, rect: request.rect },
+      effect: {
+        dispatched: !disabled,
+        verified,
+        verificationRequired: !verified,
+        mode: 'value',
+        value: actual,
+      },
+      navigation: { detected: generationChanged, generation: session.generation },
+    };
+    if (!verified) {
+      const error = disabled
+        ? `The <input type="${inputType}"> is disabled or read-only.`
+        : actual === ''
+          ? `The <input type="${inputType}"> rejected "${text}": it only accepts the format ${format}.`
+          : `The <input type="${inputType}"> normalized "${text}" to "${actual}".`;
+      result.code = disabled ? 'TARGET_NOT_EDITABLE' : 'ACTION_EFFECT_MISMATCH';
+      result.error = error;
+      result.message = error;
+      result.retryable = !disabled;
+      result.recovery = disabled
+        ? 'Inspect the page; enable the field first or choose a different control.'
+        : `Retry fill with the value in ${format} (not the displayed locale format); do not type into the field segments.`;
+    }
+    return result;
+  }
+
   private async insertText(
     session: SessionState,
     text: string,
@@ -1048,7 +1235,7 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
     try {
       const focused = await cdp<{
         result?: { value?: { focused?: boolean; editable?: boolean; withinTarget?: boolean } };
-        exceptionDetails?: { text?: string };
+        exceptionDetails?: CdpExceptionDetails;
       }>(session, 'Runtime.callFunctionOn', {
         objectId,
         functionDeclaration: `function () {
@@ -1079,7 +1266,7 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
         awaitPromise: true,
       });
       if (focused.exceptionDetails) {
-        throw new Error(focused.exceptionDetails.text || 'INPUT_FOCUS_REJECTED');
+        throw new Error(describeCdpException(focused.exceptionDetails, 'INPUT_FOCUS_REJECTED'));
       }
       const state = focused.result?.value;
       if (!state?.focused || !state.editable || !state.withinTarget) {
@@ -1392,4 +1579,48 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
 
 function isSupportedBrowserUrl(url: string): boolean {
   return /^(?:https?|file|data|about):/iu.test(url.trim());
+}
+
+const VALUE_CONTROL_FORMATS = {
+  date: 'YYYY-MM-DD, e.g. 2026-03-09',
+  time: 'HH:MM or HH:MM:SS in 24-hour time, e.g. 14:30',
+  'datetime-local': 'YYYY-MM-DDTHH:MM, e.g. 2026-03-09T14:30',
+  month: 'YYYY-MM, e.g. 2026-03',
+  week: 'YYYY-Www, e.g. 2026-W10',
+  color: 'lowercase #rrggbb, e.g. #1a2b3c',
+  range: 'a number within the slider min/max and step',
+} as const;
+type ValueControlType = keyof typeof VALUE_CONTROL_FORMATS;
+
+/**
+ * Chrome stores time and datetime-local values in a canonical form: zero
+ * seconds/milliseconds are dropped and a space separator becomes "T"
+ * ("2026-03-09 14:30:00" → "2026-03-09T14:30"). Compare both sides in that
+ * form so an accepted value is not reported as ACTION_EFFECT_MISMATCH.
+ */
+function canonicalTemporalValue(value: string): string {
+  const match = /^(?:(\d{4,}-\d{2}-\d{2})[T ])?(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/u.exec(
+    value.trim(),
+  );
+  if (!match) return value;
+  const [, date, hours, minutes, seconds = '00', fraction = ''] = match;
+  const millis = fraction.padEnd(3, '0');
+  const time =
+    millis !== '000'
+      ? `${hours}:${minutes}:${seconds}.${millis}`
+      : seconds !== '00'
+        ? `${hours}:${minutes}:${seconds}`
+        : `${hours}:${minutes}`;
+  return date ? `${date}T${time}` : time;
+}
+
+function valueControlTypeOf(
+  tag: string | undefined,
+  type: string | undefined,
+): ValueControlType | undefined {
+  if (tag?.toLowerCase() !== 'input' || !type) return undefined;
+  const normalized = type.toLowerCase();
+  return Object.prototype.hasOwnProperty.call(VALUE_CONTROL_FORMATS, normalized)
+    ? (normalized as ValueControlType)
+    : undefined;
 }

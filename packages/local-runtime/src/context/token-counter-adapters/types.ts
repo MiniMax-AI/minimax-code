@@ -52,7 +52,6 @@ export interface RemoteTokenCounter {
 
 export interface RemoteTokenCounterHttpRequest {
   url: string;
-  unsupportedCacheKey: string;
   body: unknown;
   headers: Record<string, string>;
   hasImages: boolean;

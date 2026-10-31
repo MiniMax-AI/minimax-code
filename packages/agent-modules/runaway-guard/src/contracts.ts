@@ -105,6 +105,30 @@ export interface RunawayGuardToolPolicy {
   readonly projectProgress?: (
     step: RunawayGuardToolStep,
   ) => RunawayGuardProgressProjection | undefined;
+  /**
+   * List the calls this tool made inside one execution (for example PTC
+   * run_code children), read only from its trusted structured result, so they
+   * count like calls of the same step under their own tool policies.
+   */
+  readonly projectChildSteps?: (step: RunawayGuardToolStep) => readonly RunawayGuardChildStep[];
+}
+
+/** One child call as recorded by its parent tool; there is no result text to inspect. */
+export interface RunawayGuardChildStep {
+  readonly toolName: string;
+  /**
+   * Omitted when the parent did not keep this child's arguments. Such a child
+   * has no action identity, so it never counts as a repeated call or result.
+   */
+  readonly arguments?: unknown;
+  readonly isError: boolean;
+  /** Parent-assigned code of a failed child (for PTC, the PTC_* code). */
+  readonly errorCode?: string;
+  /**
+   * Code the child tool itself reported. With kept arguments it keys the error
+   * family like a native call; without them it groups failures across tools.
+   */
+  readonly toolErrorCode?: string;
 }
 
 export interface RunawayGuardObservation {
@@ -131,6 +155,8 @@ export interface RunawayGuardTurnSummary {
   readonly agentName: string;
   readonly stepCount: number;
   readonly projectionSkippedCount: number;
+  /** Child calls counted this Turn; shows that run_code Turns are observed at all. */
+  readonly childStepsProjected: number;
   readonly reminderInjected: boolean;
   readonly signals: Readonly<Record<RunawayGuardSignalKind, RunawayGuardSignalSummary>>;
 }

@@ -1,7 +1,8 @@
 export type WindowsNativeDeleteCommand = {
-  command: 'del' | 'erase' | 'rd' | 'rmdir' | 'remove-item' | 'ri';
+  command: 'del' | 'erase' | 'rd' | 'rmdir' | 'remove-item' | 'ri' | 'rm';
   shell: 'cmd' | 'powershell';
   targets: string[];
+  targetTokens: WindowsToken[];
   recursive?: boolean;
   force?: boolean;
 };
@@ -15,7 +16,8 @@ type WindowsToken = {
 
 const CMD_FILE_DELETE = new Set(['del', 'erase']);
 const CMD_DIRECTORY_DELETE = new Set(['rd', 'rmdir']);
-const POWERSHELL_DELETE = new Set(['remove-item', 'ri']);
+// Built-in PowerShell aliases that resolve to Remove-Item on Windows.
+const POWERSHELL_DELETE = new Set(['remove-item', 'ri', 'rm', 'del', 'erase', 'rd', 'rmdir']);
 const CMD_FILE_FLAGS = new Set(['/f', '/q']);
 const CMD_DIRECTORY_FLAGS = new Set(['/s', '/q']);
 const POWERSHELL_FLAGS = new Set(['-recurse', '-force']);
@@ -43,7 +45,10 @@ export function parseWindowsNativeDelete(
     return undefined;
   }
   if (POWERSHELL_DELETE.has(executable))
-    return parsePowerShellDelete(executable as 'remove-item' | 'ri', tokens.slice(1));
+    return parsePowerShellDelete(
+      executable as WindowsNativeDeleteCommand['command'],
+      tokens.slice(1),
+    );
   return undefined;
 }
 
@@ -53,7 +58,7 @@ function parseCmdDelete(
   directoryDelete: boolean,
 ): WindowsNativeDeleteCommand | undefined {
   const acceptedFlags = directoryDelete ? CMD_DIRECTORY_FLAGS : CMD_FILE_FLAGS;
-  const targets: string[] = [];
+  const targetTokens: WindowsToken[] = [];
   let recursive = false;
   let force = false;
 
@@ -70,24 +75,25 @@ function parseCmdDelete(
     // fail-closed instead of treating a flag as a deletion target.
     if (!token.quoted && lower.startsWith('-')) return undefined;
     if (!isLiteralWindowsTarget(token.value)) return undefined;
-    targets.push(token.value);
+    targetTokens.push(token);
   }
 
-  if (targets.length === 0 || (directoryDelete && !recursive)) return undefined;
+  if (targetTokens.length === 0 || (directoryDelete && !recursive)) return undefined;
   return {
     command,
     shell: 'cmd',
-    targets,
+    targets: targetTokens.map((token) => token.value),
+    targetTokens,
     ...(recursive ? { recursive: true } : {}),
     ...(force ? { force: true } : {}),
   };
 }
 
 function parsePowerShellDelete(
-  command: 'remove-item' | 'ri',
+  command: WindowsNativeDeleteCommand['command'],
   operands: WindowsToken[],
 ): WindowsNativeDeleteCommand | undefined {
-  const targets: string[] = [];
+  const targetTokens: WindowsToken[] = [];
   let recursive = false;
   let force = false;
 
@@ -99,15 +105,19 @@ function parsePowerShellDelete(
       if (lower === '-force') force = true;
       continue;
     }
+    // CMD-style switches (`del /q`, `rd /s`) are drive-relative paths to
+    // Remove-Item. Refuse them rather than deleting something like `\s`.
+    if (!token.quoted && /^\/[a-z?](?::|$)/.test(lower)) return undefined;
     if (!isLiteralWindowsTarget(token.value) || token.value.includes(',')) return undefined;
-    targets.push(token.value);
+    targetTokens.push(token);
   }
 
-  if (targets.length === 0) return undefined;
+  if (targetTokens.length === 0) return undefined;
   return {
     command,
     shell: 'powershell',
-    targets,
+    targets: targetTokens.map((token) => token.value),
+    targetTokens,
     ...(recursive ? { recursive: true } : {}),
     ...(force ? { force: true } : {}),
   };

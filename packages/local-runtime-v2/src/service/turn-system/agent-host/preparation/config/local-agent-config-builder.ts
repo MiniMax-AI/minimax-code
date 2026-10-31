@@ -217,10 +217,11 @@ export class LocalAgentConfigBuilder {
     promptRead?: PromptReadScope,
   ): Promise<IAgentConfig> {
     const config = this.options.config();
-    const runtimeFacts = resolveAgentRuntimeFacts(input.agent, config);
+    const runtimeFacts = resolveAgentRuntimeFacts(input.agent, config, input.session);
     const profileAndBinding = await this.renderProfileForTurn({
       ...input,
       ...(promptRead ? { promptRead } : {}),
+      ...ptcRequestedField(runtimeFacts),
     });
     const profile = profileAndBinding.profile;
     const turnInput = input;
@@ -334,6 +335,7 @@ export class LocalAgentConfigBuilder {
     readonly agent: AgentExecutionSnapshot;
     readonly isSessionFirstTurn: boolean;
     readonly promptRead?: PromptReadScope;
+    readonly ptcRequested?: boolean;
   }): Promise<{
     readonly profile?: LocalAgentExecutionProfile;
     readonly binding?: TaskSessionBinding;
@@ -430,12 +432,26 @@ async function readRetryContinuationPrompt(
   );
 }
 
+/**
+ * The same Session mode that becomes agentConfig.ptc_enabled, which the tool
+ * catalog reads, so the prompt's PTC section and the PTC catalog are decided
+ * from one fact on every build of this Session (Turns, compaction, title,
+ * Context Debug) and the prompt prefix does not depend on what started the Turn.
+ */
+function ptcRequestedField(runtimeFacts: Pick<AgentRuntimeFacts, 'ptcEnabled'>): {
+  readonly ptcRequested?: true;
+} {
+  return runtimeFacts.ptcEnabled ? { ptcRequested: true } : {};
+}
+
 interface AgentRuntimeFacts {
   readonly resourceAgentName: string;
   readonly builtinCapabilities: ResolvedAgentCapabilities;
   readonly builtinSkillNames?: readonly string[];
   readonly cuModeActive: boolean;
   readonly exposeCuModeActive: boolean;
+  /** The Session's tool call mode, read once while assembling this Turn. */
+  readonly ptcEnabled: boolean;
 }
 
 interface LoadedPromptLayers {
@@ -896,6 +912,7 @@ function createAgentConfig(scope: {
     builtinCapabilities: ResolvedAgentCapabilities;
     cuModeActive: boolean;
     desktopPluginSkills: readonly { readonly pluginName: string; readonly name: string }[];
+    ptc_enabled?: boolean;
     capability_ceiling?: LocalAgentExecutionProfile['capabilityCeiling'];
     prompt_metadata?: Readonly<Record<string, unknown>>;
     agent_profile?: {
@@ -959,6 +976,7 @@ function createAgentConfig(scope: {
         }
       : {}),
   };
+  if (runtimeFacts.ptcEnabled) agentConfig.ptc_enabled = true;
   attachCustomConfigEvidence(agentConfig, customConfig);
   return agentConfig;
 }
@@ -973,6 +991,7 @@ function attachCustomConfigEvidence(
 function resolveAgentRuntimeFacts(
   agent: AgentExecutionSnapshot,
   config: LocalConversationRuntimeConfig,
+  session: Pick<SessionRecord, 'toolCallMode'>,
 ): AgentRuntimeFacts {
   return {
     resourceAgentName: agent.resourceAgentName?.trim() || agent.agentName,
@@ -981,6 +1000,10 @@ function resolveAgentRuntimeFacts(
     ...(agent.builtinSkillNames ? { builtinSkillNames: agent.builtinSkillNames } : {}),
     cuModeActive: agent.cuModeActive === true,
     exposeCuModeActive: agent.cuModeActive !== undefined,
+    // Fixed at Session creation and refreshed only after a summary compaction (beta.ptc resolved
+    // for the build then), so toggling beta.ptc never changes an ongoing conversation's prompt
+    // prefix.
+    ptcEnabled: session.toolCallMode === 'ptc',
   };
 }
 

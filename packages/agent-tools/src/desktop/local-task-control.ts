@@ -15,6 +15,7 @@ import type {
   LocalTaskOutputReadResult,
 } from './types.js';
 import { formatBashExecutionOutcome, readBashExecutionOutcome } from './local-bash-result.js';
+import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 
 const MAX_TASK_OUTPUT_WAIT_MS = 30_000;
 
@@ -242,8 +243,14 @@ function executionMode(task: BackgroundTask): string | undefined {
   return typeof mode === 'string' && mode ? mode : undefined;
 }
 
+/** Successful task-control results also state their completeness for PTC (side channel only). */
 function ok(toolName: string, text: string, details: Record<string, unknown>): ToolResult {
-  return { tool_name: toolName, text, content: [{ type: 'text', text }], details };
+  return withDesktopCompletenessReport(toolName, {
+    tool_name: toolName,
+    text,
+    content: [{ type: 'text', text }],
+    details,
+  });
 }
 
 function notFound(

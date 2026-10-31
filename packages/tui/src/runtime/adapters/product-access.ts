@@ -90,6 +90,28 @@ export class TuiProductAccess {
     );
   }
 
+  /** Undefined when this Runtime cannot read the switch. */
+  async getPromptSuggestionEnabled(): Promise<boolean | undefined> {
+    return this.context.service('config.prompt-suggestion.read').getPromptSuggestionEnabled();
+  }
+
+  /** Undefined when this Runtime cannot persist the switch. */
+  async setPromptSuggestionEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.context
+      .service('config.prompt-suggestion.write')
+      .setPromptSuggestionEnabled(enabled);
+  }
+
+  /** Undefined when this Runtime cannot read the switch. */
+  async getPtcEnabled(): Promise<boolean | undefined> {
+    return this.context.service('config.ptc.read').getPtcEnabled();
+  }
+
+  /** Undefined when this Runtime cannot persist the switch. */
+  async setPtcEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.context.service('config.ptc.write').setPtcEnabled(enabled);
+  }
+
   async listModels(sessionId?: string): Promise<TuiModel[]> {
     const service = this.context.service("model.list");
     const request = { ...(sessionId ? { sessionId } : {}) };
@@ -382,6 +404,7 @@ export class TuiProductAccess {
           : "idle",
       ...(turnId ? { turnId } : {}),
       actions: { steer: steerable },
+      ...(started && activeTurn?.ownedByOtherRuntime ? { runningElsewhere: true as const } : {}),
     };
   }
 

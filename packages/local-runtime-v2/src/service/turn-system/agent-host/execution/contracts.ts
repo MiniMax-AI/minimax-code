@@ -11,7 +11,12 @@ import type {
   TurnEventReporter,
   UserMessageInput,
 } from '@mavis/agent-core/pi-turn-runner';
-import type { RuntimeTool, ToolExecutionContext } from '@mavis/agent-core/tools';
+import type {
+  PtcToolFactCollector,
+  PtcToolResultProjection,
+  RuntimeTool,
+  ToolExecutionContext,
+} from '@mavis/agent-core/tools';
 
 import type { InputSafetyDecision } from '../../../content-safety/index.js';
 import type {
@@ -28,6 +33,8 @@ import type {
   LocalTurnOutputTokenCapResolver,
   LocalTurnToolPolicyGuard,
 } from '../runner/contracts.js';
+import type { PromptSuggestionTurnPort } from '../runner/prompt-suggestion/prompt-suggestion-service.js';
+import type { PtcMetrics, PtcSurface, PtcTurnObserver } from '../runner/ptc/ptc-observability.js';
 import type {
   FileApiUploadStoreSource,
   MessagesFileApiPatcherLogger,
@@ -56,6 +63,8 @@ export type LocalRuntimeTurnRunnerInput<
 > = Omit<RunTurnInput<TContext>, 'eventWriter' | 'toolConfig'> & {
   readonly eventWriter: LocalTurnEventWriter;
   readonly tools?: readonly RuntimeTool[];
+  /** Hidden PTC child catalog after the same process-local result policy as visible tools. */
+  readonly ptcTools?: readonly RuntimeTool[];
   readonly disableBuiltinToolFallback?: boolean;
   readonly toolContext?: TContext;
   readonly reviewUserInput?: string;
@@ -113,6 +122,19 @@ export interface LocalRuntimeTurnToolContext extends ToolExecutionContext {
   readonly trustedExactWritePaths: readonly string[];
   /** Native files materialized from user attachments during this active Turn. */
   readonly browserAssets?: readonly AgentHostBrowserAsset[];
+  /**
+   * Host runner logger, present only on PTC turns. run_code writes one
+   * structured line per program with it, and the runner two lines per direct
+   * call of a run_code child (the call, then its argument repair); guest code
+   * can never reach it.
+   */
+  readonly ptcLogger?: Pick<PiTurnRunnerLogger, 'info'>;
+  /**
+   * Present only on PTC turns. run_code and the direct-call wiring report
+   * programs, children and direct calls to it, and the runner closes it with
+   * one `ptc turn summary` line; guest code can never reach it.
+   */
+  readonly ptcObserver?: PtcTurnObserver;
 }
 
 export type LocalRuntimeTurnReconcileSignal =
@@ -120,8 +142,14 @@ export type LocalRuntimeTurnReconcileSignal =
       readonly kind: 'output-recall';
       readonly source?: 'input-review' | 'output-review';
       readonly variant: 'content' | 'network' | 'auth';
+      readonly slowNetworkRead?: true;
     }
-  | { readonly kind: 'network-reconcile'; readonly approvedContent?: string }
+  | {
+      readonly kind: 'network-reconcile';
+      readonly approvedContent?: string;
+      readonly slowNetworkRead?: true;
+    }
+  | { readonly kind: 'safety-reconcile'; readonly approvedContent: string }
   | { readonly kind: 'abort-reconcile'; readonly approvedContent?: string };
 
 export interface LocalRuntimeTurnRunnerResult {
@@ -147,6 +175,12 @@ export interface LocalRuntimeTurnRuntimeOutcome {
   readonly errorDetail?: string;
   readonly errorProviderId?: string;
   readonly messageId?: string;
+  /**
+   * The last assistant message that carried visible text: the reply the user
+   * reads, copies and rates. Unlike `messageId`, tool-call-only frames, user
+   * frames and system events never count.
+   */
+  readonly replyMessageId?: string;
   readonly waitingForUser?: boolean;
 }
 
@@ -204,6 +238,7 @@ export interface LocalTurnHookMergeOptions<
   readonly toolSafetyGuard?: LocalTurnToolSafetyGuard;
   readonly toolPolicyGuard?: LocalTurnToolPolicyGuard;
   readonly finalizeToolResultForHistory?: LocalToolResultHistoryFinalizer;
+  readonly ptcFactCollector?: PtcToolFactCollector;
 }
 
 export interface LocalTurnExecutionPreparation<TContext extends ToolExecutionContext> {
@@ -281,6 +316,8 @@ export interface LocalRuntimeTurnExecutorOptions<
 > {
   readonly runtime: LocalRuntimeTurnRunnerPort<TContext>;
   readonly backgroundCadenceReminder?: BackgroundCadenceReminder;
+  /** Read when preparing a new Turn's Bash guidance, not during the model loop. */
+  readonly nativeDelete?: () => boolean;
   readonly canAppendExecutionBudgetReminder?: ExecutionBudgetReminderAdmission;
   /** Exact child Turn scope; notifications join this Turn and never independently reactivate it. */
   readonly createChildBashLifecycle?: (input: {
@@ -299,6 +336,8 @@ export interface LocalRuntimeTurnExecutorOptions<
       }
     | undefined;
   readonly executionPreparation: LocalTurnExecutionPreparationSource<TAgent, TContext>;
+  /** Optional next-message suggestion. Absent or disabled collects no context. */
+  readonly promptSuggestion?: PromptSuggestionTurnPort;
   readonly fileChanges: LocalTurnFileChangeLifecycle;
   readonly nowMs?: () => number;
   readonly attemptRecall: {
@@ -313,17 +352,29 @@ export interface LocalRuntimeTurnExecutorOptions<
   readonly cliProductPolicy?: boolean;
   /** Immutable policy selected only by the new TUI Runtime composition. */
   readonly tuiProductPolicy?: boolean;
+  /** Product surface named in PTC state logs and metrics; absent reads `other`. */
+  readonly ptcSurface?: PtcSurface;
+  /**
+   * Borrowed from the runner. Used only for PTC metrics: `ptc_turn_total` on
+   * Turns of a PTC-mode Session and program-level metrics on PTC Turns.
+   */
+  readonly metricsClient?: PtcMetrics;
   /** TUI-only region policy: only CN TUI hosts review MiniMax-managed turns. */
   readonly contentReviewEnabled?: boolean;
   readonly disableTools?: boolean;
   /** Creates isolated safety state once for each admitted product Turn. */
   readonly createTurnToolSafetyGuard?: () => LocalTurnToolSafetyGuard;
   readonly toolPolicyGuard?: LocalTurnToolPolicyGuard;
+  /** Concrete product projection is composed outside the neutral executor. */
+  readonly createPtcResultProjection?: (
+    collector: PtcToolFactCollector,
+  ) => PtcToolResultProjection;
   readonly finalizeToolResultForHistory?: LocalToolResultHistoryFinalizer;
   /** Host budget bound to this turn's provider requests; absent for ordinary turns. */
   readonly outputTokenCap?: LocalTurnOutputTokenCapResolver;
   readonly reportFailure?: (sessionId: string, message: string) => void;
-  readonly logger?: Pick<PiTurnRunnerLogger, 'info'>;
+  /** warn: the PTC reminder restorer reports its own failures (fail-open). */
+  readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'warn'>;
   readonly projectRuntimeEvent?: RuntimeEventProjector;
   readonly fileApi?: {
     readonly uploadStores: FileApiUploadStoreSource;

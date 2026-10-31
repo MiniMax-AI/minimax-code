@@ -56,6 +56,8 @@ export function initializePlanService(options: {
   readonly entryEnabled: () => boolean;
   readonly agentEntryEnabled: () => boolean;
   readonly reportFailure: (error: unknown) => void;
+  /** Agent-turn Review fallback rejections; defaults to `reportFailure`. */
+  readonly reportReviewFallbackFailure?: (error: unknown) => void;
   readonly nowMs?: () => number;
 }): PlanService {
   const nowMs = options.nowMs ?? Date.now;
@@ -127,6 +129,7 @@ export function initializePlanService(options: {
         exit: (input) => application.exitFromAgent(input),
       },
       agentEntryEnabled: options.agentEntryEnabled,
+      onReviewFallbackFailed: options.reportReviewFallbackFailure ?? options.reportFailure,
     }),
     questionnaireActionHandler,
     lifecycleReconciler,

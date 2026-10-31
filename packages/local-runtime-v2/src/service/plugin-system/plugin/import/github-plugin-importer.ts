@@ -83,7 +83,12 @@ export class GithubPluginImporter {
       source,
       plugin,
       packageSizeBytes: extracted.packageSizeBytes,
-      canImport: plugin.skills.length + plugin.mcpServers.length + (plugin.hooks?.length ?? 0) > 0,
+      canImport:
+        plugin.apps.length +
+          plugin.skills.length +
+          plugin.mcpServers.length +
+          (plugin.hooks?.length ?? 0) >
+        0,
     };
   }
 }

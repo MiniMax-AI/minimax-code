@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import type { AuthDiagnosticObserver } from '../../src/diagnostics.js';
 import { MCodeOAuthCore } from '../../src/auth-core.js';
 import { FileStore } from '../../src/credential-store/file-store.js';
 import { createAuthNamespace } from '../../src/namespace.js';
@@ -9,9 +10,13 @@ import { HttpOAuthClient } from '../../src/oauth-client.js';
 import { createAuthManager } from '../../src/token-provider.js';
 
 /** Real Core, file store and lock; only Account HTTP responses are simulated. */
-export async function createLocalAuthFixture(options: {
-  beforeDeviceTokenResponse?: () => Promise<void>;
-} = {}) {
+export async function createLocalAuthFixture(
+  options: {
+    onDiagnostic?: AuthDiagnosticObserver;
+    beforeDeviceTokenResponse?: () => Promise<void>;
+    beforeRefreshTokenResponse?: () => Promise<void>;
+  } = {},
+) {
   const dataDir = await mkdtemp(join(tmpdir(), 'mcode-auth-recovery-'));
   const namespace = createAuthNamespace({ dataDir, buildEnv: 'test', region: 'cn' });
   let now = 1_800_000_000_000;
@@ -28,6 +33,7 @@ export async function createLocalAuthFixture(options: {
   const createCore = () =>
     new MCodeOAuthCore({
       namespace,
+      onDiagnostic: options.onDiagnostic,
       credentialStore: new FileStore({ authHome: namespace.namespaceHome }),
       now: () => now,
       oauthClient: new HttpOAuthClient({
@@ -48,6 +54,7 @@ export async function createLocalAuthFixture(options: {
           if (String(url).endsWith('/revoke')) return new Response(null, { status: 200 });
           if ((init?.body as URLSearchParams).get('grant_type') === 'refresh_token') {
             calls.refresh += 1;
+            await options.beforeRefreshTokenResponse?.();
             if (refreshFailure === 'offline') throw new TypeError('fetch failed');
             if (refreshFailure) {
               return Response.json(

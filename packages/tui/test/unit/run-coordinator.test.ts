@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { TuiRunCoordinator, type TuiRunRuntime } from '../../src/application/run-coordinator.js';
 import { TuiFailure } from '../../src/failure.js';
+import type { TuiStreamEvent } from '../../src/runtime/stream-events.js';
 
 describe('TuiRunCoordinator', () => {
   it.each([
@@ -235,6 +236,51 @@ describe('TuiRunCoordinator', () => {
     expect(limitRuntime.abortSession).toHaveBeenCalledWith(
       expect.objectContaining({ reason: 'max_steps' }),
     );
+  });
+
+  it('settles a timed-out run past a blocked observer and still delivers events in order', async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = createRuntime(async function* (_req, signal) {
+        yield { type: 'delta', role: 'assistant', content: 'first' } as const;
+        yield { type: 'delta', role: 'assistant', content: 'second' } as const;
+        if (!signal?.aborted) {
+          await new Promise<void>((resolve) =>
+            signal?.addEventListener('abort', () => resolve(), { once: true }),
+          );
+        }
+      });
+      const delivered: string[] = [];
+      let unblockReader = () => undefined;
+      const observe = vi.fn(async (event: TuiStreamEvent) => {
+        if (event.type !== 'delta' || typeof event.content !== 'string') return;
+        delivered.push(event.content);
+        // A downstream reader that stops reading after the first line.
+        if (delivered.length === 1) {
+          await new Promise<void>((resolve) => {
+            unblockReader = resolve;
+          });
+        }
+      });
+
+      const running = new TuiRunCoordinator(runtime, { releaseObserverOnStop: true }).execute(
+        { ...request('turn-blocked-observer'), policy: { timeoutMs: 20 } },
+        observe,
+      );
+      await vi.advanceTimersByTimeAsync(20);
+      const result = await running;
+
+      expect(result.status).toBe('timeout');
+      expect(runtime.abortSession).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'timeout' }),
+      );
+      expect(delivered).toEqual(['first']);
+      unblockReader();
+      await result.observations;
+      expect(delivered).toEqual(['first', 'second']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fires timeouts above the Node timer limit only at the requested deadline', async () => {
@@ -539,6 +585,151 @@ describe('TuiRunCoordinator', () => {
       status: 'failed',
       outcome: { error: { code: 'CONTENT_REVIEW_BLOCKED' } },
     });
+  });
+});
+
+describe('TuiRunCoordinator turn lifecycle frames', () => {
+  // Shapes match local-runtime-v2 display facts: one compaction attempt upserts
+  // the same id as start, then terminal state, with no content.
+  const compactionStart = {
+    type: 'message',
+    message: {
+      id: 'compaction-a1',
+      turnId: 'turn-lifecycle',
+      role: 'assistant',
+      kind: 'compaction_start',
+    },
+  } as const;
+  const compactionDone = {
+    type: 'message',
+    message: {
+      id: 'compaction-a1',
+      turnId: 'turn-lifecycle',
+      role: 'assistant',
+      kind: 'compaction',
+    },
+  } as const;
+  const compactionFailed = {
+    type: 'message',
+    message: {
+      id: 'compaction-a1',
+      turnId: 'turn-lifecycle',
+      role: 'assistant',
+      kind: 'compaction_failed',
+    },
+  } as const;
+  const answer = {
+    type: 'message',
+    message: {
+      id: 'response-1',
+      turnId: 'turn-lifecycle',
+      role: 'assistant',
+      content: 'REAL_ANSWER',
+    },
+  } as const;
+  const toolStep = {
+    type: 'message',
+    message: {
+      id: 'response-0',
+      turnId: 'turn-lifecycle',
+      role: 'assistant',
+      content: 'Reading files',
+      toolCalls: [{ id: 'call-1', name: 'read' }],
+    },
+  } as const;
+
+  it.each([
+    ['completes', compactionDone],
+    ['fails', compactionFailed],
+  ] as const)(
+    'does not spend --max-steps when automatic compaction %s before the answer',
+    async (_label, terminal) => {
+      const runtime = createRuntime(async function* () {
+        yield compactionStart;
+        yield terminal;
+        yield answer;
+      });
+      const result = await new TuiRunCoordinator(runtime).execute({
+        ...request('turn-lifecycle'),
+        policy: { maxSteps: 1 },
+      });
+      expect(result).toMatchObject({
+        status: 'succeeded',
+        outcome: { answer: 'REAL_ANSWER', usageIncomplete: true },
+      });
+      expect(runtime.abortSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the step budget for model responses around mid-turn compaction', async () => {
+    const steps = async function* () {
+      yield toolStep;
+      yield compactionStart;
+      yield compactionDone;
+      yield answer;
+    };
+    const withinBudget = await new TuiRunCoordinator(createRuntime(steps)).execute({
+      ...request('turn-lifecycle'),
+      policy: { maxSteps: 2 },
+    });
+    expect(withinBudget).toMatchObject({ status: 'succeeded', outcome: { answer: 'REAL_ANSWER' } });
+
+    const overBudget = createRuntime(steps);
+    await expect(
+      new TuiRunCoordinator(overBudget).execute({
+        ...request('turn-lifecycle'),
+        policy: { maxSteps: 1 },
+      }),
+    ).resolves.toMatchObject({ status: 'limit_exceeded' });
+    expect(overBudget.abortSession).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'max_steps' }),
+    );
+  });
+
+  it('does not let a lifecycle frame replace the selected answer', async () => {
+    const result = await new TuiRunCoordinator(
+      createRuntime(async function* () {
+        yield answer;
+        yield compactionStart;
+        yield compactionDone;
+      }),
+    ).execute(request('turn-lifecycle'));
+    expect(result).toMatchObject({ status: 'succeeded', outcome: { answer: 'REAL_ANSWER' } });
+  });
+
+  it('treats review activity as bookkeeping but the review result as the answer step', async () => {
+    const review = (kind: string, content?: string) => ({
+      type: 'message' as const,
+      message: {
+        id: 'review-activity',
+        turnId: 'turn-lifecycle',
+        role: 'assistant' as const,
+        kind,
+        ...(content ? { content } : {}),
+      },
+    });
+    const result = await new TuiRunCoordinator(
+      createRuntime(async function* () {
+        yield review('review_start');
+        yield review('review_result', '<annotation-result>LGTM</annotation-result>');
+      } as TuiRunRuntime['sendMessage']),
+    ).execute({ ...request('turn-lifecycle'), policy: { maxSteps: 1 } });
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      outcome: { answer: '<annotation-result>LGTM</annotation-result>' },
+    });
+    expect(result.outcome.usageIncomplete).toBeUndefined();
+
+    const overBudget = createRuntime(async function* () {
+      yield answer;
+      yield review('review_result', '<annotation-result>LGTM</annotation-result>');
+    } as TuiRunRuntime['sendMessage']);
+    await expect(
+      new TuiRunCoordinator(overBudget).execute({
+        ...request('turn-lifecycle'),
+        policy: { maxSteps: 1 },
+      }),
+    ).resolves.toMatchObject({ status: 'limit_exceeded' });
   });
 });
 

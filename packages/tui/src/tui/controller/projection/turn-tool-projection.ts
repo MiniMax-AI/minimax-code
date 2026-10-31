@@ -73,6 +73,8 @@ export class TuiToolProjection {
         title: toolCall.name,
         content: content.text,
         detail: detail.text,
+        ...(toolCall.id ? { toolCallId: toolCall.id } : {}),
+        ...(toolCall.parentToolCallId ? { parentToolCallId: toolCall.parentToolCallId } : {}),
         ...(toolErrorCode ? { toolErrorCode } : {}),
         ...(toolPayloadBudget ? { toolPayloadBudget } : {}),
         ...(toolCall.durationMs !== undefined ? { durationMs: toolCall.durationMs } : {}),

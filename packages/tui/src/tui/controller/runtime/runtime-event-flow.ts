@@ -28,6 +28,7 @@ import type { TuiSessionFlow } from '../session-flow.js';
 import type { TuiDelegationFlow } from '../delegation-flow.js';
 import type { TuiGoalFlow } from '../product/goal-flow.js';
 import { delayWithAbort } from '../support.js';
+import type { TuiPromptSuggestionStore } from '../../features/composer/prompt-suggestion.js';
 import {
   captureTuiIncidentBestEffort,
   noopTuiObservability,
@@ -66,10 +67,7 @@ export interface TuiRuntimeEventFlowOptions {
   readonly effectRunner: TuiEffectRunner;
   readonly stateCoordinator: TuiRuntimeStateCoordinator;
   readonly sessionFlow: Pick<TuiSessionFlow, 'reconcileRuntimeEvent'>;
-  readonly delegationFlow: Pick<
-    TuiDelegationFlow,
-    'handleRuntimeEvent' | 'handleSettledRuntimeEvent' | 'refresh'
-  >;
+  readonly delegationFlow: Pick<TuiDelegationFlow, 'handleRuntimeEvent' | 'refresh'>;
   readonly activeRunFlow: TuiActiveRunFlow;
   readonly interactionFlow: TuiInteractionFlow;
   readonly runProjection: TuiRunProjection;
@@ -81,6 +79,8 @@ export interface TuiRuntimeEventFlowOptions {
   readonly onLlmRetryChanged?: (event: TuiLlmRetryEvent | undefined) => void;
   readonly onRetryAvailabilityChanged?: (sessionId: string, retryable: boolean) => void;
   readonly goalFlow?: Pick<TuiGoalFlow, 'project' | 'refresh'>;
+  /** Next-message suggestions; re-render only when the visible Session's one changes. */
+  readonly promptSuggestions?: Pick<TuiPromptSuggestionStore, 'observe'>;
   readonly updateFollowUpPanel: () => void;
   readonly onChanged: () => void;
   readonly append: AppendLocalCell;
@@ -110,6 +110,10 @@ export class TuiRuntimeEventFlow {
       }
     | undefined;
   private readonly llmRetryCalls = new Map<string, TuiLlmRetryEvent>();
+  /** The latest Turn content review stopped; its terminal settles as that stop. */
+  private reviewStoppedTurn:
+    | { readonly turnId: string; readonly variant: ContentReviewStopVariant }
+    | undefined;
   private staleRunTimer: ReturnType<typeof setInterval> | undefined;
   private staleRunCheck: Promise<boolean> | undefined;
   private staleRunGeneration = 0;
@@ -519,6 +523,16 @@ export class TuiRuntimeEventFlow {
   }
 
   private async handle(event: TuiRuntimeEvent): Promise<void> {
+    if (event.type === "turn.prompt_suggestion.generated") {
+      if (
+        this.options.promptSuggestions?.observe(event) &&
+        event.sessionId === this.options.controller.snapshot().session?.sessionId
+      ) {
+        this.options.onChanged();
+      }
+      return;
+    }
+    this.options.promptSuggestions?.observe(event);
     await this.options.delegationFlow.handleRuntimeEvent(event);
     if (isSessionCatalogEvent(event) || event.type === 'rotation.completed') {
       await this.options.sessionFlow.reconcileRuntimeEvent(event);
@@ -595,13 +609,12 @@ export class TuiRuntimeEventFlow {
       event.type === 'session.error' ||
       event.type === 'session.abort'
     ) {
-      const terminalSettled = await this.handleRuntimeTurnFinished(
+      await this.handleRuntimeTurnFinished(
         event,
         currentSessionId,
         liveTurnDurationMs,
         interactionHandled,
       );
-      if (terminalSettled) this.options.delegationFlow.handleSettledRuntimeEvent(event);
       await this.notifyTerminalEvent(event, currentSessionId);
     }
   }
@@ -644,19 +657,21 @@ export class TuiRuntimeEventFlow {
       return true;
     }
     if (matchesCurrentSession && event.type === 'content.retry.exceeded') {
-      this.options.append(
-        event.variant === 'auth'
-          ? 'Content review authentication expired. Run /login, then retry.'
-          : event.variant === 'network'
-            ? 'Content review did not return a usable result, so this response stopped. Unreviewed output was withheld. Retry; if this persists, use /feedback to report the review failure.'
-            : 'Content review withdrew this response. Rephrase your request, then retry.',
-        'warning',
-      );
+      const turnId = event.turnId ?? this.liveTurn?.turnId;
+      if (turnId) this.reviewStoppedTurn = { turnId, variant: event.variant };
+      this.options.append(contentReviewStopNotice(event.variant), 'warning');
       this.options.onChanged();
       return true;
     }
     if (matchesCurrentSession && event.type === 'message.rewind') {
-      return this.options.controller.reconcileOwnerHistory(true).then(() => {
+      // A withdrawn Runtime-owned Turn leaves history; drop its live cells first
+      // so the withdrawal notice stays beside the Turn before it.
+      const withdrawnTurnId = this.reviewStoppedTurn?.turnId;
+      return (
+        withdrawnTurnId
+          ? this.options.controller.reconcileOwnerHistory(true, withdrawnTurnId)
+          : this.options.controller.reconcileOwnerHistory(true)
+      ).then(() => {
         this.options.onChanged();
         return true;
       });
@@ -979,6 +994,11 @@ export class TuiRuntimeEventFlow {
     liveTurnDurationMs?: number,
     interactionHandled = false,
   ): Promise<boolean> {
+    const reviewStop =
+      event.type === 'session.finish' && event.turnId === this.reviewStoppedTurn?.turnId
+        ? this.reviewStoppedTurn
+        : undefined;
+    if (event.turnId === this.reviewStoppedTurn?.turnId) this.reviewStoppedTurn = undefined;
     const inProcessTurnId = this.options.controller.snapshot().activeTurnId;
     if (inProcessTurnId) {
       this.recordTerminalNotOwned(event, sessionId, 'in-process-turn', { inProcessTurnId });
@@ -1014,6 +1034,8 @@ export class TuiRuntimeEventFlow {
     );
     const runtimeSettlement = this.options.controller.runtimeTurnSettlement;
     const automationResultEnabled = runtimeSettlement.enabled();
+    // A Turn stopped by content review has no answer; its notice is already shown.
+    const settledStatus = reviewStop ? 'failed' : terminalTurnStatus(event);
     const continuationPending =
       event.type === 'session.finish' &&
       event.turnId !== undefined &&
@@ -1021,15 +1043,10 @@ export class TuiRuntimeEventFlow {
       !interactionHandled;
     const deferredSettlement =
       ownsTerminal && event.turnId && automationResultEnabled
-        ? runtimeSettlement.prepare(sessionId, event.turnId, terminalTurnStatus(event))
+        ? runtimeSettlement.prepare(sessionId, event.turnId, settledStatus)
         : undefined;
     if (ownsTerminal && event.turnId && !automationResultEnabled) {
-      await runtimeSettlement.settle(
-        sessionId,
-        event.turnId,
-        terminalTurnStatus(event),
-        liveTurnDurationMs,
-      );
+      await runtimeSettlement.settle(sessionId, event.turnId, settledStatus, liveTurnDurationMs);
     }
 
     this.options.runProjection.reconcileRuntimeTurn();
@@ -1075,6 +1092,15 @@ export class TuiRuntimeEventFlow {
       if (!deferredSettlement) return false;
     }
     if (deferredSettlement && !continuationPending) {
+      if (reviewStop) {
+        await runtimeSettlement.publish(
+          deferredSettlement,
+          liveTurnDurationMs,
+          contentReviewStopError(reviewStop.variant),
+          true,
+        );
+        return true;
+      }
       await runtimeSettlement.publish(
         automationHistoryError ? { ...deferredSettlement, status: 'failed' } : deferredSettlement,
         liveTurnDurationMs,
@@ -1291,6 +1317,30 @@ function formatQueueFailure(summary: string, reason: string | undefined, nextSte
   return reason
     ? `${summary}: ${tuiErrorDiagnostic(reason)}. ${nextStep}`
     : `${summary}. ${nextStep}`;
+}
+
+type ContentReviewStopVariant = 'content' | 'network' | 'auth';
+
+function contentReviewStopNotice(variant: ContentReviewStopVariant): string {
+  if (variant === 'auth') return 'Content review authentication expired. Run /login, then retry.';
+  if (variant === 'network') {
+    return 'Content review did not return a usable result, so this response stopped. Unreviewed output was withheld. Retry; if this persists, use /feedback to report the review failure.';
+  }
+  return 'Content review withdrew this response. Rephrase your request, then retry.';
+}
+
+function contentReviewStopError(variant: ContentReviewStopVariant): ExecResultError {
+  return {
+    category: 'runtime',
+    code:
+      variant === 'auth'
+        ? 'CONTENT_REVIEW_AUTH_EXPIRED'
+        : variant === 'network'
+          ? 'CONTENT_REVIEW_UNAVAILABLE'
+          : 'CONTENT_WITHDRAWN',
+    message: contentReviewStopNotice(variant),
+    retryable: true,
+  };
 }
 
 function terminalTurnStatus(event: TuiSessionLifecycleEvent): 'succeeded' | 'failed' | 'cancelled' {

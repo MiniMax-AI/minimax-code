@@ -169,6 +169,8 @@ function isAssignmentOnlySegment(seg: string): boolean {
 interface HeredocMarker {
   marker: string;
   stripTabs: boolean;
+  /** A quoted delimiter (`<<'EOF'`) makes the body literal: the shell runs no expansion in it. */
+  quoted: boolean;
 }
 
 interface SegmentHeredocMarker extends HeredocMarker {
@@ -178,6 +180,11 @@ interface SegmentHeredocMarker extends HeredocMarker {
 export interface HeredocBodyRange {
   start: number;
   end: number;
+}
+
+export interface HeredocBody extends HeredocBodyRange {
+  /** False when the shell would expand `$()`, backticks and variables inside this body. */
+  quoted: boolean;
 }
 
 interface FoldedSourceRange {
@@ -322,7 +329,11 @@ function parseHeredocMarkerAt(
   const parsedWord = parseHeredocWord(input, i);
   if (!parsedWord) return undefined;
 
-  return { marker: { marker: parsedWord.marker, stripTabs }, nextIndex: parsedWord.nextIndex };
+  const quoted = /['"\\]/.test(input.slice(i, parsedWord.nextIndex));
+  return {
+    marker: { marker: parsedWord.marker, stripTabs, quoted },
+    nextIndex: parsedWord.nextIndex,
+  };
 }
 
 function shellCommentStartsAt(input: string, index: number): boolean {
@@ -475,7 +486,8 @@ function consumeHeredocBody(input: string, start: number, marker: HeredocMarker)
   return input.length;
 }
 
-function splitCommandWithoutHeredoc(input: string): string[] {
+/** Preserve source text, including executable substitutions in shell headers. */
+export function splitShellSourceSegments(input: string): string[] {
   // Fold POSIX line-continuations (`\<NL>` outside single quotes) so the
   // tokenizer sees a single logical line per segment. Heredoc bodies are
   // handled before this helper is called, so body text is never folded here.
@@ -531,6 +543,13 @@ function splitCommandWithoutHeredoc(input: string): string[] {
         continue;
       }
 
+      // A lone & terminates a background command. Keep redirection operators
+      // (&>, &>>, <&, >&) attached to the command whose descriptors they affect.
+      if (ch === '&' && folded[i - 1] !== '<' && folded[i - 1] !== '>' && folded[i + 1] !== '>') {
+        flushSegment();
+        continue;
+      }
+
       // Check for ;
       if (ch === ';') {
         flushSegment();
@@ -565,7 +584,11 @@ function splitCommandWithoutHeredoc(input: string): string[] {
   }
 
   flushSegment();
+  return rawSegments;
+}
 
+function splitCommandWithoutHeredoc(input: string): string[] {
+  const rawSegments = splitShellSourceSegments(input);
   // Per-segment cleanup: drop comment-only and pure env-assignment segments
   // (they carry no command), then strip leading shell control-flow keywords.
   // Standalone keywords like `fi` / `done` evaluate to undefined here and
@@ -640,7 +663,7 @@ function splitCommandWithHeredoc(input: string, bodyStart: number): string[] {
   return suffix.trim().length > 0 ? [...withBodies, ...splitCommand(suffix)] : withBodies;
 }
 
-function collectHeredocBodyRanges(input: string, offset: number, ranges: HeredocBodyRange[]): void {
+function collectHeredocBodyRanges(input: string, offset: number, ranges: HeredocBody[]): void {
   const rest = input.slice(offset);
   const bodyStart = findFirstHeredocBodyStart(rest);
   if (bodyStart === undefined) return;
@@ -653,7 +676,7 @@ function collectHeredocBodyRanges(input: string, offset: number, ranges: Heredoc
   let cursor = offset + bodyStart;
   for (const marker of markers) {
     const next = consumeHeredocBody(input, cursor, marker);
-    ranges.push({ start: cursor, end: next });
+    ranges.push({ start: cursor, end: next, quoted: marker.quoted });
     cursor = next;
   }
 
@@ -666,7 +689,12 @@ function collectHeredocBodyRanges(input: string, offset: number, ranges: Heredoc
  * because heredoc split segments can be logical, not contiguous source slices.
  */
 export function findHeredocBodyRanges(input: string): HeredocBodyRange[] {
-  const ranges: HeredocBodyRange[] = [];
+  return findHeredocBodies(input).map(({ start, end }) => ({ start, end }));
+}
+
+/** Preserve each body's expansion mode for safety callers. */
+export function findHeredocBodies(input: string): HeredocBody[] {
+  const ranges: HeredocBody[] = [];
   collectHeredocBodyRanges(input, 0, ranges);
   return ranges;
 }

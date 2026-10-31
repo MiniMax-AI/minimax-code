@@ -79,6 +79,21 @@ export interface LLMModelConfig {
 
 export interface ToolConfig<TCtx extends ToolExecutionContext = ToolExecutionContext> {
   tools?: readonly RuntimeTool<TSchema, TCtx>[];
+  /** Final authorized PTC child catalog. It may be broader than model-visible tools. */
+  ptcTools?: readonly RuntimeTool<TSchema, TCtx>[];
+  /** Host-owned migration hint for a tool hidden by this turn's catalog. */
+  missingToolMessage?: (toolName: string) => string | undefined;
+  /**
+   * Host lookup for a tool the model called directly although `tools` omits it, such as a
+   * PTC child. A returned tool with the same name runs that call like a tool in `tools`:
+   * same context, validation, hooks and events. The tools sent to the model are unchanged.
+   * Called once per such call, with the arguments as the model sent them.
+   */
+  resolveMissingTool?: (toolCall: {
+    readonly id: string;
+    readonly name: string;
+    readonly arguments: unknown;
+  }) => RuntimeTool<TSchema, TCtx> | undefined;
   disableBuiltinToolFallback?: boolean;
   context: TCtx;
 }

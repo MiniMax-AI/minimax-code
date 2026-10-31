@@ -1,12 +1,13 @@
 import type { LocalTaskRunnerHostWithSessionLookup } from '../api/local-task-host.js';
+import { logger } from '../common/logger.js';
 
 interface ActiveBackgroundTask {
   readonly settled: Promise<void>;
   readonly abort?: (reason: string) => void;
   /**
-   * Durable row identity, published by the runner once the row exists. Admission
-   * happens before `createBackgroundTaskId()`, so this stays undefined during the
-   * short setup window and the task is simply not claimed yet.
+   * Durable row identity, published by the runner before it writes the row.
+   * Admission happens before `createBackgroundTaskId()`, so this stays undefined
+   * until the runner has selected the id and the task is not claimed yet.
    */
   taskId?: string;
 }
@@ -86,6 +87,29 @@ export function isBackgroundTaskAdmittedHere(
     if (task.taskId === taskId) return true;
   }
   return false;
+}
+
+/** Abort this task's runner, including setup before its child Turn is admitted. */
+export function abortAdmittedBackgroundTask(
+  host: LocalTaskRunnerHostWithSessionLookup,
+  taskId: string,
+  reason: string,
+): void {
+  for (const task of hostStates.get(host)?.active ?? []) {
+    if (task.taskId !== taskId || !task.abort) continue;
+    try {
+      task.abort(reason);
+    } catch {
+      try {
+        logger.warn(
+          { event: 'background_task_admission_abort_failed', taskId, reason },
+          'Background task admission abort failed',
+        );
+      } catch {
+        // Diagnostics must not skip the host's existing process/Turn stop.
+      }
+    }
+  }
 }
 
 export function beginBackgroundTaskShutdown(

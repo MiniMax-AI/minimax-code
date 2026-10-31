@@ -11,9 +11,14 @@ export class TuiInteractionSurface {
     private readonly requestRender: () => void,
     private readonly onActiveChanged?: (active: boolean) => void,
     private readonly followFullscreenBottom?: () => void,
+    private readonly revealFullscreenBottom?: () => void,
   ) {}
 
-  show(panel: Component): void {
+  /**
+   * `reveal` is for panels the user opened by command: the fullscreen body jumps to the panel even
+   * when the user had scrolled into history. Other interactions keep the user's scroll position.
+   */
+  show(panel: Component, options: { readonly reveal?: boolean } = {}): void {
     if (this.layer) {
       this.host.show(panel);
       this.layer.setFocus(panel);
@@ -32,7 +37,10 @@ export class TuiInteractionSurface {
       }
     }
     this.onActiveChanged?.(true);
-    if (this.surfaces.getChatMode() === 'fullscreen') this.followFullscreenBottom?.();
+    if (this.surfaces.getChatMode() === 'fullscreen') {
+      if (options.reveal && this.revealFullscreenBottom) this.revealFullscreenBottom();
+      else this.followFullscreenBottom?.();
+    }
     this.requestRender();
   }
 

@@ -51,6 +51,42 @@ const PRINTABLE_SYMBOL_KEYS: Readonly<Record<string, Omit<BrowserPrintableKeyDes
     '~': { code: 'Backquote', windowsVirtualKeyCode: 192, modifiers: SHIFT_MODIFIER },
   };
 
+const UNSHIFTED_KEY_BY_CODE: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(PRINTABLE_SYMBOL_KEYS)
+    .filter(([, descriptor]) => descriptor.modifiers === 0)
+    .map(([char, descriptor]) => [descriptor.code, char]),
+);
+
+const SHIFTED_KEY_BY_CODE: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(PRINTABLE_SYMBOL_KEYS)
+    .filter(([, descriptor]) => descriptor.modifiers === SHIFT_MODIFIER)
+    .map(([char, descriptor]) => [descriptor.code, char]),
+);
+
+/**
+ * Physical US-layout key for a `KeyboardEvent.code` such as `KeyW`, `Digit1`
+ * or `Minus`, with its unshifted character. Null for codes that are not
+ * printable keys (use browserKeyDescriptor for named keys).
+ */
+export function browserPhysicalKeyDescriptor(code: string): BrowserKeyDescriptor | null {
+  const letter = /^Key([A-Z])$/u.exec(code)?.[1];
+  if (letter) return browserKeyDescriptor(letter.toLowerCase());
+  const digit = /^Digit([0-9])$/u.exec(code)?.[1];
+  if (digit) return browserKeyDescriptor(digit);
+  const char = UNSHIFTED_KEY_BY_CODE[code];
+  if (char === undefined) return null;
+  const printable = browserPrintableKeyDescriptor(char);
+  return printable
+    ? { key: char, code, windowsVirtualKeyCode: printable.windowsVirtualKeyCode, text: char }
+    : null;
+}
+
+/** Character the physical key `code` produces with Shift held (US layout). */
+export function browserShiftedKey(code: string): string | undefined {
+  const letter = /^Key([A-Z])$/u.exec(code)?.[1];
+  return letter ?? SHIFTED_KEY_BY_CODE[code];
+}
+
 const NAMED_KEYS: Readonly<Record<string, BrowserKeyDescriptor>> = {
   arrowdown: { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 },
   arrowleft: { key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 },

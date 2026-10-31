@@ -142,7 +142,6 @@ function buildOpenAIChatTokenizerRequest(
 
   return {
     url,
-    unsupportedCacheKey: `${adapterId}:${url}`,
     body,
     headers: {
       authorization: `Bearer ${ctx.apiKey ?? ''}`,

@@ -136,20 +136,18 @@ export class ContextUsageCalibrationCoordinator {
       ...(input.streamOptions?.reasoning ? { thinkingLevel: input.streamOptions.reasoning } : {}),
       ...(input.streamOptions?.signal ? { signal: input.streamOptions.signal } : {}),
     };
-    const [withoutTools, withTools] = await Promise.all([
-      this.counter.countContextTokens(base),
-      this.counter.countContextTokens({
-        ...base,
-        tools: [...(input.context.tools ?? [])],
-      }),
-    ]);
+    // Probe without tools first. An unavailable counter cannot calibrate the
+    // marginal, so do not upload the much larger tool definitions in that case.
+    const withoutTools = await this.counter.countContextTokens(base);
+    if (withoutTools.source !== 'remote') {
+      return { fingerprint: input.fingerprint, status: 'UNAVAILABLE' };
+    }
+    const withTools = await this.counter.countContextTokens({
+      ...base,
+      tools: [...(input.context.tools ?? [])],
+    });
     const tokens = withTools.tokens - withoutTools.tokens;
-    if (
-      withoutTools.source !== 'remote' ||
-      withTools.source !== 'remote' ||
-      !Number.isSafeInteger(tokens) ||
-      tokens < 0
-    ) {
+    if (withTools.source !== 'remote' || !Number.isSafeInteger(tokens) || tokens < 0) {
       return { fingerprint: input.fingerprint, status: 'UNAVAILABLE' };
     }
     return {

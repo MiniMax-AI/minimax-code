@@ -759,8 +759,17 @@ export const HARD_BLOCKED_REGISTRY = {
  * Match a bash command string against {@link HARD_BLOCKED_REGISTRY.bashPatterns}.
  * Returns the first matching entry, or null when no entry matches.
  */
-export function matchHardBlockedBash(command: string): HardBlockedMatch | null {
+export function matchHardBlockedBash(
+  command: string,
+  options: { nativeDelete?: boolean; recoverableWindowsDelete?: boolean } = {},
+): HardBlockedMatch | null {
   for (const entry of HARD_BLOCKED_BASH_PATTERNS) {
+    // Filter before matching so a delete entry cannot hide a later hard boundary.
+    if (
+      entry.category === 'windows-delete' &&
+      (options.nativeDelete || options.recoverableWindowsDelete)
+    )
+      continue;
     if (entry.pattern.test(command)) {
       return { category: entry.category, description: entry.description };
     }
@@ -1546,16 +1555,18 @@ export function matchSecretReadForm(surface: string): string | undefined {
 export const ALL_DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<{
   pattern: RegExp;
   category: string;
+  recoverableDeleteOnly?: boolean;
 }> = [
   ...HARD_BLOCKED_BASH_PATTERNS.map((e) => ({
     pattern: e.pattern,
     category: `HARD ${e.category}: ${e.description}`,
+    recoverableDeleteOnly: e.category === 'windows-delete',
   })),
   ...SOFT_RISK_BASH_PATTERNS.map((e) => ({
     pattern: e.pattern,
     category: `SOFT ${e.category}: ${e.description}`,
   })),
-  ...LEGACY_DELETE_BYPASS_PATTERNS,
+  ...LEGACY_DELETE_BYPASS_PATTERNS.map((entry) => ({ ...entry, recoverableDeleteOnly: true })),
   ...LEGACY_ENCODING_BYPASS_PATTERNS,
   ...SUBCOMMAND_DANGEROUS_PATTERNS,
 ];

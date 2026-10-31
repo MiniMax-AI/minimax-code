@@ -33,6 +33,7 @@
     "mavis/system-prompt.md.hbs": "Legacy Agent-level fallback superseded by managed mode assets.",
     "verifier/agent.md": "Agent capability configuration, outside Prompt injection.",
     "worker/agent.md": "Agent capability configuration, outside Prompt injection.",
-    "_v2/tui/SYSTEM.md.hbs": "Local V2 prompt combining identity, rules, and feature conditions; excluded from remote prompt delivery."
+    "_v2/tui/SYSTEM.md.hbs": "Local V2 prompt combining identity, rules, and feature conditions; excluded from remote prompt delivery.",
+    "_v2/PTC_TOOL_CALLS.md.hbs": "Local V2 PTC section, rendered by the runtime and inserted into the main template only on turns where PTC is actually in effect; excluded from remote prompt delivery because neither the remote version nor older clients need it."
   }
 }

@@ -1,7 +1,13 @@
 import { createHash } from 'node:crypto';
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
+import {
+  listRequestImages,
+  replaceRequestImages,
+  type PiTurnRunnerLogger,
+  type RequestImage,
+} from '@mavis/agent-core/pi-turn-runner';
+import { archivedImageText } from '@mavis/context-manager';
 
 import type { ToolResultCompactionConfig } from '../contracts.js';
 import { parseToolRounds, type ToolCallIdentity, type ToolRound } from './history-reduction.js';
@@ -50,10 +56,22 @@ interface ToolResultArtifact {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+interface ToolResultImageArtifactInput {
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly data: string;
+  readonly mimeType: string;
+}
+
 export interface ToolResultArchiverOptions {
   readonly writeArtifact: (
     input: ToolResultArtifactInput,
   ) => ToolResultArtifact | Promise<ToolResultArtifact>;
+  /** Stores an archived image that names no source file; without it the receipt names none. */
+  readonly writeImageArtifact?: (
+    input: ToolResultImageArtifactInput,
+  ) => { readonly reference: string } | Promise<{ readonly reference: string }>;
   readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'>;
   readonly referenceMemoEntries?: number;
   /** Live threshold source. Missing or invalid fields retain the current defaults. */
@@ -108,6 +126,12 @@ export interface ToolResultTrimCandidate {
 }
 
 export type ToolResultCompactionCandidate = ToolResultArchiveCandidate | ToolResultTrimCandidate;
+
+export interface ToolResultImageArchive {
+  readonly messages: readonly AgentMessage[];
+  readonly archivedImageCount: number;
+  readonly savedBytes: number;
+}
 
 /**
  * Plans the shared ToolResult candidate set for durable context compaction.
@@ -203,6 +227,77 @@ export class ToolResultArchiver {
       trimmedResultCount: replacements.length,
       actualSavingsBytes: materialized.actualSavingsBytes,
     };
+  }
+
+  /**
+   * Replaces every image in history, user attachments and tool results alike,
+   * with a receipt naming its file, so later requests carry text instead. An
+   * image whose history names no source file is written to the Session
+   * artifacts first. Video blocks stay: they have their own projection.
+   */
+  async archiveImages(input: {
+    readonly sessionId: string;
+    readonly messages: readonly AgentMessage[];
+  }): Promise<ToolResultImageArchive | undefined> {
+    const images = listRequestImages(input.messages).filter(
+      (image) => !image.mimeType?.toLowerCase().startsWith('video/'),
+    );
+    if (images.length === 0) return undefined;
+    const receipts = new Map<string, string>();
+    let savedBytes = 0;
+    for (const image of images) {
+      const receipt = archivedImageText(image.path ?? (await this.writeImageFile(input, image)));
+      receipts.set(image.key, receipt);
+      savedBytes += Math.max(0, image.base64Bytes - Buffer.byteLength(receipt));
+    }
+    logBestEffort(this.options.logger, 'info', {
+      event: 'context_image_archive',
+      session_id: input.sessionId,
+      archived_image_count: images.length,
+      saved_bytes: savedBytes,
+    });
+    return {
+      messages: replaceRequestImages(input.messages, (image) => receipts.get(image.key)),
+      archivedImageCount: images.length,
+      savedBytes,
+    };
+  }
+
+  /**
+   * Writes an image of a tool result or user message to the Session artifacts;
+   * `undefined` when it cannot. A user image is keyed by its message position,
+   * as user messages have no call id.
+   */
+  async writeImageFile(
+    input: { readonly sessionId: string; readonly messages: readonly AgentMessage[] },
+    image: RequestImage,
+  ): Promise<string | undefined> {
+    const message = input.messages[image.messageIndex];
+    if (!this.options.writeImageArtifact) return undefined;
+    if (message?.role !== 'toolResult' && message?.role !== 'user') return undefined;
+    const block = Array.isArray(message.content) ? message.content[image.blockIndex] : undefined;
+    if (block?.type !== 'image') return undefined;
+    const owner =
+      message.role === 'toolResult'
+        ? { toolCallId: message.toolCallId, toolName: message.toolName }
+        : { toolCallId: `user-${image.messageIndex}`, toolName: 'user' };
+    try {
+      const artifact = await this.options.writeImageArtifact({
+        sessionId: input.sessionId,
+        ...owner,
+        data: block.data,
+        mimeType: block.mimeType,
+      });
+      return nonEmptyString(artifact.reference);
+    } catch (error) {
+      logBestEffort(this.options.logger, 'error', {
+        event: 'context_image_artifact_failed',
+        session_id: input.sessionId,
+        tool_name: owner.toolName,
+        reason: safeErrorReason(error),
+      });
+      return undefined;
+    }
   }
 
   private finishMaterialization(

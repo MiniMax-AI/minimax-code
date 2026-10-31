@@ -7,6 +7,7 @@ import {
   captureBrowserFrameEpochs,
   byteLength,
   getBrowserSnapshot,
+  describeCdpException,
   type BrowserSessionState as SessionState,
   type ElementRecord,
   storeBrowserSnapshot,
@@ -89,24 +90,53 @@ export abstract class BrowserSnapshotSupport {
         Math.floor(asNumber(input.limit, DEFAULT_SNAPSHOT_PAGE_SIZE)),
       ),
     );
+    // Every element of a snapshot receives its opaque ref when the snapshot is
+    // created, so any in-range offset of a live snapshot is a safe random-access
+    // page. Only an obsolete observation must not be paged; replace it with a
+    // fresh scan and say so explicitly instead of failing the call (eval: 172
+    // pagination failures from missing snapshotId, non-exact offsets and stale
+    // continuations).
+    // Offsets are only meaningful within the snapshot that produced them.
+    // Whenever the continuation target is gone — stale snapshotId, expired or
+    // action-invalidated snapshot, or no snapshot at all — paging the fresh
+    // scan at the requested offset could silently skip elements the model has
+    // never seen. Every restarted scan therefore starts from offset 0 and
+    // says so; `requestedOffset` keeps the original request visible.
+    let restarted: Record<string, unknown> | undefined;
     if (snapshotId) {
       const snapshot = getBrowserSnapshot(session, snapshotId);
-      if (!snapshot) {
-        throw new Error('STALE_SNAPSHOT: inspect continuation is no longer available');
+      if (snapshot) {
+        if ((snapshot.continuationKind ?? 'inspect') !== 'inspect') {
+          // Eval 777827: the bare message did not name the right action.
+          throw new Error(
+            snapshot.continuationKind === 'query-editable'
+              ? 'SNAPSHOT_KIND_MISMATCH: this snapshotId came from query kind "editable"; continue it with action "query", kind "editable" and the same snapshotId/offset'
+              : 'SNAPSHOT_KIND_MISMATCH: this snapshotId is not an inspect snapshot; continue it with the action named in its own continuation',
+          );
+        }
+        return this.snapshotPage(snapshot, offset, limit);
       }
-      if ((snapshot.continuationKind ?? 'inspect') !== 'inspect') {
-        throw new Error(
-          'SNAPSHOT_KIND_MISMATCH: continue the snapshot with the action returned by its continuation',
-        );
+      const sameDocument = snapshotGenerationOf(snapshotId) === session.generation;
+      restarted = {
+        reason: sameDocument ? 'page_changed' : 'document_replaced',
+        requestedSnapshotId: snapshotId.slice(0, 200),
+        requestedOffset: offset,
+        message: sameDocument
+          ? 'The requested snapshot is no longer available (the page changed or the snapshot expired). Offsets from the old snapshot are not comparable, so this is a fresh snapshot of the current page starting at offset 0.'
+          : 'The requested snapshot belongs to a previous document. This is a fresh snapshot of the current document starting at offset 0.',
+      };
+    } else if (offset > 0) {
+      const latest = session.snapshot ? getBrowserSnapshot(session, session.snapshot.id) : undefined;
+      if (latest && (latest.continuationKind ?? 'inspect') === 'inspect') {
+        return this.snapshotPage(latest, offset, limit);
       }
-      if (snapshot.nextOffset === null || offset !== snapshot.nextOffset) {
-        throw new Error(
-          'SNAPSHOT_CONTINUATION_MISMATCH: continue from the exact nextOffset returned by the previous page',
-        );
-      }
-      return this.snapshotPage(snapshot, offset, limit);
+      restarted = {
+        reason: 'no_current_snapshot',
+        requestedOffset: offset,
+        message:
+          'No current inspect snapshot was available to continue, so this is a fresh snapshot starting at offset 0.',
+      };
     }
-    if (offset > 0) throw new Error('inspect offset requires snapshotId from a previous inspect');
 
     const startedAt = Date.now();
     const inspectionGeneration = session.generation;
@@ -162,7 +192,11 @@ export abstract class BrowserSnapshotSupport {
     storeBrowserSnapshot(session, snapshot);
     session.elementMap.replaceOpaqueRefs(elements);
     snapshot.durationMs = Date.now() - startedAt;
-    return this.snapshotPage(snapshot, 0, limit);
+    // Every path that reaches the fresh scan serves its first page from
+    // offset 0: ordinary first inspects request it, and restarted
+    // continuations must not skip unseen elements.
+    const firstPage = this.snapshotPage(snapshot, 0, limit);
+    return restarted ? { ...firstPage, snapshotRestarted: restarted } : firstPage;
   }
 
   protected async searchSemantic(
@@ -295,6 +329,12 @@ export abstract class BrowserSnapshotSupport {
 
 function assertInspectionGeneration(session: SessionState, expected: number): void {
   if (session.generation !== expected) throw staleInspectionError();
+}
+
+/** Snapshot ids are `browser-snapshot:<generation>-<uuid>`; foreign ids yield undefined. */
+function snapshotGenerationOf(snapshotId: string): number | undefined {
+  const match = /^browser-snapshot:(\d+)-/u.exec(snapshotId);
+  return match ? Number(match[1]) : undefined;
 }
 
 function staleInspectionError(): Error {
@@ -603,9 +643,7 @@ class AttachedFrameTransport implements BrowserTransport {
     );
     const exception = payload.exceptionDetails;
     if (exception && typeof exception === 'object') {
-      throw new Error(
-        String((exception as Record<string, unknown>).text ?? 'Page evaluation failed'),
-      );
+      throw new Error(describeCdpException(exception, 'Page evaluation failed'));
     }
     const remote = payload.result;
     if (!remote || typeof remote !== 'object') return undefined as T;

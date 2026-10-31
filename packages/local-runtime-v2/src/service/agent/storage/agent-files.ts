@@ -19,17 +19,14 @@ import {
   AgentConfigError,
   assertSafeAgentAvatarDirectory,
   decodeAgentAvatarDataUrl,
-  parseCanonicalAgentMarkdownSource,
-  parseBuiltinCanonicalAgentMarkdown,
   parseCanonicalAgentMarkdown,
+  parseCanonicalAgentMarkdownSource,
   readBuiltinCanonicalAgentConfig,
   readCanonicalAgentConfig,
   readSafeAgentAvatar,
   readStableAgentMarkdown,
-  serializeBuiltinCanonicalAgentConfig,
   serializeCanonicalAgentConfig,
   validateAgentAvatar,
-  type BuiltinCanonicalAgentConfigForWrite,
   type CanonicalAgentConfig,
 } from './canonical-agent-config.js';
 import {
@@ -708,27 +705,6 @@ export class AgentFiles {
     return parsed.config;
   }
 
-  async writeBuiltinCanonicalConfig(
-    name: string,
-    config: BuiltinCanonicalAgentConfigForWrite,
-    locked = false,
-  ): Promise<void> {
-    if (!locked) {
-      return this.withLock(`.builtin:${name}`, () =>
-        this.writeBuiltinCanonicalConfig(name, config, true),
-      );
-    }
-    await this.ensureSafeAgentDirectory(this.builtinAgentDir(name));
-    await this.validateBuiltinCanonicalConfigForWrite(this.builtinAgentDir(name), name, config);
-    const filePath = join(this.builtinAgentDir(name), SYSTEM_PROMPT_FILE);
-    const serialized = serializeBuiltinCanonicalAgentConfig({ config });
-    await replaceFileAtomically(filePath, serialized, async (temporaryPath) => {
-      parseBuiltinCanonicalAgentMarkdown(await readFile(temporaryPath, 'utf8'), name, {
-        requireFeaturePolicy: true,
-      });
-    });
-  }
-
   /** Removes only a stale primary canonical file; legacy primary assets remain untouched. */
   removeBuiltinCanonicalConfig(name: string): Promise<boolean> {
     return this.withLock(`.builtin:${name}`, async () => {
@@ -756,22 +732,8 @@ export class AgentFiles {
     }
   }
 
-  private async validateBuiltinCanonicalConfigForWrite(
-    agentDir: string,
-    routeName: string,
-    config: BuiltinCanonicalAgentConfigForWrite,
-  ): Promise<void> {
-    parseBuiltinCanonicalAgentMarkdown(
-      serializeBuiltinCanonicalAgentConfig({ config }),
-      routeName,
-      { requireFeaturePolicy: true },
-    );
-    if (config.xMavis?.avatar) {
-      await validateAgentAvatar(agentDir, config.xMavis.avatar, this.dataDir);
-    }
-  }
-
-  private async ensureSafeAgentDirectory(agentDir: string): Promise<void> {
+  /** Creates the Agent directory under dataDir without following a link out of it. */
+  async ensureSafeAgentDirectory(agentDir: string): Promise<void> {
     await mkdir(this.dataDir, { recursive: true });
     const root = resolve(this.dataDir);
     const target = resolve(agentDir);
@@ -1113,11 +1075,11 @@ function hasSemanticMarkdownBody(raw: Buffer): boolean {
   return stripFrontmatter(raw.toString('utf8')).trim().length > 0;
 }
 
-function rawDigest(raw: Buffer): string {
+export function rawDigest(raw: Buffer): string {
   return createHash('sha256').update(raw).digest('hex');
 }
 
-function documentRevision(content: string): string {
+export function documentRevision(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 

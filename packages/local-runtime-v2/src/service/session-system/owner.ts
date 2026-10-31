@@ -65,6 +65,7 @@ import {
   type NativeSessionAgentDirectory,
 } from './sessions/support/native-record-factory.js';
 import type { SessionBackfillDiagnostics } from './sessions/lifecycle/record-service.js';
+import type { SessionToolCallModePolicy } from './sessions/support/tool-call-mode.js';
 import { SessionArtifactService } from './sessions/support/artifact-service.js';
 import { createPlanDocumentOwner } from './sessions/support/plan-document.js';
 import { SessionDeletionGate } from './sessions/lifecycle/deletion-gate.js';
@@ -109,6 +110,8 @@ export interface InitializeSessionSystemOptions {
   readonly defaultWorkspaceDir: () => string;
   readonly titlePolicy: SessionRecordServiceDeps['titlePolicy'];
   readonly resolveRequestedModel?: SessionRecordServiceDeps['resolveRequestedModel'];
+  /** Tool call mode for new Sessions and for Sessions after a committed summary compaction. */
+  readonly toolCallMode?: SessionToolCallModePolicy;
   readonly facts: SessionFactSink;
   readonly conversationFacts: SessionConversationFactSink;
   readonly compactionFacts?: SessionCompactionFactSink;
@@ -253,7 +256,7 @@ export function initializeSessionSystem(options: InitializeSessionSystemOptions)
     onLegacyCleanupError,
     canonicalHistory,
     stream,
-    reports: createSessionReportsOwner(historyLocations, sessions),
+    ...createSessionDirectoryOwners(historyLocations, sessions),
   });
   const { agentProjection, conversationActions } = createAgentCapabilities({
     options,
@@ -401,6 +404,7 @@ function createSessionRecordService(input: {
       path.join(options.dataDir, 'sessions', sessionId, 'workspace'),
     ...(options.makeSessionId ? { makeSessionId: options.makeSessionId } : {}),
     ...(options.backfillDiagnostics ? { backfillDiagnostics: options.backfillDiagnostics } : {}),
+    ...(options.toolCallMode ? { toolCallMode: options.toolCallMode } : {}),
     nowMs,
   });
 }
@@ -443,15 +447,25 @@ function createSessionMetadataCapabilities(
   return { sessions, historyLocations, interactionMode, planDocuments };
 }
 
-function createSessionReportsOwner(
+function createSessionDirectoryOwners(
   historyLocations: SessionHistoryLocationResolver,
   sessions: ReturnType<typeof createSessionRepository>,
 ) {
+  const locate = async (sessionId: string) => {
+    const session = await sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    return historyLocations.ensure(session);
+  };
   return {
-    ensureDirectory: async (sessionId: string) => {
-      const session = await sessions.get(sessionId);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      return (await historyLocations.ensure(session)).reports;
+    reports: {
+      ensureDirectory: async (sessionId: string) => (await locate(sessionId)).reports,
+      inspectDirectory: async (sessionId: string) =>
+        (await historyLocations.inspectSession(sessionId))?.paths.reports,
+    },
+    snapshots: {
+      resolveDirectory: async (sessionId: string) => (await locate(sessionId)).snapshots,
+      inspectDirectory: async (sessionId: string) =>
+        (await historyLocations.inspectSession(sessionId))?.paths.snapshots,
     },
   };
 }
@@ -652,6 +666,9 @@ function createAgentCapabilities(input: {
     compactionFacts: composeCompactionFactSink(input.llmCalls, input.options.compactionFacts),
     ...(input.options.compactionMetrics
       ? { compactionMetrics: input.options.compactionMetrics }
+      : {}),
+    ...(input.options.toolCallMode
+      ? { toolCallMode: { policy: input.options.toolCallMode, sessions: input.sessions } }
       : {}),
     nowMs: input.nowMs,
   });

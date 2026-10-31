@@ -1,5 +1,4 @@
 import path from 'node:path';
-import lockfile from 'proper-lockfile';
 
 import { openAgentDb } from '../../agent/db.js';
 import type { DatabaseLike } from '../db.js';
@@ -36,14 +35,6 @@ import {
 
 const MANIFEST_FILE = 'agent-name-conflicts.json';
 const EMPTY_REFERENCE_COUNTS = EMPTY_AGENT_NAME_CONFLICT_REFERENCE_COUNTS;
-// Synchronous backup/rewrite needs a long-lived dataDir lease.
-export const AGENT_NAME_CONFLICT_MIGRATION_LOCK_STALE_MS = 30 * 60_000;
-const AGENT_NAME_CONFLICT_MIGRATION_LOCK_RETRIES = {
-  retries: 120,
-  factor: 1.2,
-  minTimeout: 25,
-  maxTimeout: 500,
-} as const;
 export type {
   AgentNameConflictMigrationFailureStep,
   AgentNameConflictMigrationPhase,
@@ -115,8 +106,8 @@ export interface AgentNameConflictMigrationInspection {
   readonly skipCode?: AgentNameConflictMigrationSkipCode;
 }
 
-export interface AgentNameConflictMigrationLockScope {
-  /** Read-only collision scan, scoped to the lock-held composition callback. */
+export interface AgentNameConflictMigrationScope {
+  /** Read-only collision scan, scoped to the composition callback. */
   readonly inspectCollision: () => AgentNameConflictMigrationInspection;
   /** Applies backup and deterministic rewrite only after a positive scan. */
   readonly applyCollision: (nowMs?: () => number) => AgentNameConflictMigrationResult;
@@ -127,8 +118,8 @@ export interface AgentNameConflictMigrationLockScope {
    */
   readonly prepareCollision: (nowMs?: () => number) => AgentNameConflictMigrationResult;
   /**
-   * Target-side V2 repair. It is only available while the shared dataDir
-   * lease is active, so callers cannot apply it outside the migration lock.
+   * Target-side V2 repair. Like every member it is revoked once the callback
+   * settles, so it cannot run outside the caller's migration lock.
    */
   readonly repairBuiltinAgentNameConflicts: V2BuiltinAgentNameConflictRepair;
 }
@@ -144,80 +135,36 @@ type AgentNameConflictMigrationPlan = AgentNameConflictMigrationState & {
 };
 
 /**
- * @deprecated Legacy explicit source-side repair adapter. V2 startup owns the
- * complete target-empty cutover; this remains an explicit repair/test adapter.
+ * Hands the legacy collision scan/apply and the V2 builtin-name repair to a
+ * V2 Agent cutover callback, and revokes them once the callback settles.
  *
- * Rename only custom rows that occupy a canonical built-in AgentName.
- *
- * The manifest fixes the chosen suffix so a crash cannot select another name
- * on retry.
+ * It takes no lock of its own: the runtime runs the cutover while it holds the
+ * dataDir startup migration lock, whose recorded holder pid lets the next
+ * startup reclaim it at once when the holder dies mid-cutover. A separate lock
+ * here is left behind whenever app.exit or a forced kill ends that startup,
+ * and then blocks every later startup until it expires.
  */
-export function ensureAgentNameConflictMigration(
+export async function withAgentNameConflictMigrationScope<T>(
   dataDir: string,
-  nowMs: () => number = () => Date.now(),
-): AgentNameConflictMigrationResult {
-  // Do not create a lock, backup, manifest, or other migration artifact when
-  // there is no actual conflict to repair. If work is required, inspect again
-  // after acquiring the lock because another process may have completed the
-  // migration while this caller was waiting to enter the critical section.
-  try {
-    const preflight = getAgentNameConflictMigrationState(dataDir);
-    const preflightResult = getPreflightMigrationResult(dataDir, preflight);
-    if (preflightResult) return preflightResult;
-  } catch (error) {
-    rethrowMigrationFailure('manifest_prepare', error);
-  }
-
-  let release: (() => void) | undefined;
-  try {
-    release = lockfile.lockSync(dataDir, { stale: AGENT_NAME_CONFLICT_MIGRATION_LOCK_STALE_MS });
-  } catch (error) {
-    rethrowMigrationFailure('lock', error);
-  }
-  try {
-    return ensureAgentNameConflictMigrationLocked(dataDir, nowMs);
-  } catch (error) {
-    return rethrowMigrationFailure('manifest_prepare', error);
-  } finally {
-    release?.();
-  }
-}
-
-/**
- * Serialize a V2 Agent cutover with the same dataDir lock used by the legacy
- * collision migration. The async lock API waits for another host instead of
- * failing immediately, and keeps its heartbeat alive while builtin rows seed.
- */
-export async function withAgentNameConflictMigrationLock<T>(
-  dataDir: string,
-  operation: (scope: AgentNameConflictMigrationLockScope) => T | PromiseLike<T>,
+  operation: (scope: AgentNameConflictMigrationScope) => T | PromiseLike<T>,
 ): Promise<T> {
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(dataDir, {
-      stale: AGENT_NAME_CONFLICT_MIGRATION_LOCK_STALE_MS,
-      retries: AGENT_NAME_CONFLICT_MIGRATION_LOCK_RETRIES,
-    });
-  } catch (error) {
-    rethrowMigrationFailure('lock', error);
-  }
   let active = true;
+  const requireActive = (): void => {
+    if (!active) throw new Error('Agent storage lock scope is no longer active');
+  };
+  const applyCollision = (nowMs = () => Date.now()): AgentNameConflictMigrationResult => {
+    requireActive();
+    try {
+      return ensureAgentNameConflictMigrationLocked(dataDir, nowMs);
+    } catch (error) {
+      return rethrowMigrationFailure('manifest_prepare', error);
+    }
+  };
+  const repairBuiltinAgentNameConflicts = createV2BuiltinAgentNameConflictRepair(
+    dataDir,
+    requireActive,
+  );
   try {
-    const requireActive = (): void => {
-      if (!active) throw new Error('Agent storage lock scope is no longer active');
-    };
-    const applyCollision = (nowMs = () => Date.now()): AgentNameConflictMigrationResult => {
-      requireActive();
-      try {
-        return ensureAgentNameConflictMigrationLocked(dataDir, nowMs);
-      } catch (error) {
-        return rethrowMigrationFailure('manifest_prepare', error);
-      }
-    };
-    const repairBuiltinAgentNameConflicts = createV2BuiltinAgentNameConflictRepair(
-      dataDir,
-      requireActive,
-    );
     return await operation({
       inspectCollision: () => {
         requireActive();
@@ -236,7 +183,6 @@ export async function withAgentNameConflictMigrationLock<T>(
     });
   } finally {
     active = false;
-    await release?.();
   }
 }
 
@@ -277,16 +223,6 @@ function getAgentNameConflictMigrationState(dataDir: string): AgentNameConflictM
     }
   }
   return { manifestPath, previous };
-}
-
-function getPreflightMigrationResult(
-  dataDir: string,
-  state: AgentNameConflictMigrationState,
-): AgentNameConflictMigrationResult | undefined {
-  const completedResult = getCompletedMigrationResult(state);
-  if (completedResult) return completedResult;
-  const inspection = inspectAgentNameConflictMigration(dataDir, state);
-  return inspection.status === 'skipped' ? migrationResultFromInspection(inspection) : undefined;
 }
 
 function inspectAgentNameConflictMigration(

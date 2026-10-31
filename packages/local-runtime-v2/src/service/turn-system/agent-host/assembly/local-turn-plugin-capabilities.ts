@@ -30,7 +30,11 @@ import {
   type IPluginCapabilityProvenance,
 } from '@mavis/protocol';
 
-import type { AgentHostTurnCapabilityView } from './turn-capability-lifecycle.js';
+import type { AgentHostUserInput } from '../preparation/contracts.js';
+import type {
+  AgentHostTurnCapabilityView,
+  AgentHostTurnPluginAgent,
+} from './turn-capability-lifecycle.js';
 import type {
   HostCapabilityReferenceTarget,
   HostCapabilityResolver,
@@ -74,12 +78,20 @@ export interface MergeAgentHostTurnCapabilitiesInput {
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
   readonly surface?: HostCapabilitySurface;
   readonly userText?: string;
+  /** PTC Turn: only the tool_search and @Plugin reminder wording change; disclosure is the same. */
+  readonly ptc?: boolean;
 }
 
 export interface MergedAgentHostTurnCapabilities {
   readonly tools: readonly RuntimeTool[];
   readonly plan: McpDisclosurePlan;
   readonly reminder?: string;
+  /**
+   * Attribution wrapper of each tool it decorated, keyed by the undecorated
+   * object. Catalog trust is by object identity, so a caller holding the
+   * undecorated native tools follows this to the objects `tools` lists.
+   */
+  readonly attributed?: ReadonlyMap<RuntimeTool, RuntimeTool>;
 }
 
 /** Applies the v1 final-catalog precedence and explicit @Plugin reminder semantics in v2. */
@@ -95,17 +107,26 @@ export function mergeAgentHostTurnCapabilities(
     );
     return { ...merged, ...(reminder ? { reminder } : {}) };
   }
+  const attributedTools = attachPluginCapabilityAttribution(
+    merged.tools,
+    buildAttributionIndex({
+      capabilities,
+      effectivePluginSkills: input.effectivePluginSkills,
+      finalTools: merged.tools,
+      plan: merged.plan,
+    }),
+  );
+  // Attribution maps one to one; a wrapper is a different object at the same index.
+  const wrappers = new Map(
+    merged.tools.flatMap((tool, index) => {
+      const wrapper = attributedTools[index];
+      return wrapper && wrapper !== tool ? [[tool, wrapper] as const] : [];
+    }),
+  );
   const attributed = {
     ...merged,
-    tools: attachPluginCapabilityAttribution(
-      merged.tools,
-      buildAttributionIndex({
-        capabilities,
-        effectivePluginSkills: input.effectivePluginSkills,
-        finalTools: merged.tools,
-        plan: merged.plan,
-      }),
-    ),
+    tools: attributedTools,
+    ...(wrappers.size > 0 ? { attributed: wrappers } : {}),
   };
   if (input.userText === undefined) return attributed;
   const inventory = buildCapabilityInventory({
@@ -117,22 +138,73 @@ export function mergeAgentHostTurnCapabilities(
       attributed.plan.deferred ? attributed.plan.deferredRegistry.keys() : [],
     ),
   });
+  const delegable = delegablePluginIds(capabilities.agents, merged.tools);
   const unavailable = [
     ...new Set(parsePluginMentions(input.userText).map((mention) => mention.pluginId)),
   ].filter(
     (id) =>
+      !delegable.has(id) &&
       !inventory.some(
         (plugin) =>
           plugin.pluginId === id &&
           (plugin.skills.length > 0 || plugin.appTools.length > 0 || plugin.mcpTools.length > 0),
       ),
   );
-  const reminder = buildPluginReferenceReminder(
-    detectPluginReferencesForMessages([{ content: input.userText }], input.userText, inventory),
-    unavailable,
-  );
+  const reminder = [
+    buildPluginReferenceReminder(
+      detectPluginReferencesForMessages([{ content: input.userText }], input.userText, inventory),
+      unavailable,
+      // PTC Turn: Tool Search results are called inside run_code, not via mcp_invoke.
+      input.ptc ? { ptc: true } : {},
+    ),
+    renderPluginAgentRoster(capabilities.agents, merged.tools),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   return { ...attributed, ...(reminder ? { reminder } : {}) };
 }
+
+/** Plugin Agents are callable only through `task`; the id keeps each Agent's source. */
+function delegablePluginIds(
+  agents: readonly AgentHostTurnPluginAgent[] | undefined,
+  tools: readonly RuntimeTool[],
+): ReadonlySet<string> {
+  if (!agents?.length || !tools.some((tool) => tool.def.name === 'task')) return new Set();
+  return new Set(agents.map((agent) => buildPluginId(agent.pluginName, agent.origin)));
+}
+
+const PLUGIN_AGENT_DESCRIPTION_LIMIT = 200;
+
+/**
+ * @internal Exported only for focused roster tests.
+ * Stable Plugin Agent roster; emitted only when this Turn can call `task`.
+ */
+export function renderPluginAgentRoster(
+  agents: readonly AgentHostTurnPluginAgent[] | undefined,
+  tools: readonly RuntimeTool[],
+): string | undefined {
+  if (!agents?.length || !tools.some((tool) => tool.def.name === 'task')) return undefined;
+  const lines = [...agents]
+    .sort((left, right) => (left.scopedName < right.scopedName ? -1 : 1))
+    .map((agent) => `- \`${agent.scopedName}\`: ${rosterDescription(agent.description)}`);
+  return [
+    '<plugin-agents>',
+    'Enabled Plugin subagents. To delegate, call `task` with `agent_name` set to the scoped name.',
+    ...lines,
+    '</plugin-agents>',
+  ].join('\n');
+}
+
+function rosterDescription(description: string): string {
+  const flat = description.replace(/\s+/gu, ' ').trim();
+  const clipped =
+    flat.length > PLUGIN_AGENT_DESCRIPTION_LIMIT
+      ? `${flat.slice(0, PLUGIN_AGENT_DESCRIPTION_LIMIT - 1)}…`
+      : flat;
+  return clipped.replace(/[<>&]/gu, (char) => ROSTER_ESCAPES[char] ?? char);
+}
+
+const ROSTER_ESCAPES: Readonly<Record<string, string>> = { '<': '&lt;', '>': '&gt;', '&': '&amp;' };
 
 function buildAttributionIndex(input: {
   readonly capabilities: AgentHostTurnCapabilityView;
@@ -182,10 +254,20 @@ function bindingOwners(
     const plugin = plugins.get(normalizedName(binding.pluginName));
     return plugin ? [plugin] : [];
   }
-  return selectPreferredAppPluginOwners(
-    binding.source,
-    allPlugins.filter((plugin) => plugin.appProviders.includes(binding.source)),
-  );
+  return appProviderOwners(binding.source, allPlugins);
+}
+
+/**
+ * Official declarations own an App before local ones, so a user-authored Plugin cannot take an
+ * official App's attribution by naming itself after the provider.
+ */
+function appProviderOwners(
+  provider: string,
+  plugins: AgentHostTurnCapabilityView['plugins'],
+): readonly AgentHostTurnCapabilityView['plugins'][number][] {
+  const declaring = plugins.filter((plugin) => plugin.appProviders.includes(provider));
+  const official = declaring.filter((plugin) => plugin.source === 'official');
+  return selectPreferredAppPluginOwners(provider, official.length > 0 ? official : declaring);
 }
 
 function provenance(

@@ -19,6 +19,11 @@ export interface TuiComposerState {
   surface: TuiSurface;
   /** Contextual empty-editor placeholder, e.g. the BTW side prompt. */
   placeholder?: string;
+  /**
+   * Next-message suggestion shown as the empty-editor placeholder; Tab fills it
+   * into the composer. Set only when the projection decided it is visible.
+   */
+  promptSuggestion?: string;
   /** Stable mode label rendered below the editor, separate from the global status rail. */
   contextLabel?: string;
   hint?: string;
@@ -46,13 +51,19 @@ export interface TuiComposerOptions {
 
 export class TuiComposer implements Component {
   constructor(
-    private readonly editor: Pick<Editor, 'render' | 'invalidate'>,
+    private readonly editor: Pick<Editor, 'render' | 'invalidate'> &
+      Partial<Pick<Editor, 'getPaddingX'>>,
     private state: TuiComposerState,
     private readonly options: TuiComposerOptions = {},
   ) {}
 
   setState(state: TuiComposerState): void {
     this.state = state;
+  }
+
+  /** The suggestion this composer currently renders, if any. */
+  visiblePromptSuggestion(): string | undefined {
+    return this.state.promptSuggestion;
   }
 
   invalidate(): void {
@@ -70,7 +81,12 @@ export class TuiComposer implements Component {
     if (safeWidth <= 2) return [...this.editor.render(safeWidth, placeholder)];
 
     const innerWidth = safeWidth - 2;
-    const body = this.editor.render(innerWidth, placeholder);
+    const body = this.editor.render(
+      innerWidth,
+      this.state.promptSuggestion && placeholder
+        ? fitPlaceholder(placeholder, innerWidth - 2 * (this.editor.getPaddingX?.() ?? 0))
+        : placeholder,
+    );
     const rendered = this.state.headerHidden
       ? []
       : [
@@ -152,6 +168,8 @@ function renderComposerHeaderWithTip(
     return header;
   }
 
+  // The suggestion row already explains the empty composer; a tip would compete with it.
+  if (state.promptSuggestion) return header;
   const tip = selectTuiTipAt(nowMs, availableTips);
   if (!tip) return header;
 
@@ -162,6 +180,12 @@ function renderComposerHeaderWithTip(
     return `${header}${' '.repeat(gap)}${chalk.hex(colors.muted)(text)}`;
   }
   return header;
+}
+
+/** A suggestion wider than the editor ends in an ellipsis instead of being cut silently. */
+function fitPlaceholder(text: string, width: number): string {
+  if (width <= 0 || visibleWidth(text) <= width) return text;
+  return truncateToWidth(text, width, '…');
 }
 
 function isEditorBorder(line: string): boolean {
@@ -261,6 +285,10 @@ function composerLabels(
   }
   if (state.surface === 'welcome') {
     return ['Start · @ file or Plugin · / autocomplete', 'Start below'];
+  }
+  if (state.promptSuggestion) {
+    const accept = `${formatTuiKeybinding('tui.input.tab', keybindings)} accept`;
+    return [`Suggested next message · ${accept}`, `Suggestion · ${accept}`, accept];
   }
   const newline = composerNewlineKeybinding(supportsShiftEnter, keybindings);
   return [`Message · ${submit} send · ${newline} newline`, `Message · ${submit} send`, 'Message'];

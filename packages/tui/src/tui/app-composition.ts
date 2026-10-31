@@ -496,6 +496,7 @@ export function createTuiApplicationSurface(options: {
       goal.setAnimationPaused(active);
     },
     () => layout.followBottom(),
+    () => layout.forceFollowBottom(),
   );
   return { layout, surfaceHost, fullscreenLayout: surfaceHost, themeRendering, interactionSurface };
 }
@@ -563,6 +564,8 @@ export function createTuiApplicationSessionFeatures(options: {
   readonly setEditTranscriptBoundary: (sourceMessageId: string | undefined) => void;
   readonly onAgentTeamChanged: (snapshot: TuiAgentTeamSnapshot) => void;
   readonly onBackgroundTasksChanged: (tasks: readonly TuiBackgroundTask[]) => void;
+  /** `[V]` machine status is enabled (`tui.statusLine: [build-mode]`). */
+  readonly machineStatus: boolean;
   readonly onChanged: () => void;
   readonly hasLiveRun: () => boolean;
 }) {
@@ -597,6 +600,7 @@ export function createTuiApplicationSessionFeatures(options: {
     openSession: activateSessionById,
     onAgentTeamChanged: options.onAgentTeamChanged,
     onBackgroundTasksChanged: options.onBackgroundTasksChanged,
+    machineStatus: options.machineStatus,
     onChanged: options.onChanged,
     onError: (error) =>
       options.append(

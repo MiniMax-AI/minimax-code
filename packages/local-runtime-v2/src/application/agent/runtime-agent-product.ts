@@ -209,9 +209,17 @@ export function createRuntimeAgentProduct(
     executor: {
       ...baseProduct.executor,
       createTurnToolSafetyGuard: () => browserUse.createTurnToolSafetyGuard(),
+      // PTC state logs name the product surface. The TUI exec entry point is
+      // known only to the host process, so exec reads `tui` here.
+      ptcSurface: ptcSurfaceOf(runtimeOwnerKind),
     },
     normalExtensions: [browserUse.extension, ...(baseProduct.normalExtensions ?? [])],
   };
+}
+
+function ptcSurfaceOf(runtimeOwnerKind: string | undefined): 'desktop' | 'tui' | 'other' {
+  if (runtimeOwnerKind === 'electron') return 'desktop';
+  return runtimeOwnerKind === 'tui' ? 'tui' : 'other';
 }
 
 function normalizedSkillName(value: string): string {

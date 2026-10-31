@@ -3,6 +3,7 @@ import {
   inspectCanonicalHistorySequence,
   type CanonicalHistoryEnvelope,
 } from '../../../sessions/representation/canonical-history-contract.js';
+import { sanitizePtcSafetyHistoryMessage } from '../../ptc/safety-reconcile.js';
 
 export interface SessionHistorySnapshot {
   readonly generation: number;
@@ -15,7 +16,7 @@ export interface SettleTurnTailInput {
   readonly sessionId: string;
   readonly turnId: string;
   readonly operationId: string;
-  readonly mode: 'abort' | 'network';
+  readonly mode: 'abort' | 'network' | 'safety';
   readonly approvedContent: string;
 }
 
@@ -67,6 +68,7 @@ export function planSettleTurnTail(
   input: SettleTurnTailInput,
 ): SettleTurnTailPlan {
   assertMutationIdentity(input);
+  if (input.mode === 'safety') return planSafetyTurnTail(active, input);
   const last = active.at(-1);
   if (!last || last.turn_id !== input.turnId || last.message.role !== 'assistant') {
     return unchangedSettle(active);
@@ -91,6 +93,24 @@ export function planSettleTurnTail(
   }
   if (sameJson(active, next)) return unchangedSettle(active);
   assertSettled(next, 'Turn tail settlement');
+  return { status: 'committed', active: next, deletedMessageIds };
+}
+
+function planSafetyTurnTail(
+  active: readonly CanonicalHistoryEnvelope[],
+  input: SettleTurnTailInput,
+): SettleTurnTailPlan {
+  if (active.at(-1)?.turn_id !== input.turnId) return unchangedSettle(active);
+  const deletedMessageIds: string[] = [];
+  const next = active.flatMap((record) => {
+    if (record.turn_id !== input.turnId) return [record];
+    const message = sanitizePtcSafetyHistoryMessage(record.message);
+    if (message) return [{ ...record, message }];
+    deletedMessageIds.push(record.message_id);
+    return [];
+  });
+  if (sameJson(active, next)) return unchangedSettle(active);
+  assertSettled(next, 'Safety Turn tail settlement');
   return { status: 'committed', active: next, deletedMessageIds };
 }
 

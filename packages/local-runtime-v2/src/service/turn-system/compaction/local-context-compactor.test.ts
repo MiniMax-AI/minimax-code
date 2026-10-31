@@ -11,6 +11,7 @@ import { wrapInternalContext } from '@mavis/goal';
 import { describe, expect, it, vi } from 'vitest';
 
 import { buildLocalRequestPayloadTransform } from '../agent-host/assembly/local-turn-payload-transform.js';
+import type { ManualContextCompactionInput } from '../agent-host/compaction/contracts.js';
 import { buildCheckpointMessage } from './algorithm/checkpoint-format.js';
 import { readCompactionCompatibility } from './compat.js';
 import { buildCheckpointControl } from './execution/checkpoint-prompt.js';
@@ -26,6 +27,100 @@ function localCompactor(
 ) {
   return new LocalContextCompactor(checkpointState, logger, promptSnapshots);
 }
+describe("Manual compaction Context Usage", () => {
+  it("measures each committed replacement with prompt and tools instead of checkpoint Provider usage", async () => {
+    const model = testModel({ contextWindow: 512_000 });
+    const systemPrompt = "System instructions.\nSaved memory.\nAvailable skills.";
+    const streamFn = vi
+      .fn<StreamFn>()
+      .mockImplementationOnce(() =>
+        completedStream(
+          checkpointMessage(model, `${validCheckpointSummary()}\n${"details ".repeat(500)}`),
+        ),
+      )
+      .mockImplementationOnce(() =>
+        completedStream(checkpointMessage(model, validCheckpointSummary())),
+      );
+    const input: ManualContextCompactionInput = {
+      sessionId: "session-context-usage",
+      model,
+      thinkingLevel: "off",
+      streamFn,
+      systemPrompt,
+      contextUsagePromptRanges: [
+        { kind: "MEMORY", startOffset: 21, endOffset: 34 },
+        { kind: "SKILLS", startOffset: 35, endOffset: systemPrompt.length },
+      ],
+      tools: [{ name: "read", description: "Read a file.", parameters: { type: "object" } }],
+      messages: [
+        ...twoToolRounds(),
+        { role: "user", content: "Preserve my request.", timestamp: 5 },
+      ],
+    };
+    const compactor = localCompactor();
+    const first = await compactor.compactManual(input);
+    if (first.status !== "completed") throw new Error("Expected completed checkpoint.");
+    const second = await compactor.compactManual({
+      ...input,
+      messages: first.replacementMessages,
+    });
+    if (second.status !== "completed") throw new Error("Expected completed checkpoint.");
+
+    for (const result of [first, second]) {
+      expect(result.contextUsage).toMatchObject({
+        contextWindowTokens: 512_000,
+        totalCountSource: "LOCAL_ESTIMATE",
+      });
+      const snapshot = result.contextUsage;
+      if (!snapshot) throw new Error("Expected post-compaction Context Usage.");
+      expect(snapshot.components.map(({ kind }) => kind)).toEqual([
+        "SYSTEM_PROMPT",
+        "MEMORY",
+        "TOOLS",
+        "SKILLS",
+        "MESSAGES",
+        "OTHER",
+      ]);
+      const components = Object.fromEntries(
+        snapshot.components.map(({ kind, tokens }) => [kind, tokens]),
+      );
+      for (const kind of ["SYSTEM_PROMPT", "MEMORY", "TOOLS", "SKILLS"]) {
+        expect(components[kind]).toBeGreaterThan(0);
+      }
+      expect(components.MESSAGES).toBe(
+        createLocalContextFootprintMeasurer({ model }).measure(
+          result.replacementMessages,
+        ).inputTokens,
+      );
+      expect(snapshot.usedTokens).toBe(
+        snapshot.components.reduce((total, part) => total + part.tokens, 0),
+      );
+      expect(snapshot.usedTokens).toBeLessThan(result.tokensBefore);
+      expect(snapshot.usedTokens).not.toBe(100); // Summary request output usage.
+    }
+    if (!first.contextUsage || !second.contextUsage) throw new Error("Expected both snapshots.");
+    expect(second.contextUsage.usedTokens).toBeLessThan(first.contextUsage.usedTokens);
+    expect(streamFn).toHaveBeenCalledTimes(2); // Only the two checkpoint requests.
+  });
+
+  it.each([undefined, [{ kind: "MEMORY" as const, startOffset: 0, endOffset: 999 }]])(
+    "still commits when prompt attribution is unavailable or invalid (%j)",
+    async (contextUsagePromptRanges) => {
+      const model = testModel();
+      const result = await localCompactor().compactManual({
+        sessionId: "session-missing-attribution",
+        messages: [{ role: "user", content: "Preserve this request.", timestamp: 1 }],
+        model,
+        thinkingLevel: "off",
+        systemPrompt: "System instructions.",
+        ...(contextUsagePromptRanges === undefined ? {} : { contextUsagePromptRanges }),
+        streamFn: () => completedStream(checkpointMessage(model, validCheckpointSummary())),
+      });
+      expect(result).toMatchObject({ status: "completed", method: "llm_checkpoint" });
+      expect(result).not.toHaveProperty("contextUsage");
+    },
+  );
+});
 
 describe('LocalContextCompactor', () => {
   it('bypasses trigger and filtering, then checkpoints full H0 with instructions', async () => {

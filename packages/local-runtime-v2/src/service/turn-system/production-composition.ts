@@ -6,8 +6,12 @@ import type {
   PromptSnapshotSource,
 } from '@mavis/agent-runtime';
 import {
+  outputLimitRecoveryExtension,
+  requestMediaExtension,
   sessionReportExtension,
   toolOutputBudgetExtension,
+  type OutputLimitRecoveryObservation,
+  type RequestMediaExtensionOptions,
   type ToolOutputArtifactInput,
 } from '@mavis/agent-extension';
 import type { LLMRetryOptions } from '@mavis/agent-core/pi-turn-runner';
@@ -16,7 +20,10 @@ import type { IAgentConfig } from '@mavis/protocol';
 import type { GlobalEventInput } from '@mavis/shared/global-events';
 import {
   TOOL_RESULT_COMPACTION_DEFAULTS,
+  parseRequestMediaConfig,
   parseToolResultCompactionConfig,
+  type RequestImageSettings,
+  type RequestMediaSettings,
   type ResolvedAgentCapabilities,
   type RunawayGuardOverride,
 } from '@mavis/config';
@@ -57,7 +64,11 @@ import {
   type NativeAgentPreparationOptions,
   type NativeLocalAgentPreparationOptions,
 } from './agent-host/index.js';
-import type { AgentExecutionSnapshot, AgentHost } from './agent-host/contracts.js';
+import type {
+  AgentExecutionSnapshot,
+  AgentHost,
+  AgentHostDependencies,
+} from './agent-host/contracts.js';
 import type { CanonicalHistoryCompactionChange } from './agent-host/history/contracts.js';
 import type { DurableCanonicalHistoryProvider } from './agent-host/history/durable-canonical-history-store.js';
 import { captureSemanticSnapshot } from './agent-host/history/semantic-identity.js';
@@ -67,13 +78,15 @@ import type {
   RequiredAgentEventProjector,
   RequiredAgentRuntimeProjector,
 } from './agent-host/events/required-agent-event-delivery.js';
-import { readCompactionCommitMetadata } from './agent-host/compaction/context-compaction.js';
+import { readCompactionCommitMetadata } from './agent-host/compaction/compaction-commit-metadata.js';
 import { LocalContextCompactor } from './compaction/local-context-compactor.js';
 import {
   AutomaticContextCompactor,
   createAutomaticContextRequestFilterHook,
+  createRequestMediaGuardHook,
 } from './compaction/automatic-context-compactor.js';
 import type {
+  EarlierFilesResolver,
   ToolResultCompactionConfig,
   SubagentCheckpointStateSource,
 } from './compaction/contracts.js';
@@ -81,6 +94,13 @@ import { ContextUsageAnchorState } from './compaction/execution/usage-anchor.js'
 import { ToolResultArchiver } from './compaction/algorithm/tool-result-archiver.js';
 import { createFileApiUploadStoreSource } from './persistence/file-api-upload.repository.js';
 import { ToolOutputArtifactRepository } from './persistence/tool-output-artifact.repository.js';
+import {
+  compactionSnapshotGrantSource,
+  createSessionReadableGrantResolver,
+  runtimeWorkspaceGrantSource,
+  sessionAttachmentGrantSource,
+  toolOutputGrantSource,
+} from './agent-host/runner/policy/session-readable-grants.js';
 import type { MessagesFileApiPatcherLogger } from './agent-host/assembly/messages-file-api-patcher.js';
 import { isProductionRuntimeErrorRetryable } from './runtime-error-retry-policy.js';
 import { createTodoCadenceReminderHook } from './execution/reminder/todo-cadence-reminder.js';
@@ -139,6 +159,13 @@ export interface ProductionAgentProductCapabilities<
     }): Promise<unknown>;
   };
   readonly permission: LocalTurnPermissionGateOptions;
+  /**
+   * Asset files (attachments, generated media) the given Sessions registered.
+   * They become part of the Session read grant; see `session-readable-grants.ts`.
+   */
+  readonly sessionAssets?: {
+    listSessionReadablePaths(sessionIds: readonly string[]): Promise<readonly string[]>;
+  };
   readonly runner: Omit<LocalAgentTurnRunnerOptions, 'reviewContent'>;
   readonly executor: Omit<
     LocalRuntimeTurnExecutorOptions<TAgent, LocalRuntimeTurnToolContext>,
@@ -210,6 +237,7 @@ export interface CreateLocalAgentHostOptions<
   readonly eventObserver?: AgentEventBestEffortObserver;
   readonly contextUsageProjection?: RequiredAgentRuntimeProjector;
   readonly assemblyObserver?: AgentHostAssemblyObserver;
+  readonly promptSuggestion?: AgentHostDependencies['promptSuggestion'];
   readonly onSteeringConsumed: NonNullable<
     LocalRuntimeTurnExecutorOptions<TAgent, LocalRuntimeTurnToolContext>['onSteeringConsumed']
   >;
@@ -314,6 +342,8 @@ export function createProductionRootArchiveTitleModel<
                 resolvedStream(model, mutableTitleContext(context), options),
             }
           : {}),
+        // The same decision as this turn's reply: an archive title from a BYOK model is not reviewed.
+        contentReviewRequired: resolved.managedProvider === true,
       };
     },
     review: product.safety.review,
@@ -325,6 +355,7 @@ export function createProductionRootArchiveTitleModel<
 /** Desktop Peek adds mutation approval; BTW shares the ordinary runtime permission policy. */
 function createHostPermissionPolicy<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
+  toolOutputArtifacts: ToolOutputArtifactRepository,
 ) {
   return {
     ...options.product.permission,
@@ -334,6 +365,28 @@ function createHostPermissionPolicy<TAgent extends AgentExecutionSnapshot>(
         return session ? session.purpose !== 'peek_btw_session' && isPeekSession(session) : false;
       },
     },
+    // Paths the runtime hands the Agent inside its private data directory are
+    // granted by the runtime, never derived by the permission engine. Every
+    // such feature registers one source here (see session-readable-grants.ts).
+    resolveSessionOwnedReadablePaths: createSessionReadableGrantResolver({
+      loadSession: (sessionId) =>
+        options.sessions.sessions.execution.getExecutionSnapshot(sessionId),
+      sources: [
+        toolOutputGrantSource(toolOutputArtifacts),
+        compactionSnapshotGrantSource({
+          inspectSnapshotsDirectory: (sessionId) =>
+            options.sessions.artifacts.inspectSnapshotsDirectory(sessionId),
+        }),
+        runtimeWorkspaceGrantSource({
+          dataDir: () => options.product.preparation.configBuilder.config().dataDir,
+        }),
+        ...(options.product.sessionAssets
+          ? [sessionAttachmentGrantSource(options.product.sessionAssets)]
+          : []),
+      ],
+      ...(options.product.permission.logger ? { logger: options.product.permission.logger } : {}),
+    }),
+
   };
 }
 
@@ -346,10 +399,17 @@ export async function createLocalAgentHost<
     options.eventObserver,
   );
   const contextUsageAnchor = new ContextUsageAnchorState();
-  const toolOutputArtifacts = createToolOutputArtifactRepository(options);
+  const toolOutputArtifacts = new ToolOutputArtifactRepository({
+    resolveSessionReportsDirectory: (id) => options.sessions.artifacts.ensureReportsDirectory(id),
+    inspectSessionReportsDirectory: (id) => options.sessions.artifacts.inspectReportsDirectory(id),
+  });
   const getToolResultCompactionConfig = createToolResultCompactionConfigGetter(options);
+  const getRequestMediaConfig = createRequestMediaConfigGetter(options);
+  const getImageEncoding = () => requestImageEncoding(getRequestMediaConfig().image);
+  const getRecoveryDivisor = () => getRequestMediaConfig().recoveryDivisor;
   const toolResultArchiver = new ToolResultArchiver({
     writeArtifact: (input) => toolOutputArtifacts.write(input),
+    writeImageArtifact: (input) => toolOutputArtifacts.writeImage(input),
     logger: options.product.runner.logger,
     getConfig: getToolResultCompactionConfig,
   });
@@ -362,6 +422,7 @@ export async function createLocalAgentHost<
     options,
     toolOutputArtifacts,
     getToolResultCompactionConfig,
+    getImageEncoding,
   );
   const dependencies = await createNativeAgentHostProductionDependencies({
     sessions: {
@@ -405,9 +466,11 @@ export async function createLocalAgentHost<
       },
       config: options.product.preparation.configBuilder.config().mcpToolSearch,
       env: process.env,
+      // run_code saves a return value over 64 KiB where oversized results are externalized.
+      writePtcReturnArtifact: (input) => toolOutputArtifacts.write(input),
     },
-    inputPreparation: options.product.inputPreparation,
-    permission: createHostPermissionPolicy(options),
+    inputPreparation: { ...options.product.inputPreparation, getImageEncoding },
+    permission: createHostPermissionPolicy(options, toolOutputArtifacts),
     runner: {
       ...options.product.runner,
       reviewContent: options.safety.review,
@@ -415,6 +478,8 @@ export async function createLocalAgentHost<
     ...optionalToolPolicyGuard(options.toolPolicyGuard),
     executor: {
       ...options.product.executor,
+      nativeDelete: () =>
+        options.product.preparation.configBuilder.config().permission?.nativeDelete === true,
       logger: options.product.runner.logger,
       backgroundCadenceReminder: createBackgroundCadenceReminder(contextUsageAnchor),
       canAppendExecutionBudgetReminder: (input, marker) =>
@@ -446,6 +511,7 @@ export async function createLocalAgentHost<
       activatePluginHookSessionOwnership: options.pluginHookSessionOwnership.activate,
       afterCompactionBeforeLlmCallHooks: [
         createAutomaticContextRequestFilterHook(),
+        createRequestMediaGuardHook(),
         createSessionIdentityReminderHook(contextUsageAnchor),
         createTodoCadenceReminderHook(contextUsageAnchor),
       ],
@@ -456,8 +522,7 @@ export async function createLocalAgentHost<
     },
     ...optionalNormalExtensions(normalExtensions),
     turnControl: options.turnControl,
-    ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
-    ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    ...optionalTurnHooks(options),
     canonicalHistory: adaptCanonicalHistory(
       options.sessions.canonicalHistory,
       options.sessions.sessions.historyMutation,
@@ -470,10 +535,19 @@ export async function createLocalAgentHost<
         toolResultArchiver,
         promptSnapshots: options.product.promptSnapshots,
         getCompactionTriggerAt: createCompactionTriggerAtGetter(options),
+        getRecoveryDivisor,
+        resolveEarlierFiles: async (sessionId) => {
+          const [snapshots, toolOutputs] = await Promise.all([
+            options.sessions.artifacts.resolveSnapshotsDirectory(sessionId),
+            toolOutputArtifacts.directory(sessionId),
+          ]);
+          return { snapshots, toolOutputs };
+        },
       }),
       control: options.turnControl,
       lifecycle: options.sessions.agentProjection.compactionLifecycle,
       observer: options.sessions.agentProjection.compactionObserver,
+      checkpointSharedPrefixEnabled: createCheckpointSharedPrefixSwitch(options),
       ...(options.product.runner.metricsClient
         ? { metricsClient: options.product.runner.metricsClient }
         : {}),
@@ -516,6 +590,7 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
   toolOutputArtifacts: ToolOutputArtifactRepository,
   getToolResultCompactionConfig: () => ToolResultCompactionConfig,
+  getImageEncoding: RequestMediaExtensionOptions['getImageEncoding'],
 ): readonly AgentExtension[] | undefined {
   return mergeNormalExtensions(
     [
@@ -524,6 +599,8 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
         reportFailure: options.product.executor.reportFailure,
       }),
       createHostRunawayGuardExtension(options),
+      createHostOutputLimitRecoveryExtension(options),
+      requestMediaExtension({ getImageEncoding }),
       toolOutputBudgetExtension({
         maxInlineBytes: TOOL_RESULT_COMPACTION_DEFAULTS.maxInlineKiB * 1_024,
         getMaxInlineBytes: () => getToolResultCompactionConfig().maxInlineBytes,
@@ -571,6 +648,34 @@ function createHostRunawayGuardExtension<TAgent extends AgentExecutionSnapshot>(
   });
 }
 
+function createHostOutputLimitRecoveryExtension<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): AgentExtension {
+  const log =
+    (outcome: 'retry' | 'recovered' | 'exhausted') =>
+    (observation: OutputLimitRecoveryObservation): void => {
+      options.product.runner.logger?.[outcome === 'exhausted' ? 'error' : 'info']?.(
+        {
+          event: 'output_limit_recovery',
+          outcome,
+          session_id: observation.sessionId,
+          turn_id: observation.turnId,
+          attempts: observation.attempts,
+          ...(observation.truncatedToolCall === undefined
+            ? {}
+            : { truncated_tool_call: observation.truncatedToolCall }),
+          ...(observation.model === undefined ? {} : { model: observation.model }),
+        },
+        '[local-runtime-v2] Output limit recovery',
+      );
+    };
+  return outputLimitRecoveryExtension({
+    onRetry: log('retry'),
+    onRecovered: log('recovered'),
+    onExhausted: log('exhausted'),
+  });
+}
+
 function createMcpToolResultHistoryExternalizer<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
   artifacts: ToolOutputArtifactRepository,
@@ -590,6 +695,8 @@ function createToolOutputArtifactRepository<TAgent extends AgentExecutionSnapsho
   return new ToolOutputArtifactRepository({
     resolveSessionReportsDirectory: (sessionId) =>
       options.sessions.artifacts.ensureReportsDirectory(sessionId),
+    inspectSessionReportsDirectory: (sessionId) =>
+      options.sessions.artifacts.inspectReportsDirectory(sessionId),
   });
 }
 
@@ -600,6 +707,8 @@ function createContextCompactors(input: {
   readonly toolResultArchiver: ToolResultArchiver;
   readonly promptSnapshots: ConstructorParameters<typeof LocalContextCompactor>[2];
   readonly getCompactionTriggerAt: () => number | undefined;
+  readonly getRecoveryDivisor: () => number;
+  readonly resolveEarlierFiles: EarlierFilesResolver;
 }) {
   return {
     automatic: new AutomaticContextCompactor(
@@ -610,9 +719,14 @@ function createContextCompactors(input: {
         toolResultArchiver: input.toolResultArchiver,
         promptSnapshots: input.promptSnapshots,
         getCompactionTriggerAt: input.getCompactionTriggerAt,
+        getRecoveryDivisor: input.getRecoveryDivisor,
+        resolveEarlierFiles: input.resolveEarlierFiles,
       },
     ),
-    manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots),
+    manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots, {
+      imageFileWriter: input.toolResultArchiver,
+      resolveEarlierFiles: input.resolveEarlierFiles,
+    }),
   };
 }
 
@@ -639,11 +753,42 @@ function createCompactionTriggerAtGetter<TAgent extends AgentExecutionSnapshot>(
   return read;
 }
 
+function createRequestMediaConfigGetter<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): () => RequestMediaSettings {
+  return () => {
+    let raw: unknown;
+    try {
+      raw = options.product.preparation.configBuilder.config().requestMedia;
+    } catch {
+      raw = undefined;
+    }
+    return parseRequestMediaConfig(raw);
+  };
+}
+
+function requestImageEncoding(image: RequestImageSettings) {
+  return {
+    maxWidth: image.max_width,
+    maxHeight: image.max_height,
+    maxBase64Bytes: image.max_base64_bytes,
+  };
+}
+
+/** Remote kill switch: only an explicit Apollo `false` restores the isolated checkpoint request. */
+function createCheckpointSharedPrefixSwitch<TAgent extends AgentExecutionSnapshot>(
+  options: CreateLocalAgentHostOptions<TAgent>,
+): () => boolean {
+  return () =>
+    readToolResultCompactionOverride(options.getToolResultCompactionConfig)
+      ?.checkpointSharedPrefix !== false;
+}
+
 function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
 ): () => ToolResultCompactionConfig {
   const fileConfig = parseToolResultCompactionConfig(readToolResultCompactionFileConfig(options));
-  const base: Required<ToolResultCompactionConfig> = {
+  const base: Required<Omit<ToolResultCompactionConfig, 'checkpointSharedPrefix'>> = {
     enabled: fileConfig.enabled,
     maxInlineBytes: fileConfig.maxInlineKiB * 1_024,
     mcpDetailsMaxInlineBytes: fileConfig.mcpDetailsMaxInlineKiB * 1_024,
@@ -798,6 +943,20 @@ function optionalNormalExtensions(normalExtensions: readonly AgentExtension[] | 
   return normalExtensions ? { normalExtensions } : {};
 }
 
+/** Optional per-Turn seams; absent ones are omitted rather than set to undefined. */
+function optionalTurnHooks(
+  options: Pick<
+    CreateLocalAgentHostOptions,
+    'turnCapabilities' | 'assemblyObserver' | 'promptSuggestion'
+  >,
+) {
+  return {
+    ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
+    ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    ...(options.promptSuggestion ? { promptSuggestion: options.promptSuggestion } : {}),
+  };
+}
+
 export function combineAgentEventObservers(
   ...observers: readonly (AgentEventBestEffortObserver | undefined)[]
 ): AgentEventBestEffortObserver | undefined {
@@ -930,7 +1089,12 @@ function adaptCanonicalHistory(
         summary: metadata.summary,
         ...(metadata.currentUserSourceIndex === undefined
           ? {}
-          : { currentUserSourceIndex: metadata.currentUserSourceIndex }),
+          : {
+              currentUserSourceIndex: metadata.currentUserSourceIndex,
+              ...(metadata.placedMarkerCount === undefined
+                ? {}
+                : { placedMarkerCount: metadata.placedMarkerCount }),
+            }),
       } as const;
       if (metadata.method !== 'llm_checkpoint') {
         const committed = await provider.compact({

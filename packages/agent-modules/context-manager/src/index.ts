@@ -43,3 +43,29 @@ export type {
   ContextTokenCounter,
   ContextTriggerEvaluatedEvent,
 } from './types.js';
+export {
+  archivedImageText,
+  boundRequestMedia,
+  checkpointImageText,
+  DEFAULT_REQUEST_IMAGE_ENCODING,
+  encodeRequestImage,
+  encodeRequestImageBlocks,
+  encodeRequestImageDetails,
+  isRequestMediaRejection,
+  omittedRequestImageText,
+  PROVIDER_IMAGE_MAX_BASE64_BYTES,
+  resolveRequestMediaBudget,
+  selectRequestImages,
+  type EncodedRequestImage,
+  type EncodedRequestImageDetails,
+  type RequestImageEncoding,
+  type RequestMediaBudget,
+  withoutThinking,
+} from './request-media.js';
+export {
+  decideOutputLimitRecovery,
+  DEFAULT_OUTPUT_LIMIT_MAX_RETRIES,
+  OUTPUT_LIMIT_EXHAUSTED_REASON,
+  OUTPUT_LIMIT_RETRY_REASON,
+  type OutputLimitRecoveryDecision,
+} from './output-limit.js';

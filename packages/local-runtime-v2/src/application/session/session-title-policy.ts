@@ -15,9 +15,12 @@ import type {
   SessionRecordServiceDeps,
 } from "../../service/session-system/index.js";
 
-/** Local CLI metadata follows the selected provider, without requiring inference credentials. */
+/**
+ * Whether a Session title goes to content review follows the Session's selected model:
+ * a BYOK model skips it, the same as Desktop, TUI and CLI, without requiring inference
+ * credentials.
+ */
 export function createSessionTitlePolicy(input: {
-  readonly runtimeOwnerKind?: string;
   readonly config: () => LocalRuntimeConfig;
   readonly safety: ContentSafetyService;
   readonly readDefinition: (
@@ -27,18 +30,13 @@ export function createSessionTitlePolicy(input: {
   return {
     blocks: async (title, session) => {
       if (!title.trim()) return false;
-      if (
-        input.runtimeOwnerKind === "tui" ||
-        input.runtimeOwnerKind === "cli"
-      ) {
-        const config = input.config();
-        const model = await selectedModel(
-          session,
-          config,
-          input.readDefinition,
-        );
-        if (model && isUnmanagedProvider(config, model)) return false;
-      }
+      const config = input.config();
+      const model = await selectedModel(
+        session,
+        config,
+        input.readDefinition,
+      );
+      if (model && isUnmanagedProvider(config, model)) return false;
       // Missing/ambiguous provider context retains the existing gate, as do all
       // managed routes. In particular, auth and local errors still block.
       return input.safety.blocks(title, SAFETY_SCENE.ConfigField);
@@ -53,6 +51,9 @@ async function selectedModel(
     sessionId: string,
   ) => Promise<SessionAgentDefinition | undefined>,
 ): Promise<ReturnType<typeof parseSourceQualifiedModelKey>> {
+  // A channel (IM) Session follows its bound Agent's model, which is not recorded on the
+  // Session; the exact model is unknown here, so it keeps going through review.
+  if (session.sessionKind === "channel") return undefined;
   if (session.sessionKind === "task") {
     const binding = await readDefinition(session.sessionId);
     if (binding?.definition.definitionVersion !== 2) return undefined;

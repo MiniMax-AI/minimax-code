@@ -124,18 +124,22 @@ export interface LocalRuntimeConfig {
 
 /** Conversation-owned read model of the process config. */
 export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
+  readonly permission?: Partial<Pick<Config['permission'], 'nativeDelete'>>;
   readonly defaultLightModel?: string;
   /** Goal verifier policy consumed by process-local auxiliary model calls. */
   readonly goal?: Config['goal'];
   readonly memory?: Partial<Config['memory']>;
   /** Session title auto-generation flag — see @mavis/config SessionTitleConfig. */
   readonly sessionTitle?: Config['sessionTitle'];
+  readonly promptSuggestion?: Config['promptSuggestion'];
   /** Runaway Guard local policy resolved from config.yaml. */
   readonly runawayGuard?: Config['runawayGuard'];
   /** ToolResult compaction values resolved from config.yaml. */
   readonly toolResultCompaction?: Config['toolResultCompaction'];
   /** Context management values resolved from config.yaml. */
   readonly contextManagement?: Partial<Config['contextManagement']>;
+  /** Request media recovery values resolved from config.yaml. */
+  readonly requestMedia?: Config['requestMedia'];
   /**
    * Widened past `Config['agents']`: the v2 Agent cutover also threads
    * already-resolved capabilities through this read model, and `default` is

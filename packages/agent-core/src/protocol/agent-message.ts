@@ -58,6 +58,8 @@ export type ToolCallStatus = (typeof ToolCallStatus)[keyof typeof ToolCallStatus
 export interface ToolCall {
   tool_name: string;
   tool_call_id: string;
+  /** Optional parent run_code id for a host-executed PTC child call. */
+  parent_tool_call_id?: string;
   tool_call_status: ToolCallStatus;
   /** JSON string of the argument object the model produced. */
   tool_call_args?: string;
@@ -169,6 +171,8 @@ export interface AgentMessageChunk {
   msg_id: string;
   parent_msg_id?: string;
   msg_content?: string;
+  /** Set when `msg_content` is runtime-authored rather than model output. */
+  msg_content_source?: 'system_error';
   tool_calls?: ToolCall[];
   thinking_content?: string;
   thinking_duration_ms?: number;
@@ -191,6 +195,8 @@ export interface AgentMessage {
   /** Unix-ms timestamp produced by the source runtime. */
   timestamp?: number;
   msg_content?: string;
+  /** Set when `msg_content` is runtime-authored rather than model output. */
+  msg_content_source?: 'system_error';
   msg_type?: MsgType;
   role?: Role;
   thinking_content?: string;

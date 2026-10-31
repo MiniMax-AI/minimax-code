@@ -3,7 +3,10 @@ import type {
   AgentExtension,
   InternalTurnPromptReadRegistry,
 } from "@mavis/agent-runtime";
-import type { RunawayGuardOverride } from "@mavis/config";
+import type {
+  PromptSuggestionRemotePolicy,
+  RunawayGuardOverride,
+} from "@mavis/config";
 import {
   getRuntimeRegion,
   isLocalSourceProvenanceEnabled,
@@ -319,6 +322,10 @@ export interface CreateRuntimeServicesOptions
   readonly greetingEnabled?: boolean;
   /** Live optional Runaway Guard override injected by the owning product. */
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
+  /** Live remote rollout policy for the next-message suggestion. */
+  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
+  /** See `CreateLocalRuntimeHostOptions.promptSuggestionSurface`. */
+  readonly promptSuggestionSurface?: boolean;
   /** Live ToolResult compaction thresholds injected by the owning product. */
   readonly getToolResultCompactionConfig?: () =>
     | ToolResultCompactionConfig
@@ -641,6 +648,18 @@ function createServiceGlobalEventWriter(
   });
 }
 
+function planFailureReporter(
+  product: ProductionSessionComposition['product'],
+  stage: 'lifecycle-reconcile' | 'review-fallback',
+): (error: unknown) => void {
+  return (error) => {
+    product.executor.reportFailure?.(
+      'plan-lifecycle',
+      `owner=plan;stage=${stage};error=${describeError(error)}`,
+    );
+  };
+}
+
 async function initializeRuntimeServiceOwners(
   input: RuntimeServiceOwnerInitializationInput,
 ): Promise<InitializedRuntimeServiceOwners> {
@@ -707,12 +726,8 @@ async function initializeRuntimeServiceOwners(
         requireTurnSystem(turnSystem).turns.dispatchQueue(sessionId),
       entryEnabled: input.planEntryEnabled,
       agentEntryEnabled: input.agentPlanEntryEnabled,
-      reportFailure: (error) => {
-        input.product.executor.reportFailure?.(
-          "plan-lifecycle",
-          `owner=plan;stage=lifecycle-reconcile;error=${describeError(error)}`,
-        );
-      },
+      reportFailure: planFailureReporter(input.product, 'lifecycle-reconcile'),
+      reportReviewFallbackFailure: planFailureReporter(input.product, 'review-fallback'),
       nowMs: input.nowMs,
     });
     bindConversationMutationPlanState({
@@ -1199,6 +1214,7 @@ async function initializeSessionApplications(
       rewindPreview: input.options.compatibility.sessionV2.diff.rewind,
       operations: input.sessionSystem.sessions.operationIntents,
       mutationPlanState: input.sessionSystem.conversationMutationState,
+      ...rewindEditActiveTurn(turnSystem),
       stream: input.sessionSystem.stream,
       turn: turnSystem.turns,
       trustedEditSubmission: turnSystem.trustedEditSubmission,
@@ -1239,6 +1255,14 @@ async function initializeSessionApplications(
     agentApplication,
     runtimeConversation,
   };
+}
+
+/** Lets Rewind/Edit refuse a Turn that another live Runtime owns. */
+function rewindEditActiveTurn(turnSystem: TurnSystemOwner) {
+  const inspection = turnSystem.inspection;
+  return inspection
+    ? { activeTurn: (sessionId: string) => inspection.activeTurn(sessionId) }
+    : {};
 }
 function createOptionalCronDelivery(
   cron: InitializedCronService | undefined,

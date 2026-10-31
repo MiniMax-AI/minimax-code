@@ -1530,4 +1530,36 @@ describe('regular-mode retained document', () => {
       plain(['BANNER', ...fullTranscript, 'composer', 'status']),
     );
   });
+
+  // xterm.js (VS Code) draws ZWJ emoji as separate glyphs, wider than visibleWidth() measures.
+  // A full-width padded Editor row must not soft-wrap and push every later frame down a row.
+  it('keeps the Editor row in place when the terminal draws a ZWJ emoji wider than measured', async () => {
+    const terminal = new RecordingVirtualTerminal(40, 12);
+    const tui = new TuiMainScreen(terminal);
+    const header = new MutableLines();
+    header.lines = ['header'];
+    const editor = new Editor(tui, { borderColor: passthrough, selectList: selectListTheme });
+    tui.addChild(header);
+    tui.addChild(editor);
+    tui.setFocus(editor);
+    const kiss = '\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}';
+    tui.start();
+    try {
+      for (const input of ['a', 'b', kiss, 'c', 'd', 'e', 'f']) {
+        editor.handleInput(input);
+        tui.renderNow();
+        await terminal.flush();
+      }
+
+      const rows = terminal.getViewport().filter((row) => row.trim().length > 0);
+      expect(rows).toHaveLength(4);
+      expect(rows[0]).toBe('header');
+      expect(rows[1]).toMatch(/^─+$/);
+      expect(rows[2]).toMatch(/^ab.+cdef/);
+      expect(rows[3]).toMatch(/^─+$/);
+      expect(terminal.takeWrites().endsWith('\x1b[?7h\x1b[?2026l')).toBe(true);
+    } finally {
+      tui.stop();
+    }
+  });
 });

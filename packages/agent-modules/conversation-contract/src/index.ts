@@ -151,6 +151,43 @@ export interface ConversationSessionCreateInput {
   readonly taskModelSelection?: ConversationTaskModelSelection;
   readonly isDefaultWorkspace?: boolean;
   readonly origin?: "user" | "root-repair";
+  /**
+   * Trusted Task-only Plugin Agent copied from the parent Turn's capability
+   * lease. Request mappers never populate it; the Task host is the only writer.
+   */
+  readonly pluginAgentDefinition?: ConversationPluginAgentDefinition;
+}
+
+/**
+ * Plugin subagent (official or LOCAL package) frozen with one Turn capability
+ * generation. Selectors use the Custom Agent encoding: `undefined` inherits,
+ * `[]` explicitly disables.
+ */
+export interface ConversationPluginAgentDefinition {
+  /** Task target `<plugin>:<agent>`. */
+  readonly scopedName: string;
+  readonly pluginName: string;
+  readonly agentName: string;
+  readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  /** Package origin; absent only for producers that predate official Plugin subagents. */
+  readonly origin?: 'official' | 'local';
+  readonly packageDigest: string;
+  readonly pluginRoot: string;
+  readonly description: string;
+  readonly displayName?: string;
+  /** Markdown body before Plugin path placeholders are expanded. */
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly extensionSkills?: readonly string[];
+  /** MCP server names this Plugin package declares, whether or not they published tools. */
+  readonly declaredMcpServers?: readonly string[];
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
 }
 
 export interface ConversationSessionUpdate {
@@ -263,6 +300,8 @@ export interface ConversationToolCall {
   readonly tool_call_args?: string;
   readonly tool_call_result_data?: string;
   readonly tool_call_duration_ms?: number;
+  /** Optional outer run_code ToolCall id for a PTC child invocation. */
+  readonly parent_tool_call_id?: string;
 }
 
 export interface ConversationCommittedMessage {
@@ -404,6 +443,12 @@ export interface ConversationSteerInput {
    * not provide this hook and keeps its existing semantics.
    */
   readonly preDelivery?: ConversationSteerPreDelivery;
+  /**
+   * Internal per-item receipt ids that the runtime durably binds to the exact
+   * Turn admitting this steer, in the same write as the producer receipt. A
+   * batching producer uses them to answer which Turn carried each item.
+   */
+  readonly receiptAliases?: readonly string[];
 }
 
 export interface ConversationSteerPreDelivery {

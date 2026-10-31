@@ -1,5 +1,6 @@
 import type { AppDb } from '../../infra/db/client.js';
 import type { InputSafetyDecision } from '../content-safety/index.js';
+import type { PromptSuggestionReadResult } from './agent-host/runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   CommittedQueueCapability,
   QueueClaimAcceptanceLookup,
@@ -7,6 +8,7 @@ import type {
   QueueDispatchCapability,
   QueueDispatchClaim,
   QueueItem,
+  PtcCrashRecoveryTerminalFact,
   SessionHistoryMutationCapability,
   SessionSystemCanonicalHistoryProvider,
   SessionMaintenanceGuard,
@@ -32,6 +34,7 @@ import type {
   TurnAdmissionPolicy,
   TurnAdmissionRejectionReason,
   TurnAdmissionUserInputResume,
+  TurnClientRequestBinding,
   TurnIngressReceipt,
   TurnSessionAdmissionCapability,
 } from './admission-contracts.js';
@@ -97,6 +100,16 @@ export interface AbortTurnInput {
   readonly reason: string;
   /** Runs after exact ownership accepts the abort, before waiting for release. */
   readonly onAccepted?: () => void | Promise<void>;
+  /**
+   * Called once, synchronously, at the moment the Turn this abort was accepted
+   * for releases its Session: before the abort resolves, and before the next
+   * Turn can be registered. The abort path holds no Session lock, so a caller
+   * that must tell this Turn's work from the next Turn's needs this moment, not
+   * the (later) moment the abort returns. Never called for `not-running` or
+   * `turn-mismatch`; after `abort-timeout` it still fires if the Turn releases
+   * later. Must not throw; a failure is logged and ignored.
+   */
+  readonly onReleased?: () => void;
 }
 
 export interface TurnFailureProjection {
@@ -176,6 +189,16 @@ export interface TurnActivationSubmission extends TurnMessageSubmission {
   /** Queue item identity carried onto the persisted user message. */
   readonly sourceMessageId?: string;
   readonly resume?: TurnAdmissionUserInputResume;
+  /**
+   * Stable id of the Query this submission's producer already admitted durably.
+   *
+   * Set when a delivery re-routes the same user submission to a fresh Turn, so
+   * that Turn binds the Query the user actually asked instead of admitting the
+   * same text a second time under its own id.
+   */
+  readonly admittedQueryId?: string;
+  /** Per-item receipt ids admitted with `clientRequestId` in the same ledger write. */
+  readonly receiptAliases?: readonly string[];
 }
 
 export interface ResumeUserInputSubmission extends Omit<
@@ -387,6 +410,11 @@ export interface SteerSessionInput extends TurnMessageSubmission {
   /** Queue item identity carried onto the persisted user message. */
   readonly sourceMessageId?: string;
   readonly preDelivery?: TurnSteerPreDelivery;
+  /**
+   * Per-item receipt ids bound to the Turn that admits or joins this steer. Setting them
+   * makes the producer receipt durable, like `preDelivery`.
+   */
+  readonly receiptAliases?: readonly string[];
 }
 
 export type SteerSessionResult =
@@ -415,7 +443,7 @@ export interface HistoryForkInput {
   readonly targetWorkspaceDir: string;
   /** Frozen inclusive complete-prefix boundary used by side conversations. */
   readonly throughMessageId?: string;
-  /** Preferred inclusive canonical Assistant boundary. */
+  /** Preferred inclusive canonical Assistant boundary, plus the results of its own tool calls. */
   readonly throughAssistantMessageId?: string;
   /** Compatibility boundary for legacy Display rows without an Assistant identity. */
   readonly beforeUserMessageId?: UserMessageId;
@@ -432,6 +460,17 @@ export interface HistoryForkInput {
     readonly kind: string;
     readonly content: string;
   };
+}
+
+/** Boundary fields that decide which canonical prefix a Fork would copy. */
+export type HistoryForkBoundaryInput = Pick<
+  HistoryForkInput,
+  'sourceSessionId' | 'throughMessageId' | 'throughAssistantMessageId' | 'beforeUserMessageId'
+>;
+
+export interface HistoryForkBoundaryInspection {
+  /** False when the selected prefix would end inside an unfinished tool call. */
+  readonly settled: boolean;
 }
 
 export interface HistoryRewindInput {
@@ -513,6 +552,8 @@ export interface TurnRewindProjectionCapability {
 /** Stable consumer-facing TurnSystem capability. */
 export interface TurnService {
   fork(input: HistoryForkInput): Promise<HistoryForkResult>;
+  /** Read-only Fork preflight with the exact prefix rule of `fork()`; creates nothing. */
+  inspectForkBoundary?(input: HistoryForkBoundaryInput): Promise<HistoryForkBoundaryInspection>;
   rewind(input: HistoryRewindInput): Promise<HistoryRewindResult>;
   submit(input: SubmitTurnSubmission): Promise<SubmitTurnResult>;
   resumeUserInput(input: ResumeUserInputSubmission): Promise<ActivateTurnResult>;
@@ -526,6 +567,20 @@ export interface TurnService {
   /** Internal Queue mutation/release wake used by compatibility composition. */
   dispatchQueue(sessionId: string): Promise<void>;
   sessionDeletion(sessionId: string, cleanup: () => Promise<void>): Promise<void>;
+  /**
+   * Optional next-message suggestion control. Scoped to one exact settled Turn
+   * of one Session so a stale cancel can never affect a newer Turn.
+   */
+  readonly promptSuggestion?: {
+    /** True only when it actually cancelled that Turn's in-flight request. */
+    cancel(sessionId: string, turnId: string): boolean;
+    /**
+     * Restores an already generated suggestion. Issues no model request and
+     * spends no quota. Returns a status instead of text whenever the result must
+     * not be resurrected.
+     */
+    read(sessionId: string, turnId: string): PromptSuggestionReadResult;
+  };
 }
 
 /** Queue execution seam implemented by the TurnSystem-owned message-delivery workflow. */
@@ -565,7 +620,11 @@ export interface TurnSystemSessionCapabilities {
       recoverPreviousProcess(input: {
         readonly processStartedAtMs: number;
         readonly protectedSessionIds?: readonly string[];
-      }): Promise<{ readonly interruptedSessionIds: readonly string[] }>;
+        readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
+      }): Promise<{
+        readonly interruptedSessionIds: readonly string[];
+        readonly recoveredPtcTurnIds?: readonly string[];
+      }>;
     };
     readonly deletion: {
       begin(
@@ -597,10 +656,11 @@ export interface TurnSystemSessionCapabilities {
  */
 export interface UserStopCascadePort {
   /**
-   * Runs before the abort. Resolving `undefined` means "do not cascade" (child
-   * worker Session, unknown Session, or the hook itself failed).
+   * Runs synchronously before the abort and must not block. Its delivery window
+   * becomes effective before this returns; Session scope resolution happens in
+   * the returned run so the controller still aborts the Turn at arrival.
    */
-  begin(sessionId: string): Promise<UserStopCascadeRun | undefined>;
+  begin(sessionId: string): UserStopCascadeRun | undefined;
 }
 
 /**
@@ -609,12 +669,27 @@ export interface UserStopCascadePort {
  */
 export type UserStopAcceptance = 'controller_accepted' | 'not_running';
 
+/**
+ * Where a stop fixed its target boundary: the stopped Turn released the Session,
+ * or the controller reported that nothing was running.
+ */
+export type UserStopBoundarySource = 'released' | 'not_running';
+
 export interface UserStopCascadeRun {
   /**
    * Side effects a stop may only have once it is accepted (pausing the Goal).
-   * Idempotent; must never throw; resolves after the pause attempt.
+   * Idempotent; must never throw; resolves after Session scope resolution and
+   * the pause attempt.
    */
   accept(how: UserStopAcceptance): Promise<void>;
+  /**
+   * Fixes the target boundary now. Both sources are the last moment before the
+   * next Turn can be admitted — the stop itself holds no Session lock and is
+   * still pausing the Goal — so that Turn's work stays out of this stop.
+   * Synchronous (it runs inside the controller's release); the first boundary
+   * wins; must never throw.
+   */
+  markBoundary(source: UserStopBoundarySource): void;
   /** Detached follow-up; must never throw and never block the stop response. */
   complete(result: AbortTurnResult): void;
   /**
@@ -634,6 +709,8 @@ export interface InitializeTurnSystemOptions {
   readonly logger?: {
     info(fields: Record<string, unknown>, message: string): void;
     warn(fields: Record<string, unknown>, message: string): void;
+    error?(fields: Record<string, unknown>, message: string): void;
+    debug?(fields: Record<string, unknown>, message: string): void;
   };
   readonly sessions: TurnSystemSessionCapabilities;
   readonly processStartedAtMs: number;
@@ -750,6 +827,12 @@ export interface TurnSystemOwner {
           readonly turnId: string;
           readonly busyReason: 'turn' | 'compaction';
           readonly locallyOwned: boolean;
+          /**
+           * Present only when another live Runtime sharing this dataDir owns the
+           * Turn. Clients project it as read-only `running`; this Runtime cannot
+           * steer or abort it.
+           */
+          readonly ownedByOtherRuntime?: true;
         }
       | undefined
     >;
@@ -766,6 +849,11 @@ export interface TurnSystemOwner {
   readonly maintenance: SessionMaintenanceGuard;
   readonly receipts: {
     findReceipt(turnId: string): Promise<TurnIngressReceipt | undefined>;
+    /** Read-only lookup of the Turn each durable client request receipt is bound to. */
+    findClientRequestBindings(input: {
+      readonly sessionId: string;
+      readonly clientRequestIds: readonly string[];
+    }): Promise<readonly TurnClientRequestBinding[]>;
   };
   readonly trustedEditSubmission: {
     submit(input: ConversationEditAdmissionInput): Promise<ConversationEditAdmissionResult>;

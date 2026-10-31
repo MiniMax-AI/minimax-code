@@ -216,6 +216,8 @@ export interface LocalAgentConfigurationSelection {
   readonly mcpServers?: readonly string[];
   readonly skills?: readonly string[];
   readonly extensionSkills?: readonly string[];
+  /** Diagnostics only: set on profiles rendered from a Task snapshot. */
+  readonly frozenSelectorVersion?: 2 | 'legacy';
 }
 
 /** Neutral profile renderer supplied by the Agent owner at composition time. */
@@ -226,6 +228,12 @@ export interface LocalAgentProfileSource {
     readonly isSessionFirstTurn: boolean;
     readonly agentBinding?: TaskSessionBinding;
     readonly promptRead?: PromptReadScope;
+    /**
+     * The Session's `toolCallMode` is `ptc`, the same fact the tool catalog
+     * reads as agentConfig.ptc_enabled; the profile then renders the PTC
+     * prompt section.
+     */
+    readonly ptcRequested?: boolean;
   }): Promise<LocalAgentExecutionProfile>;
 }
 

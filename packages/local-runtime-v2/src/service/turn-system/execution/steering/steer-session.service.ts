@@ -105,7 +105,7 @@ async function deliverToKnownActive(
 ): Promise<SteerSessionResult | undefined> {
   const reservation = await reserveActiveDeliveryReceipt(
     options,
-    input.sessionId,
+    input,
     clientRequestId,
     activeTurnId,
   );
@@ -123,15 +123,16 @@ async function deliverToKnownActive(
 
 async function reserveActiveDeliveryReceipt(
   options: SteerSessionServiceOptions,
-  sessionId: string,
+  input: SteerSessionInput,
   clientRequestId: string | undefined,
   turnId: string,
 ): Promise<ActiveDeliveryReservation> {
   if (!clientRequestId) return { kind: 'deliver', receiptReserved: false };
   const receipt = await options.receipts.reserveSteeringReceipt({
-    sessionId,
+    sessionId: input.sessionId,
     clientRequestId,
     turnId,
+    ...(input.receiptAliases?.length ? { receiptAliases: input.receiptAliases } : {}),
   });
   if (receipt.status === 'duplicate') return { kind: 'duplicate', turnId: receipt.turnId };
   if (receipt.status === 'not-accepted') return { kind: 'not-accepted' };
@@ -163,12 +164,14 @@ async function releaseReservedReceipt(
   delivery: ReservedActiveDelivery,
 ): Promise<void> {
   if (!delivery.reservation.receiptReserved || !delivery.clientRequestId) return;
-  await releaseKnownUndeliveredReceipt(
-    options,
-    delivery.input.sessionId,
-    delivery.clientRequestId,
-    delivery.activeTurnId,
-  );
+  await releaseKnownUndeliveredReceipt(options, {
+    sessionId: delivery.input.sessionId,
+    clientRequestId: delivery.clientRequestId,
+    turnId: delivery.activeTurnId,
+    ...(delivery.input.receiptAliases?.length
+      ? { receiptAliases: delivery.input.receiptAliases }
+      : {}),
+  });
 }
 
 async function activateOrSteerRace(
@@ -190,7 +193,7 @@ function steerActivationInput(
   return {
     sessionId: input.sessionId,
     input: input.input,
-    clientRequestId: clientRequestId ?? input.idempotencyKey,
+    ...activationReceipt(input, clientRequestId),
     provenance: input.provenance,
     ...(input.clientIntent ? { clientIntent: input.clientIntent } : {}),
     ...(input.resumePausedQueue
@@ -203,6 +206,19 @@ function steerActivationInput(
     ...(input.requestedTurnId ? { requestedTurnId: input.requestedTurnId } : {}),
     delivery: activationDelivery(input),
     immediateSendBatch: input.immediateSendBatch,
+  };
+}
+
+/** Per-item aliases are only admitted alongside the durable producer receipt. */
+function activationReceipt(
+  input: SteerSessionInput,
+  clientRequestId: string | undefined,
+): Pick<TurnActivationSubmission, 'clientRequestId' | 'receiptAliases'> {
+  return {
+    clientRequestId: clientRequestId ?? input.idempotencyKey,
+    ...(clientRequestId && input.receiptAliases?.length
+      ? { receiptAliases: input.receiptAliases }
+      : {}),
   };
 }
 
@@ -277,12 +293,10 @@ function activeSteeringInput(input: SteerSessionInput): SteerSessionInput {
 
 async function releaseKnownUndeliveredReceipt(
   options: SteerSessionServiceOptions,
-  sessionId: string,
-  clientRequestId: string,
-  turnId: string,
+  receipt: Parameters<TurnRepository['releaseSteeringReceipt']>[0],
 ): Promise<void> {
   try {
-    await options.receipts.releaseSteeringReceipt({ sessionId, clientRequestId, turnId });
+    await options.receipts.releaseSteeringReceipt(receipt);
   } catch {
     // The receipt stays durable on a compensation write failure. Replaying it
     // is less safe than accepting the documented at-most-once loss boundary.
@@ -403,7 +417,7 @@ function isForegroundSteerSend(clientIntent: string | undefined): boolean {
 }
 
 function durableSteeringReceiptId(input: SteerSessionInput): string | undefined {
-  return input.preDelivery ? steeringReceiptId(input) : undefined;
+  return input.preDelivery || input.receiptAliases?.length ? steeringReceiptId(input) : undefined;
 }
 
 function identifyVisibleSteering(input: SteerSessionInput): SteerSessionInput {

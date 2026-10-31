@@ -116,6 +116,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         workspaceDir,
         tuiMode,
         contextMode,
+        ptc,
         lane,
         systemPromptOverrides,
       }) => {
@@ -130,6 +131,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
           ...(workspaceDir ? { workspaceDir } : {}),
           ...(tuiMode ? { tuiMode } : {}),
           ...(contextMode ? { contextMode } : {}),
+          ...(ptc ? { ptc: true } : {}),
           ...(lane ? { lane } : {}),
           ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
           ...(resumeDraftAfterLogin ? { resumeDraftAfterLogin: true } : {}),

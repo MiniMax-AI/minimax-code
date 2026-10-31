@@ -1,14 +1,24 @@
 import { randomUUID } from 'node:crypto';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 
 import { DEFAULT_COMPACTION_SETTINGS } from '@earendil-works/pi-coding-agent/compaction';
-import type { PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
-import { resolveCompactionTokenBudget } from '@mavis/context-manager';
+import {
+  projectAgentMessagesForModel,
+  type PiTurnRunnerLogger,
+} from '@mavis/agent-core/pi-turn-runner';
+import {
+  createDefaultTokenEstimator,
+  estimatePreparedContextUsage,
+  readContextWindowTokens,
+  resolveCompactionTokenBudget,
+} from '@mavis/context-manager';
 
 import type {
   ContextCompactionHooks,
   ContextCompactionResult,
   ContextCompactor,
   ManualContextCompactionInput,
+  PostCompactionContextUsage,
   PromptSnapshotSource,
 } from '../agent-host/contracts.js';
 import {
@@ -16,18 +26,34 @@ import {
   type CompactContextDecision,
   type CompactContextInput,
 } from './algorithm/compact-context.js';
-import { createCheckpointSession } from './execution/checkpoint-provider.js';
+import type { ToolResultArchiver } from './algorithm/tool-result-archiver.js';
+import {
+  checkpointGenerationObservers,
+  createCheckpointSession,
+  type CheckpointRequestProjection,
+} from './execution/checkpoint-provider.js';
+import { resolveCheckpointSharedPrefix } from './execution/checkpoint-shared-prefix.js';
 import { checkpointMaxOutputTokens } from './execution/checkpoint-prompt.js';
 import { createLocalContextFootprintMeasurer } from './execution/local-context-footprint.js';
-import type { SubagentCheckpointStateSource } from './contracts.js';
+import type { EarlierFilesResolver, SubagentCheckpointStateSource } from './contracts.js';
 
 /** Manual caller: bypasses the automatic trigger and transient filters. */
 export class LocalContextCompactor implements ContextCompactor {
+  private readonly imageFileWriter?: Pick<ToolResultArchiver, 'writeImageFile'>;
+  private readonly resolveEarlierFiles?: EarlierFilesResolver;
+
   constructor(
     private readonly checkpointState?: SubagentCheckpointStateSource,
     private readonly logger?: Pick<PiTurnRunnerLogger, 'warn' | 'error'>,
     private readonly promptSnapshots?: PromptSnapshotSource,
-  ) {}
+    context: {
+      readonly imageFileWriter?: Pick<ToolResultArchiver, 'writeImageFile'>;
+      readonly resolveEarlierFiles?: EarlierFilesResolver;
+    } = {},
+  ) {
+    this.imageFileWriter = context.imageFileWriter;
+    this.resolveEarlierFiles = context.resolveEarlierFiles;
+  }
 
   async compactManual(
     input: ManualContextCompactionInput,
@@ -44,11 +70,49 @@ export class LocalContextCompactor implements ContextCompactor {
       checkpointState: this.checkpointState,
       logger: this.logger,
       promptSnapshots: this.promptSnapshots,
+      imageFileWriter: this.imageFileWriter,
+      resolveEarlierFiles: this.resolveEarlierFiles,
     });
     logManualReplacementGrowthBestEffort(this.logger, input.sessionId, decision, {
       providerInputLimit: preparation.providerInputLimit,
     });
-    return completedManualCompaction(preparation.history, decision);
+    const contextUsage = estimatePostCompactionContextUsage(input, decision.replacementMessages);
+    return {
+      ...completedManualCompaction(preparation.history, decision),
+      ...(contextUsage === undefined ? {} : { contextUsage }),
+    };
+  }
+}
+
+/** Estimate the next main request, not the Provider request that generated the summary. */
+function estimatePostCompactionContextUsage(
+  input: ManualContextCompactionInput,
+  replacementMessages: readonly AgentMessage[],
+): PostCompactionContextUsage | undefined {
+  try {
+    const contextWindowTokens = readContextWindowTokens(input.model);
+    if (contextWindowTokens === undefined || input.contextUsagePromptRanges === undefined) {
+      return undefined;
+    }
+    const messages = projectAgentMessagesForModel(replacementMessages, input.model).messages;
+    const estimate = estimatePreparedContextUsage({
+      systemPrompt: input.systemPrompt ?? '',
+      tools: input.tools ?? [],
+      // tokensAfter already includes the system prompt and tools. Count only
+      // replacement messages here so fixed context is not charged twice.
+      messagesTokens: createDefaultTokenEstimator().estimateMessages(messages),
+      promptRanges: input.contextUsagePromptRanges,
+    });
+    if (!estimate.valid) return undefined;
+    return {
+      contextWindowTokens,
+      usedTokens: estimate.usedTokens,
+      totalCountSource: 'LOCAL_ESTIMATE',
+      components: [...estimate.components],
+    };
+  } catch {
+    // Optional usage reporting must never turn a successful compaction into a failure.
+    return undefined;
   }
 }
 
@@ -78,10 +142,21 @@ async function runManualPolicy(options: {
   readonly checkpointState?: SubagentCheckpointStateSource;
   readonly logger?: Pick<PiTurnRunnerLogger, 'warn' | 'error'>;
   readonly promptSnapshots?: PromptSnapshotSource;
+  readonly imageFileWriter?: Pick<ToolResultArchiver, 'writeImageFile'>;
+  readonly resolveEarlierFiles?: EarlierFilesResolver;
 }) {
-  const { input, hooks, preparation } = options;
+  const { input, hooks, preparation, imageFileWriter, resolveEarlierFiles } = options;
   return compactContext({
     history: preparation.history,
+    ...(resolveEarlierFiles
+      ? { resolveEarlierFiles: () => resolveEarlierFiles(input.sessionId) }
+      : {}),
+    ...(imageFileWriter
+      ? {
+          writeImageFile: (messages, image) =>
+            imageFileWriter.writeImageFile({ sessionId: input.sessionId, messages }, image),
+        }
+      : {}),
     ...(input.customInstructions === undefined ? {} : { instructions: input.customInstructions }),
     limits: manualLimits(input, preparation.providerInputLimit),
     measurePair: async (pair) => preparation.measurer.measurePair(pair),
@@ -159,16 +234,17 @@ function manualCheckpoint({
         ...(hooks?.onProviderRequestSettled
           ? { onRequestSettled: hooks.onProviderRequestSettled }
           : {}),
-        onGenerated: (generation) =>
-          hooks?.onCheckpointGenerated?.({
-            responseContentKinds: generation.responseContentKinds,
-            stopReason: generation.stopReason,
-            outputTokens: generation.outputTokens,
-          }),
+        ...manualSharedPrefixOption(input),
+        ...checkpointGenerationObservers(hooks),
         ...(promptSnapshots ? { promptSnapshots } : {}),
       });
     },
   };
+}
+
+function manualSharedPrefixOption(input: ManualContextCompactionInput) {
+  const sharedPrefix = resolveCheckpointSharedPrefix(input);
+  return sharedPrefix ? { sharedPrefix } : {};
 }
 
 function manualSubagentCapture(

@@ -7,7 +7,16 @@ export interface NativeSessionArtifactOwners {
   readonly onLegacyCleanupError?: (error: unknown, sessionId: string) => void;
   readonly canonicalHistory: { delete(sessionId: string): void | Promise<void> };
   readonly stream: { deleteSession(sessionId: string): void };
-  readonly reports: { ensureDirectory(sessionId: string): string | Promise<string> };
+  readonly reports: {
+    ensureDirectory(sessionId: string): string | Promise<string>;
+    /** Locates the reports directory without binding history or creating anything. */
+    inspectDirectory(sessionId: string): Promise<string | undefined>;
+  };
+  readonly snapshots: {
+    resolveDirectory(sessionId: string): string | Promise<string>;
+    /** Locates the snapshots directory without binding history or creating anything. */
+    inspectDirectory(sessionId: string): Promise<string | undefined>;
+  };
 }
 
 export class SessionArtifactService {
@@ -15,6 +24,28 @@ export class SessionArtifactService {
 
   async ensureReportsDirectory(sessionId: string): Promise<string> {
     return this.owners.reports.ensureDirectory(sessionId);
+  }
+
+  /**
+   * Where this Session's reports live, without side effects: no history
+   * binding, no directory creation, no manifest write. `undefined` when the
+   * Session does not exist. The directory itself may not exist yet.
+   */
+  async inspectReportsDirectory(sessionId: string): Promise<string | undefined> {
+    return this.owners.reports.inspectDirectory(sessionId);
+  }
+
+  /**
+   * Where this Session's compaction snapshots live, without side effects (see
+   * `inspectReportsDirectory`). `undefined` when the Session does not exist.
+   */
+  async inspectSnapshotsDirectory(sessionId: string): Promise<string | undefined> {
+    return this.owners.snapshots.inspectDirectory(sessionId);
+  }
+
+  /** Where each compaction keeps the full history it replaced. */
+  async resolveSnapshotsDirectory(sessionId: string): Promise<string> {
+    return this.owners.snapshots.resolveDirectory(sessionId);
   }
 
   async deleteSession(

@@ -1,4 +1,5 @@
 import type {
+  ConversationPluginAgentDefinition,
   ConversationTaskModelSelection,
   RuntimeConversation,
 } from '@mavis/conversation-contract';
@@ -31,6 +32,7 @@ export interface LocalTaskRunnerHost extends SubagentTelemetryHost {
       effectiveModel?: LocalSessionRecord['effectiveModel'];
       effectiveModelVariant?: LocalSessionRecord['effectiveModelVariant'];
       taskModelSelection?: ConversationTaskModelSelection;
+      pluginAgentDefinition?: ConversationPluginAgentDefinition;
     }): Promise<LocalSessionRecord>;
     listLocalAgents(): Promise<Array<{ name: string; displayName: string }>>;
   };

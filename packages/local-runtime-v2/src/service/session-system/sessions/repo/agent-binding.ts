@@ -6,14 +6,28 @@ interface FrozenAgentExecutionDefinitionBase {
   readonly systemPrompt: string;
   readonly promptSnapshot?: AgentPromptSnapshot;
   readonly capabilities: Readonly<{
-    /** Every expansion-capable bucket is an explicit captured upper bound. */
+    /**
+     * Captured upper bound for internal tools. A list without `mcp__*` names
+     * names no MCP or Plugin tool: those follow `mcpServers` / `disallowedTools` live.
+     */
     readonly tools: readonly string[];
     readonly disallowedTools?: readonly string[];
+    /**
+     * Always present (releases up to v3.1.4 require it). With `selectorVersion`
+     * 2 it is the Agent's own selector: `[]` = unrestricted, `[":none"]` = no
+     * MCP. Older snapshots recorded the servers ready at capture and keep that
+     * meaning (`[]` = no MCP). See README "Desktop Local Agent 定义".
+     */
     readonly mcpServers: readonly string[];
     readonly skills: readonly string[];
     readonly extensionSkills: readonly string[];
+    /** `2` on snapshots captured with the current selector rules; absent on older ones. */
+    readonly selectorVersion?: FrozenSelectorVersion;
   }>;
 }
+
+/** The only selector version written today; see README "Desktop Local Agent 定义". */
+type FrozenSelectorVersion = 2;
 
 /** V1 was written only for Task Sessions. Keep it decodable during the rollout. */
 export interface LegacyFrozenAgentExecutionDefinition extends FrozenAgentExecutionDefinitionBase {
@@ -31,6 +45,8 @@ export interface FrozenAgentExecutionDefinition extends FrozenAgentExecutionDefi
   readonly definitionVersion: 2;
   readonly exactOwnerName: string;
   readonly ownerInstanceId?: string;
+  /** Plugin identity for a Plugin subagent; `exactOwnerName` is its scoped name. */
+  readonly pluginSource?: FrozenPluginAgentSource;
   readonly model: Readonly<{
     readonly parameterSnapshot?: {
       readonly context: 'default' | 'selection' | 'legacy';
@@ -48,6 +64,22 @@ export interface FrozenAgentExecutionDefinition extends FrozenAgentExecutionDefi
     readonly isDefaultWorkspace: boolean;
   }>;
 }
+
+export interface FrozenPluginAgentSource {
+  readonly kind: 'plugin';
+  readonly pluginName: string;
+  readonly format: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  readonly agentName: string;
+  readonly scopedName: string;
+  readonly packageDigest: string;
+  /**
+   * Package origin at capture time. Optional so definitions frozen before
+   * official Plugin subagents existed (always LOCAL) keep decoding.
+   */
+  readonly origin?: FrozenPluginAgentOrigin;
+}
+
+export type FrozenPluginAgentOrigin = 'official' | 'local';
 
 export type AnyFrozenAgentExecutionDefinition =
   | LegacyFrozenAgentExecutionDefinition
@@ -151,15 +183,19 @@ function decodeFrozenDefinition(value: unknown): AnyFrozenAgentExecutionDefiniti
   if (!exactOwnerName) throw new Error('Frozen Session Agent owner is invalid.');
   const model = decodeModel(value.model);
   const project = decodeProject(value.project);
-  const ownerInstanceId = optionalNonEmptyString(value.ownerInstanceId, 'ownerInstanceId');
-  return freezeDefinition({
+  const definition: FrozenAgentExecutionDefinition = {
     definitionVersion: 2,
     exactOwnerName,
-    ...(ownerInstanceId ? { ownerInstanceId } : {}),
+    ...frozenOwnerFields(
+      optionalNonEmptyString(value.ownerInstanceId, 'ownerInstanceId'),
+      value.pluginSource,
+    ),
     model,
     project,
     ...base,
-  });
+  };
+  validatePluginSourceOwner(definition);
+  return freezeDefinition(definition);
 }
 
 function validateFrozenDefinition(definition: AnyFrozenAgentExecutionDefinition): void {
@@ -167,12 +203,7 @@ function validateFrozenDefinition(definition: AnyFrozenAgentExecutionDefinition)
     throw new Error('Frozen Session Agent definition is invalid.');
   }
   if (definition.promptSnapshot !== undefined) decodeAgentPromptSnapshot(definition.promptSnapshot);
-  for (const field of REQUIRED_FROZEN_CAPABILITY_FIELDS) {
-    validateStringArray(definition.capabilities[field]);
-  }
-  if (definition.capabilities.disallowedTools !== undefined) {
-    validateStringArray(definition.capabilities.disallowedTools);
-  }
+  validateCapabilities(definition.capabilities);
   if (definition.definitionVersion === 1) return;
   if (definition.definitionVersion !== 2 || !definition.exactOwnerName.trim()) {
     throw new Error('Frozen Session Agent owner is invalid.');
@@ -182,6 +213,38 @@ function validateFrozenDefinition(definition: AnyFrozenAgentExecutionDefinition)
   if (definition.ownerInstanceId !== undefined && !definition.ownerInstanceId.trim()) {
     throw new Error('Frozen Session Agent owner instance is invalid.');
   }
+  validatePluginSourceOwner(definition);
+}
+
+function validateCapabilities(
+  capabilities: FrozenAgentExecutionDefinitionBase['capabilities'],
+): void {
+  for (const field of REQUIRED_FROZEN_CAPABILITY_FIELDS) {
+    validateStringArray(capabilities[field]);
+  }
+  if (capabilities.disallowedTools !== undefined) validateStringArray(capabilities.disallowedTools);
+  decodeSelectorVersion(capabilities.selectorVersion);
+}
+
+/** A Plugin Agent has no Custom Agent incarnation and is owned by its scoped name. */
+function validatePluginSourceOwner(definition: FrozenAgentExecutionDefinition): void {
+  if (definition.pluginSource === undefined) return;
+  const source = decodePluginSource(definition.pluginSource);
+  if (definition.ownerInstanceId || source.scopedName !== definition.exactOwnerName) {
+    throw new Error('Frozen Session Agent Plugin source is invalid.');
+  }
+}
+
+function frozenOwnerFields(
+  ownerInstanceId: string | undefined,
+  pluginSource: unknown,
+): Pick<FrozenAgentExecutionDefinition, 'ownerInstanceId' | 'pluginSource'> {
+  return {
+    ...(ownerInstanceId ? { ownerInstanceId } : {}),
+    ...(pluginSource === undefined
+      ? {}
+      : { pluginSource: Object.freeze(decodePluginSource(pluginSource)) }),
+  };
 }
 
 function freezeDefinition(
@@ -192,15 +255,7 @@ function freezeDefinition(
     ...(definition.promptSnapshot === undefined
       ? {}
       : { promptSnapshot: decodeAgentPromptSnapshot(definition.promptSnapshot) }),
-    capabilities: Object.freeze({
-      tools: Object.freeze([...definition.capabilities.tools]),
-      ...(definition.capabilities.disallowedTools === undefined
-        ? {}
-        : { disallowedTools: Object.freeze([...definition.capabilities.disallowedTools]) }),
-      mcpServers: Object.freeze([...definition.capabilities.mcpServers]),
-      skills: Object.freeze([...definition.capabilities.skills]),
-      extensionSkills: Object.freeze([...definition.capabilities.extensionSkills]),
-    }),
+    capabilities: freezeCapabilities(definition.capabilities),
   };
   if (definition.definitionVersion === 1) {
     return Object.freeze({ definitionVersion: 1, ...base });
@@ -208,7 +263,7 @@ function freezeDefinition(
   return Object.freeze({
     definitionVersion: 2,
     exactOwnerName: definition.exactOwnerName,
-    ...(definition.ownerInstanceId ? { ownerInstanceId: definition.ownerInstanceId } : {}),
+    ...frozenOwnerFields(definition.ownerInstanceId, definition.pluginSource),
     model: Object.freeze({
       providerId: definition.model.providerId,
       modelId: definition.model.modelId,
@@ -229,16 +284,41 @@ function freezeDefinition(
   });
 }
 
+function freezeCapabilities(
+  capabilities: FrozenAgentExecutionDefinitionBase['capabilities'],
+): FrozenAgentExecutionDefinitionBase['capabilities'] {
+  return Object.freeze({
+    tools: Object.freeze([...capabilities.tools]),
+    ...(capabilities.disallowedTools === undefined
+      ? {}
+      : { disallowedTools: Object.freeze([...capabilities.disallowedTools]) }),
+    mcpServers: Object.freeze([...capabilities.mcpServers]),
+    skills: Object.freeze([...capabilities.skills]),
+    extensionSkills: Object.freeze([...capabilities.extensionSkills]),
+    ...(capabilities.selectorVersion === undefined
+      ? {}
+      : { selectorVersion: capabilities.selectorVersion }),
+  });
+}
+
 function decodeCapabilities(
   capabilities: Record<string, unknown>,
 ): FrozenAgentExecutionDefinitionBase['capabilities'] {
+  const selectorVersion = decodeSelectorVersion(capabilities.selectorVersion);
   return {
     tools: requiredStringArray(capabilities, 'tools'),
     ...optionalStringArray(capabilities, 'disallowedTools'),
     mcpServers: requiredStringArray(capabilities, 'mcpServers'),
     skills: requiredStringArray(capabilities, 'skills'),
     extensionSkills: requiredStringArray(capabilities, 'extensionSkills'),
+    ...(selectorVersion === undefined ? {} : { selectorVersion }),
   };
+}
+
+function decodeSelectorVersion(value: unknown): FrozenSelectorVersion | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 2) throw new Error('Frozen Task Agent capability selectorVersion is invalid.');
+  return value;
 }
 
 function decodeModel(value: unknown): FrozenAgentExecutionDefinition['model'] {
@@ -298,6 +378,32 @@ function validateModel(model: FrozenAgentExecutionDefinition['model']): void {
     optionalPositiveInteger(model.contextWindow, 'contextWindow');
   if (model.maxOutputTokens !== undefined)
     optionalPositiveInteger(model.maxOutputTokens, 'maxOutputTokens');
+}
+
+const PLUGIN_SOURCE_FORMATS = new Set(['minimax', '\u0063\u006c\u0061\u0075\u0064\u0065']);
+const PLUGIN_SOURCE_ORIGINS: Record<FrozenPluginAgentOrigin, true> = {
+  official: true,
+  local: true,
+};
+
+function decodePluginSource(value: unknown): FrozenPluginAgentSource {
+  if (
+    !isRecord(value) ||
+    value.kind !== 'plugin' ||
+    !PLUGIN_SOURCE_FORMATS.has(String(value.format)) ||
+    (value.origin !== undefined && !Object.hasOwn(PLUGIN_SOURCE_ORIGINS, String(value.origin)))
+  ) {
+    throw new Error('Frozen Session Agent Plugin source is invalid.');
+  }
+  return {
+    kind: 'plugin',
+    pluginName: requiredNonEmptyString(value.pluginName, 'pluginSource.pluginName'),
+    format: value.format as FrozenPluginAgentSource['format'],
+    agentName: requiredNonEmptyString(value.agentName, 'pluginSource.agentName'),
+    scopedName: requiredNonEmptyString(value.scopedName, 'pluginSource.scopedName'),
+    packageDigest: requiredNonEmptyString(value.packageDigest, 'pluginSource.packageDigest'),
+    ...(value.origin === undefined ? {} : { origin: value.origin as FrozenPluginAgentOrigin }),
+  };
 }
 
 function validateProject(project: FrozenAgentExecutionDefinition['project']): void {

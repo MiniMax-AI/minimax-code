@@ -17,6 +17,7 @@ export interface ShadowState {
   readonly secret: Buffer;
   stepIndex: number;
   fingerprintSkippedCount: number;
+  childStepsProjected: number;
   reminderAttempted: boolean;
   reminderInjected: boolean;
   readonly signalStats: Record<RunawayGuardSignalKind, MutableSignalStats>;
@@ -66,6 +67,7 @@ export function snapshotTurnSummary(
     agentName: ctx.agentName,
     stepCount: state.stepIndex,
     projectionSkippedCount: state.fingerprintSkippedCount,
+    childStepsProjected: state.childStepsProjected,
     reminderInjected: state.reminderInjected,
     signals: snapshotSignalStats(state.signalStats),
   };
@@ -101,6 +103,7 @@ export function newShadowState(): ShadowState {
     secret: randomBytes(32),
     stepIndex: 0,
     fingerprintSkippedCount: 0,
+    childStepsProjected: 0,
     reminderAttempted: false,
     reminderInjected: false,
     signalStats: createSignalStats(),

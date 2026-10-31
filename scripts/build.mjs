@@ -80,6 +80,9 @@ const result = await build({
   entryPoints: {
     cli: "packages/tui/src/index.ts",
     "image-preview-worker": "packages/tui/src/host/image-preview-worker.ts",
+    // run_code resolves its Worker beside the bundled caller (ptcWorkerUrl).
+    "quickjs-worker":
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/ptc/quickjs-worker.ts",
     'mcode-tools': 'packages/tui/src/cli/mcode-tools-entry.ts',
     'matrix-mcp-stdio': 'packages/agent-tools/src/desktop/matrix-mcp-stdio.ts',
   },
@@ -158,4 +161,16 @@ const piRequire = createRequire(
 cpSync(
   piRequire.resolve("@silvia-odwyer/photon-node/photon_rs_bg.wasm"),
   path.join(outdir, "photon_rs_bg.wasm"),
+);
+
+// run_code's QuickJS Worker (getQuickJS -> release-sync variant) loads its
+// wasm from beside dist/quickjs-worker.js.
+const quickJsRequire = createRequire(
+  createRequire(path.join(root, "packages/local-runtime-v2/package.json")).resolve(
+    "quickjs-emscripten",
+  ),
+);
+cpSync(
+  quickJsRequire.resolve("@jitl/quickjs-wasmfile-release-sync/wasm"),
+  path.join(outdir, "emscripten-module.wasm"),
 );

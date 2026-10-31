@@ -641,12 +641,28 @@ export class CliService {
     ).setPermissionMode(input);
   }
 
-  listModels(
-    input?: Parameters<
-      NonNullable<LocalRuntimeApplication["models"]>["list"]
-    >[0],
-  ) {
-    return this.requireCapability("models", "Model").list(input);
+  /** Undefined when this host cannot read the next-message suggestion switch. */
+  getPromptSuggestionEnabled(): Promise<boolean> | undefined {
+    return this.options.application.configuration?.getPromptSuggestionEnabled?.();
+  }
+
+  /** Undefined when this host cannot persist the next-message suggestion switch. */
+  setPromptSuggestionEnabled(enabled: boolean): Promise<boolean> | undefined {
+    return this.options.application.configuration?.setPromptSuggestionEnabled?.({ enabled });
+  }
+
+  /** Undefined when this host cannot read the PTC switch. */
+  getPtcEnabled(): Promise<boolean> | undefined {
+    return this.options.application.configuration?.getPtcEnabled?.();
+  }
+
+  /** Undefined when this host cannot persist the PTC switch. */
+  setPtcEnabled(enabled: boolean): Promise<boolean> | undefined {
+    return this.options.application.configuration?.setPtcEnabled?.({ enabled });
+  }
+
+  listModels(input?: Parameters<NonNullable<LocalRuntimeApplication['models']>['list']>[0]) {
+    return this.requireCapability('models', 'Model').list(input);
   }
 
   selectModel(

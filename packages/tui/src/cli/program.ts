@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { Command, InvalidArgumentError } from 'commander';
 import type { MavisRegion } from '@mavis/config';
 import { TuiContributionRegistry } from '../contributions/index.js';
@@ -94,8 +95,10 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .command('init')
     .description('Analyze the codebase and generate AGENTS.md with the Runtime init Skill')
     .argument('[directory]', 'project directory', '.')
+    // Session Project resolution only accepts absolute workspace paths, so the
+    // default '.' and any relative directory must be resolved at the CLI boundary.
     .action((directory: string) =>
-      options.launchTui(withLane({ initialPrompt: '/init', workspaceDir: directory })),
+      options.launchTui(withLane({ initialPrompt: '/init', workspaceDir: resolve(directory) })),
     );
 
   const exec = program.command('exec').description('Run one prompt without starting the TUI');

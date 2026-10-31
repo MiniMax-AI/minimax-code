@@ -64,7 +64,8 @@ export type LLMErrorSignal =
   | 'image_limit'
   | 'invalid_request'
   | 'request_too_large'
-  | 'context_overflow';
+  | 'context_overflow'
+  | 'incomplete_stream';
 
 /**
  * Model-side safety classifier decline (Messages API `stop_reason: "refusal"`). Providers surface it
@@ -76,6 +77,20 @@ const PROVIDER_REFUSAL_MESSAGE_RE = /\bstop_reason:\s*refusal\b/i;
 /** True when an LLM error message reports a provider safety refusal; it must not be retried. */
 export function isLLMProviderRefusalMessage(message: string | undefined): boolean {
   return typeof message === 'string' && PROVIDER_REFUSAL_MESSAGE_RE.test(message);
+}
+
+/**
+ * pi-ai's Messages stream completeness guard for a provider stream that ended
+ * without a non-empty `stop_reason`: the upstream truncated the answer. Only this
+ * wording matches, whatever provider prefix precedes it; the `without
+ * message_start` / `before message_stop` guards keep their own classification.
+ * The diagnostics after it are event counts and timings, so they must never feed
+ * the numeric status/code heuristics.
+ */
+const MISSING_STOP_REASON_MESSAGE_RE = /\bstream ended without stop_reason\b/;
+
+function isLLMIncompleteStreamMessage(message: string | undefined): boolean {
+  return typeof message === 'string' && MISSING_STOP_REASON_MESSAGE_RE.test(message);
 }
 
 export interface LLMErrorFacts {
@@ -156,13 +171,23 @@ const LLM_IMAGE_LIMIT_MESSAGE_RE =
 /** OpenAI/Anthropic-style error type for a request the provider will never accept as sent. */
 const LLM_INVALID_REQUEST_MESSAGE_RE = /\binvalid_request_error\b/i;
 /**
- * The request body is over a provider or client byte limit: HTTP 413 bodies
- * (`request_too_large`, "Request Entity Too Large", "Payload Too Large") and the
- * local pre-send check (`Request body too large: N bytes exceeds client limit`).
- * The same body is rejected again on every resend.
+ * The request is over a provider or client size limit: HTTP 413 bodies
+ * (`request_too_large`, "Request Entity Too Large", "Payload Too Large"), the
+ * local pre-send check (`Request body too large: N bytes exceeds client limit`),
+ * gateway rewrites (AWSB's "Input is too long."), a 413 a gateway reports inside
+ * another status, and per-image size or dimension limits. The same request is
+ * rejected again on every resend; fewer or smaller images may fit.
  */
-const LLM_REQUEST_TOO_LARGE_MESSAGE_RE =
-  /\brequest_too_large\b|\bREQUEST_BODY_TOO_LARGE\b|\brequest body too large\b|\brequest entity too large\b|\bpayload too large\b/i;
+const LLM_REQUEST_TOO_LARGE_MESSAGE_RES: readonly RegExp[] = [
+  /\brequest_too_large\b|\bREQUEST_BODY_TOO_LARGE\b/i,
+  /\brequest entity too large\b|\bpayload too large\b/i,
+  /\binput is too long\b/i,
+  /\b(?:request|body)(?: body)? (?:is )?too large\b/i,
+  /\bexceeds? (?:the )?max(?:imum)? (?:allowed )?(?:request |body |payload )?size\b/i,
+  /\b413\b/,
+  /\bimages? (?:exceeds?|is too large|too large)\b/i,
+  /\bimage dimensions? exceeds?\b/i,
+];
 /**
  * The prompt is over the model context window. Kept to unambiguous provider
  * shapes; MiniMax reports it as `invalid params, context window exceeds limit
@@ -206,10 +231,16 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
       return { facts, ...(visibleMessage ? { sanitizedMessage: visibleMessage } : {}) };
     }
     const legacy = extractLegacyMessageFacts(visibleMessage);
+    const message = legacy.message ?? visibleMessage;
+    if (isLLMIncompleteStreamMessage(visibleMessage)) {
+      // Counts and millisecond timings in the diagnostics look like status codes
+      // (429, 1008, 2066, ...); keep only the structural signal.
+      signals.add('incomplete_stream');
+      return { facts, ...(message ? { sanitizedMessage: message } : {}) };
+    }
     facts.httpStatus ??= legacy.httpStatus;
     facts.upstreamStatusCode ??= legacy.upstreamStatusCode;
     facts.existingProtocolCode ??= legacy.existingProtocolCode;
-    const message = legacy.message ?? visibleMessage;
     applyMessageSignals(message, facts, signals);
     // Payload extraction keeps only the inner `message`, which drops a JSON
     // `type` such as `invalid_request_error`; check the raw text for the two
@@ -218,7 +249,7 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
       const boundedVisible = sanitizeMessage(visibleMessage);
       if (LLM_IMAGE_LIMIT_MESSAGE_RE.test(boundedVisible)) signals.add('image_limit');
       if (LLM_INVALID_REQUEST_MESSAGE_RE.test(boundedVisible)) signals.add('invalid_request');
-      if (LLM_REQUEST_TOO_LARGE_MESSAGE_RE.test(boundedVisible)) signals.add('request_too_large');
+      if (isLLMRequestTooLargeMessage(boundedVisible)) signals.add('request_too_large');
       if (LLM_CONTEXT_OVERFLOW_MESSAGE_RE.test(boundedVisible)) signals.add('context_overflow');
     }
     applyNumericSignals(facts, signals);
@@ -234,6 +265,20 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
 /** True when an LLM error message reports that the request carried too many images. */
 export function isLLMImageLimitMessage(message: string | undefined): boolean {
   return typeof message === 'string' && LLM_IMAGE_LIMIT_MESSAGE_RE.test(message);
+}
+
+/**
+ * True when an LLM error message reports a request over a size limit. Retry
+ * classification and request media recovery both read it, so a rejection is
+ * either recovered at once or not treated as a size rejection at all.
+ */
+export function isLLMRequestTooLargeMessage(message: string | undefined): boolean {
+  // The missing-stop_reason diagnostics are counts and timings; a count of 413 is not a 413.
+  if (isLLMIncompleteStreamMessage(message)) return false;
+  return (
+    typeof message === 'string' &&
+    LLM_REQUEST_TOO_LARGE_MESSAGE_RES.some((pattern) => pattern.test(message))
+  );
 }
 
 /**
@@ -276,9 +321,8 @@ export function isLLMDeterministicRequestRejection(normalized: NormalizedLLMErro
 }
 
 /**
- * The request is too big to be accepted as sent: an HTTP 413, a byte-limit
- * rejection (`request_too_large`, the local pre-send body check) or a context
- * window overflow. Resending the same request fails again, so it must not be
+ * The request is too big to be accepted as sent: an HTTP 413, a size-limit
+ * rejection (`isLLMRequestTooLargeMessage`) or a context window overflow. Resending the same request fails again, so it must not be
  * retried.
  * Anything that also looks transient (timeout, network, 408/429/5xx) is excluded.
  */
@@ -412,6 +456,8 @@ export function toLLMProtocolClassification(
     } else if (httpStatus !== undefined) {
       code = mapUpstreamHttpError(httpStatus);
     } else if (facts.timeout) {
+      code = LLM_ERROR_CODES.LLM_UPSTREAM_ERROR;
+    } else if (facts.signals.has('incomplete_stream')) {
       code = LLM_ERROR_CODES.LLM_UPSTREAM_ERROR;
     }
     return code === undefined
@@ -594,7 +640,7 @@ function applyMessageSignals(
   if (/\bempty.?response/i.test(message)) signals.add('empty_response');
   if (LLM_IMAGE_LIMIT_MESSAGE_RE.test(message)) signals.add('image_limit');
   if (LLM_INVALID_REQUEST_MESSAGE_RE.test(message)) signals.add('invalid_request');
-  if (LLM_REQUEST_TOO_LARGE_MESSAGE_RE.test(message)) signals.add('request_too_large');
+  if (isLLMRequestTooLargeMessage(message)) signals.add('request_too_large');
   if (LLM_CONTEXT_OVERFLOW_MESSAGE_RE.test(message)) signals.add('context_overflow');
   const hasStructuredError =
     facts.existingProtocolCode !== undefined || effectiveHttpStatus(facts) !== undefined;
@@ -1000,13 +1046,16 @@ export function mapUpstreamHttpError(httpStatus: number): LLMErrorStatusCode | u
  *
  * Priority:
  * 1. Explicit payload errorCode / code (status_code enum).
- * 2. Upstream payload status_code matching UPSTREAM_STATUS_CODE_MAP (MiniMax 1400010161 / 2056 /
+ * 2. Provider stream that ended without a stop_reason (`stream ended without
+ *    stop_reason`) → LLM_UPSTREAM_ERROR(50113); the counts and timings in its
+ *    diagnostics take no part in the numeric checks below.
+ * 3. Upstream payload status_code matching UPSTREAM_STATUS_CODE_MAP (minimax 1400010161 / 2056 /
  *   2067).
- * 3. Message-only quota/credits signal, e.g. "usage limit exceeded (2056)".
- * 4. HTTP 429 + TPM provider message code → LLM_TPM_RATE_LIMITED(50150).
- * 5. LLM HTTP timeout signal → LLM_UPSTREAM_ERROR(50113).
- * 6. LLM transport network signal → LLM_UPSTREAM_ERROR(50113).
- * 7. HTTP status in payload / err.statusCode → mapUpstreamHttpError.
+ * 4. Message-only quota/credits signal, e.g. "usage limit exceeded (2056)".
+ * 5. HTTP 429 + TPM provider message code → LLM_TPM_RATE_LIMITED(50150).
+ * 6. LLM HTTP timeout signal → LLM_UPSTREAM_ERROR(50113).
+ * 7. LLM transport network signal → LLM_UPSTREAM_ERROR(50113).
+ * 8. HTTP status in payload / err.statusCode → mapUpstreamHttpError.
  *
  * Return null if unrecognized; callers fall back to ProtocolErrorCode.INTERNAL_ERROR.
  *
@@ -1037,6 +1086,14 @@ export function classifyLLMErrorToCode(
         message: extracted.message ?? fallbackMessage(err),
       };
     }
+  }
+  // 1b. Provider stream truncated before a stop_reason. Its diagnostics are
+  // event counts and timings, so stop before any numeric status/quota check.
+  if (isLLMIncompleteStreamMessage(extracted.message ?? fallbackMessage(err))) {
+    return {
+      status_code: LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
+      message: extracted.message ?? fallbackMessage(err),
+    };
   }
   // 2. Match upstream status_code.
   if (extracted.statusCode !== undefined && UPSTREAM_STATUS_CODE_MAP[extracted.statusCode]) {

@@ -1,6 +1,13 @@
-import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';
+import {
+  bindTool,
+  type ToolImpl,
+  type ToolResult,
+  withProgrammaticResult,
+} from '@mavis/agent-core/tools';
 
 import { LocalWebFetchToolDef, type LocalWebFetchToolInput } from './builtin-defs.js';
+import { isPtcChildCall } from './output-limit.js';
+import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 import type { LocalRuntimeToolContext, LocalWebFetchAdapter } from './types.js';
 
 const WEB_FETCH_MAX_RESULT_TOKENS = 16_000;
@@ -14,7 +21,7 @@ export class LocalWebFetchTool implements ToolImpl<
   constructor(private readonly adapter: LocalWebFetchAdapter) {}
 
   async execute(
-    _ctx: LocalRuntimeToolContext,
+    ctx: LocalRuntimeToolContext,
     input: LocalWebFetchToolInput,
     signal?: AbortSignal,
   ): Promise<ToolResult> {
@@ -25,29 +32,44 @@ export class LocalWebFetchTool implements ToolImpl<
     const statusCode = resp.base_resp?.status_code ?? 0;
     if (statusCode !== 0) {
       const text = resp.base_resp?.status_msg ?? 'local web_fetch adapter returned non-zero status';
-      return {
-        tool_name: LocalWebFetchToolDef.name,
-        text,
-        content: [{ type: 'text', text }],
-        details: {
-          ok: false,
-          url: input.url,
-          status_code: statusCode,
-          ...(resp.status !== undefined ? { http_status: resp.status } : {}),
-          ...(resp.statusText ? { http_status_text: resp.statusText } : {}),
-          ...(resp.contentType ? { content_type: resp.contentType } : {}),
-          ...(resp.retryAfter ? { retry_after: resp.retryAfter } : {}),
-          ...(retrievalOutcome ? { retrieval_outcome: retrievalOutcome } : {}),
+      // A failed fetch is an error result, so neither the model nor a program
+      // takes the error text for page content; details stay as they were.
+      return withProgrammaticResult(
+        {
+          tool_name: LocalWebFetchToolDef.name,
+          text,
+          content: [{ type: 'text', text }],
+          isError: true,
+          details: {
+            ok: false,
+            url: input.url,
+            status_code: statusCode,
+            ...(resp.status !== undefined ? { http_status: resp.status } : {}),
+            ...(resp.statusText ? { http_status_text: resp.statusText } : {}),
+            ...(resp.contentType ? { content_type: resp.contentType } : {}),
+            ...(resp.retryAfter ? { retry_after: resp.retryAfter } : {}),
+            ...(retrievalOutcome ? { retrieval_outcome: retrievalOutcome } : {}),
+          },
         },
-      };
+        {
+          data: {
+            url: input.url,
+            ...(resp.status !== undefined ? { httpStatus: resp.status } : {}),
+            ...(resp.retryAfter ? { retryAfter: resp.retryAfter } : {}),
+          },
+        },
+      );
     }
 
-    const clipped = truncateWebFetchContentByEstimatedTokens(
-      resp.content ?? '',
-      WEB_FETCH_MAX_RESULT_TOKENS,
-    );
-    const content = clipped.text;
-    return {
+    const body = resp.content ?? '';
+    // A run_code child gets the whole body (see isPtcChildCall); the adapter's
+    // own download limit still applies and stays reported as details.truncated.
+    const childCall = isPtcChildCall(ctx);
+    const clipped = childCall
+      ? undefined
+      : truncateWebFetchContentByEstimatedTokens(body, WEB_FETCH_MAX_RESULT_TOKENS);
+    const content = clipped?.text ?? body;
+    const result: ToolResult = {
       tool_name: LocalWebFetchToolDef.name,
       text: content,
       content: [{ type: 'text', text: content }],
@@ -60,10 +82,10 @@ export class LocalWebFetchTool implements ToolImpl<
         ...(resp.contentType ? { content_type: resp.contentType } : {}),
         ...(resp.retryAfter ? { retry_after: resp.retryAfter } : {}),
         ...(resp.bytes !== undefined ? { bytes: resp.bytes } : {}),
-        ...(resp.truncated !== undefined || clipped.truncated
-          ? { truncated: Boolean(resp.truncated || clipped.truncated) }
+        ...(resp.truncated !== undefined || clipped?.truncated
+          ? { truncated: Boolean(resp.truncated || clipped?.truncated) }
           : {}),
-        ...(clipped.truncated
+        ...(clipped?.truncated
           ? {
               token_truncated: true,
               original_estimated_tokens: clipped.originalTokens,
@@ -74,6 +96,37 @@ export class LocalWebFetchTool implements ToolImpl<
         ...(retrievalOutcome ? { retrieval_outcome: retrievalOutcome } : {}),
       },
     };
+    // The adapter hands back an HTTP error page as a normal body (status_code 0),
+    // so the final HTTP status decides failure here: a 4xx/5xx page must not be
+    // read as the requested content. Text and details stay as they were; PTC
+    // gets the failure data shape.
+    if (resp.status !== undefined && resp.status >= 400) {
+      return withProgrammaticResult(
+        { ...result, isError: true },
+        {
+          data: {
+            url: input.url,
+            httpStatus: resp.status,
+            ...(resp.retryAfter ? { retryAfter: resp.retryAfter } : {}),
+          },
+        },
+      );
+    }
+    // The completeness statement and data for PTC; details and text are unchanged.
+    // data.content is the text itself, so it is cut exactly where output is.
+    const data = {
+      url: input.url,
+      ...(resp.finalUrl ? { finalUrl: resp.finalUrl } : {}),
+      ...(resp.status !== undefined ? { httpStatus: resp.status } : {}),
+      ...(resp.contentType ? { contentType: resp.contentType } : {}),
+      ...(resp.bytes !== undefined ? { bytes: resp.bytes } : {}),
+      content,
+    };
+    const uncappedOutput = childCall && estimateTextTokens(body) > WEB_FETCH_MAX_RESULT_TOKENS;
+    return withDesktopCompletenessReport(LocalWebFetchToolDef.name, result, {
+      data,
+      ...(uncappedOutput ? { uncappedOutput } : {}),
+    });
   }
 }
 

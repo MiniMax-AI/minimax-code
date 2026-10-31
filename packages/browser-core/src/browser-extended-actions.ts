@@ -2,7 +2,9 @@ import { BrowserActionSupport } from './browser-actions.js';
 import {
   asNumber,
   cdp,
+  type CdpExceptionDetails,
   delay,
+  describeCdpException,
   stringArray,
   type BrowserSessionState as SessionState,
 } from './browser-state.js';
@@ -20,6 +22,38 @@ interface SelectMutationState {
   multiple: boolean;
   missingValues: string[];
   selectedValues: string[];
+  /** Requested entries mapped to option values (label matches resolve to their value). */
+  resolvedValues?: string[];
+  /** Bounded option list disclosed when a requested entry matches nothing. */
+  availableOptions?: Array<{
+    value: string;
+    label: string;
+    valueTruncated?: true;
+    labelTruncated?: true;
+  }>;
+  availableOptionCount?: number;
+  /**
+   * Requested labels shared by options with different values; the disclosed
+   * `availableOptions` are then exactly those candidates.
+   */
+  ambiguousValues?: string[];
+  /** Accessible identity of the select that was hit, to expose wrong-target selectors. */
+  selectIdentity?: string;
+}
+
+const MAX_DISCLOSED_SELECT_OPTIONS = 30;
+/**
+ * Per-option text cap. Labels used to be cut at 80 chars without a marker while
+ * recovery asked for an "exact label" (eval 784094: an issue picker label was
+ * cut mid-word), so truncation is now flagged and recovery points at `value`.
+ */
+const MAX_DISCLOSED_SELECT_OPTION_TEXT = 200;
+
+function selectOptionNotFoundRecovery(options: SelectMutationState['availableOptions']): string {
+  const base =
+    'Retry with a value or exact label from availableOptions. If none of them fit, this is probably the wrong select element; inspect and use the intended select ref.';
+  if (!options?.some((option) => option.labelTruncated)) return base;
+  return `${base} Labels marked labelTruncated are shortened and will not match as labels; pass that option's value instead.`;
 }
 
 interface SelectState {
@@ -43,6 +77,15 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
   ): Promise<unknown> {
     const startedAt = Date.now();
     const target = await this.resolveTarget(session, input, true, true);
+    if (target.backendNodeId === undefined && isCoordinateLocator(input)) {
+      const backendNodeId = await this.resolveControlAtPoint(session, target, 'checkable');
+      if (backendNodeId === undefined) {
+        throw new Error(
+          'TARGET_NOT_FOUND: no checkbox or radio input (or its label) is at that position; inspect the page and use the control ref',
+        );
+      }
+      target.backendNodeId = backendNodeId;
+    }
     if (target.backendNodeId === undefined) throw new Error('CHECK_REQUIRES_ELEMENT_REF');
     const before = await this.callBackendNode<CheckableState>(
       session,
@@ -116,6 +159,15 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
   ): Promise<unknown> {
     const startedAt = Date.now();
     const target = await this.resolveTarget(session, input, true, false);
+    if (target.backendNodeId === undefined && isCoordinateLocator(input)) {
+      const backendNodeId = await this.resolveControlAtPoint(session, target, 'select');
+      if (backendNodeId === undefined) {
+        throw new Error(
+          'TARGET_NOT_FOUND: no select element (or its label) is at that position; inspect the page and use the select ref',
+        );
+      }
+      target.backendNodeId = backendNodeId;
+    }
     if (target.backendNodeId === undefined) throw new Error('SELECT_REQUIRES_ELEMENT_REF');
     const values = Array.from(new Set(stringArray(input.values)));
     if (values.length === 0) throw new Error('SELECT_REQUIRES_VALUES');
@@ -131,29 +183,112 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
             selectedValues: [],
           };
         }
-        const values = Array.from(new Set(Array.isArray(wanted) ? wanted.map(String) : []));
+        const requestedEntries = Array.from(
+          new Set(Array.isArray(wanted) ? wanted.map(String) : []),
+        );
         const options = Array.from(this.options || []);
         const multiple = Boolean(this.multiple);
+        const normalize = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
+        const optionLabel = (option) => normalize(option.label || option.textContent);
+        const byValue = new Set(options.map((option) => String(option.value)));
+        // A requested entry is an option value first; when no option has that
+        // value, fall back to an exact visible label (models usually read
+        // labels, not values, from inspect output). Eval 827211: pickers that
+        // render the same option twice (same label, same value) were reported
+        // as SELECT_OPTION_NOT_FOUND, so a label resolves when its matches
+        // share one value. Disabled duplicates yield to enabled ones; labels
+        // still naming several values are ambiguous, never guessed.
+        const missingValues = [];
+        const ambiguousValues = [];
+        const ambiguousOptions = [];
+        const values = [];
+        // A value and its own label name the same option; keep one entry so
+        // the selected set compares equal and single selects accept it.
+        const pushValue = (value) => {
+          if (!values.includes(value)) values.push(value);
+        };
+        for (const entry of requestedEntries) {
+          if (byValue.has(entry)) {
+            pushValue(entry);
+            continue;
+          }
+          const wantedLabel = normalize(entry);
+          let labelMatches = options.filter((option) => optionLabel(option) === wantedLabel);
+          if (labelMatches.length === 0) {
+            const folded = wantedLabel.toLowerCase();
+            labelMatches = options.filter(
+              (option) => optionLabel(option).toLowerCase() === folded,
+            );
+          }
+          const enabledMatches = labelMatches.filter((option) => !option.disabled);
+          if (enabledMatches.length > 0) labelMatches = enabledMatches;
+          const matchedValues = Array.from(
+            new Set(labelMatches.map((option) => String(option.value))),
+          );
+          if (matchedValues.length === 1) pushValue(matchedValues[0]);
+          else if (matchedValues.length === 0) missingValues.push(entry);
+          else {
+            ambiguousValues.push(entry);
+            for (const option of labelMatches) {
+              if (!ambiguousOptions.includes(option)) ambiguousOptions.push(option);
+            }
+          }
+        }
+        const identity = () =>
+          normalize(
+            this.getAttribute('aria-label') ||
+              (this.labels && this.labels[0] && this.labels[0].textContent) ||
+              this.getAttribute('name') ||
+              this.id ||
+              '',
+          ).slice(0, 80);
         if (!multiple && values.length > 1) {
           return {
             selectable: true,
             multiple,
             missingValues: [],
             selectedValues: Array.from(this.selectedOptions, (option) => String(option.value)),
+            resolvedValues: values,
           };
         }
-        const available = new Set(options.map((option) => String(option.value)));
-        const missingValues = values.filter((value) => !available.has(value));
-        if (missingValues.length > 0) {
+        if (missingValues.length > 0 || ambiguousValues.length > 0) {
+          const disclosed = missingValues.length > 0 ? options : ambiguousOptions;
           return {
             selectable: true,
             multiple,
             missingValues,
+            ambiguousValues,
             selectedValues: Array.from(this.selectedOptions, (option) => String(option.value)),
+            availableOptions: disclosed
+              .slice(0, ${MAX_DISCLOSED_SELECT_OPTIONS})
+              .map((option) => {
+                const value = String(option.value);
+                const label = optionLabel(option);
+                const max = ${MAX_DISCLOSED_SELECT_OPTION_TEXT};
+                return {
+                  value: value.slice(0, max),
+                  label: label.slice(0, max),
+                  ...(value.length > max ? { valueTruncated: true } : {}),
+                  ...(label.length > max ? { labelTruncated: true } : {}),
+                };
+              }),
+            availableOptionCount: disclosed.length,
+            selectIdentity: identity(),
+            resolvedValues: values,
           };
         }
-        const requested = new Set(values);
-        for (const option of options) option.selected = requested.has(String(option.value));
+        // Duplicate options share a value; select one per value (the first
+        // enabled) so a multi-select does not report the value twice.
+        const pending = new Set(values);
+        for (const option of options) option.selected = false;
+        for (const option of options) {
+          const value = String(option.value);
+          if (!option.disabled && pending.delete(value)) option.selected = true;
+        }
+        for (const option of options) {
+          const value = String(option.value);
+          if (pending.delete(value)) option.selected = true;
+        }
         this.dispatchEvent(new Event('input', { bubbles: true }));
         this.dispatchEvent(new Event('change', { bubbles: true }));
         return {
@@ -161,6 +296,7 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
           multiple,
           missingValues: [],
           selectedValues: Array.from(this.selectedOptions, (option) => String(option.value)),
+          resolvedValues: values,
         };
       }`,
       [{ value: values }],
@@ -175,7 +311,7 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
         effect: { dispatched: false, verified: false, selectedValues: [] },
       };
     }
-    if (values.length > 1 && mutation.multiple !== true) {
+    if ((mutation.resolvedValues ?? values).length > 1 && mutation.multiple !== true) {
       return {
         success: false,
         code: 'SELECT_MULTIPLE_VALUES_NOT_ALLOWED',
@@ -191,17 +327,65 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
       };
     }
     if (mutation.missingValues.length > 0) {
+      const identity = mutation.selectIdentity ? ` "${mutation.selectIdentity}"` : '';
+      const total = mutation.availableOptionCount ?? mutation.availableOptions?.length ?? 0;
+      const shown = mutation.availableOptions?.length ?? 0;
       return {
         success: false,
         code: 'SELECT_OPTION_NOT_FOUND',
-        error: `Browser select_option could not find requested option value(s): ${mutation.missingValues.join(', ')}`,
+        error: `Browser select_option could not find requested option value(s) or label(s) in select${identity}: ${mutation.missingValues.join(', ')}`,
         durationMs: Date.now() - startedAt,
-        target: { resolved: true, rect: target.rect },
+        target: {
+          resolved: true,
+          rect: target.rect,
+          ...(mutation.selectIdentity ? { name: mutation.selectIdentity } : {}),
+        },
         effect: {
           dispatched: false,
           verified: false,
           selectedValues: mutation.selectedValues,
         },
+        ...(mutation.availableOptions
+          ? {
+              availableOptions: mutation.availableOptions,
+              ...(total > shown
+                ? { availableOptionsTruncated: true, availableOptionCount: total }
+                : {}),
+            }
+          : {}),
+        recovery: selectOptionNotFoundRecovery(mutation.availableOptions),
+      };
+    }
+    const ambiguousValues = mutation.ambiguousValues ?? [];
+    if (ambiguousValues.length > 0) {
+      const identity = mutation.selectIdentity ? ` "${mutation.selectIdentity}"` : '';
+      const total = mutation.availableOptionCount ?? mutation.availableOptions?.length ?? 0;
+      const shown = mutation.availableOptions?.length ?? 0;
+      return {
+        success: false,
+        code: 'SELECT_OPTION_AMBIGUOUS',
+        error: `Browser select_option label(s) match several options with different values in select${identity}: ${ambiguousValues.join(', ')}`,
+        durationMs: Date.now() - startedAt,
+        target: {
+          resolved: true,
+          rect: target.rect,
+          ...(mutation.selectIdentity ? { name: mutation.selectIdentity } : {}),
+        },
+        effect: {
+          dispatched: false,
+          verified: false,
+          selectedValues: mutation.selectedValues,
+        },
+        ...(mutation.availableOptions
+          ? {
+              availableOptions: mutation.availableOptions,
+              ...(total > shown
+                ? { availableOptionsTruncated: true, availableOptionCount: total }
+                : {}),
+            }
+          : {}),
+        recovery:
+          'availableOptions lists the options sharing that label; retry with the value of the intended option.',
       };
     }
     await delay(ACTION_SETTLE_DELAY_MS, session.commandSignal);
@@ -223,7 +407,7 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
     const verified =
       after?.selectable === true &&
       after.multiple === mutation.multiple &&
-      sameStringSet(selectedValues, values);
+      sameStringSet(selectedValues, mutation.resolvedValues ?? values);
     this.invalidateObservation(session);
     const result = {
       success: verified,
@@ -378,7 +562,7 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
     try {
       const result = await cdp<{
         result?: { value?: unknown };
-        exceptionDetails?: { text?: string };
+        exceptionDetails?: CdpExceptionDetails;
       }>(session, 'Runtime.callFunctionOn', {
         objectId,
         functionDeclaration,
@@ -387,7 +571,7 @@ export abstract class BrowserExtendedActionSupport extends BrowserActionSupport 
         awaitPromise: true,
       });
       if (result.exceptionDetails) {
-        throw new Error(result.exceptionDetails.text || 'TARGET_SCRIPT_FAILED');
+        throw new Error(describeCdpException(result.exceptionDetails, 'TARGET_SCRIPT_FAILED'));
       }
       return result.result?.value as T;
     } finally {
@@ -401,5 +585,13 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
     left.length === right.length &&
     left.every((value) => right.includes(value)) &&
     right.every((value) => left.includes(value))
+  );
+}
+
+function isCoordinateLocator(input: Record<string, unknown>): boolean {
+  return (
+    (input.position !== undefined || input.normalized_position !== undefined) &&
+    typeof input.ref !== 'string' &&
+    typeof input.selector !== 'string'
   );
 }

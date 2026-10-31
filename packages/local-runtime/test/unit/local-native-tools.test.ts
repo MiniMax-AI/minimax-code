@@ -1,6 +1,6 @@
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -20,6 +20,48 @@ import { initSkillService } from '../../src/skills/skill-service.js';
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 describe('local native turn tools', () => {
+  it.skipIf(process.platform === 'win32')('reads nativeDelete from the live config for an existing Bash tool', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'native-bash-policy-'));
+    let nativeDelete = false;
+    const environments: NodeJS.ProcessEnv[] = [];
+    const configGetter = vi.fn(() => ({ dataDir, provider: {}, permission: { nativeDelete } }));
+    const tools = buildLocalNativeRuntimeTools({
+      dataDir,
+      workspaceRoot: dataDir,
+      agentName: 'mavis',
+      configGetter,
+      sandboxOperationsFactory: {
+        create: () => ({
+          exec: async (_command, _cwd, options) => {
+            environments.push(options.env!);
+            return { exitCode: 0 };
+          },
+        }),
+      },
+    });
+    const bash = tools.find((tool) => tool.def.name === 'bash')!;
+    const shim = join(dataDir, 'shims');
+    vi.stubEnv('PATH', [shim, process.env.PATH].join(delimiter));
+    try {
+      expect(configGetter).not.toHaveBeenCalled();
+      for (const enabled of [false, true, false]) {
+        nativeDelete = enabled;
+        const result = await bash.impl.execute(
+          { sessionId: 'bash-session', turnId: 'bash-turn' },
+          { command: 'true' },
+        );
+        expect(result.isError).toBeFalsy();
+      }
+      expect(environments[0]!.PATH?.split(delimiter)).toContain(shim);
+      expect(environments[1]!.PATH?.split(delimiter)).not.toContain(shim);
+      expect(environments[2]!.PATH).toBe(environments[0]!.PATH);
+      expect(configGetter).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it('exposes native web_search only when the local product owner gate is enabled', () => {
     const base = {
       workspaceRoot: '/workspace',
@@ -770,7 +812,7 @@ describe('local native turn tools', () => {
           deleteSession: async () => ({ success: true }),
           listMessages: async (req) => {
             sessionCalls.push(req);
-            return { messages: [{ content: 'ok' }] };
+            return { messages: [{ msg_id: 'msg-1', msg_content: 'ok' }] };
           },
         },
       });
@@ -814,7 +856,7 @@ describe('local native turn tools', () => {
       expect(JSON.parse(sessionResult.text)).toMatchObject({
         ok: true,
         command: 'session messages',
-        response: { messages: [{ content: 'ok' }] },
+        response: { messages: [{ msg_id: 'msg-1', msg_content: 'ok' }] },
       });
       expect(sessionCalls).toEqual([{ sessionId: 'session-current' }]);
 

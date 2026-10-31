@@ -1,3 +1,7 @@
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import * as acp from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -14,6 +18,9 @@ import type {
   TuiSkillList,
 } from '../../src/types/runtime-models.js';
 import type { TuiRuntimeEvent } from '../../src/types/runtime-events.js';
+
+const ONE_PIXEL_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 function createRuntime(
   events: readonly TuiStreamEvent[] = [],
@@ -1161,7 +1168,7 @@ describe('MiniMax Code ACP agent', () => {
             sse: true,
           },
           promptCapabilities: {
-            image: false,
+            image: true,
             audio: false,
             embeddedContext: false,
           },
@@ -1244,6 +1251,119 @@ describe('MiniMax Code ACP agent', () => {
         },
       },
     ]);
+  });
+
+  it('forwards prompt images to the Runtime as attachments and removes the temporary copies', async () => {
+    const { runtime, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    const png = Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64');
+    let deliveredBytes: Buffer | undefined;
+    sendMessage.mockImplementationOnce(async () => {
+      const [request] = sendMessage.mock.lastCall as unknown as [
+        { attachments: [{ local: { filePath: string } }] },
+      ];
+      deliveredBytes = await readFile(request.attachments[0].local.filePath);
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+
+    await acp.client({ name: 'test-client' }).connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [
+            { type: 'text', text: 'Describe this.' },
+            { type: 'image', mimeType: 'image/png', data: ONE_PIXEL_PNG_BASE64 },
+          ],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      {
+        id: 'session-1',
+        turnId: 'turn-1',
+        content: 'Describe this.',
+        attachments: [
+          {
+            meta: {
+              attachmentType: 'image',
+              fileName: 'image-1.png',
+              mimeType: 'image/png',
+              sizeBytes: png.byteLength,
+            },
+            local: { filePath: expect.stringContaining('minimax-code-acp-prompt-') },
+          },
+        ],
+      },
+      expect.any(AbortSignal),
+    );
+    expect(deliveredBytes).toEqual(png);
+    const [request] = sendMessage.mock.lastCall as unknown as [
+      { attachments: [{ local: { filePath: string } }] },
+    ];
+    await expect(stat(request.attachments[0].local.filePath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it.each([
+    {
+      name: 'an unsupported image MIME type',
+      block: { type: 'image' as const, mimeType: 'image/svg+xml', data: ONE_PIXEL_PNG_BASE64 },
+      message: 'Prompt image MIME type image/svg+xml is not supported',
+    },
+    {
+      name: 'malformed image data',
+      block: { type: 'image' as const, mimeType: 'image/png', data: 'not base64!' },
+      message: 'Prompt image 1 is not valid base64 data.',
+    },
+    {
+      name: 'more images than the attachment limit',
+      blocks: Array.from({ length: 11 }, () => ({
+        type: 'image' as const,
+        mimeType: 'image/png',
+        data: ONE_PIXEL_PNG_BASE64,
+      })),
+      message: 'A prompt can include at most 10 images.',
+    },
+    {
+      name: 'an audio block',
+      block: { type: 'audio' as const, mimeType: 'audio/wav', data: 'AAAA' },
+      message: 'Prompt content type audio is not supported.',
+    },
+  ])('rejects $name without starting a Runtime turn', async (testCase) => {
+    const { message } = testCase;
+    const blocks: acp.ContentBlock[] = 'blocks' in testCase ? testCase.blocks : [testCase.block];
+    const { runtime, sendMessage } = createRuntime();
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+
+    await acp.client({ name: 'test-client' }).connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Look.' }, ...blocks],
+        }),
+      ).rejects.toMatchObject({ code: -32602, message: expect.stringContaining(message) });
+    });
+
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('cleans up cancelled new Sessions and bounds stalled creation generations', async () => {
@@ -1592,6 +1712,78 @@ describe('MiniMax Code ACP agent', () => {
       { kind: 'agent_message_chunk', text: 'Oldest answer.' },
       { kind: 'user_message_chunk', text: 'Newest question.' },
       { kind: 'agent_message_chunk', text: 'Newest answer.' },
+    ]);
+  });
+
+  it('replays image attachments of loaded user messages and keeps unavailable images visible', async () => {
+    const { runtime, getSession, listMessagePage } = createRuntime();
+    const assetDirectory = await mkdtemp(join(tmpdir(), 'acp-history-image-'));
+    const imagePath = join(assetDirectory, 'image-1.png');
+    await writeFile(imagePath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
+    const image = { type: 'image' as const, fileName: 'image-1.png', mimeType: 'image/png' };
+    getSession.mockResolvedValue({ sessionId: 'session-existing', workspaceDir: '/workspace' });
+    listMessagePage.mockResolvedValue({
+      messages: [
+        {
+          id: 'image-only',
+          role: 'user',
+          content: '',
+          attachments: [{ ...image, filePath: imagePath }],
+        },
+        {
+          id: 'image-caption',
+          role: 'user',
+          content: 'Describe this.',
+          attachments: [
+            { ...image, filePath: imagePath },
+            { ...image, fileName: 'gone.png', filePath: join(assetDirectory, 'gone.png') },
+          ],
+        },
+      ],
+      hasMore: false,
+    });
+    const updates: acp.SessionNotification[] = [];
+    const client = acp
+      .client({ name: 'test-client' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+
+    try {
+      await client.connectWith(
+        createTuiAcpAgent({ runtime, version: '1.2.3' }),
+        async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: {},
+          });
+          await connection.request(acp.methods.agent.session.load, {
+            sessionId: 'session-existing',
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+        },
+      );
+    } finally {
+      await rm(assetDirectory, { recursive: true, force: true });
+    }
+
+    const pngImage = { type: 'image', mimeType: 'image/png', data: ONE_PIXEL_PNG_BASE64 };
+    expect(
+      updates
+        .map(({ update }) => update)
+        .filter((update) => update.sessionUpdate === 'user_message_chunk'),
+    ).toEqual([
+      { sessionUpdate: 'user_message_chunk', messageId: 'image-only', content: pngImage },
+      {
+        sessionUpdate: 'user_message_chunk',
+        messageId: 'image-caption',
+        content: { type: 'text', text: 'Describe this.' },
+      },
+      { sessionUpdate: 'user_message_chunk', messageId: 'image-caption', content: pngImage },
+      {
+        sessionUpdate: 'user_message_chunk',
+        messageId: 'image-caption',
+        content: { type: 'text', text: '[Image: gone.png]' },
+      },
     ]);
   });
 

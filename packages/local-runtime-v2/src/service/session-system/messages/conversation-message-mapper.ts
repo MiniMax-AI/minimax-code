@@ -44,6 +44,7 @@ function readToolCall(entry: unknown): ConversationToolCall[] {
       ...optionalToolCallArgs(Reflect.get(entry, 'tool_call_args')),
       ...optionalToolCallResult(Reflect.get(entry, 'tool_call_result_data')),
       ...optionalDuration(Reflect.get(entry, 'tool_call_duration_ms')),
+      ...optionalParentToolCallId(Reflect.get(entry, 'parent_tool_call_id')),
     },
   ];
 }
@@ -70,6 +71,12 @@ function optionalDuration(
   return typeof value === 'number' && Number.isFinite(value)
     ? { tool_call_duration_ms: value }
     : {};
+}
+
+function optionalParentToolCallId(
+  value: unknown,
+): Partial<Pick<ConversationToolCall, 'parent_tool_call_id'>> {
+  return typeof value === 'string' && value.length > 0 ? { parent_tool_call_id: value } : {};
 }
 
 function readString(value: Readonly<Record<string, unknown>>, key: string): string | undefined {

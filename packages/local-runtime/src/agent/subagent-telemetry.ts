@@ -168,6 +168,30 @@ const NAME_RESOLUTION_ERROR_CODES = new Set([
   'BUILTIN_AGENT_IMMUTABLE',
 ]);
 
+function metricKeysForEvent(event: string): readonly string[] {
+  switch (event) {
+    case SUBAGENT_TELEMETRY_EVENT.resourceAmbiguity:
+      return ['resource_kind', 'member_count_bucket'];
+    case SUBAGENT_TELEMETRY_EVENT.agentRoleObservation:
+      return ['status', 'source', 'role_class'];
+    case SUBAGENT_TELEMETRY_EVENT.toolPolicy:
+      return ['role_class'];
+    case SUBAGENT_TELEMETRY_EVENT.resolve:
+      return ['source', 'success', 'error_code', 'plugin_origin'];
+    case SUBAGENT_TELEMETRY_EVENT.nameCompatResolve:
+      return [
+        'intent',
+        'canonical_class',
+        'source',
+        'member_count_bucket',
+        'success',
+        'error_code',
+      ];
+    default:
+      return ['role_class', 'run_mode', 'status', 'model_verdict', 'file_change_observation'];
+  }
+}
+
 function toMetricTags(
   event: string,
   fields: Readonly<Record<string, TelemetryValue>>,

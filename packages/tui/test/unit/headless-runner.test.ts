@@ -1082,6 +1082,122 @@ describe('runTuiExec', () => {
     );
   });
 
+  describe('when the stdout reader stops reading', () => {
+    function streamingUntilAbort() {
+      const runtime = runtimeWith();
+      runtime.sendMessage.mockImplementation(async function* (_req, signal?: AbortSignal) {
+        yield { type: 'delta', role: 'assistant', content: 'partial answer' };
+        if (!signal?.aborted) {
+          await new Promise<void>((resolve) =>
+            signal?.addEventListener('abort', () => resolve(), { once: true }),
+          );
+        }
+      });
+      return runtime;
+    }
+
+    // Every write stays pending, like a pipe whose reader never reads again.
+    const blockedStdout = () => vi.fn(() => new Promise<void>(() => undefined));
+
+    it('still returns after SIGTERM instead of waiting for the reader', async () => {
+      const processRef = new EventEmitter();
+      const runtime = streamingUntilAbort();
+      const stdout = blockedStdout();
+
+      const executing = runTuiExec(
+        { prompt: 'Fix it', workspaceDir: '/tmp/workspace', version: '0.1.0', format: 'stream-json' },
+        {
+          runtime,
+          stdout,
+          stderr: vi.fn(),
+          shutdown: async () => undefined,
+          processRef: processRef as unknown as Pick<NodeJS.Process, 'once' | 'off'>,
+          createTurnId: () => 'turn-1',
+          stopOutputGraceMs: 10,
+        },
+      );
+      await vi.waitFor(() => expect(stdout).toHaveBeenCalled());
+      processRef.emit('SIGTERM');
+
+      await expect(executing).resolves.toBe(130);
+      expect(runtime.abortSession).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'session-1', turnId: 'turn-1', reason: 'user_stop' }),
+      );
+      expect(processRef.listenerCount('SIGTERM')).toBe(0);
+    });
+
+    it('still honors --timeout and returns the timeout code', async () => {
+      const runtime = streamingUntilAbort();
+
+      await expect(
+        runTuiExec(
+          {
+            prompt: 'Fix it',
+            workspaceDir: '/tmp/workspace',
+            version: '0.1.0',
+            format: 'stream-json',
+            timeoutMs: 30,
+          },
+          {
+            runtime,
+            stdout: blockedStdout(),
+            stderr: vi.fn(),
+            shutdown: async () => undefined,
+            createTurnId: () => 'turn-1',
+            stopOutputGraceMs: 10,
+          },
+        ),
+      ).resolves.toBe(6);
+      expect(runtime.abortSession).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'timeout' }),
+      );
+    });
+  });
+
+  it('keeps the terminal result last when a cancelled run can still drain slow output', async () => {
+    const processRef = new EventEmitter();
+    const started = vi.fn();
+    const runtime = runtimeWith();
+    runtime.sendMessage.mockImplementation(async function* (_req, signal?: AbortSignal) {
+      yield { type: 'delta', role: 'assistant', content: 'partial answer' };
+      started();
+      if (!signal?.aborted) {
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener('abort', () => resolve(), { once: true }),
+        );
+      }
+    });
+    const lines: string[] = [];
+    // A slow but live reader: each line drains a little later.
+    const stdout = vi.fn(
+      (line: string) =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            lines.push(line);
+            resolve();
+          }, 5),
+        ),
+    );
+    const executing = runTuiExec(
+      { prompt: 'Fix it', workspaceDir: '/tmp/workspace', version: '0.1.0', format: 'stream-json' },
+      {
+        runtime,
+        stdout,
+        stderr: vi.fn(),
+        shutdown: async () => undefined,
+        processRef: processRef as unknown as Pick<NodeJS.Process, 'once' | 'off'>,
+        createTurnId: () => 'turn-1',
+      },
+    );
+    await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
+    processRef.emit('SIGINT');
+
+    await expect(executing).resolves.toBe(130);
+    const records = lines.map((line) => JSON.parse(line));
+    expect(records.at(-1)).toMatchObject({ type: 'exec.completed', result: { status: 'cancelled' } });
+    expect(records.filter((record) => record.type === 'exec.completed')).toHaveLength(1);
+  });
+
   it('reuses a valid Session and continues the latest workspace Session', async () => {
     const direct = runtimeWith();
     await runTuiExec(

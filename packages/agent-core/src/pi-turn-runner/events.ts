@@ -10,6 +10,7 @@ import { immediateSendBatchId } from './outbound-message-normalizer.js';
 export interface eventSub {
   unsubscribe(): void;
   drain(): Promise<void>;
+  dispatch(event: AgentEvent): Promise<void>;
   convergeAtIdle(): Promise<void>;
   forcedTermination(): TurnTerminationReason | undefined;
 }
@@ -93,6 +94,7 @@ export function subscribeEvents(
     event: Extract<AgentEvent, { type: 'message_end' }>,
   ): Promise<'emit' | 'discard'> => {
     if (event.message.role !== 'assistant' || turn.hooks.afterLLM.length === 0) return 'emit';
+    if (event.message.stopReason !== 'error') turn.recovery.used = false;
     for (const hook of turn.hooks.afterLLM) {
       let decision: Awaited<ReturnType<typeof hook>>;
       try {
@@ -135,6 +137,22 @@ export function subscribeEvents(
           content: [{ type: 'text', text: decision.prompt }],
           timestamp: Date.now(),
         });
+        return 'discard';
+      }
+      if (decision.type === 'recover') {
+        if (
+          event.message.stopReason !== 'error' ||
+          turn.recovery.used ||
+          turn.input.signal?.aborted === true
+        ) {
+          continue;
+        }
+        turn.recovery.used = true;
+        turn.recovery.pending = {
+          reason: decision.reason,
+          errorMessage: event.message.errorMessage ?? '',
+          requestMessages: turn.recovery.lastRequest ?? [],
+        };
         return 'discard';
       }
       // A failed response is rejected as a whole. Never let its still-pending
@@ -260,6 +278,9 @@ export function subscribeEvents(
   };
 
   const writeAgentEvent = async (event: AgentEvent, observedAtMs: number): Promise<void> => {
+    if (requiresPtcLifecycleDelivery(event, turn) && !turn.bridge.getActiveAssistantMessageId()) {
+      throw new Error('PTC lifecycle delivery requires an active assistant message id.');
+    }
     let out: Awaited<ReturnType<typeof turn.bridge.processEvent>>;
     try {
       out = await turn.bridge.processEvent(event, observedAtMs);
@@ -320,6 +341,7 @@ export function subscribeEvents(
         },
         '[pi-turn-runner] event handler threw',
       );
+      if (requiresPtcLifecycleDelivery(event, turn)) throw err;
     }
 
     if ((!discardMessage && event.type === 'message_end') || event.type === 'tool_execution_end') {
@@ -358,7 +380,7 @@ export function subscribeEvents(
     if (event.type === 'turn_end') await pollExternalContinuations(event);
   };
 
-  const unsubscribe = agent.subscribe((event: AgentEvent) => {
+  const dispatch = (event: AgentEvent): Promise<void> => {
     // Capture before queueing or awaiting response hooks so decode timing only
     // spans model events, not caller-side control or delivery work.
     const observedAtMs = nowMs();
@@ -368,14 +390,33 @@ export function subscribeEvents(
     const queued = queue.then(() => onAgentEvent(event, observedAtMs));
     queue = queued.catch(() => undefined);
     return queued;
-  });
+  };
+
+  const unsubscribe = agent.subscribe((event: AgentEvent) => dispatch(event));
 
   return {
     unsubscribe,
     drain: () => queue,
+    dispatch,
     convergeAtIdle,
     forcedTermination: () => forcedTermination,
   };
+}
+
+function requiresPtcLifecycleDelivery(event: AgentEvent, turn: turnState): boolean {
+  if (
+    turn.input.toolConfig.ptcTools === undefined ||
+    (event.type !== 'tool_execution_start' && event.type !== 'tool_execution_end')
+  ) {
+    return false;
+  }
+  if (event.parentToolCallId) return true;
+  return (
+    event.toolName === 'run_code' &&
+    (turn.input.toolConfig.tools ?? []).some(
+      (tool) => tool.def.name === 'run_code' && tool.source === 'builtin',
+    )
+  );
 }
 
 function enqueueSteering(agent: Agent, messages: AgentMessage[]): void {

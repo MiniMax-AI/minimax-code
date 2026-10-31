@@ -1,5 +1,5 @@
 import { toRuntimeTool } from '@mavis/agent-core/tools';
-import type { BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
+import type { LocalBashEnvPolicySource } from './permission-execution.js';
 
 import { LocalAskUserTool } from './local-ask-user.js';
 import { LocalFeatureEnableTool } from './local-feature-enable.js';
@@ -49,10 +49,12 @@ export * from './local-ask-user.js';
 export * from './local-feature-enable.js';
 export * from './local-browser.js';
 export * from './local-pi-tools.js';
+export * from './ptc-result-projection.js';
 export * from './local-bash-result.js';
 export * from './local-bash-timing.js';
 export * from './local-bash-input.js';
 export * from './local-bash-contract.js';
+export * from './permission-execution.js';
 export { executeLocalHostTrashIfRequested } from './host-trash-executor.js';
 export type { LocalHostTrashRuntime } from './host-trash-executor.js';
 export * from './local-glob.js';
@@ -61,6 +63,7 @@ export * from './local-rg-runner.js';
 export * from './local-skill.js';
 export * from './local-mavis.js';
 export * from './local-mavis-commands.js';
+export * from './local-mavis-ptc.js';
 export * from './local-mavis-cron-adapter.js';
 export * from './local-memory.js';
 export * from './local-code-review.js';
@@ -100,11 +103,11 @@ export interface LocalToolRegistryDeps {
   /**
    * Layer B env sanitize policy for bash subprocesses (Layer A boundary strip
    * is always on). REQUIRED so every assembly names its policy explicitly —
-   * production passes `resolveAgentBashEnvPolicy(dataDir)` (rm-shim PATH +
-   * spawn preflight); tests typically pass `{ mode: 'off' }`. See
+   * production passes a callback resolving the current runtime policy (rm-shim
+   * PATH + spawn preflight); tests typically pass `{ mode: 'off' }`. See
    * design/tools-optimize/bash-tool-optimization.md.
    */
-  bashEnvPolicy: BashEnvPolicy;
+  bashEnvPolicy: LocalBashEnvPolicySource;
   webFetchAdapter?: LocalWebFetchAdapter;
   webSearchAdapter?: LocalWebSearchAdapter;
   taskAdapter?: LocalTaskAdapter;
@@ -202,4 +205,7 @@ export {
   CloudSessionReadError,
   type CloudSessionReaderOptions,
 } from './cloud-session-reader.js';
-export { DESKTOP_BASH_PREVIEW_BYTES } from './output-limit.js';
+export {
+  DESKTOP_BASH_PREVIEW_BYTES,
+  PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
+} from './output-limit.js';

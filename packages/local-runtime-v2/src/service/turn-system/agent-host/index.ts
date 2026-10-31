@@ -94,7 +94,6 @@ export {
   type LocalTurnReminderFacts,
   type PreparedLocalTurnInput,
 } from './assembly/local-turn-input-preparation.js';
-export { createLocalCuScreenshotPruner } from './runner/local-cu-screenshot-pruner.js';
 export * from './runner/index.js';
 export { AgentHostTurnCloseError } from './runner/turn-close-error.js';
 export {

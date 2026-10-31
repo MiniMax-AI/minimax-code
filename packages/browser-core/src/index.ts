@@ -39,6 +39,7 @@ export * from './browser-keyboard.js';
 export * from './clipboard.js';
 export * from './browser-query.js';
 export * from './browser-snapshot-helpers.js';
+export * from './browser-script.js';
 export * from './cdp-file-upload.js';
 export * from './cdp-helper.js';
 export * from './cdp-helper-contracts.js';
@@ -59,7 +60,9 @@ export {
   type PageSummary,
   type Rect,
   type Snapshot,
+  type CdpExceptionDetails,
   cdp,
+  describeCdpException,
   evaluate,
   asNumber,
   asString,

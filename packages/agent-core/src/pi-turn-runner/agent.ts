@@ -1,9 +1,10 @@
-import { Agent } from '@earendil-works/pi-agent-core';
+import { Agent, type AgentTool, type AgentToolCall } from '@earendil-works/pi-agent-core';
 import type { UserMessage } from '@earendil-works/pi-ai';
 import type { TurnTerminationReason } from '../event-bridge/types.js';
 import { projectAgentMessagesForModel } from './outbound-message-normalizer.js';
 import { resolveMaxImagesPerRequest } from './request-image-limit.js';
 import { failureReason } from './terminal.js';
+import { newRuntimeTool } from './tools.js';
 import type { turnState } from './turn.js';
 import type { UserMessageInput } from './types.js';
 
@@ -94,6 +95,12 @@ export function newAgent(turn: turnState): Agent {
     streamFn: turn.streamFn,
     getApiKey: (provider) => (provider === turn.llm.model.provider ? turn.llm.apiKey : undefined),
     toolExecution: 'parallel',
+    ...(turn.input.toolConfig.missingToolMessage
+      ? { missingToolMessage: turn.input.toolConfig.missingToolMessage }
+      : {}),
+    ...(turn.input.toolConfig.resolveMissingTool
+      ? { resolveMissingTool: (toolCall) => resolveMissingTool(turn, toolCall) }
+      : {}),
     sessionId: turn.input.sessionId,
     ...(turn.input.shouldStopAfterSteering
       ? { shouldStopAfterSteering: turn.input.shouldStopAfterSteering }
@@ -107,6 +114,44 @@ export function newAgent(turn: turnState): Agent {
     ...(turn.llm.payloadTransform ? { onPayload: turn.llm.payloadTransform } : {}),
     ...(turn.llm.responseObserver ? { onResponse: turn.llm.responseObserver } : {}),
   });
+}
+
+/**
+ * A direct call the host resolves outside this turn's catalog gets the same Pi wrapper as a
+ * catalog tool: the turn's tool context, no PTC parent, no result observer.
+ */
+function resolveMissingTool(turn: turnState, toolCall: AgentToolCall): AgentTool | undefined {
+  const runtimeTool = turn.input.toolConfig.resolveMissingTool?.({
+    id: toolCall.id,
+    name: toolCall.name,
+    arguments: toolCall.arguments,
+  });
+  if (runtimeTool?.def.name !== toolCall.name) return undefined;
+  return newRuntimeTool(runtimeTool, turn.input.toolConfig.context, () =>
+    turn.bridge.getActiveAssistantMessageId(),
+  );
+}
+
+/**
+ * Pi ends its loop on a provider error, so a response an afterLlmCall hook
+ * recovered from (already removed from the transcript) is repeated here by
+ * continuing from the same transcript.
+ */
+async function repeatRecoveredRequest(
+  agent: Agent,
+  turn: turnState,
+  convergeAtIdle: (() => Promise<void>) | undefined,
+): Promise<void> {
+  for (let recovery = turn.recovery.pending; recovery; recovery = turn.recovery.pending) {
+    delete turn.recovery.pending;
+    if (turn.input.signal?.aborted) return;
+    turn.recovery.active = recovery;
+    turn.metrics.forgetLLMFailureObservation();
+    await agent.continue();
+    await agent.waitForIdle();
+    await convergeAtIdle?.();
+    await agent.waitForIdle();
+  }
 }
 
 export async function runAgent(
@@ -125,8 +170,10 @@ export async function runAgent(
       ]);
     }
     await agent.waitForIdle();
+    await repeatRecoveredRequest(agent, turn, convergeAtIdle);
     await convergeAtIdle?.();
     await agent.waitForIdle();
+    await repeatRecoveredRequest(agent, turn, convergeAtIdle);
     if (turn.input.signal?.aborted) {
       return { kind: 'aborted' };
     }

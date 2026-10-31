@@ -12,6 +12,8 @@ import type { AskUserToolInput } from '@mavis/shared/questionnaire';
 import type { BashOperations } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from '@sinclair/typebox';
 
+import type { LocalPermissionExecutionPlan } from './permission-execution.js';
+
 import type {
   LocalBashToolInput,
   LocalTaskToolInput,
@@ -22,6 +24,43 @@ import type {
   LocalCodeReviewToolInput,
 } from './builtin-defs.js';
 import type { WebSearchInput } from '../shared/web-search.js';
+
+/**
+ * Plugin subagent definition (official or LOCAL package) from the Turn
+ * capability lease. Selectors use the Custom Agent encoding: `undefined`
+ * inherits, `[]` explicitly disables.
+ */
+export interface LocalPluginAgentDefinition {
+  /** Task target `<plugin>:<agent>`. */
+  readonly scopedName: string;
+  readonly pluginName: string;
+  readonly agentName: string;
+  readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
+  /** Package origin; absent only for producers that predate official Plugin subagents. */
+  readonly origin?: 'official' | 'local';
+  readonly packageDigest: string;
+  readonly pluginRoot: string;
+  readonly description: string;
+  readonly displayName?: string;
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly extensionSkills?: readonly string[];
+  /** MCP server names this Plugin package declares, whether or not they published tools. */
+  readonly declaredMcpServers?: readonly string[];
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+}
+
+export interface LocalPluginAgentRoster {
+  list(): readonly LocalPluginAgentDefinition[];
+  /** Case-insensitive `<plugin>:<agent>` lookup. */
+  resolve(scopedName: string): LocalPluginAgentDefinition | undefined;
+}
 
 export interface LocalRuntimeToolContext extends ToolExecutionContext {
   /** Frozen from the final Turn catalog; false keeps ordinary Bash synchronous. */
@@ -68,6 +107,11 @@ export interface LocalRuntimeToolContext extends ToolExecutionContext {
    * set shared by the skill and Browser tools; legacy/test hosts may omit it.
    */
   readonly loadedSkills?: Set<string>;
+  /**
+   * Plugin subagents (official or LOCAL) frozen with this Turn's capability lease. Absent
+   * means no Plugin Agent target is admissible for `task`.
+   */
+  readonly pluginAgents?: LocalPluginAgentRoster;
   /** Parent-turn Plugin Hook generation inherited by a user-visible child Agent. */
   readonly pluginSubagentLifecycle?: {
     start(
@@ -195,6 +239,7 @@ export type LocalBrowserToolAction =
   | 'click'
   | 'click_and_wait_for_navigation'
   | 'double_click'
+  | 'triple_click'
   | 'drag'
   | 'fill'
   | 'type'
@@ -211,7 +256,8 @@ export type LocalBrowserToolAction =
   | 'upload_files'
   | 'paste'
   | 'verify_text'
-  | 'inspect_editable_targets';
+  | 'inspect_editable_targets'
+  | 'run_script';
 
 export interface LocalBrowserAdapter {
   getCapabilities?(): BrowserProviderCapabilities;
@@ -310,6 +356,8 @@ export interface LocalSandboxBashOperationsFactory {
   create(input: {
     identity: LocalSandboxInvocationIdentity;
     workspaceRoot: string;
+    /** Permission decision snapshot carried across the execution boundary. */
+    permissionExecutionPlan?: LocalPermissionExecutionPlan;
     /**
      * Runs once the invocation is admitted and wrapped, immediately before the
      * native spawn. Background callers persist `running`/`startedAt` here, so
@@ -330,6 +378,7 @@ export interface LocalBackgroundBashExecutor {
     identity: LocalSandboxInvocationIdentity;
     workspaceRoot: string;
     command: string;
+    permissionExecutionPlan?: LocalPermissionExecutionPlan;
     timeout?: number;
     signal: AbortSignal;
     onPreflightComplete?: () => void | Promise<void>;
@@ -527,7 +576,12 @@ export interface LocalMemoryAdapter {
     ctx: LocalRuntimeToolContext,
     input: LocalMemoryToolInput,
     signal?: AbortSignal,
-  ): Promise<{ text: string; details?: Record<string, unknown> }>;
+  ): Promise<{
+    text: string;
+    details?: Record<string, unknown>;
+    /** Structured copy of the same result for PTC; never shown to the model. */
+    data?: Record<string, unknown>;
+  }>;
 }
 
 export interface LocalMavisAgentDetail {

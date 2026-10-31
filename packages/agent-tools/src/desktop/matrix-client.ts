@@ -17,6 +17,8 @@ const LOCAL_GATEWAY_PREFIX = '/mavis/api/v1/mcp/';
 
 export interface DesktopMatrixAuthContext {
   readonly accessToken?: string;
+  /** Owner-side login generation; a change means the access token was refreshed. */
+  readonly loginEpoch?: string;
 }
 
 interface MatrixFetchDispatcherOptions {
@@ -29,7 +31,14 @@ type MatrixFetchDispatcherFactory = (options: MatrixFetchDispatcherOptions) => D
 export interface DesktopMatrixClientOptions {
   baseUrl?: string;
   accessToken?: string;
+  /** Static managed-login snapshot; ignored when `authContextGetter` is provided. */
   authContext?: DesktopMatrixAuthContext;
+  /**
+   * Live host auth read on every request. The host swaps in a new object each
+   * time it refreshes the access token, so a long Turn must not keep the
+   * snapshot taken when it started.
+   */
+  authContextGetter?: () => DesktopMatrixAuthContext | null | undefined;
   endpoint?: DesktopMatrixEndpoint;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -57,8 +66,12 @@ export class DesktopMatrixClient implements MatrixExecutor {
   private readonly baseUrl: string;
   private readonly explicitAccessToken: string | undefined;
   private readonly managedEndpoint: boolean;
-  private readonly useManagedAuth: boolean;
+  /** True when requests carry the managed-login token rather than an explicit one. */
+  protected readonly useManagedAuth: boolean;
   private readonly authContext: DesktopMatrixAuthContext | undefined;
+  private readonly authContextGetter:
+    | (() => DesktopMatrixAuthContext | null | undefined)
+    | undefined;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private readonly dispatcherFactory: MatrixFetchDispatcherFactory;
@@ -72,6 +85,7 @@ export class DesktopMatrixClient implements MatrixExecutor {
     this.managedEndpoint = endpoint.managed;
     this.useManagedAuth = endpoint.managed && !explicitAccessToken;
     this.authContext = options.authContext;
+    this.authContextGetter = options.authContextGetter;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     // Keep fetch and dispatcher on the same Undici implementation. Node 26's
     // built-in fetch uses Undici 8, whose dispatcher handler contract is not
@@ -209,7 +223,8 @@ export class DesktopMatrixClient implements MatrixExecutor {
 
   private getManagedAccessToken(): string | undefined {
     if (!this.useManagedAuth) return undefined;
-    return this.authContext?.accessToken?.trim() || undefined;
+    const authContext = this.authContextGetter ? this.authContextGetter() : this.authContext;
+    return authContext?.accessToken?.trim() || undefined;
   }
 }
 

@@ -1,6 +1,13 @@
 import { createAgentRuntime, type AgentExtension, type AgentRuntime } from '@mavis/agent-runtime';
-import { getLocalBashEnvironment } from '@mavis/agent-tools';
+import type { PtcToolResultProjectionInput } from '@mavis/agent-core/tools';
+import {
+  createDesktopPtcResultProjection,
+  getLocalBashEnvironment,
+  projectDesktopPtcEvidenceInput,
+} from '@mavis/agent-tools';
 import type { ResolvedAgentCapabilities } from '@mavis/config';
+import { redactSecretText } from '@mavis/shared/logging/redact-log-secret';
+import { sanitizeObservabilityText } from '@mavis/shared/local-runtime-diagnostics/redaction';
 
 import type {
   LocalModelResolverLike,
@@ -8,6 +15,7 @@ import type {
 } from '../../model-system/index.js';
 import {
   buildLocalTurnToolCatalog,
+  type BuildLocalTurnToolCatalogInput,
   type LocalMcpToolSearchConfig,
   type LocalTurnRawToolSources,
 } from './assembly/local-turn-tool-catalog.js';
@@ -29,6 +37,7 @@ import {
   type LocalRuntimeTurnToolContext,
 } from './execution/executor.js';
 import type { LocalTurnToolPolicyGuard } from './runner/contracts.js';
+import { resetPtcPrefixBaseline } from './runner/policy/ptc-prefix-fingerprint.js';
 import {
   LocalAgentConfigBuilder,
   LocalAgentPreparationService,
@@ -68,7 +77,10 @@ export interface NativeLocalTurnToolCatalogOptions {
   readonly config?: LocalMcpToolSearchConfig;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly emitDiagnostic?: (type: string, payload: Readonly<Record<string, unknown>>) => void;
+  /** Structured log sink for catalog decisions (PTC long-tail resolution). */
+  readonly logger?: BuildLocalTurnToolCatalogInput['logger'];
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
+  readonly writePtcReturnArtifact?: BuildLocalTurnToolCatalogInput['writePtcReturnArtifact'];
 }
 
 export interface NativeAgentPreparationOptions {
@@ -127,7 +139,11 @@ export async function createNativeAgentHostProductionDependencies<
 >(
   options: NativeAgentHostProductionDependenciesOptions<TAgent>,
 ): Promise<NativeAgentHostProductionDependencies<TAgent>> {
-  const toolCatalog = createToolCatalogSource(options.toolCatalog);
+  // Catalog decisions (PTC long-tail resolution) log through the runner's sink unless overridden.
+  const toolCatalog = createToolCatalogSource({
+    logger: options.runner.logger,
+    ...options.toolCatalog,
+  });
   const normalRuntime = await createAgentRuntime({
     base: configuredNormalExtensions(options.normalExtensions),
   });
@@ -197,14 +213,23 @@ function createNativeAgentHostDependencies<TAgent extends AgentExecutionSnapshot
     turnControl: options.turnControl,
     ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
     ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    promptSuggestion: options.promptSuggestion,
     canonicalHistory: options.canonicalHistory,
     ...(options.runner.logger ? { logger: options.runner.logger } : {}),
     ...(options.usage ? { usage: options.usage } : {}),
     events: options.events,
     executor: {
       ...options.executor,
+      // PTC admission and program metrics report through the runner's client.
+      ...runnerMetricsClient(options.runner),
       runtime,
       executionPreparation,
+      createPtcResultProjection: (collector) =>
+        createDesktopPtcResultProjection({
+          projectInput: projectDesktopPtcEvidenceInput,
+          projectResultRef: projectNativePtcResultRef,
+          projectRetainedFacts: (projection) => collector.read(projection.childToolCallId),
+        }),
       ...(permissionMutations
         ? {
             clearPluginHookSessionPermissions: (sessionId: string) =>
@@ -219,13 +244,58 @@ function createNativeAgentHostDependencies<TAgent extends AgentExecutionSnapshot
   });
 }
 
+function projectNativePtcResultRef(input: PtcToolResultProjectionInput): string | undefined {
+  if (input.source !== 'builtin' || input.toolName !== 'bash') return undefined;
+  const details = recordValue(recordValue(input.result)?.details);
+  if (!details) return undefined;
+  const processOutput = recordValue(details.processOutput);
+  // A plain LocalBashTool error may have extracted fullOutputPath from text.
+  // Its source-owned process/exit facts must exist before that field is trusted.
+  let path = processOutput?.rawOutputPath;
+  if (typeof path !== 'string' && hasStructuredBashExit(details, processOutput)) {
+    path = details.fullOutputPath;
+  }
+  if (typeof path !== 'string' || !path.trim()) return undefined;
+  return sanitizeObservabilityText(redactSecretText(path));
+}
+
+function hasStructuredBashExit(
+  details: Record<string, unknown>,
+  processOutput: Record<string, unknown> | undefined,
+): boolean {
+  const execution = recordValue(details.execution);
+  return (
+    details.exitCode === null ||
+    Number.isSafeInteger(details.exitCode) ||
+    processOutput?.exitCode === null ||
+    Number.isSafeInteger(processOutput?.exitCode) ||
+    execution?.exitCode === null ||
+    Number.isSafeInteger(execution?.exitCode)
+  );
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function runnerMetricsClient(
+  runner: LocalAgentTurnRunnerOptions,
+): Pick<LocalAgentTurnRunnerOptions, 'metricsClient'> {
+  return runner.metricsClient ? { metricsClient: runner.metricsClient } : {};
+}
+
 function createPermissionGateOptions<TAgent extends AgentExecutionSnapshot>(
   options: NativeAgentHostProductionDependenciesOptions<TAgent>,
 ): LocalTurnPermissionGateOptions {
   const logger = options.permission.logger ?? options.runner.logger;
+  // Counts run_code children's permission outcomes (ptc_child_permission_total).
+  const metricsClient = options.permission.metricsClient ?? options.runner.metricsClient;
   return {
     ...options.permission,
     ...(logger ? { logger } : {}),
+    ...(metricsClient ? { metricsClient } : {}),
     enforceBuiltinTools:
       options.executor.cliProductPolicy === true && options.executor.tuiProductPolicy !== true,
   };
@@ -250,6 +320,7 @@ export function createAgentHostRuntimeLifecycle(
 ): AgentHostRuntimeLifecycle {
   return {
     async disposeSession(sessionId) {
+      resetPtcPrefixBaseline(sessionId);
       await Promise.all([
         disposeRuntimeSession(runtime, sessionId),
         mutations?.clearSession(sessionId) ?? Promise.resolve(),
@@ -291,6 +362,8 @@ async function buildToolCatalog(
 ) {
   return buildLocalTurnToolCatalog({
     sessionId: input.sessionId,
+    turnId: input.turnId,
+    agentName: input.agentName,
     sources: await options.resolveSources(toolCatalogSourceInput(input)),
     llmModel: input.llmModel,
     effectivePluginSkills: input.effectivePluginSkills,
@@ -342,12 +415,15 @@ function toolCatalogBuildOptions(
     ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),
     ...(input.modelCapabilities ? { modelCapabilities: input.modelCapabilities } : {}),
     ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
+    ...(input.ptcEnabled ? { ptcEnabled: true } : {}),
     ...(options.config ? { config: options.config } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.emitDiagnostic ? { emitDiagnostic: options.emitDiagnostic } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
     ...(options.hostCapabilityRegistry
       ? { hostCapabilityRegistry: options.hostCapabilityRegistry }
       : {}),
+    writePtcReturnArtifact: options.writePtcReturnArtifact,
   };
 }
 

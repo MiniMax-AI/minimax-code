@@ -28,10 +28,11 @@ describe('user stop cascade trigger', () => {
   it('opens the cascade before aborting, so a task driven terminal cannot slip a delivery through', async () => {
     const fixture = harness();
     const order: string[] = [];
-    fixture.cascadeBegin.mockImplementation(async () => {
+    fixture.cascadeBegin.mockImplementation(() => {
       order.push('cascade-begin');
       return {
         accept: vi.fn(async () => undefined),
+        markBoundary: vi.fn(),
         complete: vi.fn(() => {
           order.push('cascade-complete');
         }),
@@ -215,13 +216,186 @@ describe('user stop cascade trigger', () => {
 
   it('still aborts when the cascade hook itself fails', async () => {
     const fixture = harness();
-    fixture.cascadeBegin.mockRejectedValue(new Error('cascade unavailable'));
+    // `begin` is synchronous, so the failure must be a throw, not a rejection.
+    fixture.cascadeBegin.mockImplementation(() => {
+      throw new Error('cascade unavailable');
+    });
     fixture.controller.abort.mockResolvedValue({ status: 'aborted', turnId: 'turn-1' });
 
     await expect(
       fixture.service.abort({ sessionId: 'session-1', reason: 'user_stop' }),
     ).resolves.toEqual({ status: 'aborted', turnId: 'turn-1' });
     expect(fixture.controller.abort).toHaveBeenCalled();
+  });
+});
+
+describe('user stop cascade boundary', () => {
+  // The abort path holds no Session lock and still awaits the Goal pause after the
+  // stopped Turn released, so the next Turn can start meanwhile. The cascade's
+  // boundary is therefore fixed at the release (or `not-running`), never later.
+
+  it('fixes the boundary when the stopped Turn releases, while the Goal pause still runs', async () => {
+    const fixture = harness();
+    const order: string[] = [];
+    const acceptStarted = deferred();
+    const goalPause = deferred();
+    fixture.cascadeAccept.mockImplementation(async () => {
+      order.push('accept-started');
+      acceptStarted.resolve();
+      await goalPause.promise;
+      order.push('accept-resolved');
+    });
+    fixture.cascadeMarkBoundary.mockImplementation((source) => {
+      order.push(`mark:${source}`);
+    });
+    fixture.cascadeComplete.mockImplementation(() => {
+      order.push('complete');
+    });
+    fixture.controller.abort.mockImplementation(async (input) => {
+      // As the controller does: `onAccepted` runs, and the stopped Turn releases
+      // (firing `onReleased`) while the Goal pause is still pending.
+      const accepted = input.onAccepted?.();
+      await acceptStarted.promise;
+      input.onReleased?.();
+      goalPause.resolve();
+      await accepted;
+      return { status: 'aborted', turnId: 'turn-1' };
+    });
+    const callerOnReleased = vi.fn(() => {
+      order.push('caller-onReleased');
+    });
+
+    await fixture.service.abort({
+      sessionId: 'session-1',
+      reason: 'user_stop',
+      onReleased: callerOnReleased,
+    });
+
+    expect(fixture.cascadeMarkBoundary).toHaveBeenCalledTimes(1);
+    expect(order).toEqual([
+      'accept-started',
+      'mark:released',
+      'caller-onReleased',
+      'accept-resolved',
+      'complete',
+    ]);
+  });
+
+  it('fixes the boundary at the not-running report, before pausing the Goal', async () => {
+    const fixture = harness();
+    const order: string[] = [];
+    fixture.cascadeMarkBoundary.mockImplementation((source) => {
+      order.push(`mark:${source}`);
+    });
+    fixture.cascadeAccept.mockImplementation(async () => {
+      order.push('accept');
+    });
+    fixture.cascadeComplete.mockImplementation(() => {
+      order.push('complete');
+    });
+    fixture.controller.abort.mockResolvedValue({ status: 'not-running' });
+
+    await fixture.service.abort({ sessionId: 'session-1', reason: 'user_stop' });
+
+    expect(fixture.cascadeMarkBoundary).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['mark:not_running', 'accept', 'complete']);
+  });
+
+  it('never fixes a boundary for a stop that was rejected or failed', async () => {
+    const rejected = harness();
+    rejected.controller.abort.mockResolvedValue({ status: 'turn-mismatch' });
+    await rejected.service.abort({
+      sessionId: 'session-1',
+      turnId: 'turn-old',
+      reason: 'user_stop',
+    });
+
+    const failed = harness();
+    failed.controller.abort.mockRejectedValue(new Error('abort failed'));
+    await expect(
+      failed.service.abort({ sessionId: 'session-1', reason: 'user_stop' }),
+    ).rejects.toThrow('abort failed');
+
+    for (const fixture of [rejected, failed]) {
+      expect(fixture.cascadeMarkBoundary).not.toHaveBeenCalled();
+      expect(fixture.cascadeComplete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('logs a failing boundary mark and still completes the stop', async () => {
+    const fixture = harness();
+    fixture.cascadeMarkBoundary.mockImplementation(() => {
+      throw new Error('mark broke');
+    });
+    fixture.controller.abort.mockResolvedValue({ status: 'not-running' });
+
+    await expect(
+      fixture.service.abort({ sessionId: 'session-1', reason: 'user_stop' }),
+    ).resolves.toEqual({ status: 'not-running' });
+
+    expect(fixture.cascadeAccept).toHaveBeenCalledWith('not_running');
+    expect(fixture.cascadeComplete).toHaveBeenCalledWith({ status: 'not-running' });
+    expect(fixture.loggerInfo).toHaveBeenCalledWith(
+      {
+        event: 'user_stop_cascade_mark_boundary_failed',
+        session_id: 'session-1',
+        boundary_source: 'not_running',
+        error: 'mark broke',
+      },
+      expect.any(String),
+    );
+  });
+
+  it('adds no release hook to an abort that does not cascade', async () => {
+    const fixture = harness();
+    fixture.controller.abort.mockResolvedValue({ status: 'aborted', turnId: 'turn-1' });
+
+    await fixture.service.abort({ sessionId: 'session-1', reason: 'session_leave' });
+
+    expect(fixture.controller.abort).toHaveBeenCalledWith(
+      expect.not.objectContaining({ onReleased: expect.anything() }),
+    );
+  });
+});
+
+describe('user stop of a Turn owned by another Runtime', () => {
+  it('neither pauses the Goal nor sweeps background work it never reached', async () => {
+    // IM `/stop` reaches TurnExecution directly. Here the controller has nothing,
+    // because another live Runtime sharing the dataDir runs the Turn.
+    const fixture = harness();
+    fixture.controller.abort.mockResolvedValue({ status: 'not-running' });
+    fixture.repository.findActiveTurn.mockResolvedValue({
+      turnId: 'turn-foreign',
+      busyReason: 'turn',
+      ownedByOtherRuntime: true,
+    });
+
+    await expect(
+      fixture.service.abort({ sessionId: 'session-1', reason: 'user_stop' }),
+    ).resolves.toEqual({ status: 'not-running' });
+
+    expect(fixture.cascadeAccept).not.toHaveBeenCalled();
+    expect(fixture.cascadeComplete).not.toHaveBeenCalled();
+    expect(fixture.cascadeCancel).toHaveBeenCalledWith('owned_by_other_runtime');
+  });
+
+  it('keeps stopping leftover work when the active Turn is local or unreadable', async () => {
+    for (const findActiveTurn of [
+      async () => ({ turnId: 'turn-local', busyReason: 'turn' as const }),
+      async () => {
+        throw new Error('database busy');
+      },
+    ]) {
+      const fixture = harness();
+      fixture.controller.abort.mockResolvedValue({ status: 'not-running' });
+      fixture.repository.findActiveTurn.mockImplementation(findActiveTurn);
+
+      await fixture.service.abort({ sessionId: 'session-1', reason: 'user_stop' });
+
+      expect(fixture.cascadeAccept).toHaveBeenCalledWith('not_running');
+      expect(fixture.cascadeComplete).toHaveBeenCalledWith({ status: 'not-running' });
+      expect(fixture.cascadeCancel).not.toHaveBeenCalled();
+    }
   });
 });
 
@@ -291,6 +465,7 @@ function harness() {
       status: 'not-accepted',
     })),
     releaseSteeringReceipt: vi.fn<TurnRepository['releaseSteeringReceipt']>(async () => undefined),
+    findClientRequestBindings: vi.fn<TurnRepository['findClientRequestBindings']>(async () => []),
     revokeAdmission: vi.fn<TurnRepository['revokeAdmission']>(async () => true),
     beginSessionDeletion: vi.fn<TurnRepository['beginSessionDeletion']>(async () => ({
       status: 'quiescent',
@@ -351,8 +526,12 @@ function harness() {
   const cascadeCancel = vi.fn();
   const cascadeAccept = vi.fn(async () => undefined);
   const loggerInfo = vi.fn();
-  const cascadeBegin = vi.fn(async () => ({
+  // `begin` is synchronous by contract: the delivery window must be open before
+  // the abort, so the service never awaits the handle it returns.
+  const cascadeMarkBoundary = vi.fn();
+  const cascadeBegin = vi.fn(() => ({
     accept: cascadeAccept,
+    markBoundary: cascadeMarkBoundary,
     complete: cascadeComplete,
     cancel: cascadeCancel,
   }));
@@ -384,6 +563,7 @@ function harness() {
     cascadeComplete,
     cascadeCancel,
     cascadeAccept,
+    cascadeMarkBoundary,
     loggerInfo,
     service: createTurnExecutionService(options),
   };

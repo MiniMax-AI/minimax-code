@@ -168,7 +168,6 @@ describe("TuiProviderManager", () => {
     expect(rendered).toContain("r refresh models");
     expect(rendered).not.toContain("Add custom provider");
     expect(rendered).not.toContain("a add");
-    expect(rendered).not.toContain("d delete");
   });
 
   it("switches from MiniMax API Key back to MiniMax OAuth with space", async () => {
@@ -248,16 +247,103 @@ describe("TuiProviderManager", () => {
     );
   });
 
-  it("ignores the removed add and delete shortcuts", () => {
+  it("ignores the removed add shortcut and refuses to delete MiniMax sources", () => {
     const onRefresh = vi.fn(async () => snapshot);
-    const manager = createManager({ onRefresh });
+    const onDelete = vi.fn(async () => undefined);
+    const manager = createManager({ onRefresh, onDelete });
 
-    for (const key of ["a", "d", "y"]) manager.handleInput(key);
+    manager.handleInput("a");
+    manager.handleInput("d");
+    manager.handleInput("y");
 
     const rendered = stripAnsi(manager.render(84).join("\n"));
-    expect(rendered).toContain("Providers");
+    expect(rendered).toContain("Only custom connections can be deleted.");
     expect(rendered).not.toContain("Add provider");
-    expect(rendered).not.toContain("Delete");
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it("deletes a custom connection only after y and cancels on any other key", async () => {
+    const onDelete = vi.fn(async () => undefined);
+    const remaining: McodeProviderSnapshot = {
+      ...snapshot,
+      providers: snapshot.providers.filter(
+        (provider) => provider.kind !== "custom",
+      ),
+    };
+    const onRefresh = vi.fn(async () => remaining);
+    const manager = createManager({ onDelete, onRefresh });
+
+    manager.handleInput("\u001b[B");
+    manager.handleInput("\u001b[B");
+    manager.handleInput("d");
+    const confirmation = stripAnsi(manager.render(90).join("\n"));
+    expect(confirmation).toContain("Delete OpenAI?");
+    expect(confirmation).toContain("all 1 configured model.");
+    expect(confirmation).toContain("y delete · any other key cancel");
+
+    manager.handleInput("\r");
+    expect(stripAnsi(manager.render(90).join("\n"))).toContain("Providers");
+    manager.handleInput("d");
+    manager.handleInput("n");
+    expect(onDelete).not.toHaveBeenCalled();
+
+    manager.handleInput("d");
+    manager.handleInput("Y");
+    await vi.waitFor(() =>
+      expect(stripAnsi(manager.render(90).join("\n"))).toContain(
+        "Deleted OpenAI and its 1 model.",
+      ),
+    );
+    expect(onDelete).toHaveBeenCalledOnce();
+    expect(onDelete).toHaveBeenCalledWith("custom_provider:openai");
+    const rows = stripAnsi(manager.render(90).join("\n"));
+    expect(rows).not.toContain("Enabled · 1 model");
+    expect(rows).toContain("› ○ MiniMax API Key");
+  });
+
+  it("reports a stale list instead of a failed deletion when only the reload fails", async () => {
+    const onDelete = vi.fn(async () => undefined);
+    const onRefresh = vi.fn(async () => {
+      throw new Error("runtime unavailable");
+    });
+    const manager = createManager({ onDelete, onRefresh });
+
+    manager.handleInput("\u001b[B");
+    manager.handleInput("\u001b[B");
+    manager.handleInput("d");
+    manager.handleInput("y");
+
+    await vi.waitFor(() =>
+      expect(stripAnsi(manager.render(180).join("\n"))).toContain(
+        "Deleted OpenAI, but the list could not refresh",
+      ),
+    );
+    const rendered = stripAnsi(manager.render(180).join("\n"));
+    expect(rendered).not.toContain("Couldn't delete OpenAI");
+    expect(rendered).not.toContain("unchanged");
+  });
+
+  it("keeps the connection listed when deletion fails", async () => {
+    const onDelete = vi.fn(async () => {
+      throw new Error("Switch to another model before deleting this provider");
+    });
+    const onRefresh = vi.fn(async () => snapshot);
+    const manager = createManager({ onDelete, onRefresh });
+
+    manager.handleInput("\u001b[B");
+    manager.handleInput("\u001b[B");
+    manager.handleInput("d");
+    manager.handleInput("y");
+
+    await vi.waitFor(() =>
+      expect(stripAnsi(manager.render(180).join("\n"))).toContain(
+        "Switch to another model before deleting this provider",
+      ),
+    );
+    expect(stripAnsi(manager.render(180).join("\n"))).toContain(
+      "Enabled · 1 model",
+    );
     expect(onRefresh).not.toHaveBeenCalled();
   });
 

@@ -1,3 +1,5 @@
+import { parseRequestMediaConfig } from '@mavis/config';
+
 import {
   initializeBrowserUseService,
   type BrowserUseService,
@@ -17,12 +19,14 @@ export interface RuntimeBrowserUseOptions {
     readonly agentHost: {
       readonly preparation: {
         readonly configBuilder: {
-          config(): { readonly beta?: RuntimeBrowserUseBetaConfig };
+          config(): {
+            readonly beta?: RuntimeBrowserUseBetaConfig;
+            readonly requestMedia?: unknown;
+          };
         };
       };
     };
     readonly generatedAssets: {
-      readonly compressModelImage: BrowserUseServiceOptions['compressScreenshot'];
       readonly registerGeneratedAsset: BrowserUseServiceOptions['registerGeneratedAsset'];
     };
     readonly questionnaires: {
@@ -57,7 +61,21 @@ export function createRuntimeBrowserUseComposition(
           : { browserUseToolingEnabled: beta.browserUseTooling }),
       };
     },
-    compressScreenshot: options.compatibility.generatedAssets.compressModelImage,
+    getImageEncoding: () => {
+      let requestMedia: unknown;
+      try {
+        requestMedia =
+          options.compatibility.agentHost.preparation.configBuilder.config().requestMedia;
+      } catch {
+        requestMedia = undefined;
+      }
+      const { image } = parseRequestMediaConfig(requestMedia);
+      return {
+        maxWidth: image.max_width,
+        maxHeight: image.max_height,
+        maxBase64Bytes: image.max_base64_bytes,
+      };
+    },
     registerGeneratedAsset: options.compatibility.generatedAssets.registerGeneratedAsset,
     activationMode: ownsElectronRuntimeCapabilities(options.runtimeOwnerKind)
       ? 'desktop-plugin'

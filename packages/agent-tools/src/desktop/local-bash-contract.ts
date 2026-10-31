@@ -12,6 +12,8 @@ import {
 
 export interface LocalBashTurnCapabilities {
   readonly background: boolean;
+  /** Frozen for this Turn's model guidance; execution reads the live host policy. */
+  readonly nativeDelete?: boolean;
   readonly shell: ReturnType<typeof getShellConfig>['type'] | 'unavailable';
 }
 
@@ -51,7 +53,16 @@ function renderBashUsage(capabilities: LocalBashTurnCapabilities): string {
       : ['- This Turn supports foreground execution only.']),
     "- Large output preserves the beginning and end. Follow the result's instructions to read omitted output.",
     ...shellRules(capabilities.shell),
+    ...deletionRules(capabilities.nativeDelete === true),
   ].join('\n');
+}
+
+function deletionRules(nativeDelete: boolean): string[] {
+  if (nativeDelete) return [];
+  return [
+    '- For file or directory deletion, use one top-level `rm -- <path> ...`; the local runtime routes it through recoverable deletion.',
+    '- Do not bypass recoverable deletion with absolute paths to deletion commands or inline scripts. If it fails, report the failure instead of falling back to permanent deletion. Permission checks still apply.',
+  ];
 }
 
 function shellRules(shell: LocalBashTurnCapabilities['shell']): string[] {

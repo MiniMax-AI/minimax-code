@@ -174,6 +174,18 @@ export function buildLocalRequestPayloadTransform(
   });
 }
 
+/**
+ * Optional next-message calls reuse the main request transform unchanged, so
+ * thinking and effort follow exactly what the user selected for the Turn. Only
+ * the main Turn's output contract is dropped: the suggestion is plain text.
+ */
+export function buildPromptSuggestionPayloadTransform(
+  input: Parameters<typeof buildLocalRequestPayloadTransform>[0],
+  runtime: Parameters<typeof buildLocalRequestPayloadTransform>[1],
+) {
+  return buildLocalRequestPayloadTransform({ ...input, outputContract: undefined }, runtime);
+}
+
 export function buildTurnPayloadTransforms<TAgent extends AgentExecutionSnapshot>(
   input: Pick<LocalTurnExecutionInput<TAgent>, 'lease' | 'preparation'>,
   outputContract: TurnOutputContract | undefined,
@@ -251,8 +263,12 @@ function assertRequestBodyFits(payload: Record<string, unknown>, limit: number |
   if (limit === undefined) return;
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
   if (bytes <= limit) return;
+  // `request_too_large` lets Pi's isContextOverflow recognise the local gate
+  // like the provider rejection it pre-empts.
   throw Object.assign(
-    new Error(`Request body too large: ${bytes} bytes exceeds client limit ${limit} bytes.`),
+    new Error(
+      `Request body too large (request_too_large): ${bytes} bytes exceeds client limit ${limit} bytes.`,
+    ),
     {
       code: 'REQUEST_BODY_TOO_LARGE',
       retryable: false,
@@ -401,6 +417,7 @@ function mergeRequestPatch(
   patch: Readonly<Record<string, unknown>>,
 ): void {
   for (const [key, value] of Object.entries(patch)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     if (value === undefined) {
       delete target[key];
       continue;

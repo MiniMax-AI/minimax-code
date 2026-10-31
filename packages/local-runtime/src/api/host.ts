@@ -1,6 +1,7 @@
 import {
   CloudSessionReader,
   managedBackendRoutingHeaders,
+  resolveLocalBashShell,
 } from "@mavis/agent-tools/desktop";
 import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 import type {
@@ -27,6 +28,7 @@ import { stopBackgroundLocalBashTask } from "../background-task/bash-runner.js";
 import { closeLocalBackgroundTaskDelivery } from "../background-task/delivery.js";
 import { createLocalBackgroundTaskService } from "../background-task/index.js";
 import {
+  abortAdmittedBackgroundTask,
   beginBackgroundTaskShutdown,
   drainBackgroundTasks,
 } from "../background-task/lifecycle.js";
@@ -65,7 +67,6 @@ import {
 import { createLocalFileApiGitChangesCoordinator } from "../files/api.js";
 import { LocalHookService } from "../hooks/api.js";
 import { ensureBinInProcessPath } from "../infra/ensure-bin-in-path.js";
-import { ensurePathIntegration } from "../infra/ensure-path-integration.js";
 import { ensureRmShim } from "../infra/ensure-rm-shim.js";
 import {
   ensureTrashScript,
@@ -314,6 +315,8 @@ export class LocalRuntimeApiHost {
   public readonly metricsClient: LocalRuntimeApiHostOptions["metricsClient"];
   public readonly configGetter: () => LocalRuntimeConfig;
   public readonly shellFamily: LocalRuntimeApiHostOptions["shellFamily"];
+  /** TUI-only opt-out, frozen at startup rather than read from tool/session input. */
+  public readonly skipWindowsHardSafetyChecks: boolean;
   public readonly authContextGetter:
     | (() => LocalRuntimeAuthContext | undefined)
     | undefined;
@@ -464,7 +467,19 @@ export class LocalRuntimeApiHost {
     );
     this.surfaces = buildLocalRuntimeSurfaceCapabilities(this.runtimeMode);
     this.configGetter = options.configGetter ?? (() => getConfig());
-    this.shellFamily = options.shellFamily;
+    // Use the executor's shell selection when the product entrypoint supplies no override.
+    // Keep POSIX provenance on Windows (Git Bash / sh) as well as native shells.
+    this.shellFamily =
+      options.shellFamily ??
+      (() => {
+        const shell = resolveLocalBashShell();
+        if (shell === 'powershell' || shell === 'pwsh') return 'powershell';
+        if (shell === 'bash' || shell === 'sh') return 'posix';
+        return undefined;
+      })();
+    this.skipWindowsHardSafetyChecks =
+      options.runtimeOwnerKind === 'tui' &&
+      this.configGetter().skipWindowsHardSafetyChecks === true;
     this.authContextGetter = options.authContextGetter;
     this.authContextInvalidator = options.authContextInvalidator;
     this.routingContextGetter = options.routingContextGetter;
@@ -506,12 +521,13 @@ export class LocalRuntimeApiHost {
         this.metricsReporter,
       );
     }
-    const runtimeDataDir = this.configGetter().dataDir;
+    const runtimeConfig = this.configGetter();
+    const runtimeDataDir = runtimeConfig.dataDir;
+    const nativeDelete = runtimeConfig.permission?.nativeDelete === true;
     try {
+      // Keep explicit mavis-trash available in either mode.
       ensureTrashScript(runtimeDataDir);
-      // Seeded alongside the trash script: the shim is the execution-layer
-      // entry point that makes `rm` recoverable regardless of how it is reached.
-      ensureRmShim(runtimeDataDir);
+      if (!nativeDelete) ensureRmShim(runtimeDataDir);
     } catch (error) {
       const nodeError =
         error instanceof Error ? (error as NodeJS.ErrnoException) : undefined;
@@ -529,19 +545,22 @@ export class LocalRuntimeApiHost {
         "local_runtime.trash_seed_failed",
       );
     }
-    for (const ensure of [ensureBinInProcessPath, ensurePathIntegration]) {
-      try {
-        ensure(runtimeDataDir);
-      } catch {
-        // PATH integration remains best-effort; deletion safety is gated separately above.
-      }
+    // The Runtime adds its bin directory only to its own process PATH and to the
+    // PATH of its children. It never edits the user's shell profiles or the
+    // Windows user PATH; the install script and `npm i -g` own that.
+    try {
+      ensureBinInProcessPath(runtimeDataDir);
+    } catch {
+      // PATH integration remains best-effort; deletion safety is gated separately above.
     }
-    const trashRuntime = inspectTrashRuntime(runtimeDataDir);
-    if (!trashRuntime.available) {
-      logger.error(
-        { reason: trashRuntime.reason, ...trashRuntime.diagnostics },
-        "local_runtime.trash_unavailable",
-      );
+    if (!nativeDelete) {
+      const trashRuntime = inspectTrashRuntime(runtimeDataDir);
+      if (!trashRuntime.available) {
+        logger.error(
+          { reason: trashRuntime.reason, ...trashRuntime.diagnostics },
+          "local_runtime.trash_unavailable",
+        );
+      }
     }
     this.messageStore = options.messageStore;
     const sessionStoreOptions = {
@@ -667,6 +686,11 @@ export class LocalRuntimeApiHost {
       () => this.configGetter().dataDir,
       this.nowMs,
       async (task, reason) => {
+        abortAdmittedBackgroundTask(
+          this,
+          task.taskId,
+          reason ?? (task.kind === 'bash' ? 'Background bash stopped' : 'Background task stopped'),
+        );
         await stopBackgroundLocalBashTask(task, reason);
         const childSessionId = task.metadata?.childSessionId;
         const subTurnId = task.metadata?.subTurnId;

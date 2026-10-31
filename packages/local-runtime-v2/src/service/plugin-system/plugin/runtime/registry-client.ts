@@ -233,6 +233,23 @@ function readMarketplaceDetail(value: unknown): PluginMarketplaceDetail {
       'exampleQueries',
       requireStringValue,
     ),
+    ...optionalArrayProjection(record, ['agents', 'agents'], 'agents', readPluginAgent),
+  };
+}
+
+/** Official Marketplace Plugin subagent as the registry API returns it. */
+interface PluginAgentInfo {
+  readonly name: string;
+  readonly description?: string;
+  readonly content: string;
+}
+
+function readPluginAgent(value: unknown): PluginAgentInfo {
+  const agent = requireRecord(value, 'Plugin Agent');
+  return {
+    name: requireString(agent, 'name', 'name'),
+    ...optionalStringProjection(agent, 'description', 'description', 'description'),
+    content: requireString(agent, 'content', 'content'),
   };
 }
 
@@ -378,6 +395,7 @@ function readCapabilities(value: unknown) {
     mcpServerCount: requireNumber(record, 'mcp_server_count', 'mcpServerCount'),
     skillCount: requireNumber(record, 'skill_count', 'skillCount'),
     ...optionalNumberProjection(record, 'hook_count', 'hookCount', 'hookCount'),
+    ...optionalNumberProjection(record, 'agent_count', 'agentCount', 'agentCount'),
   };
 }
 

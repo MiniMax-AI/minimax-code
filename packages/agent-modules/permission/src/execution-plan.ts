@@ -1,3 +1,8 @@
+import {
+  POSIX_TRASH_EXECUTION,
+  readPosixTrashExecution,
+  rewritePosixRm,
+} from './tools/rm-shell-rewrite.js';
 import { snapshotPermissionEffectiveInput, snapshotPermissionInput } from './effective-input.js';
 import type {
   CommandIntent,
@@ -9,10 +14,10 @@ import type {
   ShellFamily,
 } from './permission-core.js';
 import { resolvePermissionPath } from './path-resolver.js';
-import { readWindowsTrashExecution } from './windows-trash-execution.js';
-import { isRmCommand, parseRmTargets } from './tools/bash-permission.js';
+import { isNonRecursiveWindowsRm, readWindowsTrashExecution } from './windows-trash-execution.js';
+import { isRmCommand, parseRmTargets, resolveRmCommandPaths } from './tools/bash-permission.js';
 import { splitCommand } from './tools/bash-split.js';
-import { shellTokenize } from './tools/shell-tokenize.js';
+import { shellTokenize, shellTokenizeWithMetadata } from './tools/shell-tokenize.js';
 import { parseWindowsNativeDelete } from './tools/windows-native-delete.js';
 
 export type { ExecutionPlan } from './permission-core.js';
@@ -27,6 +32,8 @@ export type CreatePermissionExecutionPlanInput = Pick<
   shell?: ShellFamily;
   context?: Pick<PermissionEvaluationInput['context'], 'workingDirectory' | 'homeDir'>;
   rewrittenInput?: Readonly<Record<string, unknown>>;
+  /** Snapshot of Permission.nativeDelete at decision time. */
+  nativeDelete?: boolean;
 };
 
 /** Build the complete immutable plan consumed by production permission gates. */
@@ -34,14 +41,34 @@ export function createPermissionExecutionPlan(
   input: CreatePermissionExecutionPlanInput,
 ): Readonly<ExecutionPlan> {
   const originalInput = snapshotPermissionInput(input.input);
-  const intents = inferPermissionCommandIntents(input);
+  const intents =
+    input.rewrittenInput && readPosixTrashExecution(input.rewrittenInput)
+      ? [
+          {
+            kind: 'opaque' as const,
+            shell: 'posix' as const,
+            raw: String(originalInput.command),
+            reason: 'Shell expands recoverable-delete arguments at execution time.',
+          },
+        ]
+      : inferPermissionCommandIntents(input);
   const effectiveInput =
     snapshotPermissionEffectiveInput(originalInput, input.rewrittenInput) ?? originalInput;
   const targets = collectRecoverableDeleteTargets(intents);
-  const transforms: ExecutionPlan['transforms'] =
-    input.rewrittenInput && targets.length > 0 ? [{ type: 'recoverable-delete', targets }] : [];
+  const posixTrash = readPosixTrashExecution(effectiveInput);
+  const transforms: ExecutionPlan['transforms'] = posixTrash
+    ? [{ type: 'recoverable-shell-delete', launcher: posixTrash.launcher }]
+    : input.rewrittenInput && targets.length > 0
+      ? [{ type: 'recoverable-delete', targets }]
+      : [];
   return validatePermissionExecutionPlan(
-    { originalInput, effectiveInput, intents, transforms },
+    {
+      originalInput,
+      effectiveInput,
+      intents,
+      transforms,
+      nativeDelete: input.nativeDelete === true,
+    },
     originalInput,
   );
 }
@@ -126,11 +153,13 @@ export function validatePermissionExecutionPlan(
 
   validateTransformConsistency(originalSnapshot, effectiveSnapshot, intents, transforms);
   const metadata = snapshotPermissionInput({ intents, transforms });
+  const nativeDelete = readDataProperty(plan, 'nativeDelete');
   return Object.freeze({
     originalInput: originalSnapshot as Record<string, unknown>,
     effectiveInput: effectiveSnapshot as Record<string, unknown>,
     intents: metadata.intents as CommandIntent[],
     transforms: metadata.transforms as ExecutionTransform[],
+    ...(nativeDelete === undefined ? {} : { nativeDelete: nativeDelete === true }),
   });
 }
 
@@ -144,24 +173,32 @@ function inferBashSegmentIntent(
     effectiveShell === 'cmd' || effectiveShell === 'powershell'
       ? parseWindowsNativeDelete(command, effectiveShell)
       : undefined;
+  const rmPaths = isRmCommand(command)
+    ? resolveRmCommandPaths(command, input.context, effectiveShell)
+    : undefined;
   if (nativeDelete && nativeDelete.shell === effectiveShell) {
     return [
       {
         kind: 'filesystem',
         action: 'delete',
-        paths: nativeDelete.targets.map((raw) => toPathValue(raw, input)),
+        // A PowerShell rm alias can also produce the recoverable rm rewrite.
+        // Its marker follows the rm parser's literal quoting contract.
+        paths:
+          rmPaths && readWindowsTrashExecution(input.rewrittenInput)
+            ? rmPaths
+            : nativeDelete.targets.map((raw) => toPathValue(raw, input)),
         ...(nativeDelete.recursive ? { recursive: true } : {}),
         ...(nativeDelete.force ? { force: true } : {}),
         shell: effectiveShell,
       },
     ];
   }
-  if (isRmCommand(command)) {
+  if (rmPaths) {
     return [
       {
         kind: 'filesystem',
         action: 'delete',
-        paths: parseRmTargets(command).map((raw) => toPathValue(raw, input)),
+        paths: rmPaths,
         shell: effectiveShell,
       },
     ];
@@ -261,20 +298,49 @@ function validateTransformConsistency(
   intents: readonly CommandIntent[],
   transforms: readonly ExecutionTransform[],
 ): void {
+  const shellTransform = transforms.find((item) => item.type === 'recoverable-shell-delete');
+  if (shellTransform?.type === 'recoverable-shell-delete') {
+    const marker = readPosixTrashExecution(effectiveInput);
+    const originalCommand = originalInput.command;
+    const expected =
+      typeof originalCommand === 'string'
+        ? rewritePosixRm(originalCommand, shellTransform.launcher)
+        : undefined;
+    if (
+      transforms.length !== 1 ||
+      !shellTransform.launcher.endsWith('/mavis-trash') ||
+      !marker ||
+      marker.launcher !== shellTransform.launcher ||
+      !expected ||
+      expected.dynamic !== marker.dynamic ||
+      expected.command !== effectiveInput.command ||
+      intents.some((intent) => intent.shell !== 'posix')
+    ) {
+      throw new TypeError(
+        'Recoverable shell delete must preserve the original shell arguments and sequence.',
+      );
+    }
+    const originalFields = { ...originalInput, command: expected.command };
+    const effectiveFields = { ...effectiveInput };
+    Reflect.deleteProperty(effectiveFields, POSIX_TRASH_EXECUTION);
+    if (!permissionValuesEqual(originalFields, effectiveFields)) {
+      throw new TypeError('Recoverable shell delete must preserve other tool arguments.');
+    }
+    return;
+  }
   const changed = !permissionValuesEqual(originalInput, effectiveInput);
   const deleteIntents = intents.filter(
     (intent): intent is Extract<CommandIntent, { kind: 'filesystem' }> =>
       intent.kind === 'filesystem' && intent.action === 'delete',
   );
-  if (deleteIntents.length > 0 && transforms.length === 0) {
-    throw new TypeError('Delete execution plan requires a recoverable-delete transform.');
-  }
   if (changed && transforms.length === 0) {
     throw new TypeError('Permission execution plan changed input without a declared transform.');
   }
   if (transforms.length === 0) return;
 
-  const recoverableTargets = transforms.flatMap((transform) => transform.targets);
+  const recoverableTargets = transforms.flatMap((transform) =>
+    transform.type === 'recoverable-delete' ? transform.targets : [],
+  );
   const executedTargets = readRecoverableDeleteTargets(effectiveInput);
   if (!executedTargets) {
     throw new TypeError('Recoverable-delete execution plan must execute mavis-trash.');
@@ -292,7 +358,12 @@ function validateTransformConsistency(
 
   const windowsTrash = readWindowsTrashExecution(effectiveInput);
   if (windowsTrash) {
-    if (!sameStringSet(windowsTrash.targets, recoverableTargets)) {
+    if (
+      !sameStringSet(windowsTrash.targets, recoverableTargets) ||
+      (windowsTrash.allowOutsideWorkspaceFiles === true &&
+        (typeof originalInput.command !== 'string' ||
+          !isNonRecursiveWindowsRm(originalInput.command)))
+    ) {
       throw new TypeError(
         'Windows recoverable-delete plan requires the targets-only trash marker.',
       );
@@ -319,7 +390,8 @@ function readRecoverableDeleteTargets(
     const tokens = shellTokenize(segment);
     const executable = readExecutableBasename(segment, tokens[0]);
     if (executable !== 'mavis-trash' && executable !== 'mavis-trash.cmd') return [];
-    return tokens.slice(tokens[1] === '--' ? 2 : 1);
+    const executableToken = shellTokenizeWithMetadata(segment)[0];
+    return executableToken ? parseRmTargets(`rm ${segment.slice(executableToken.end)}`) : [];
   });
   return targets.length > 0 || readWindowsTrashExecution(input) ? targets : undefined;
 }
@@ -360,7 +432,10 @@ function hasEveryInputField(
 }
 
 function isExecutionTransform(value: unknown): value is ExecutionTransform {
-  if (!isRecord(value) || readDataProperty(value, 'type') !== 'recoverable-delete') return false;
+  if (!isRecord(value)) return false;
+  if (readDataProperty(value, 'type') === 'recoverable-shell-delete')
+    return isNonBlankString(readDataProperty(value, 'launcher'));
+  if (readDataProperty(value, 'type') !== 'recoverable-delete') return false;
   const targets = readDataProperty(value, 'targets');
   return Array.isArray(targets) && targets.length > 0 && targets.every(isNonBlankString);
 }

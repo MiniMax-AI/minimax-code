@@ -10,6 +10,7 @@ import type {
 import { LocalTurnPermissionGate } from '../runner/policy/local-turn-permission-gate.js';
 import { LocalTurnInputPreparer } from './local-turn-input-preparation.js';
 import { readTrustedBuiltinAgentProfileIdentity } from './local-turn-tool-catalog-source.js';
+import { readAuthorizedTurnTools } from '../execution/ptc/catalog.js';
 import {
   emitLocalPluginHookWarnings,
   localPluginHookCoordinator,
@@ -199,7 +200,11 @@ function isValidPluginPermissionRewrite(
           toolName,
           updatedInput,
         )
-      : isRuntimeToolInputValid(execution.assembly.tools, toolName, updatedInput))
+      : isRuntimeToolInputValid(
+          readAuthorizedTurnTools(execution.assembly.tools),
+          toolName,
+          updatedInput,
+        ))
   );
 }
 

@@ -256,171 +256,169 @@ describe("TuiDelegationFlow", () => {
     flow.stop();
   });
 
-  it("keeps background members active until every root delivery Turn is settled", async () => {
-    const onChanged = vi.fn();
-    const flow = new TuiDelegationFlow({
-      runtime: runtime({
-        getDelegationSnapshot: vi.fn(async () => ({
-          schemaVersion: 1 as const,
-          rootSessionId: "root",
-          members: [
-            {
-              sessionId: "child-a",
-              parentSessionId: "root",
-              status: "completed" as const,
-              backgroundTaskId: "task-a",
-            },
-            {
-              sessionId: "child-b",
-              parentSessionId: "root",
-              status: "completed" as const,
-              backgroundTaskId: "task-b",
-            },
-          ],
+  describe("sub-Agent root notification settlement", () => {
+    function agentTask(
+      overrides: Partial<TuiBackgroundTask> = {},
+    ): TuiBackgroundTask {
+      return {
+        taskId: "agent-task-a",
+        kind: "subagent",
+        status: "succeeded",
+        ownerSessionId: "root",
+        childSessionId: "child-a",
+        createdAtMs: 100,
+        updatedAtMs: 200,
+        endedAtMs: 200,
+        notification: { state: "pending" },
+        ...overrides,
+      };
+    }
+
+    function completedMembers(...sessionIds: string[]) {
+      return vi.fn(async () => ({
+        schemaVersion: 1 as const,
+        rootSessionId: "root",
+        members: sessionIds.map((sessionId) => ({
+          sessionId,
+          parentSessionId: "root",
+          status: "completed" as const,
         })),
-      }),
-      currentSession: () => ({ sessionId: "root" }),
-      onChanged,
+      }));
+    }
+
+    it("keeps a finished child active until the Runtime settles its root notification", async () => {
+      let tasks: TuiBackgroundTask[] = [agentTask()];
+      const listBackgroundTasks = vi.fn(async () => tasks);
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          getDelegationSnapshot: completedMembers("child-a"),
+          listBackgroundTasks,
+        }),
+        currentSession: () => ({ sessionId: "root" }),
+        machineStatus: true,
+        onChanged: vi.fn(),
+      });
+
+      await flow.refresh();
+      expect(listBackgroundTasks).toHaveBeenCalledWith("root", {
+        machineStatus: true,
+      });
+      expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+
+      // Settled once a parent Turn takes the report, even while that Turn is still running.
+      tasks = [
+        agentTask({
+          notification: { state: "settled", turnId: "turn-delivery" },
+        }),
+      ];
+      await flow.refresh();
+      expect(flow.agentCounts()).toEqual({ active: 0, total: 1 });
+      flow.stop();
     });
-    await flow.refresh();
-    const firstDelivery = {
-      type: "session.finish" as const,
-      timestampMs: 500,
-      source: "runtime",
-      sessionId: "root",
-      turnId: "delivery-a",
-      taskId: "task-a",
-      runSource: "background-task-delivery",
-      queueItemIds: [],
-    };
 
-    expect(flow.agentCounts()).toEqual({ active: 2, total: 2 });
-    await flow.handleRuntimeEvent(firstDelivery);
-    expect(flow.agentCounts()).toEqual({ active: 2, total: 2 });
+    it("pairs sub-Agent Tasks with their members by child Session", async () => {
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          getDelegationSnapshot: vi.fn(async () => ({
+            schemaVersion: 1 as const,
+            rootSessionId: "root",
+            members: [
+              {
+                sessionId: "child-a",
+                parentSessionId: "root",
+                status: "running" as const,
+              },
+              {
+                sessionId: "child-b",
+                parentSessionId: "root",
+                status: "completed" as const,
+              },
+            ],
+          })),
+          listBackgroundTasks: vi.fn(async () => [
+            agentTask({
+              status: "running",
+              endedAtMs: undefined,
+              notification: undefined,
+            }),
+            agentTask({ taskId: "agent-task-b", childSessionId: "child-b" }),
+            // Failed before its child Session existed: no member, keyed by its Task.
+            agentTask({
+              taskId: "agent-task-c",
+              status: "failed",
+              childSessionId: undefined,
+            }),
+            // Not created yet: the spawning root Turn owns it, no member to pair with.
+            agentTask({
+              taskId: "agent-task-d",
+              status: "queued",
+              childSessionId: undefined,
+              notification: undefined,
+            }),
+          ]),
+        }),
+        currentSession: () => ({ sessionId: "root" }),
+        onChanged: vi.fn(),
+      });
 
-    flow.handleSettledRuntimeEvent(firstDelivery);
-    expect(flow.agentCounts()).toEqual({ active: 1, total: 2 });
-    flow.handleSettledRuntimeEvent({
-      ...firstDelivery,
-      timestampMs: 600,
-      turnId: "delivery-b",
-      taskId: "task-b",
+      await flow.refresh();
+
+      expect(flow.agentCounts()).toEqual({ active: 3, total: 2 });
+      flow.stop();
     });
-    expect(flow.agentCounts()).toEqual({ active: 0, total: 2 });
-    expect(onChanged).toHaveBeenCalledTimes(3);
-    flow.stop();
-  });
 
-  it("settles every background Task steered into one owner Turn without reopening on replay", async () => {
-    const onChanged = vi.fn();
-    const flow = new TuiDelegationFlow({
-      runtime: runtime({
-        getDelegationSnapshot: vi.fn(async () => ({
-          schemaVersion: 1 as const,
-          rootSessionId: "root",
-          members: [
+    it("counts a child whose Task is still listed as running after the member finished", async () => {
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          getDelegationSnapshot: completedMembers("child-a"),
+          listBackgroundTasks: vi.fn(async () => [
+            agentTask({
+              status: "running",
+              endedAtMs: undefined,
+              notification: undefined,
+            }),
+          ]),
+        }),
+        currentSession: () => ({ sessionId: "root" }),
+        onChanged: vi.fn(),
+      });
+
+      await flow.refresh();
+
+      expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+      flow.stop();
+    });
+
+    it("keeps sub-Agent Tasks out of the Tasks surfaces and the background count", async () => {
+      const onBackgroundTasksChanged = vi.fn();
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({
+          getDelegationSnapshot: completedMembers("child-a"),
+          listBackgroundTasks: vi.fn(async () => [
+            agentTask(),
             {
-              sessionId: "child-a",
-              parentSessionId: "root",
-              status: "completed" as const,
-              backgroundTaskId: "task-a",
+              taskId: "bash-1",
+              kind: "bash" as const,
+              status: "running" as const,
+              ownerSessionId: "root",
+              createdAtMs: 100,
+              updatedAtMs: 100,
             },
-            {
-              sessionId: "child-b",
-              parentSessionId: "root",
-              status: "completed" as const,
-              backgroundTaskId: "task-b",
-            },
-            {
-              sessionId: "child-c",
-              parentSessionId: "root",
-              status: "completed" as const,
-              backgroundTaskId: "task-c",
-            },
-          ],
-        })),
-      }),
-      currentSession: () => ({ sessionId: "root" }),
-      onChanged,
-    });
-    await flow.refresh();
-    const steeredStart = {
-      type: "session.start" as const,
-      timestampMs: 500,
-      source: "runtime",
-      sessionId: "root",
-      turnId: "turn-owner",
-      taskId: "task-a",
-      runSource: "background-task-delivery",
-      queueItemIds: [],
-    };
-    await flow.handleRuntimeEvent(steeredStart);
-    await flow.handleRuntimeEvent({ ...steeredStart, taskId: "task-b" });
+          ]),
+        }),
+        currentSession: () => ({ sessionId: "root" }),
+        onBackgroundTasksChanged,
+        onChanged: vi.fn(),
+      });
 
-    flow.handleAutomationResultPublished({
-      sessionId: "root",
-      turnId: "turn-unrelated",
-    });
-    expect(flow.agentCounts()).toEqual({ active: 3, total: 3 });
+      await flow.refresh();
 
-    flow.handleAutomationResultPublished({
-      sessionId: "root",
-      turnId: "turn-owner",
+      expect(flow.backgroundTaskCount()).toBe(1);
+      expect(onBackgroundTasksChanged).toHaveBeenLastCalledWith([
+        expect.objectContaining({ taskId: "bash-1" }),
+      ]);
+      flow.stop();
     });
-    expect(flow.agentCounts()).toEqual({ active: 1, total: 3 });
-
-    flow.handleAutomationResultPublished({
-      sessionId: "root",
-      turnId: "turn-late-event",
-    });
-    await flow.handleRuntimeEvent({
-      ...steeredStart,
-      timestampMs: 550,
-      turnId: "turn-late-event",
-      taskId: "task-c",
-    });
-    expect(flow.agentCounts()).toEqual({ active: 0, total: 3 });
-
-    await flow.handleRuntimeEvent({ ...steeredStart, timestampMs: 600 });
-    expect(flow.agentCounts()).toEqual({ active: 0, total: 3 });
-    expect(onChanged).toHaveBeenCalledTimes(3);
-    flow.stop();
-  });
-
-  it("does not settle a background member from an unrelated delivery task", async () => {
-    const flow = new TuiDelegationFlow({
-      runtime: runtime({
-        getDelegationSnapshot: vi.fn(async () => ({
-          schemaVersion: 1 as const,
-          rootSessionId: "root",
-          members: [
-            {
-              sessionId: "child",
-              parentSessionId: "root",
-              status: "completed" as const,
-              backgroundTaskId: "expected-task",
-            },
-          ],
-        })),
-      }),
-      currentSession: () => ({ sessionId: "root" }),
-      onChanged: vi.fn(),
-    });
-    await flow.refresh();
-
-    flow.handleSettledRuntimeEvent({
-      type: "session.finish",
-      timestampMs: 500,
-      source: "runtime",
-      sessionId: "root",
-      turnId: "other-delivery",
-      taskId: "other-task",
-      runSource: "background-task-delivery",
-      queueItemIds: [],
-    });
-
-    expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
-    flow.stop();
   });
 
   it("keeps durable task turns unchanged while publishing the recovered team", async () => {
@@ -1392,8 +1390,7 @@ describe("TuiDelegationFlow", () => {
       updatedAtMs: 200,
     };
     let finishStalePoll:
-      | ((tasks: readonly (typeof task)[]) => void)
-      | undefined;
+      ((tasks: readonly (typeof task)[]) => void) | undefined;
     const listBackgroundTasks = vi
       .fn()
       .mockResolvedValueOnce([])
@@ -1540,14 +1537,16 @@ describe("TuiDelegationFlow", () => {
     flow.stop();
   });
 
-  describe('root background Task status count', () => {
-    function bashTask(overrides: Partial<TuiBackgroundTask> = {}): TuiBackgroundTask {
+  describe("root background Task status count", () => {
+    function bashTask(
+      overrides: Partial<TuiBackgroundTask> = {},
+    ): TuiBackgroundTask {
       return {
-        taskId: 'bash-1',
-        kind: 'bash',
-        status: 'running',
-        ownerSessionId: 'root',
-        command: 'sleep 75; echo finished',
+        taskId: "bash-1",
+        kind: "bash",
+        status: "running",
+        ownerSessionId: "root",
+        command: "sleep 75; echo finished",
         createdAtMs: 100,
         updatedAtMs: 100,
         ...overrides,
@@ -1555,45 +1554,58 @@ describe("TuiDelegationFlow", () => {
     }
 
     function rootLifecycle(
-      type: 'session.start' | 'session.finish',
+      type: "session.start" | "session.finish",
       turnId: string,
       deliveredTaskId?: string,
     ) {
       return {
         type,
         timestampMs: 100,
-        source: 'runtime',
-        sessionId: 'root',
+        source: "runtime",
+        sessionId: "root",
         turnId,
         queueItemIds: [],
         ...(deliveredTaskId
-          ? { runSource: 'background-task-delivery' as const, taskId: deliveredTaskId }
+          ? {
+              runSource: "background-task-delivery" as const,
+              taskId: deliveredTaskId,
+            }
           : {}),
       };
     }
 
-    it('counts only queued, running and stopping Tasks, as listed by the Runtime', async () => {
+    it("counts only queued, running and stopping Tasks, as listed by the Runtime", async () => {
       vi.useFakeTimers();
       let tasks: TuiBackgroundTask[] = [];
       const flow = new TuiDelegationFlow({
         runtime: runtime({ listBackgroundTasks: vi.fn(async () => tasks) }),
-        currentSession: () => ({ sessionId: 'root' }),
+        currentSession: () => ({ sessionId: "root" }),
         onChanged: vi.fn(),
       });
 
       try {
-        await flow.handleRuntimeEvent(rootLifecycle('session.start', 'turn-1'));
-        tasks = [bashTask(), bashTask({ taskId: 'bash-2', status: 'stopping' })];
+        await flow.handleRuntimeEvent(rootLifecycle("session.start", "turn-1"));
+        tasks = [
+          bashTask(),
+          bashTask({ taskId: "bash-2", status: "stopping" }),
+        ];
         await vi.advanceTimersByTimeAsync(1_000);
         expect(flow.backgroundTaskCount()).toBe(2);
 
-        await flow.handleRuntimeEvent(rootLifecycle('session.finish', 'turn-1'));
+        await flow.handleRuntimeEvent(
+          rootLifecycle("session.finish", "turn-1"),
+        );
         expect(flow.backgroundTaskCount()).toBe(2);
 
         // A terminal Task is no longer active, whether or not its result reached the model.
         tasks = [
-          bashTask({ status: 'succeeded', endedAtMs: 300, updatedAtMs: 300 }),
-          bashTask({ taskId: 'bash-2', status: 'canceled', endedAtMs: 300, updatedAtMs: 300 }),
+          bashTask({ status: "succeeded", endedAtMs: 300, updatedAtMs: 300 }),
+          bashTask({
+            taskId: "bash-2",
+            status: "canceled",
+            endedAtMs: 300,
+            updatedAtMs: 300,
+          }),
         ];
         await vi.advanceTimersByTimeAsync(1_000);
         expect(flow.backgroundTaskCount()).toBe(0);
@@ -1602,26 +1614,40 @@ describe("TuiDelegationFlow", () => {
       }
     });
 
-    it('keeps sub-Agent Tasks in agents and ignores finished bash history', async () => {
+    it("keeps sub-Agent Tasks in agents and ignores finished bash history", async () => {
       const flow = new TuiDelegationFlow({
         runtime: runtime({
           getDelegationSnapshot: vi.fn(async () => ({
             schemaVersion: 1 as const,
-            rootSessionId: 'root',
+            rootSessionId: "root",
             members: [
               {
-                sessionId: 'child',
-                parentSessionId: 'root',
-                status: 'completed' as const,
-                backgroundTaskId: 'agent-task',
+                sessionId: "child",
+                parentSessionId: "root",
+                status: "completed" as const,
               },
             ],
           })),
           listBackgroundTasks: vi.fn(async () => [
-            bashTask({ status: 'succeeded', endedAtMs: 200, deliveredAtMs: 200 }),
+            bashTask({
+              status: "succeeded",
+              endedAtMs: 200,
+              deliveredAtMs: 200,
+              notification: { state: "settled" },
+            }),
+            {
+              taskId: "agent-task",
+              kind: "subagent" as const,
+              status: "succeeded" as const,
+              ownerSessionId: "root",
+              childSessionId: "child",
+              createdAtMs: 100,
+              updatedAtMs: 200,
+              notification: { state: "pending" as const },
+            },
           ]),
         }),
-        currentSession: () => ({ sessionId: 'root' }),
+        currentSession: () => ({ sessionId: "root" }),
         onChanged: vi.fn(),
       });
       await flow.refresh();
@@ -1631,15 +1657,52 @@ describe("TuiDelegationFlow", () => {
       flow.stop();
     });
 
-    it('excludes a foreground-owned bash Task that has not been promoted to the background', async () => {
+    it("keeps a finished bash Task counted until its root notification settles", async () => {
+      vi.useFakeTimers();
+      const finished = {
+        status: "succeeded" as const,
+        endedAtMs: 300,
+        updatedAtMs: 300,
+      };
+      let tasks: TuiBackgroundTask[] = [];
+      const flow = new TuiDelegationFlow({
+        runtime: runtime({ listBackgroundTasks: vi.fn(async () => tasks) }),
+        currentSession: () => ({ sessionId: "root" }),
+        onChanged: vi.fn(),
+      });
+
+      try {
+        await flow.handleRuntimeEvent(rootLifecycle("session.start", "turn-1"));
+        await flow.handleRuntimeEvent(
+          rootLifecycle("session.finish", "turn-1"),
+        );
+        // Finished while the root was idle: no Turn has taken the notification yet.
+        tasks = [bashTask({ ...finished, notification: { state: "pending" } })];
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(flow.backgroundTaskCount()).toBe(1);
+
+        tasks = [
+          bashTask({
+            ...finished,
+            notification: { state: "settled", turnId: "turn-2" },
+          }),
+        ];
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(flow.backgroundTaskCount()).toBe(0);
+      } finally {
+        flow.stop();
+      }
+    });
+
+    it("excludes a foreground-owned bash Task that has not been promoted to the background", async () => {
       const flow = new TuiDelegationFlow({
         runtime: runtime({
           listBackgroundTasks: vi.fn(async () => [
             bashTask({ foreground: true }),
-            bashTask({ taskId: 'bash-2', status: 'running' }),
+            bashTask({ taskId: "bash-2", status: "running" }),
           ]),
         }),
-        currentSession: () => ({ sessionId: 'root' }),
+        currentSession: () => ({ sessionId: "root" }),
         onChanged: vi.fn(),
       });
       await flow.refresh();
@@ -1647,9 +1710,10 @@ describe("TuiDelegationFlow", () => {
       flow.stop();
     });
 
-    it('never reports zero before a Task list requested after the root settle succeeds', async () => {
+    it("never reports zero before a Task list requested after the root settle succeeds", async () => {
       vi.useFakeTimers();
-      let finishStalePoll: ((tasks: readonly TuiBackgroundTask[]) => void) | undefined;
+      let finishStalePoll:
+        ((tasks: readonly TuiBackgroundTask[]) => void) | undefined;
       const listBackgroundTasks = vi
         .fn()
         .mockResolvedValueOnce([])
@@ -1659,7 +1723,7 @@ describe("TuiDelegationFlow", () => {
               finishStalePoll = resolve;
             }),
         )
-        .mockRejectedValueOnce(new Error('list unavailable'))
+        .mockRejectedValueOnce(new Error("list unavailable"))
         .mockResolvedValueOnce([]);
       const onChanged = vi.fn();
       const flow = new TuiDelegationFlow({
@@ -1667,12 +1731,12 @@ describe("TuiDelegationFlow", () => {
           getActiveRun: vi.fn(async (sessionId: string) => ({
             schemaVersion: 1 as const,
             sessionId,
-            state: 'running' as const,
+            state: "running" as const,
             actions: { steer: false },
           })),
           listBackgroundTasks,
         }),
-        currentSession: () => ({ sessionId: 'root' }),
+        currentSession: () => ({ sessionId: "root" }),
         onChanged,
       });
 
@@ -1680,9 +1744,11 @@ describe("TuiDelegationFlow", () => {
         await flow.refresh();
         expect(flow.backgroundTaskCount()).toBe(0);
         await vi.advanceTimersByTimeAsync(1_000);
-        expect(finishStalePoll).toBeTypeOf('function');
+        expect(finishStalePoll).toBeTypeOf("function");
 
-        await flow.handleRuntimeEvent(rootLifecycle('session.finish', 'turn-1'));
+        await flow.handleRuntimeEvent(
+          rootLifecycle("session.finish", "turn-1"),
+        );
         expect(flow.backgroundTaskCount()).toBe(1);
 
         // A list requested before the settle cannot prove that no Task was yielded.

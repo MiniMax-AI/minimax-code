@@ -664,3 +664,255 @@ This reminder applies only to the current Turn. Do not save or generalize it int
     expect(guard.finishTurn(ctx)?.signals.polling_repeat.maxOccurrences).toBe(3);
   });
 });
+
+interface ChildFixture {
+  readonly toolName: string;
+  readonly arguments?: unknown;
+  readonly isError?: boolean;
+  readonly errorCode?: string;
+  readonly toolErrorCode?: string;
+}
+
+function programStep(index: number, children: readonly ChildFixture[], code = `program-${index}`): RunawayGuardReplayStep {
+  const toolCallId = `program-${index}`;
+  return {
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: toolCallId, name: 'run_code', arguments: { code } }],
+      api: 'openai-completions', provider: 'test', model: 'test', stopReason: 'toolUse', timestamp: 0,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    } as never,
+    toolResults: [{
+      role: 'toolResult',
+      toolCallId,
+      toolName: 'run_code',
+      content: [{ type: 'text', text: `program output ${index}` }],
+      // A failed child never fails the program itself.
+      isError: false,
+      details: { children },
+      timestamp: 0,
+    }] as never,
+  };
+}
+
+const programPolicy: RunawayGuardToolPolicy = {
+  kind: 'detect',
+  projectChildSteps(input) {
+    const details = input.result?.details as { children?: readonly ChildFixture[] } | undefined;
+    return (details?.children ?? []).map((child) => ({
+      toolName: child.toolName,
+      ...(child.arguments === undefined ? {} : { arguments: child.arguments }),
+      isError: child.isError ?? false,
+      ...(child.errorCode === undefined ? {} : { errorCode: child.errorCode }),
+      ...(child.toolErrorCode === undefined ? {} : { toolErrorCode: child.toolErrorCode }),
+    }));
+  },
+};
+
+/** A child whose arguments the parent did not keep, stopped with a tool-reported code. */
+const aborted = (toolName: string): ChildFixture => ({
+  toolName,
+  isError: true,
+  errorCode: 'PTC_TOOL_EXECUTION_FAILED',
+  toolErrorCode: 'computer_aborted',
+});
+
+const failedRead: ChildFixture = {
+  toolName: 'read',
+  arguments: { path: 'a.txt' },
+  isError: true,
+  errorCode: 'PTC_TOOL_FAILED',
+};
+
+function programGuard(extraPolicies: Readonly<Record<string, RunawayGuardToolPolicy>> = {}) {
+  return createRunawayGuard({
+    remindAfterOccurrences: 3,
+    toolPolicies: { run_code: programPolicy, ...extraPolicies },
+  });
+}
+
+function programReplay(
+  children: readonly (readonly ChildFixture[])[],
+  extraPolicies: Readonly<Record<string, RunawayGuardToolPolicy>> = {},
+) {
+  return replayRunawayGuardTrajectory({
+    ...ctx,
+    toolPolicies: { run_code: programPolicy, ...extraPolicies },
+    steps: children.map((list, index) => programStep(index + 1, list)),
+  });
+}
+
+describe('child calls projected from a parent tool result', () => {
+  it('reminds when different tools report the same tool error code in three consecutive programs', () => {
+    const guard = programGuard();
+    expect(guard.observe(ctx, programStep(1, [aborted('computer_click')]), true)).toBeUndefined();
+    expect(guard.observe(ctx, programStep(2, [aborted('computer_app_state')]), true)).toBeUndefined();
+    const reminder = guard.observe(ctx, programStep(3, [aborted('computer_app_list')]), true);
+    expect(reminder?.observation).toMatchObject({ signalKind: 'same_error_family', stepIndex: 3 });
+    const summary = guard.finishTurn(ctx);
+    expect(summary?.childStepsProjected).toBe(3);
+    expect(summary?.signals.same_error_family.maxOccurrences).toBe(3);
+  });
+
+  it('keys failures of a child with kept arguments by its action, like a native call', () => {
+    const missing = (path: string): ChildFixture => ({
+      toolName: 'read',
+      arguments: { path },
+      isError: true,
+      errorCode: 'PTC_TOOL_EXECUTION_FAILED',
+      toolErrorCode: 'ENOENT',
+    });
+    const probing = programReplay([[missing('a.txt')], [missing('b.txt')], [missing('c.txt')]]);
+    expect(probing.summary.signals.same_error_family.maxOccurrences).toBe(1);
+    expect(probing.observations).toEqual([]);
+    const guard = programGuard();
+    expect(guard.observe(ctx, programStep(1, [missing('a.txt')]), true)).toBeUndefined();
+    expect(guard.observe(ctx, programStep(2, [missing('a.txt')]), true)).toBeUndefined();
+    expect(guard.observe(ctx, programStep(3, [missing('a.txt')]), true)).toBeDefined();
+    expect(guard.finishTurn(ctx)?.signals.same_error_family.maxOccurrences).toBe(3);
+  });
+
+  it('groups failures without a tool error code by child tool and parent code only', () => {
+    const generic = (toolName: string): ChildFixture => ({ toolName, isError: true, errorCode: 'PTC_TOOL_FAILED' });
+    const alternating = programReplay([
+      [generic('computer_click')], [generic('computer_app_state')], [generic('computer_click')],
+    ]);
+    expect(alternating.summary.signals.same_error_family.maxOccurrences).toBe(1);
+    const sameTool = programReplay([
+      [generic('computer_click')], [generic('computer_click')], [generic('computer_click')],
+    ]);
+    expect(sameTool.summary.signals.same_error_family.maxOccurrences).toBe(3);
+    const otherCode = programReplay([
+      [aborted('computer_click')], [aborted('computer_click')], [{ ...aborted('computer_click'), toolErrorCode: 'computer_busy' }],
+    ]);
+    expect(otherCode.summary.signals.same_error_family.maxOccurrences).toBe(2);
+  });
+
+  it('does not count children without kept arguments as repeated calls or results', () => {
+    const state: ChildFixture = { toolName: 'computer_app_state' };
+    const guard = programGuard();
+    for (let index = 1; index <= 4; index += 1) {
+      expect(guard.observe(ctx, programStep(index, [state, state]), true)).toBeUndefined();
+    }
+    const summary = guard.finishTurn(ctx);
+    expect(summary?.childStepsProjected).toBe(8);
+    expect(summary?.signals.exact_action_repeat.maxOccurrences).toBe(1);
+    expect(summary?.signals.exact_result_repeat.maxOccurrences).toBe(1);
+  });
+
+  it('still reminds when a child with kept arguments repeats in three consecutive programs', () => {
+    const read: ChildFixture = { toolName: 'read', arguments: { path: 'a.txt' } };
+    const guard = programGuard();
+    expect(guard.observe(ctx, programStep(1, [read]), true)).toBeUndefined();
+    expect(guard.observe(ctx, programStep(2, [read]), true)).toBeUndefined();
+    expect(guard.observe(ctx, programStep(3, [read]), true)?.observation.signalKind).toBe('exact_action_repeat');
+  });
+
+  it('never starts an error streak from a child whose tool has an expected-failure rule', () => {
+    const bash = (index: number): ChildFixture => ({
+      toolName: 'bash',
+      arguments: { command: `rg pattern-${index} .` },
+      isError: true,
+      errorCode: 'PTC_TOOL_FAILED',
+      toolErrorCode: 'EXIT_1',
+    });
+    const grep: ChildFixture = { toolName: 'grep', isError: true, errorCode: 'PTC_TOOL_FAILED', toolErrorCode: 'EXIT_1' };
+    const replay = programReplay([[bash(1), grep], [bash(2), grep], [bash(3), grep]], {
+      bash: { kind: 'detect', isExpectedResult: () => true },
+      grep: { kind: 'detect', isExpectedResult: () => true },
+    });
+    expect(replay.summary.signals.same_error_family.maxOccurrences).toBe(0);
+    expect(replay.observations).toEqual([]);
+  });
+
+  it('counts identical child keys from one program once', () => {
+    const first = programReplay([Array.from({ length: 5 }, () => failedRead)]);
+    expect(first.summary.childStepsProjected).toBe(5);
+    expect(first.summary.signals.exact_action_repeat.maxOccurrences).toBe(1);
+    expect(first.summary.signals.exact_result_repeat.maxOccurrences).toBe(1);
+    expect(first.summary.signals.same_error_family.maxOccurrences).toBe(1);
+    expect(first.observations).toEqual([]);
+    const sameCode = programReplay([[aborted('computer_click'), aborted('computer_app_state')]]);
+    expect(sameCode.summary.signals.same_error_family.maxOccurrences).toBe(1);
+    const both = programReplay([Array.from({ length: 5 }, () => failedRead), [failedRead, failedRead]]);
+    expect(both.summary.signals.same_error_family.maxOccurrences).toBe(2);
+  });
+
+  it('applies a polling policy to a polling child', () => {
+    const poll: ChildFixture = { toolName: 'task_output', arguments: { task_id: 'task-a' } };
+    const guard = programGuard({ task_output: { kind: 'polling' } });
+    for (let index = 1; index <= 4; index += 1) {
+      expect(guard.observe(ctx, programStep(index, [poll, poll]), true)).toBeUndefined();
+    }
+    const summary = guard.finishTurn(ctx);
+    expect(summary?.signals.polling_repeat.maxOccurrences).toBe(4);
+    expect(summary?.signals.exact_action_repeat.maxOccurrences).toBe(1);
+    expect(summary?.signals.exact_result_repeat.maxOccurrences).toBe(1);
+  });
+
+  it('skips an exempt child but still counts it as projected', () => {
+    const watch: ChildFixture = { toolName: 'watch', arguments: { id: 1 }, isError: true, errorCode: 'busy' };
+    const replay = programReplay([[watch], [watch], [watch]], { watch: { kind: 'exempt' } });
+    expect(replay.summary.childStepsProjected).toBe(3);
+    expect(replay.summary.signals.same_error_family.maxOccurrences).toBe(0);
+    expect(replay.summary.signals.exact_action_repeat.maxOccurrences).toBe(1);
+  });
+
+  it('keeps the program action key itself', () => {
+    const guard = programGuard();
+    const read = (index: number): ChildFixture => ({ toolName: 'read', arguments: { path: `${index}.txt` } });
+    for (let index = 1; index <= 2; index += 1) {
+      expect(guard.observe(ctx, programStep(index, [read(index)], 'same program'), true)).toBeUndefined();
+    }
+    expect(guard.observe(ctx, programStep(3, [read(3)], 'same program'), true)?.observation.signalKind)
+      .toBe('exact_action_repeat');
+  });
+
+  it('leaves results without a child hook unchanged', () => {
+    const steps = [1, 2, 3].map((index) => programStep(index, [aborted('computer_click')]));
+    const withoutHook = replayRunawayGuardTrajectory({ ...ctx, toolPolicies: { run_code: { kind: 'detect' } }, steps });
+    const withoutPolicy = replayRunawayGuardTrajectory({ ...ctx, steps });
+    expect(withoutHook.summary).toEqual(withoutPolicy.summary);
+    expect(withoutHook.observations).toEqual([]);
+    expect(withoutHook.summary.childStepsProjected).toBe(0);
+    expect(withoutHook.summary.signals.same_error_family.maxOccurrences).toBe(0);
+  });
+
+  it('ignores a throwing hook and malformed children', () => {
+    const steps = [1, 2, 3].map((index) => programStep(index, [aborted('computer_click')]));
+    const throwing = replayRunawayGuardTrajectory({
+      ...ctx,
+      toolPolicies: { run_code: { kind: 'detect', projectChildSteps: () => { throw new Error('bad envelope'); } } },
+      steps,
+    });
+    expect(throwing.summary.childStepsProjected).toBe(0);
+    const malformed = replayRunawayGuardTrajectory({
+      ...ctx,
+      toolPolicies: {
+        run_code: {
+          kind: 'detect',
+          projectChildSteps: () => [
+            { toolName: '', isError: true },
+            { toolName: 'computer_click', isError: 'yes' },
+            { toolName: 'computer_click', isError: true, errorCode: 7 },
+            { toolName: 'computer_click', isError: true, toolErrorCode: 7 },
+            null,
+          ] as never,
+        },
+      },
+      steps,
+    });
+    expect(malformed.summary.childStepsProjected).toBe(0);
+    expect(malformed.observations).toEqual([]);
+  });
+
+  it('does not read children from a permission-blocked call', () => {
+    const steps = [1, 2, 3].map((index) => ({
+      ...programStep(index, [aborted('computer_click')]),
+      blockedToolCalls: [{ toolCallId: `program-${index}`, blockedBy: 'permission' as const }],
+    }));
+    const replay = replayRunawayGuardTrajectory({ ...ctx, toolPolicies: { run_code: programPolicy }, steps });
+    expect(replay.summary.childStepsProjected).toBe(0);
+    expect(replay.observations).toEqual([]);
+  });
+});

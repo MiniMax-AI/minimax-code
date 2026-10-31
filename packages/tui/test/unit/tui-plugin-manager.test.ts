@@ -32,7 +32,7 @@ const plugins = [
     marketplace: 'local' as const,
     installed: true,
     enabled: false,
-    capabilities: { appCount: 0, mcpServerCount: 1, skillCount: 0 },
+    capabilities: { appCount: 0, mcpServerCount: 1, skillCount: 0, agentCount: 2 },
   },
 ];
 
@@ -61,6 +61,15 @@ describe('TuiPluginManager', () => {
     expect(rendered).toContain('Installed (2)');
     expect(rendered).toContain('Documents');
     expect(rendered).toContain('Calendar');
+  });
+
+  it('counts Plugin subagents only when the Plugin has any', () => {
+    const { manager } = createManager();
+    const rendered = stripVTControlCharacters(manager.render(120).join('\n'));
+
+    expect(rendered).toContain('0 apps · 1 MCP · 0 skills · 2 subagents');
+    expect(rendered).toContain('1 apps · 0 MCP · 0 skills');
+    expect(rendered).not.toContain('0 skills · 0 subagents');
   });
 
   it('filters by typing, cycles tabs, and mutates the selected Plugin', async () => {

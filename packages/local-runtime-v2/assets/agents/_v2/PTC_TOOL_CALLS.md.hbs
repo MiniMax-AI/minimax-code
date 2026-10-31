@@ -1,0 +1,35 @@
+{{!-- PTC section (see prompt-renderer.ts `ptc`). Rendered by the Runtime only when PTC is really on
+for this Turn, then inserted before "# Harness" of the main V2 templates through `ptc.section`.
+Local-only (prompt-exemptions.json): never part of a remote Prompt version, so older clients never
+read it. List only built-in tools this Agent has enabled. --}}
+# Tool calls in this turn (PTC)
+Only `run_code` and the visible control tools are top-level in this turn. The tools listed at the start of `run_code`'s description are called only inside `run_code` as `await tools.<name>(args)`; calling them directly is rejected.
+{{!-- Batching guidance: in a local replay of 160 real conversation prefixes
+(artifacts/mcode-ptc-night-20261014/dsh-cause/prefix/, variant VF) these lines, the batching line
+below and the run_code concurrency sentence and batch example together raised calls per program
+from 1.31 to 1.54 and Promise.* programs from 22.9% to 33.8%; no single change was significant
+alone. Half sentences that name tools.bash are only shown when bash is enabled. --}}
+{{#if tools.grep}}
+- `tools.grep` for file-content search{{#if tools.bash}}, not `grep` or `rg` in `tools.bash`{{/if}}.
+{{/if}}
+{{#if tools.glob}}
+- `tools.glob` for file-name or path search{{#if tools.bash}}, not `find` or `ls -R` in `tools.bash`{{/if}}.
+{{/if}}
+{{#if tools.read}}
+- `tools.read` to read files{{#if tools.bash}}, not `cat`, `head` or `sed -n` in `tools.bash`{{/if}}; use `r.data.content` for the raw text.
+{{/if}}
+{{#if tools.edit}}
+- `tools.edit` for targeted changes.
+{{/if}}
+{{#if tools.write}}
+- `tools.write` for new files or rewrites.
+{{/if}}
+{{#if tools.bash}}
+- `tools.bash` only for builds, tests, git and other shell work.
+{{/if}}
+- Gather context in as few `run_code` calls as possible: put every independent read and search you already know you need into one `Promise.all`; reads and searches run at the same time.{{#if tools.bash}} Shell commands run one at a time, so reads and searches through `tools.bash` do not run in parallel.{{/if}}
+{{!-- Name the owner of timeout_ms: in smoke runs the model set a tools.bash timeout, or put timeout_ms
+into the tools.bash arguments, and the program still stopped at 120 seconds. A tools.bash timeout now
+extends the program (Agent Core batch clock) within the same maximum. Numbers mirror
+PTC_DEFAULT_WALL_CLOCK_MS / PTC_MAX_WALL_CLOCK_MS (the run_code description derives them). --}}
+- A `run_code` program stops after 120 seconds by default. For a longer program, pass `timeout_ms` to `run_code` itself, next to `code` and `description`, e.g. `{ code, description, timeout_ms: 600000 }` for 10 minutes (at most 3,600,000).{{#if tools.bash}} `timeout_ms` is not a `tools.bash` argument. A `tools.bash` timeout (in seconds) longer than the time left extends the program to fit it, within the same 3,600,000 ms limit. Or use `run_in_background: true`.{{/if}}

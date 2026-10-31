@@ -36,6 +36,7 @@ import type {
 } from './token-counter-adapters/types.js';
 
 import { logger } from '../common/logger.js';
+import { RemoteTokenCounterFailures } from './remote-token-counter-failures.js';
 
 export { buildResponsesInputTokensUrl } from './token-counter-adapters/responses.js';
 export type {
@@ -51,6 +52,7 @@ const BODY_PREVIEW_LIMIT = 500;
 export interface HttpRemoteTokenCounterOptions {
   timeoutMs?: number;
   fetchFn?: typeof fetch;
+  nowMs?: () => number;
   /** Internal/test seam; production callers use the static default registry. */
   adapters?: readonly RemoteTokenCounterAdapter[];
 }
@@ -59,21 +61,39 @@ interface ResolvedCounterRequest extends RemoteTokenCounterHttpRequest {
   adapter: RemoteTokenCounterAdapter;
 }
 
+/**
+ * A counter URL that rejects counting is reported once here; the failure state
+ * (unsupported endpoint, rejected credentials, transient backoff) lives in
+ * RemoteTokenCounterFailures.
+ */
+function logNonSuccessfulResponse(response: Response, request: ResolvedCounterRequest): void {
+  const missingEndpoint =
+    response.status === 404 || response.status === 405 || response.status === 501;
+  logger.warn(
+    {
+      url: request.url,
+      status: response.status,
+      kind: request.adapter.counterKind,
+      adapter_id: request.adapter.id,
+    },
+    missingEndpoint
+      ? '[local-remote-token-counter] token counter endpoint missing; stopping remote counting for this configuration'
+      : '[local-remote-token-counter] non-2xx; using BPE fallback',
+  );
+}
+
 export class HttpRemoteTokenCounter implements RemoteTokenCounter {
   private readonly timeoutMs: number;
   private readonly fetchFn: typeof fetch;
   private readonly adapters: readonly RemoteTokenCounterAdapter[];
-  /**
-   * Base URLs whose counter endpoint answered 404/405 — the endpoint does not
-   * exist there, so retrying on every LLM call would tax each turn with a
-   * doomed full-context POST. Remembered for the process lifetime.
-   */
-  private readonly unsupportedBaseUrls = new Set<string>();
+  private readonly failures: RemoteTokenCounterFailures;
+  private readonly resolvedFailureScopes = new Map<string, string>();
 
   constructor(opts: HttpRemoteTokenCounterOptions = {}) {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.fetchFn = opts.fetchFn ?? fetch;
     this.adapters = opts.adapters ?? DEFAULT_REMOTE_TOKEN_COUNTER_ADAPTERS;
+    this.failures = new RemoteTokenCounterFailures(opts.nowMs);
   }
 
   async countContextTokens(ctx: RemoteTokenCountContext): Promise<RemoteTokenCountResult> {
@@ -114,14 +134,12 @@ export class HttpRemoteTokenCounter implements RemoteTokenCounter {
     ) {
       return estimate('inline_media_unprepared');
     }
-    const preflightUnsupportedCacheKey =
-      adapter.id === 'anthropic-messages' ? `messages:${ctx.model.baseUrl}` : undefined;
-    if (
-      preflightUnsupportedCacheKey &&
-      this.unsupportedBaseUrls.has(preflightUnsupportedCacheKey)
-    ) {
-      return estimate('endpoint_unsupported');
-    }
+    const preflightScope = this.failures.scope(ctx, adapter.id);
+    const fallbackReason = this.failures.fallbackReason(
+      this.resolvedFailureScopes.get(preflightScope) ?? preflightScope,
+    );
+    if (fallbackReason) return estimate(fallbackReason);
+    let scope = preflightScope;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -137,9 +155,10 @@ export class HttpRemoteTokenCounter implements RemoteTokenCounter {
       );
       if (!builtRequest) return estimate('counter_unavailable');
       request = { ...builtRequest, adapter };
-      if (this.unsupportedBaseUrls.has(request.unsupportedCacheKey)) {
-        return estimate('endpoint_unsupported');
-      }
+      scope = this.failures.scope(ctx, adapter.id, request.url);
+      this.resolvedFailureScopes.set(preflightScope, scope);
+      const scopedFallbackReason = this.failures.fallbackReason(scope);
+      if (scopedFallbackReason) return estimate(scopedFallbackReason);
       const res = await this.fetchFn(request.url, {
         method: 'POST',
         headers: request.headers,
@@ -147,32 +166,21 @@ export class HttpRemoteTokenCounter implements RemoteTokenCounter {
         signal,
       });
       if (!res.ok) {
-        if (res.status === 404 || res.status === 405) {
-          this.unsupportedBaseUrls.add(request.unsupportedCacheKey);
-          logger.warn(
-            {
-              url: request.url,
-              status: res.status,
-              kind: request.adapter.counterKind,
-              adapter_id: request.adapter.id,
-            },
-            '[local-remote-token-counter] token counter endpoint missing; disabling remote counting for this base url',
-          );
-        } else {
-          logger.warn(
-            {
-              url: request.url,
-              status: res.status,
-              kind: request.adapter.counterKind,
-              adapter_id: request.adapter.id,
-            },
-            '[local-remote-token-counter] non-2xx; using BPE fallback',
-          );
+        logNonSuccessfulResponse(res, request);
+        if (!ctx.signal?.aborted) {
+          this.failures.failed(scope, res.status, res.headers.get('retry-after'));
         }
         return estimate(`http_${res.status}`);
       }
       const json = (await res.json()) as unknown;
       const tokens = request.adapter.parseTokens(json);
+      if (!ctx.signal?.aborted) {
+        if (typeof tokens === 'number' && Number.isSafeInteger(tokens) && tokens > 0) {
+          this.failures.succeeded(scope);
+        } else {
+          this.failures.failed(scope, res.status, res.headers.get('retry-after'));
+        }
+      }
       if (typeof tokens !== 'number' || !Number.isSafeInteger(tokens) || tokens <= 0) {
         logger.warn(
           {
@@ -203,6 +211,7 @@ export class HttpRemoteTokenCounter implements RemoteTokenCounter {
         );
         return estimate('request_build_failed');
       }
+      if (!ctx.signal?.aborted) this.failures.failed(scope);
       logger.warn(
         {
           url: request.url,

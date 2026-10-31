@@ -29,7 +29,7 @@ type PluginManifestKind =
 
 export interface PluginReaderDiagnostic {
   readonly code: string;
-  readonly capability?: 'MCP' | 'SKILL' | 'APP' | 'HOOK';
+  readonly capability?: 'MCP' | 'SKILL' | 'APP' | 'HOOK' | 'AGENT';
   readonly name?: string;
 }
 
@@ -57,6 +57,37 @@ export interface PluginSkill {
   readonly content: string;
   readonly skillFilePath: string;
   readonly skillRoot: string;
+}
+
+export type PluginAgentSourceFormat = 'MINIMAX' | '\u0043\u004c\u0041\u0055\u0044\u0045';
+
+/**
+ * Markdown subagent accepted from an official or LOCAL package. Selector fields keep the
+ * Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
+ */
+export interface PluginAgent {
+  /** Segments after the Plugin name, e.g. `reviewer` or `review:security`. */
+  readonly name: string;
+  /** Task target `<plugin>:<name>`. */
+  readonly scopedName: string;
+  readonly sourceFormat: PluginAgentSourceFormat;
+  readonly description: string;
+  readonly displayName?: string;
+  /** Complete Markdown file, including frontmatter. */
+  readonly content: string;
+  /** Markdown body; Plugin path variables are substituted only when a Task captures it. */
+  readonly systemPrompt: string;
+  readonly agentFilePath: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  /** Same-Plugin Skills are addressed by their runtime name `<plugin>:<skill>`. */
+  readonly extensionSkills?: readonly string[];
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
 }
 
 export type PluginHostBindingSurface = 'interactive';
@@ -131,6 +162,8 @@ export interface ReadPluginPackage {
   readonly skills: readonly PluginSkill[];
   readonly hostBindings?: readonly PluginHostBinding[];
   readonly hooks?: readonly PluginHookCommandHandler[];
+  /** MiniMax (official and local) and compatible-format packages carry subagents. */
+  readonly agents?: readonly PluginAgent[];
   readonly miniapp?: MiniAppContribution;
   readonly diagnostics: readonly PluginReaderDiagnostic[];
 }

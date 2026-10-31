@@ -2,6 +2,14 @@ import { withOpenCodeGoHeaders, withOpenRouterAttributionHeaders } from '@mavis/
 
 import type { ModelProviderApi } from '../identity.js';
 
+/** Strips trailing `char` repeats in linear time (no backtracking regex). */
+function trimTrailingChar(value: string, char: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === char) end -= 1;
+  return value.slice(0, end);
+}
+
+
 export type { ModelProviderApi } from '../identity.js';
 
 const MESSAGES_VERSION_HEADER = 'anthropic-messages'.replace('-messages', '-version');
@@ -79,7 +87,7 @@ function originModelsUrl(base: string): string | undefined {
 }
 
 export function normalizeProviderBaseUrl(api: ModelProviderApi, baseUrl: string): string {
-  let base = baseUrl.replace(/\/+$/u, '');
+  let base = trimTrailingChar(baseUrl, '/');
   if (api === 'anthropic-messages') {
     if (base.endsWith('/v1/messages')) base = base.slice(0, -'/v1/messages'.length);
     else if (base.endsWith('/messages')) base = base.slice(0, -'/messages'.length);

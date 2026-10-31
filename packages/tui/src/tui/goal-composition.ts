@@ -1,5 +1,6 @@
 import type { CreateTuiAppOptions } from '../types/tui-app.js';
 import { readTuiClipboardText } from '../host/clipboard-text.js';
+import { TuiClipboardImageError } from '../host/clipboard-image.js';
 import type { TuiChatController } from './controller/chat-controller.js';
 import type { TuiChromeFlow } from './controller/product/chrome-flow.js';
 import { TuiGoalFlow } from './controller/product/goal-flow.js';
@@ -33,12 +34,46 @@ export function createTuiGoalComposition(options: TuiGoalCompositionOptions): {
   readonly goalFlow: TuiGoalFlow;
 } {
   const resolveAttachment = options.app.resolveAttachment ?? resolveTuiAttachment;
+  const readClipboardImage = options.app.readClipboardImage;
   const composerDraft = new TuiComposerDraft({
     workspaceDir: options.app.workspaceDir,
     ...(options.app.homeDir ? { homeDir: options.app.homeDir } : {}),
     resolveAttachment,
-    ...(options.app.readClipboardImage
-      ? { readClipboardImage: options.app.readClipboardImage }
+    ...(readClipboardImage
+      ? {
+          readClipboardImage: async (signal?: AbortSignal) => {
+            const startedAt = performance.now();
+            const sessionId = options.controller.snapshot().session?.sessionId;
+            let succeeded = false;
+            let failure: unknown;
+            try {
+              const lease = await readClipboardImage(signal);
+              succeeded = true;
+              return lease;
+            } catch (error) {
+              failure = error;
+              throw error;
+            } finally {
+              const error = failure instanceof TuiClipboardImageError ? failure : undefined;
+              try {
+                options.app.observability?.recordClipboardRead?.({
+                  sessionId,
+                  outcome: succeeded
+                    ? 'succeeded'
+                    : error?.code === 'no-image'
+                      ? 'empty'
+                      : signal?.aborted || error?.code === 'cancelled'
+                        ? 'cancelled'
+                        : 'failed',
+                  durationMs: performance.now() - startedAt,
+                  ...(error ? { errorCode: error.code, diagnostic: error.diagnostic } : {}),
+                });
+              } catch {
+                // Diagnostics must not change clipboard acquisition or attachment ownership.
+              }
+            }
+          },
+        }
       : {}),
     readClipboardText: options.app.readClipboardText ?? readTuiClipboardText,
     insertTextAtCursor: (text) => options.editor.insertTextAtCursor(text),

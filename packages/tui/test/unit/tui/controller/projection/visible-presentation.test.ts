@@ -844,3 +844,30 @@ describe("visible presentation selector", () => {
     });
   });
 });
+
+describe('next-message suggestion in the composer', () => {
+  const promptSuggestion = 'Run the parser tests and fix any failures';
+
+  it('offers the suggestion as the placeholder of an idle, empty composer', () => {
+    expect(resolve({ promptSuggestion }).composer).toMatchObject({
+      placeholder: promptSuggestion,
+      promptSuggestion,
+    });
+  });
+
+  it.each([
+    ['a running turn', { snapshot: { ...idleChat, activeTurnId: 'turn-2' } }],
+    ['a draft', { draftCharacterCount: 3 }],
+    ['an attachment', { attachmentCount: 1 }],
+    ['a pending permission', { activePermission: true }],
+    ['a transient hint', { transientHint: 'Press Esc again to edit the latest message' }],
+    ['a goal draft', { goalDraft: true }],
+    ['the welcome surface', { surface: 'welcome' as const }],
+    ['a side conversation', { sideConversation: { view: 'side' as const } }],
+  ])('keeps the composer for its owner during %s', (_case, overrides) => {
+    const composer = resolve({ promptSuggestion, ...overrides }).composer;
+
+    expect(composer.promptSuggestion).toBeUndefined();
+    expect(composer.placeholder).not.toBe(promptSuggestion);
+  });
+});

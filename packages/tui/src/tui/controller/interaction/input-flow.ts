@@ -9,7 +9,7 @@ import {
   getDefaultTuiKeybindingRegistry,
   type TuiKeybindingRegistry,
 } from '../../shell/keybindings.js';
-import { isKeyRelease, matchesKey } from '../../engine/public.js';
+import { getKeybindings, isKeyRelease, matchesKey } from '../../engine/public.js';
 import type { TUI } from '../../engine/public.js';
 import type { EditTuiDraftInExternalEditor } from '../../../host/external-editor.js';
 import { TuiExternalEditorFlow } from './external-editor-flow.js';
@@ -78,6 +78,11 @@ export interface TuiInputFlowOptions {
   ) => void;
   readonly onSubmissionSettled?: (submissionToken?: string) => void;
   readonly requestInteractionRender: () => void;
+  /**
+   * Fills the composer with the visible next-message suggestion. Returns false
+   * when none is visible, so Tab keeps its normal completion behaviour.
+   */
+  readonly acceptPromptSuggestion?: () => boolean;
 }
 
 export class TuiInputFlow {
@@ -274,6 +279,11 @@ export class TuiInputFlow {
     }
     if (interactionActive) {
       this.lastEscapeAtMs = 0;
+      if (keyAction === 'view-plan') {
+        if (!this.options.interaction.toggleFullView()) return undefined;
+        this.options.tui.requestRender();
+        return { consume: true };
+      }
       if (keyAction !== 'scroll-up' && keyAction !== 'scroll-down') return undefined;
       const direction = keyAction === 'scroll-up' ? -1 : 1;
       const interactionScroll = this.options.interaction.scrollByPage(direction);
@@ -291,6 +301,15 @@ export class TuiInputFlow {
     if (previewIsImage && matchesKey(data, 'escape')) {
       this.options.editor.dismissAttachmentPreview();
       this.lastEscapeAtMs = 0;
+      return { consume: true };
+    }
+    if (
+      this.options.acceptPromptSuggestion &&
+      getKeybindings().matches(data, 'tui.input.tab') &&
+      this.options.editor.getText().length === 0 &&
+      !this.options.composerDraft.hasContent() &&
+      this.options.acceptPromptSuggestion()
+    ) {
       return { consume: true };
     }
     if (this.clearedEditorDraft && keyAction === 'restore-draft') {

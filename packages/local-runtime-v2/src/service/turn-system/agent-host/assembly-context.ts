@@ -35,6 +35,7 @@ const AGENT_CONFIG_ALLOWLIST = [
   'builtinCapabilities',
   'cuModeActive',
   'desktopPluginSkills',
+  'ptc_enabled',
   'capability_ceiling',
   'agent_profile',
 ] as const;

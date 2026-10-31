@@ -66,6 +66,11 @@ import {
   type ToolResultCompactionSettings,
 } from "./tool-result-compaction-config.js";
 import {
+  REQUEST_MEDIA_DEFAULTS,
+  parseRequestMediaConfig,
+  type RequestMediaSettings,
+} from './request-media-config.js';
+import {
   BROWSER_CONFIG_DEFAULTS,
   parseBrowserConfig,
   type BrowserConfig,
@@ -321,6 +326,7 @@ export type * from "./asr.js";
  *   browserAgentCursor: false
  *   desktopPlanMode: true
  *   desktopPlanModeAgentEntry: false
+ *   ptc: false
  *   taskHistoryProjectGrouping: false
  *   threadGoal: false
  *   mcodeTools: false
@@ -431,6 +437,12 @@ export interface BetaConfig {
    * a controlled rollback while the parent Plan Mode switch remains enabled.
    */
   desktopPlanModeAgentEntry: boolean;
+  /**
+   * Programmatic Tool Calling for eligible local root conversations. Read only when a
+   * conversation is created or has just compacted: the conversation keeps that run mode
+   * (`toolCallMode`) so toggling this never rewrites an existing prompt prefix.
+   */
+  ptc: boolean;
   /**
    * /btw side-question peek command (the UI's "Aside" slash palette row). Both visibility fields
    * are `test`, so dev/test ships ON by default while prod is force-off regardless of config.yaml
@@ -630,6 +642,14 @@ export const BETA_FEATURE_DEFS = {
     defaultVisibility: "none",
     configurableVisibility: "online",
   },
+  // On by default everywhere except the public production build: dev/test/staging through the
+  // test channel, Internal and inside packages through their build variant. An explicit `false`
+  // always wins, and explicit `true` still opts a production install in.
+  ptc: {
+    defaultVisibility: "test",
+    defaultBuildVariants: ["internal", "inside"],
+    configurableVisibility: "online",
+  },
   peek: { defaultVisibility: "test", configurableVisibility: "test" },
   keepAlive: { defaultVisibility: "test", configurableVisibility: "test" },
   promptOverride: { defaultVisibility: "test", configurableVisibility: "test" },
@@ -774,6 +794,18 @@ export type { AskUserConfig } from "./ask-user-config.js";
  */
 export interface SessionTitleConfig {
   enabled: boolean;
+}
+
+// ── Next Prompt Suggestion ───────────────────────────────────────
+
+/**
+ * The user's own choice for one extra post-turn model request. Absent means
+ * the user never chose; `resolvePromptSuggestionEnabled` turns that into the
+ * effective value (the remote default, on when absent). The rollout policy is
+ * remote-only; see `PromptSuggestionRemotePolicy`.
+ */
+export interface PromptSuggestionConfig {
+  enabled?: boolean;
 }
 
 // ── CLI Feature Flags ─────────────────────────────────────────────
@@ -960,6 +992,8 @@ export interface Config {
   defaultLightModel?: string;
   /** Permission mode for tool call authorization. */
   permissionMode: PermissionMode;
+  /** Explicit Windows TUI hard-safety opt-out; defaults to false and is read at startup. */
+  skipWindowsHardSafetyChecks: boolean;
   permission: PermissionConfig;
   /** Global SSE error event publishing controls. */
   sseErrorPush: SSEErrorPushConfig;
@@ -996,6 +1030,8 @@ export interface Config {
   askUser: AskUserConfig;
   /** Session title auto-generation feature flag — see `SessionTitleConfig`. */
   sessionTitle: SessionTitleConfig;
+  /** Post-turn next-user-prompt suggestion — see `PromptSuggestionConfig`. */
+  promptSuggestion: PromptSuggestionConfig;
   /** CLI feature flags. */
   cli: CliConfig;
   /** Browser provider options; activation is owned by V2 Plugin/config policy. */
@@ -1012,6 +1048,8 @@ export interface Config {
   runawayGuard: RunawayGuardSettings;
   /** ToolResult archive/trim thresholds shared by TUI, CLI and managed Desktop. */
   toolResultCompaction: ToolResultCompactionSettings;
+  /** Per-image encoding limits, and how far a request rejected for its media is cut. */
+  requestMedia: RequestMediaSettings;
   /** Runtime selection knobs (e.g. `defaultFramework` for new sessions). */
   agentRuntime: AgentRuntimeConfig;
   /**
@@ -1686,6 +1724,7 @@ const DEFAULTS: Omit<
   logLevel: "info",
   devPort: DEFAULT_UI_PORT,
   permissionMode: "auto",
+  skipWindowsHardSafetyChecks: false,
   sseErrorPush: {
     history: true,
     stream: true,
@@ -1740,6 +1779,9 @@ const DEFAULTS: Omit<
     // Default ON. See `SessionTitleConfig`.
     enabled: true,
   },
+  promptSuggestion: {
+    // Unset: the effective default is resolved with the remote policy.
+  },
   cli: {
     spawn: {
       enabled: false,
@@ -1769,6 +1811,7 @@ const DEFAULTS: Omit<
   },
   runawayGuard: { enabled: true },
   toolResultCompaction: { ...TOOL_RESULT_COMPACTION_DEFAULTS },
+  requestMedia: { ...REQUEST_MEDIA_DEFAULTS },
   agentRuntime: {
     // Single source of truth lives in `./agent-runtime-config.ts` so the
     // default and the union type cannot drift.
@@ -1822,6 +1865,8 @@ function ensureConfigFile(): void {
     logLevel: DEFAULTS.logLevel,
     provider: managedPresetBaseUrlSyncEnabled ? preset.provider : undefined,
     defaultModel: preset.defaultModel,
+    // Written on first install as an editable safe default; existing files are not changed.
+    skipWindowsHardSafetyChecks: DEFAULTS.skipWindowsHardSafetyChecks,
   });
   writePrivateConfigFileSync(configPath, content, true);
 }
@@ -2014,6 +2059,7 @@ export function resolveConfigFromRaw(
       typeof raw.defaultLightModel === "string"
         ? raw.defaultLightModel
         : undefined,
+    skipWindowsHardSafetyChecks: raw.skipWindowsHardSafetyChecks === true,
     permissionMode:
       typeof raw.permissionMode === "string" &&
       ["default", "bypassPermissions", "auto", "off"].includes(
@@ -2054,6 +2100,7 @@ export function resolveConfigFromRaw(
     skills: parseSkillsConfig(raw),
     askUser: parseAskUserConfig(raw, DEFAULTS.askUser),
     sessionTitle: parseSessionTitleConfig(raw),
+    promptSuggestion: parsePromptSuggestionConfig(raw),
     cli: parseCliConfig(raw),
     browser: parseBrowserConfig(raw.browser),
     tui: parseTuiConfig(raw),
@@ -2064,6 +2111,7 @@ export function resolveConfigFromRaw(
     toolResultCompaction: parseToolResultCompactionConfig(
       raw.toolResultCompaction,
     ),
+    requestMedia: parseRequestMediaConfig(raw.requestMedia),
     agentRuntime: parseAgentRuntimeConfig(raw.agentRuntime),
     logRetentionDays: parseLogRetentionDays(raw),
     contentReview: parseContentReviewConfig(raw),
@@ -2134,7 +2182,21 @@ function parseBetaConfig(raw: Record<string, unknown>): BetaConfig {
       ? (raw.beta as Record<string, unknown>)
       : {};
 
-  const context: BetaFeatureResolutionContext = {
+  const context = currentBetaResolutionContext();
+  const result = {} as BetaConfig;
+  for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
+    result[key] = resolveBetaFeature(key, obj[key], context);
+  }
+  return result;
+}
+
+/**
+ * The build facts `parseBetaConfig` resolves every flag with. Exported so a caller holding a
+ * raw (unparsed) config can resolve one flag exactly as `getConfig()` would for this process,
+ * instead of rebuilding the context and drifting from it.
+ */
+export function currentBetaResolutionContext(): BetaFeatureResolutionContext {
+  return {
     buildEnv: getRuntimeBuildEnv(),
     defaultBuildEnvironment: getBetaDefaultBuildEnvironment(),
     internalBuild: isInternalBuild(),
@@ -2144,11 +2206,6 @@ function parseBetaConfig(raw: Record<string, unknown>): BetaConfig {
         ? "published"
         : undefined,
   };
-  const result = {} as BetaConfig;
-  for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
-    result[key] = resolveBetaFeature(key, obj[key], context);
-  }
-  return result;
 }
 
 // ── Skill Evolve config parsing ─────────────────────────────────
@@ -2448,6 +2505,19 @@ function parseSessionTitleConfig(
   return {
     enabled: typeof obj.enabled === "boolean" ? obj.enabled : defaults.enabled,
   };
+}
+
+// ── prompt suggestion config parsing ────────────────────────────
+
+function parsePromptSuggestionConfig(raw: Record<string, unknown>): PromptSuggestionConfig {
+  const value = raw.promptSuggestion;
+  const enabled =
+    value != null && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>).enabled
+      : undefined;
+  // Keep "never chose" distinct from an explicit `false`: the effective default
+  // depends on the remote policy, which parsing cannot see.
+  return typeof enabled === 'boolean' ? { enabled } : {};
 }
 
 // ── CLI config parsing ──────────────────────────────────────────

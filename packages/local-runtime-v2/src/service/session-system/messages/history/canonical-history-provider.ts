@@ -22,13 +22,7 @@ import {
   type CanonicalHistoryLegacyMigration,
 } from './canonical-history-materializer.js';
 import {
-  CanonicalHistoryIndexWriteError,
-  createCanonicalHistoryIndexAdapter,
-  type CanonicalHistoryIndexAdapter,
-} from './mutation/canonical-history-index.js';
-import {
   HistoryScannerError,
-  createCanonicalHistoryScanner,
   scanCanonicalHistoryArtifacts,
 } from './mutation/canonical-history-scanner.js';
 import { isUserMessageId } from '../../shared/user-message-id.js';
@@ -98,6 +92,8 @@ interface SessionCanonicalHistoryCompactionChangeBase extends Omit<
   readonly summary: string;
   /** Source identity for a structurally preserved real-user tail. */
   readonly currentUserSourceIndex?: number;
+  /** Hidden markers placed directly before that tail; absent means 1. */
+  readonly placedMarkerCount?: number;
 }
 
 export type SessionCanonicalHistoryCompactionChange = SessionCanonicalHistoryCompactionChangeBase &
@@ -219,8 +215,6 @@ export function createSessionSystemCanonicalHistoryProvider(
   const locations =
     options.locations ??
     createSessionHistoryLocationResolver({ dataDir: options.dataDir, sessions: options.sessions });
-  const indexes = new Map<string, CanonicalHistoryIndexAdapter>();
-  const scanHistory = createCanonicalHistoryScanner();
   const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
 
   return view();
@@ -235,8 +229,7 @@ export function createSessionSystemCanonicalHistoryProvider(
       inspectActive: (sessionId) => inLane(sessionId, () => inspectActiveSnapshot(sessionId)),
       initialize: (sessionId) =>
         inLane(sessionId, async () => {
-          const paths = await ensureInitialized(sessionId, 'allocate');
-          await syncIndex(sessionId, paths);
+          await ensureInitialized(sessionId, 'allocate');
         }),
       delete: (sessionId) =>
         inLane(sessionId, async () => {
@@ -320,7 +313,6 @@ export function createSessionSystemCanonicalHistoryProvider(
               `Canonical compaction generation verification failed: ${change.sessionId}`,
             );
           }
-          await syncIndex(change.sessionId, paths, true, committed);
           const result = {
             ...historySnapshot(committed, true, transform),
             generation: committedGeneration,
@@ -362,7 +354,6 @@ export function createSessionSystemCanonicalHistoryProvider(
         records = recovery.records;
       }
     }
-    await syncIndex(sessionId, paths, true, records);
     return historySnapshot(records, allowPendingToolCallTail, transform);
   }
 
@@ -395,35 +386,6 @@ export function createSessionSystemCanonicalHistoryProvider(
     return paths;
   }
 
-  async function syncIndex(
-    sessionId: string,
-    paths: SessionHistoryPaths,
-    allowMissingParent = false,
-    verifiedRecords?: readonly CanonicalHistoryEnvelope[],
-  ): Promise<void> {
-    const active = verifiedRecords ?? (await files.readActiveStrict(paths.messages));
-    const adapter = indexes.get(sessionId) ?? createCanonicalHistoryIndexAdapter(paths.sessionDir);
-    indexes.set(sessionId, adapter);
-    try {
-      await adapter.loadOrRebuild(
-        {
-          sessionId,
-          activeGeneration: activeGeneration(active),
-          activeRevision: canonicalActiveHistoryRevision(active),
-        },
-        // Only the default reader owns reusable immutable records. Preserve the
-        // independent on-disk scanner for externally supplied adapters.
-        (scannerPaths) => options.files
-          ? scanCanonicalHistoryArtifacts(scannerPaths)
-          : scanHistory(scannerPaths, files),
-        { activePath: paths.messages, snapshotsPath: paths.snapshots, sessionId },
-      );
-    } catch (error) {
-      if (error instanceof CanonicalHistoryIndexWriteError) return;
-      if (allowMissingParent && isMissingParentScannerError(error)) return;
-      throw error;
-    }
-  }
   async function inLane<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     return ioLane.run(sessionId, operation);
   }
@@ -747,24 +709,32 @@ function readCurrentUserTail(
   if (!Number.isSafeInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= active.length) {
     throw new TypeError('Canonical current-user tail source lineage is invalid.');
   }
-  if (change.messages.length < 2) {
+  const markerCount = change.placedMarkerCount ?? 1;
+  if (!Number.isSafeInteger(markerCount) || markerCount < 1) {
+    throw new TypeError('Canonical current-user tail marker count is invalid.');
+  }
+  const tailLength = markerCount + 1;
+  if (change.messages.length < tailLength) {
     throw new TypeError('Canonical current-user tail is incomplete.');
   }
-  const marker = change.messages.at(-2);
+  const baseLength = change.messages.length - tailLength;
+  const markers = change.messages.slice(baseLength, -1);
   const userMessage = change.messages.at(-1);
   const source = requireExternalCurrentUserSource(active[sourceIndex]);
-  const normalizedMarker = requireHiddenTypedCustom(marker);
+  const normalizedMarkers = markers.map(requireHiddenTypedCustom);
   const normalizedUser = requireExactCurrentUserMessage(userMessage, source);
   return {
-    baseMessages: change.messages.slice(0, -2),
+    baseMessages: change.messages.slice(0, baseLength),
     user: source,
     envelopes: [
-      envelope({
-        change,
-        message: normalizedMarker,
-        turnId: `${change.turnId}:compaction`,
-        index: change.messages.length - 2,
-      }),
+      ...normalizedMarkers.map((message, offset) =>
+        envelope({
+          change,
+          message,
+          turnId: `${change.turnId}:compaction`,
+          index: baseLength + offset,
+        }),
+      ),
       { ...withoutHistoryArtifact(source), message: normalizedUser },
     ],
   };

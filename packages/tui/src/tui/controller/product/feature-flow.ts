@@ -731,33 +731,6 @@ export class TuiFeatureFlow {
                 ) ?? false,
             }
           : {}),
-        onDeleteProvider: async (providerId) => {
-          if (
-            this.modelPicker !== picker ||
-            !this.isCurrentSessionRequest(sessionId, sessionGeneration, loadSequence)
-          ) {
-            return;
-          }
-          const providerModels = models.filter((model) => model.providerId === providerId);
-          const providerName = sanitizeTerminalText(
-            providerModels[0]?.providerName?.trim() || providerId,
-          );
-          if (sessionId && providerModels.some((model) => model.selected)) {
-            throw new Error('Switch to another model before deleting this provider');
-          }
-          await this.providerApplication.remove(providerId);
-          if (!this.isCurrentSessionRequest(sessionId, sessionGeneration, loadSequence)) return;
-          if (this.pendingSessionModelSelection?.model.providerId === providerId) {
-            this.pendingSessionModelSelection = undefined;
-          }
-          await this.modelState.refresh(sessionId);
-          if (!this.isCurrentSessionRequest(sessionId, sessionGeneration, loadSequence)) return;
-          this.options.append(
-            `Provider deleted: ${providerName} · ${providerModels.length} model${providerModels.length === 1 ? '' : 's'} removed.`,
-          );
-          this.options.controller.refreshStatusMetricsNow();
-          await this.showModelPicker('');
-        },
         requestRender: this.options.onChanged,
         ...(!managedTokenPresent && models.some((model) => model.providerKind === 'minimax-managed')
           ? { unavailableHint: OFFICIAL_MODEL_LOGIN_HINT }
@@ -942,6 +915,19 @@ export class TuiFeatureFlow {
       },
       onRefreshModels: (provider) => this.providerApplication.refreshModels(provider),
       onSaveCustom: (input) => this.providerApplication.saveCandidate(input),
+      onDelete: async (providerId) => {
+        const sessionId = this.currentSessionId();
+        if (sessionId) {
+          const models = await this.options.runtime.listModels(sessionId);
+          if (models.some((model) => model.providerId === providerId && model.selected)) {
+            throw new Error('Switch to another model before deleting this provider');
+          }
+        }
+        await this.providerApplication.remove(providerId);
+        if (this.pendingSessionModelSelection?.model.providerId === providerId) {
+          this.pendingSessionModelSelection = undefined;
+        }
+      },
       onSetMiniMaxApiKey: (apiKey) => this.providerApplication.setMiniMaxApiKey(apiKey),
       onSetMiniMaxSource: (source) =>
         this.providerApplication.setMiniMaxSource(source).then(() => undefined),
@@ -1452,7 +1438,9 @@ export class TuiFeatureFlow {
   private showInspectionPanel(panel: Component): void {
     this.closeInspectionPanel();
     this.inspectionPanel = panel;
-    this.options.surface.show(panel);
+    // The panel is appended below the fullscreen transcript and hides the Composer; it must be in
+    // view, otherwise End/PgDn go to the off-screen panel and the user appears stuck.
+    this.options.surface.show(panel, { reveal: true });
   }
 
   private closeInspectionPanel(panel?: Component): void {

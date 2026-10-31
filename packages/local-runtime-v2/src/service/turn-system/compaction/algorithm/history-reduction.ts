@@ -1,8 +1,10 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { readPtcExecutionDetails, type PtcExecutionDetails } from '@mavis/agent-core/tools';
 
 import { readGenuineUserQueryText } from './checkpoint-format.js';
 
 const TOOL_RESULT_REMOVED_TEXT = '[Tool result removed by context compaction.]';
+const PTC_RETURN_REMOVED_TEXT = '[run_code return removed by context compaction.]';
 const MEDIA_REMOVED_TEXT = '[Media removed by context compaction.]';
 
 const PROTECTED_TOOL_ROUND_RATIO = 0.3;
@@ -171,6 +173,12 @@ function buildToolResultCandidate(
       const toolName = callId ? round.toolCallsById.get(callId)?.name : undefined;
       if (!toolName || !eligible(round, message, toolName)) return;
       if (isRemovedToolResult(message)) return;
+      const ptcDetails = readPtcExecutionDetails(message);
+      if (ptcDetails) {
+        const replacement = trimPtcToolReturn(message, ptcDetails);
+        if (replacement) replacements.set(index, replacement);
+        return;
+      }
       replacements.set(index, {
         ...message,
         content: [{ type: 'text', text: TOOL_RESULT_REMOVED_TEXT }],
@@ -191,7 +199,35 @@ function buildToolResultCandidate(
 
 function isRemovedToolResult(message: ToolResultMessage): boolean {
   const onlyBlock = message.content.length === 1 ? message.content[0] : undefined;
-  return onlyBlock?.type === 'text' && onlyBlock.text === TOOL_RESULT_REMOVED_TEXT;
+  return (
+    onlyBlock?.type === 'text' &&
+    (onlyBlock.text === TOOL_RESULT_REMOVED_TEXT || onlyBlock.text === PTC_RETURN_REMOVED_TEXT)
+  );
+}
+
+function trimPtcToolReturn(
+  message: ToolResultMessage,
+  details: PtcExecutionDetails,
+): ToolResultMessage | undefined {
+  const forced = details.host_forced_content;
+  const hasNonReturnFact = details.retained_facts.some(
+    (fact) => fact.kind !== 'plugin_feedback' && fact.kind !== 'approval',
+  );
+  if (!forced) {
+    if (hasNonReturnFact) return undefined;
+    return {
+      ...message,
+      content: [{ type: 'text', text: PTC_RETURN_REMOVED_TEXT }],
+    };
+  }
+  const onlyBlock = message.content.length === 1 ? message.content[0] : undefined;
+  if (onlyBlock?.type !== 'text') return undefined;
+  const prefix = forced.endsWith('\n') ? forced : `${forced}\n`;
+  if (!onlyBlock.text.startsWith(prefix) || onlyBlock.text.length === prefix.length) return undefined;
+  return {
+    ...message,
+    content: [{ type: 'text', text: `${prefix}${PTC_RETURN_REMOVED_TEXT}` }],
+  };
 }
 
 export function parseToolRounds(

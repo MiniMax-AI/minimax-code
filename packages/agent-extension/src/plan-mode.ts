@@ -1,9 +1,13 @@
 import {
   defineRuntimeTool,
+  type AfterLlmCallHandler,
+  type AfterToolCallHandler,
   type AgentExtension,
   type ModelContextAssemblyCtx,
   PromptSnapshotInvalidError,
   type ToolExecutionContext,
+  type TurnAssemblyCtx,
+  type TurnEndHandler,
 } from '@mavis/agent-runtime';
 import { Type } from '@sinclair/typebox';
 
@@ -98,6 +102,11 @@ export interface PlanModeExtensionOptions {
   };
   /** Agent-initiated entry rollback switch (`beta.desktopPlanModeAgentEntry`). */
   readonly agentEntryEnabled: () => boolean;
+  /**
+   * Receives a fallback Review submission the Plan owner rejected (for example
+   * queued work or another pending Questionnaire). The turn still completes.
+   */
+  readonly onReviewFallbackFailed?: (error: unknown) => void;
 }
 
 const EmptyInput = Type.Object({}, { additionalProperties: false });
@@ -133,6 +142,77 @@ export function planModeExtension(options: PlanModeExtensionOptions): AgentExten
               }
             : null,
       });
+      const reviewFallback = planReviewSubmissionFallback(options);
+      pi.on('after_tool_call', reviewFallback.afterToolCall);
+      pi.on('after_llm_call', reviewFallback.afterLlmCall);
+      pi.on('turn_end', reviewFallback.turnEnd);
+    },
+  };
+}
+
+/**
+ * Tools that can change the canonical Plan. The Plan tool guard rejects them
+ * for every other path, so a successful call in a Plan turn updated the Plan.
+ */
+const PLAN_DOCUMENT_TOOLS = new Set(['write', 'edit']);
+
+/**
+ * A Plan turn that updated the Plan should end in ExitPlanMode or a question.
+ * When it completes with a plain-text answer instead, the user would have no
+ * Review to approve, so the runtime submits the canonical Plan for Review on
+ * the Agent's behalf. The Agent's answer is delivered unchanged and the user
+ * keeps every Review choice: approve, feedback, or skip.
+ */
+function planReviewSubmissionFallback(options: PlanModeExtensionOptions): {
+  readonly afterToolCall: AfterToolCallHandler;
+  readonly afterLlmCall: AfterLlmCallHandler;
+  readonly turnEnd: TurnEndHandler;
+} {
+  const states = new Map<string, { planUpdated: boolean; closedInText: boolean }>();
+  const keyOf = (ctx: Pick<TurnAssemblyCtx, 'sessionId' | 'turnId'>) =>
+    `${ctx.sessionId}\u0000${ctx.turnId}`;
+  const stateFor = (ctx: TurnAssemblyCtx) => {
+    const key = keyOf(ctx);
+    let state = states.get(key);
+    if (!state) {
+      state = { planUpdated: false, closedInText: false };
+      states.set(key, state);
+    }
+    return state;
+  };
+  return {
+    afterToolCall: (input, _signal, ctx) => {
+      if (ctx.plan && !input.isError && PLAN_DOCUMENT_TOOLS.has(input.toolCall.name)) {
+        stateFor(ctx).planUpdated = true;
+      }
+      return undefined;
+    },
+    afterLlmCall: (event, ctx) => {
+      if (!ctx.plan) return undefined;
+      // Only the last response of the turn matters; any tool call (including
+      // ExitPlanMode or a question) or a truncated/failed response clears it.
+      stateFor(ctx).closedInText =
+        event.message.stopReason === 'stop' &&
+        !event.message.content.some((block) => block.type === 'toolCall');
+      return undefined;
+    },
+    // turn_end runs after every continuation has settled, so the closing
+    // response observed above is final. It must never throw: a turn_end
+    // failure would fail an otherwise completed turn.
+    turnEnd: async (event, ctx) => {
+      const state = states.get(keyOf(ctx));
+      states.delete(keyOf(ctx));
+      if (!ctx.plan || event.reason !== 'completed') return;
+      if (!state?.planUpdated || !state.closedInText) return;
+      try {
+        await options.actions.exit({ sessionId: ctx.sessionId, turnId: ctx.turnId });
+      } catch (error) {
+        try {
+          options.onReviewFallbackFailed?.(error);
+        } catch {
+          // Reporting must not change the completed turn.
+        }
+      }
     },
   };
 }
@@ -209,8 +289,14 @@ update the canonical Plan file at the exact path above. An inline response
 does not count as completing the Plan, even if it contains the same content.
 
 Call ExitPlanMode({}) only after the canonical Plan file is complete and
-ready for user review. Do not begin implementation after calling
-ExitPlanMode.
+ready for user review, and call it in the same turn once it is. The user can
+review and approve the Plan only through ExitPlanMode: a plain-text reply
+that says the Plan is ready, invites review, or asks the user to confirm
+before implementation does not open that review, even when the user asked
+to confirm the Plan before you implement it. If a decision that shapes the
+Plan still needs the user, ask it through an available question tool, then
+update the Plan and call ExitPlanMode after the answer is incorporated. Do
+not begin implementation after calling ExitPlanMode.
 </system-reminder>`;
 }
 
@@ -228,7 +314,7 @@ function lifecycleTool<Name extends PlanLifecycleToolName>(
     description:
       name === 'EnterPlanMode'
         ? 'Ask the local user to confirm entering Plan Mode; the turn ends while they decide, and planning starts only after they confirm. Call this as the first tool action for a requested planning deliverable — software or technical implementation planning, or any plan the user wants to approve before implementation or delivery — before reading or unpacking attachments, clarification, research, or drafting. If you only realize mid-task that this applies, call it then: late entry is better than none.'
-        : 'Freeze the canonical Plan file and ask the local user to review it; the turn ends while they decide. Only valid while Plan Mode is active, after the canonical Plan file has been written to disk — write or update it first.',
+        : 'Freeze the canonical Plan file and ask the local user to review it; the turn ends while they decide. This is the only way the user can review and approve the Plan: call it as soon as the Plan is ready instead of ending the turn with a plain-text request for review or confirmation. Only valid while Plan Mode is active, after the canonical Plan file has been written to disk — write or update it first.',
     schema: EmptyInput,
     source: 'builtin',
     execute: async (ctx: ToolExecutionContext, _input, signal) => {

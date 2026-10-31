@@ -23,6 +23,7 @@ function createHarness(
     source: "cli" | "vscode";
   },
   inSideSession = false,
+  acceptPromptSuggestion?: () => boolean,
 ) {
   let inputListener: ((data: string) => unknown) | undefined;
   let currentInput = input;
@@ -115,6 +116,7 @@ function createHarness(
     offeredCodexSession = undefined;
   });
   const scrollByPage = vi.fn();
+  const toggleFullView = vi.fn(() => true);
   const composerDraft = {
     snapshot: vi.fn(() => ({
       attachments: draft.attachments,
@@ -148,6 +150,7 @@ function createHarness(
     interaction: {
       isActive: vi.fn(() => interactionActive),
       scrollByPage,
+      toggleFullView,
     } as never,
     interactionSurface: {} as never,
     interactionFlow: {} as never,
@@ -182,6 +185,7 @@ function createHarness(
     onSubmissionSettled,
     requestProcessSuspend,
     requestInteractionRender: vi.fn(),
+    ...(acceptPromptSuggestion ? { acceptPromptSuggestion } : {}),
   });
   flow.attach();
   return {
@@ -207,6 +211,7 @@ function createHarness(
     onChanged,
     requestRender,
     scrollByPage,
+    toggleFullView,
     trackAutocompleteSelect,
     takeRecentCodexSession,
     restoreRecentCodexSession,
@@ -636,6 +641,25 @@ describe("TuiInputFlow steer Draft handling", () => {
 
     expect(harness.scrollByPage).toHaveBeenNthCalledWith(1, -1);
     expect(harness.scrollByPage).toHaveBeenNthCalledWith(2, 1);
+  });
+
+  it("routes the full-view shortcut to an active interaction that supports it", () => {
+    const harness = createHarness(
+      '',
+      { attachments: [] },
+      false,
+      false,
+      false,
+      'consumed',
+      true,
+    );
+
+    expect(harness.inputListener?.("\x0f")).toEqual({ consume: true });
+    expect(harness.toggleFullView).toHaveBeenCalledOnce();
+    expect(harness.toggleTranscriptDetails).not.toHaveBeenCalled();
+
+    harness.toggleFullView.mockReturnValueOnce(false);
+    expect(harness.inputListener?.('\x0f')).toBeUndefined();
   });
 
   it("clears and restores text and attachments as one Draft", () => {
@@ -1150,4 +1174,45 @@ describe("shell cancellation", () => {
       expect(harness.editor.setText).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('TuiInputFlow next-message suggestion', () => {
+  const idleHarness = (input: string, accept: () => boolean, attachments: unknown[] = []) =>
+    createHarness(
+      input,
+      { attachments },
+      false,
+      false,
+      false,
+      'consumed',
+      false,
+      vi.fn(() => false),
+      undefined,
+      false,
+      accept,
+    );
+
+  it('fills an empty composer with the visible suggestion on Tab', () => {
+    const accept = vi.fn(() => true);
+    const harness = idleHarness('', accept);
+
+    expect(harness.inputListener?.('\t')).toEqual({ consume: true });
+    expect(accept).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves Tab to normal completion when no suggestion is visible', () => {
+    const accept = vi.fn(() => false);
+    const harness = idleHarness('', accept);
+
+    expect(harness.inputListener?.('\t')).toBeUndefined();
+    expect(accept).toHaveBeenCalledTimes(1);
+  });
+
+  it('never replaces a draft or attachments with the suggestion', () => {
+    const accept = vi.fn(() => true);
+
+    expect(idleHarness('my own words', accept).inputListener?.('\t')).toBeUndefined();
+    expect(idleHarness('', accept, [{ type: 'image' }]).inputListener?.('\t')).toBeUndefined();
+    expect(accept).not.toHaveBeenCalled();
+  });
 });

@@ -7,6 +7,162 @@ This changelog covers important changes that directly affect MCode TUI users. It
 
 Internal refactors, test-only changes, and changes limited to other product surfaces are excluded.
 
+## 0.7.2 · 2026-10-30
+
+### Added
+
+- Programmatic Tool Calling (PTC, beta): when enabled, the agent writes a `run_code` program that combines
+  `read`, `grep`, `bash` and other tool calls in a sandbox and brings only the filtered results back into
+  context, which suits bulk file reads and multi-step tasks. Turn it on under Preferences in `/settings`
+  (stored as `beta.ptc` in `config.yaml`, off by default), or use `mcode --ptc` / `mcode exec --ptc` for the
+  current process. It applies to new Sessions and the next compaction, not to a running Session, and
+  whether it applies depends only on the Session's tool-call mode, so the prompt prefix of a Session no
+  longer changes between turns. Tool permissions, approvals and cancellation work as before, and
+  read-only subagents still call tools directly. In the transcript `run_code` lists its child calls as a
+  group and hands each child call its full result.
+- Prompt suggestions: when a turn you started finishes, the empty composer shows a likely next message as
+  placeholder text; press `Tab` to fill it in. Turn them off or on under Preferences in `/settings` or with
+  `promptSuggestion.enabled` in `config.yaml`. Suggestions are on by default for users who never chose.
+- Browser Use adds a `run_script` action for page checks single actions cannot express: holding keys while
+  moving, modifier keys combined with mouse input, timed or repeated input, and loops that read page state
+  before deciding where to click. Keys and mouse buttons still held are released when the script finishes,
+  fails, times out or is cancelled. Available only in the TUI headless browser.
+- Plan Review shows the plan file path and opens the full plan with `Ctrl+O`. Closing the full view
+  preserves the selected action and the feedback draft.
+- Local plugins can declare subagents for delegated tasks, official Marketplace plugins can declare
+  subagents, and local plugins can declare Apps (`*.app.json`) whose tools the agent calls through
+  `mcode-tools`. Invalid App references are skipped with a diagnostic and the rest of the plugin still loads.
+- `config.yaml` adds a `requestMedia` block, read on every use so changes need no restart.
+  `requestMedia.image.max_width`, `max_height` and `max_base64_bytes` set the size every image entering the
+  conversation is encoded to (defaults 2000 px, 2000 px and 4.5 MiB), and `requestMedia.recoveryDivisor`
+  (default `2`) sets how much of the images a rejected request keeps when it is resent. Invalid values
+  fall back to the defaults field by field.
+- `config.yaml` adds `permission.nativeDelete`, default `false`. When `true`, new Bash calls use the
+  current shell's native delete commands instead of moving files to the trash, so deleted files may not be
+  recoverable. Normal permission modes, sandboxing and the root/home recursive-delete protection remain
+  active; delete targets that cannot be resolved statically go through normal permission approval instead
+  of being rejected, while drive roots, Windows system directories and recursive deletion of home stay
+  rejected in every mode.
+- Windows TUI adds `skipWindowsHardSafetyChecks` in `config.yaml` to opt out of command-text and path checks
+  that can reject valid scripts. It defaults to `false` and requires a restart.
+- `MCODE_BROWSER_USE_SWIFTSHADER=true` enables software WebGL rendering in the TUI browser on machines
+  without a usable GPU. It is intended for trusted local page testing; CPU rendering is slower.
+- ACP accepts images in prompts and replays image attachments when a Session is loaded again.
+- The default tool-discovery budget for stdio MCP servers rises from 15 to 30 seconds, so servers that
+  install dependencies on first launch are more likely to provide tools in the current turn. The effective
+  budget is still the smaller of this default and the server `timeout` in `mcp.json`.
+- Plugin MCP servers no longer have a 128-tool limit, and when there are more than 64 MCP tools or their
+  schemas take too much context they are loaded on demand through `tool_search`.
+
+### Improved
+
+- Images in each request stay within a budget: 20 images for minimax M3 models and 100 for other models
+  unless the model sets `max_images_per_request`, and two thirds of the request body budget in bytes. When
+  a provider rejects a request for carrying too many images or too many bytes, the turn drops the older
+  images and resends once instead of failing every later request the same way; the newest image is always
+  kept, and dropped tool result images are saved to the Session's `reports/tool-outputs/` folder and
+  replaced with a note giving the path.
+- `requestMedia.image` is now the only resize applied to Read tool images, attached images and browser
+  screenshots, and a scaled-down image carries one note about its original size instead of two.
+- Compaction summaries no longer send images to the summary model; each image is described by its saved
+  path. Compaction for custom providers (BYOK) reuses the main request's prompt-cache prefix and falls
+  back to the previous standalone request when the provider does not accept it.
+- Compaction retains reusable procedures and dead ends so repeated work is avoided, and the latest user
+  request outranks stale pending work after a compaction.
+- Stopping the main conversation also stops background subagents, and background tasks follow
+  configuration, with more reliable handling of concurrent stop and result notifications.
+- The Runtime no longer edits shell profiles such as `~/.zshrc` and `~/.bashrc` or the Windows user `PATH`;
+  it adds its `bin` directory only to the `PATH` of its own process and child processes. To use the
+  `mcode` command in your terminal, install it with the install script or `npm i -g`.
+- Long streaming replies render faster: the streaming reply redraws at a rate based on how long it takes
+  to render, while the composer and status bar still update every frame. Code blocks over 64K characters
+  or 1,250 lines skip syntax highlighting and are shown as plain text.
+- Regular reads and appends in long sessions no longer rescan the full history chain.
+- Deleting a third-party connection moved from `/model` to `/provider`: press `d`, and on the confirmation
+  page only `y` deletes; any other key, including Enter, cancels. Deleting removes the connection's saved
+  API key and all of its models.
+- The `agents` / `background` counts in the `tui.statusLine: [build-mode]` status line follow notification
+  receipts persisted by the Runtime, so finished background tasks and sub-agents still count until their
+  results are handed back to the agent.
+- Built-in subagents can use your configured MCP servers and plugin tools. The tool selectors in
+  `agent.md` follow one rule for built-in, custom and plugin agents: tools whose names start with `mcp__`
+  are filtered by `mcpServers`, other tools by `tools`, and `disallowedTools` removes any tool.
+- The built-in deep-research skill is a single writing guide instead of a five-step flow, so research
+  tasks finish faster with less output. Reports are saved to the working directory and the absolute path
+  is returned.
+- With BYOK models, replies, Session titles and prompt suggestions are no longer sent to content review.
+- Sending a message no longer waits for the Token Plan quota to refresh, so it goes out immediately even
+  when the quota cache has expired.
+- A Session that is running in another MCode process is read-only in this one: your message is not sent as
+  a steer or queued, and the draft is kept. When the other process finishes, the Session refreshes and you
+  can press Enter to send.
+- When remote token counting fails for a BYOK model, the context usage falls back to a local estimate
+  without blocking the conversation, and probing stops when the endpoint is unsupported.
+
+### Fixed
+
+- Fixed a turn ending silently when the model used the whole output limit while thinking, before producing
+  any text. The cut-off response is discarded and the request is retried with a hint to reason more briefly,
+  up to 3 times.
+- Fixed turns stopping silently as if they had finished normally when an Anthropic-compatible stream was cut
+  off without a `stop_reason`. You now see a model service error and the content received so far is kept.
+- Fixed `web_search` failing with 401 in long turns because it kept the login token from the start of the
+  turn after the token was refreshed.
+- Fixed a Session staying in the running state and refusing new messages after the turn's final result
+  failed to save to the database.
+- Fixed images that cannot be decoded entering the conversation history, which made every later request
+  fail with 400 after a single bad image.
+- Fixed the Git Bash path safety check and the root/home recursive-delete guard misreading a heredoc body
+  passed to an interpreter such as python or node, which blocked valid commands.
+- Fixed a Bash `rm` that is moved to the trash losing `-f` and treating a redirect such as `2>&1` as a file
+  to delete, so cleanup no longer stops the commands after `&&`. Missing files, empty arguments and repeated
+  targets no longer incorrectly stop cleanup.
+- Fixed moving a file to the Trash inside the sandbox possibly overwriting a file with the same name, and
+  on macOS no longer plays the Finder sound for every file.
+- Fixed `edit` with `replace_all` falsely failing on files with a BOM or CRLF line endings.
+- Fixed built-in agents being unable to reply when their configuration file was missing or damaged. Startup
+  restores the factory content, archiving a damaged file in the same folder first, and keeps only the model
+  settings; use a custom agent for custom behavior.
+- Fixed `mcode init` with the default or a relative directory leaving the first Session without a
+  resolvable project, and fullscreen mode not scrolling to `/status` and other inspection panels after
+  browsing history.
+- Fixed `mcode exec` hanging on Node 26 when the global `fetch` negotiated HTTP/2; TUI connections now
+  always use HTTP/1.1. `mcode exec` also exits on stop or timeout when the process reading its stdout stops
+  reading, with code 6 on timeout and 130 on cancel.
+- Fixed compaction and review steps counting toward `--max-steps`.
+- Fixed a Goal continuation or automatically sent queued message stopped by content review being reported
+  as an empty response instead of as stopped by review.
+- Fixed forking a Session from a message sent mid-turn failing with HTTP 400, and being signed out after a
+  failed credential save caused an old refresh token to be reused.
+- Fixed startup being blocked for up to 30 minutes after MCode exited during startup and left a storage
+  lock behind.
+- Fixed Session-owned files the Runtime hands to the agent, such as large tool output, attachments and
+  compaction snapshots, prompting for a permission that could not be auto-approved.
+- Fixed context usage staying empty until the next reply after a manual `/compact`.
+- Fixed `/status` showing the name the account was registered with instead of its current name, and the
+  5-hour quota countdown exceeding the window length.
+- Fixed mouse report fragments such as `;24M;35M` appearing in the composer while the TUI was busy. A split
+  fragment could also be read as Escape and stop the running task.
+- Fixed long integers in tool arguments (beyond 2^53, such as 18-digit ID numbers) being silently changed
+  when the model wrote them without quotes, and built-in tools loaded on demand through `tool_search`
+  rejecting numeric fields the model wrote as strings.
+- Fixed App calls in the agent's `bash` failing with `Embedded mcode-tools requires
+  MCODE_AUTH_PROVIDER=shared-broker` when another `mcode-tools` came earlier in `PATH`.
+- Fixed repeated "context compaction failed" errors when a bash background task finished, its notification
+  started a new turn, and that turn triggered automatic compaction.
+- Fixed disappearing message history, repeated warnings and clipboard read error handling, and clipped long
+  hints in narrow terminals to prevent redraw crashes.
+- Fixed missing review prompts after a plan is written and queued questionnaire answers that could leave
+  execution stuck.
+- Fixed a background task message being treated as the current user, and a message inserted mid-turn no
+  longer acts as a fork boundary.
+- Fixed the agent writing "(Recommended)" into question option labels, which duplicated the recommendation
+  marker.
+- Fixed an Agent configuration model ID containing a slash being rejected.
+- Fixed a stream that holds the response until generation finishes failing after about 5 minutes with
+  `LLM request timed out`; the stream idle bound is now 60 minutes while the first-response bound stays 300
+  seconds.
+
 ## 0.6.5 · 2026-10-09
 
 ### Fixed

@@ -1107,9 +1107,18 @@ async function assertSessionCompositionPolicies(input: {
     throw new Error("test compatibility requires failure reporting");
   await assertInputReviewTitlePolicy(reportFailure);
   const titlePolicy = mocked.sessionOptions?.["titlePolicy"] as {
-    blocks(title: string): Promise<boolean>;
+    blocks(
+      title: string,
+      session: { sessionKind: "conversation"; effectiveModel: string },
+    ): Promise<boolean>;
   };
-  await expect(titlePolicy.blocks("generated title")).resolves.toBe(false);
+  // Title review follows the Session model, so only an official model is reviewed.
+  await expect(
+    titlePolicy.blocks("generated title", {
+      sessionKind: "conversation",
+      effectiveModel: "minimax/MiniMax-M3",
+    }),
+  ).resolves.toBe(false);
   expect(input.compatibility.safety.review).toHaveBeenCalledWith(
     "generated title",
     205,
@@ -3868,7 +3877,6 @@ function defaultCompatibility(
       executor: { reportFailure: vi.fn() },
     } as never,
     generatedAssets: {
-      compressModelImage: vi.fn(() => undefined),
       registerGeneratedAsset: vi.fn(),
       ...generatedAssets,
     },
@@ -3890,10 +3898,11 @@ function defaultCompatibility(
     },
     backgroundTasks: {
       bindRuntimeOwner: vi.fn(),
+      bindNotificationReceipts: vi.fn(),
       recover: vi.fn(async () => undefined),
       pollRecovery: vi.fn(async () => false),
       // No cascade in this fixture: `begin` declining keeps today's stop behaviour.
-      userStop: { begin: vi.fn(async () => undefined) },
+      userStop: { begin: vi.fn(() => undefined) },
     },
     conversation: {
       bind: async (service) => {

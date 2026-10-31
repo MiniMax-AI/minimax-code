@@ -1,8 +1,10 @@
 import type { PiBeforeToolCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
 import type { PluginHookPermissionUpdate } from '@mavis/plugin-hooks';
+import { withPermissionExecutionPlan } from '@mavis/agent-tools';
 
 import type { AgentHostChannelContext } from '../../preparation/contracts.js';
 import { assertAgentHostCapabilityAvailable } from '../../empty-dependencies.js';
+import { observePtcChildPermission, type PtcMetrics } from '../ptc/ptc-observability.js';
 import {
   SIDE_SESSION_APPROVAL_REASON,
   sideSessionRequiresApproval,
@@ -15,6 +17,7 @@ interface LocalTurnPermissionExecutionPlan {
   readonly effectiveInput: Readonly<Record<string, unknown>>;
   readonly intents: readonly unknown[];
   readonly transforms: readonly unknown[];
+  readonly nativeDelete?: boolean;
 }
 
 type LocalTurnPermissionRuleMatcher =
@@ -59,6 +62,13 @@ export interface LocalTurnPermissionDecisionSource {
     readonly signal?: AbortSignal;
     readonly channelContext?: AgentHostChannelContext;
     readonly trustedExactWritePaths: readonly string[];
+    /**
+     * Host-issued directories the active Session owns and may READ, e.g. the
+     * Session's own recoverable tool-output artifacts.
+     */
+    readonly sessionOwnedReadablePaths?: readonly string[];
+    /** First validated plan's setting; recheck input/rules while keeping this call's policy. */
+    readonly nativeDeleteSnapshot?: boolean;
   }): Promise<LocalTurnPermissionDecision>;
 }
 
@@ -75,6 +85,10 @@ export interface LocalTurnPermissionApprovalOwner {
     readonly ruleMatchers?: readonly LocalTurnPermissionRuleMatcher[];
     readonly signal?: AbortSignal;
     readonly channelContext?: AgentHostChannelContext;
+    /** Present only for a trusted PTC child call. */
+    readonly parentToolCallId?: string;
+    readonly parentToolDescription?: string;
+    readonly stopPtcOnDeny?: boolean;
   }): Promise<'allowOnce' | 'allowAlways' | 'deny'>;
 }
 
@@ -99,7 +113,22 @@ export interface LocalTurnPermissionGateOptions {
     ): Readonly<LocalTurnPermissionExecutionPlan>;
   };
   readonly logger?: PiTurnRunnerLogger;
+  /** Counts run_code children's permission outcomes only (`ptc_child_permission_total`). */
+  readonly metricsClient?: Pick<PtcMetrics, 'counter'>;
   readonly mutations?: LocalTurnPermissionMutationOwner;
+  /**
+   * Resolves the directories the active Session owns and may READ, e.g. the
+   * Session's own recoverable tool-output artifacts.
+   *
+   * The runtime hands the Agent a path when it externalizes an oversized tool
+   * result, so the Agent must be able to read that artifact back. Those
+   * artifacts live under the private runtime tree, which the permission engine
+   * otherwise refuses to read. The runtime — not the engine — owns that path,
+   * so it is injected here instead of being derived from a Session id.
+   */
+  readonly resolveSessionOwnedReadablePaths?: (
+    sessionId: string,
+  ) => Promise<readonly string[]>;
   /** Optional isolated-host override; product hosts keep Desktop's built-in tool policy. */
   readonly enforceBuiltinTools?: boolean;
   /**
@@ -133,6 +162,12 @@ interface BeforeToolCallInput {
   readonly signal?: AbortSignal;
   readonly channelContext?: AgentHostChannelContext;
   readonly trustedExactWritePaths?: readonly string[];
+  /**
+   * Host-issued directories the active Session owns and may READ, e.g. the
+   * Session's own recoverable tool-output artifacts.
+   */
+  readonly sessionOwnedReadablePaths?: readonly string[];
+
   /** Compatible-compatible PreToolUse permission request. Policy deny always wins. */
   readonly preToolPermission?: {
     readonly behavior: 'allow' | 'ask';
@@ -168,7 +203,7 @@ export class LocalTurnPermissionGate {
     );
   }
 
-  async beforeToolCall(input: BeforeToolCallInput): Promise<
+  async beforeToolCall(callInput: BeforeToolCallInput): Promise<
     | {
         readonly block: true;
         readonly reason: string;
@@ -178,22 +213,28 @@ export class LocalTurnPermissionGate {
     | undefined
   > {
     const request = readPermissionToolRequest(
-      input.toolContext,
+      callInput.toolContext,
       this.options.executionPlans?.snapshotInput,
     );
     // The side-Session lookup runs before the built-in bypass so that a
     // mutation-capable built-in (write/edit/bash) cannot skip the mandatory
     // side-Session confirmation.
-    const sideSession = await this.resolveSideSessionApprovalRequirement(input, request);
+    const sideSession = await this.resolveSideSessionApprovalRequirement(callInput, request);
     if (sideSession?.block) return { ...sideSession.block, blockedBy: 'permission' };
     const sideApprovalRequired = sideSession?.approvalRequired === true;
-    if (shouldSkipPermissionCheck(this.options, input)) {
+    if (shouldSkipPermissionCheck(this.options, callInput)) {
       // Desktop's built-in tool policy owns these tools elsewhere; the
       // side-Session confirmation is the only gate-level requirement here.
       if (!sideApprovalRequired) return undefined;
-      const blocked = await this.resolveSideSessionApproval(input, request);
+      const blocked = await this.resolveSideSessionApproval(callInput, request);
       return blocked ? { ...blocked, blockedBy: 'permission' } : undefined;
     }
+    // Resolve the Session's read grant once and carry it through every policy
+    // check of this call, including the recheck after a Hook rewrites input.
+    const input: BeforeToolCallInput = {
+      ...callInput,
+      ...(await this.resolveSessionOwnedReadablePaths(callInput.sessionId)),
+    };
     let decision = await checkPermissionDecision(this.options.decisions, input, request);
     if (sideApprovalRequired && decision.behavior === 'allow') {
       // A policy or mode auto-approval is not enough inside a side Session:
@@ -213,6 +254,30 @@ export class LocalTurnPermissionGate {
     const blocked = await this.resolveCheckedPermission(input, request, decision, executionPlan);
     // This trusted marker describes admission, not an error produced by tool execution.
     return blocked ? { ...blocked, blockedBy: 'permission' } : undefined;
+  }
+
+  /**
+   * The runtime owns the Session's artifact layout, so the read grant for the
+   * Session's own recoverable artifacts is resolved here — never derived from
+   * the Session id inside the permission engine. A resolver failure must not
+   * widen access: the Session keeps the ordinary protected behavior, and the
+   * failure is logged so a missing grant is diagnosable.
+   */
+  private async resolveSessionOwnedReadablePaths(
+    sessionId: string,
+  ): Promise<{ readonly sessionOwnedReadablePaths?: readonly string[] }> {
+    const resolve = this.options.resolveSessionOwnedReadablePaths;
+    if (!resolve) return {};
+    try {
+      const paths = await resolve(sessionId);
+      return paths.length > 0 ? { sessionOwnedReadablePaths: paths } : {};
+    } catch (error) {
+      this.options.logger?.warn?.(
+        { session_id: sessionId, error: boundedPermissionError(error) },
+        'permission.session_owned_readable_paths_unavailable',
+      );
+      return {};
+    }
   }
 
   private async resolveSideSessionApprovalRequirement(
@@ -276,7 +341,9 @@ export class LocalTurnPermissionGate {
         rewrite_applied: false,
         side_session: true,
       });
-      return permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
+      return input.toolContext.parentToolCallId
+        ? userDeniedBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON)
+        : permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
     }
     this.logEnforcement(input, request, {
       policy_behavior: 'ask',
@@ -372,7 +439,7 @@ export class LocalTurnPermissionGate {
       }
     }
     if (pluginDecision.updatedInput || pluginDecision.updatedPermissions?.length) {
-      return this.resolveRewrittenPermission(input, pluginDecision);
+      return this.resolveRewrittenPermission(input, pluginDecision, executionPlan);
     }
     return this.resolveApproval({
       input,
@@ -425,13 +492,19 @@ export class LocalTurnPermissionGate {
   private async resolveRewrittenPermission(
     input: BeforeToolCallInput,
     pluginDecision: PluginPermissionDecision,
+    previousPlan: Readonly<LocalTurnPermissionExecutionPlan> | undefined,
   ): Promise<{ readonly block: true; readonly reason: string } | undefined> {
     applyHookUpdatedInput(input.toolContext, pluginDecision.updatedInput);
     const request = readPermissionToolRequest(
       input.toolContext,
       this.options.executionPlans?.snapshotInput,
     );
-    const policyDecision = await checkPermissionDecision(this.options.decisions, input, request);
+    const policyDecision = await checkPermissionDecision(
+      this.options.decisions,
+      input,
+      request,
+      previousPlan?.nativeDelete,
+    );
     const executionPlan = readDecisionExecutionPlan(
       policyDecision,
       request.toolInput,
@@ -494,7 +567,9 @@ export class LocalTurnPermissionGate {
         approval_decision: approval,
         rewrite_applied: false,
       });
-      return permissionBlock(request.toolName, decision.reason, 'user');
+      return input.toolContext.parentToolCallId
+        ? userDeniedBlock(request.toolName, decision.reason)
+        : permissionBlock(request.toolName, decision.reason, 'user');
     }
     applyExecutionPlan(input.toolContext, executionPlan);
     this.logEnforcement(input, request, {
@@ -510,7 +585,7 @@ export class LocalTurnPermissionGate {
   }
 
   private logEnforcement(
-    input: { readonly sessionId: string; readonly turnId: string },
+    input: Parameters<typeof observePtcChildPermission>[1],
     request: PermissionToolRequest,
     fields: Readonly<Record<string, unknown>>,
   ): void {
@@ -524,6 +599,8 @@ export class LocalTurnPermissionGate {
       },
       'permission.enforcement',
     );
+    // Every final decision passes here; a run_code child also gets its PTC line.
+    observePtcChildPermission(this.options, input, request, fields);
   }
 
   private requestApproval(
@@ -557,8 +634,25 @@ export class LocalTurnPermissionGate {
       ...(decision.ruleMatchers ? { ruleMatchers: decision.ruleMatchers } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.channelContext ? { channelContext: input.channelContext } : {}),
+      ...ptcApprovalContext(input.toolContext),
     });
   }
+}
+
+function ptcApprovalContext(
+  context: BeforeToolCallContext,
+): Pick<
+  Parameters<LocalTurnPermissionApprovalOwner['request']>[0],
+  'parentToolCallId' | 'parentToolDescription'
+> {
+  if (!context.parentToolCallId) return {};
+  // A denied child fails only that call and the program keeps running, as a
+  // native denial does, so the ask no longer sets `stopPtcOnDeny` (it only
+  // relabelled the deny button as "deny and stop").
+  return {
+    parentToolCallId: context.parentToolCallId,
+    ...(context.parentDescription ? { parentToolDescription: context.parentDescription } : {}),
+  };
 }
 
 function preToolHookAllowsWithoutApproval(
@@ -585,6 +679,7 @@ async function checkPermissionDecision(
   source: LocalTurnPermissionDecisionSource,
   input: BeforeToolCallInput,
   request: PermissionToolRequest,
+  nativeDeleteSnapshot?: boolean,
 ): Promise<LocalTurnPermissionDecision> {
   return validatePermissionDecision(
     await source.check({
@@ -595,6 +690,10 @@ async function checkPermissionDecision(
       toolName: request.toolName,
       toolInput: request.toolInput,
       trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
+      ...(input.sessionOwnedReadablePaths
+        ? { sessionOwnedReadablePaths: [...input.sessionOwnedReadablePaths] }
+        : {}),
+      ...(nativeDeleteSnapshot !== undefined ? { nativeDeleteSnapshot } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.channelContext ? { channelContext: input.channelContext } : {}),
     }),
@@ -710,6 +809,13 @@ function permissionBlock(
         ? `Permission denied by user for ${toolName}: ${reason}`
         : `Permission denied for ${toolName}: ${reason}`,
   };
+}
+
+function userDeniedBlock(
+  toolName: string,
+  reason: string,
+): { readonly block: true; readonly reason: string; readonly approvalStatus: 'denied' } {
+  return { ...permissionBlock(toolName, reason, 'user'), approvalStatus: 'denied' };
 }
 
 async function requestApproval(
@@ -835,6 +941,7 @@ function applyExecutionPlan(
     }
   }
   Object.assign(target, plan.effectiveInput);
+  withPermissionExecutionPlan(target, plan);
   if (context.args !== target) Object.assign(context, { args: target });
 }
 

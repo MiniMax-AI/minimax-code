@@ -1,14 +1,19 @@
 import { getKeybindings, Markdown } from '../../engine/public.js';
 import type { ActiveTuiQuestionnaire } from '../../interaction/questionnaire.js';
 import type { Component } from '../../rendering/component.js';
-import { sanitizeTerminalText } from '../../rendering/terminal-text.js';
 import { truncateToWidth } from '../../rendering/text.js';
 import { renderTuiActionHint, tuiMarkdownTheme } from '../../theme/runtime.js';
 import { questionnaireFrameContentWidth, renderQuestionnaireFrame } from './decision-frame.js';
+import { renderPlanPathRows } from './plan-path.js';
+
+export interface TuiPlanViewerOptions {
+  readonly title?: string;
+  readonly footer?: () => string;
+}
 
 export class TuiPlanViewerPanel implements Component {
   private readonly markdown: Markdown;
-  private readonly path: string;
+  private readonly path: string | undefined;
   private viewportOffset = 0;
   private viewportRows = 0;
   private viewportLineCount = 0;
@@ -17,10 +22,11 @@ export class TuiPlanViewerPanel implements Component {
     state: ActiveTuiQuestionnaire,
     private readonly onClose: () => void,
     private readonly requestRender: () => void = () => undefined,
+    private readonly options: TuiPlanViewerOptions = {},
   ) {
     const planReview = state.request.modePayload?.planReview;
     this.markdown = new Markdown(planReview?.markdown ?? '', 0, 0, tuiMarkdownTheme);
-    this.path = sanitizeTerminalText(planReview?.path ?? '');
+    this.path = planReview?.path;
   }
 
   handleInput(data: string): void {
@@ -98,11 +104,13 @@ export class TuiPlanViewerPanel implements Component {
     const contentWidth = questionnaireFrameContentWidth(width);
     return renderQuestionnaireFrame(
       {
-        title: 'Latest Plan',
-        meta: this.path ? truncateToWidth(this.path, contentWidth) : undefined,
-        navigation: navigation.map(renderTuiActionHint),
+        title: this.options.title ?? 'Latest Plan',
+        navigation: [
+          ...renderPlanPathRows(this.path, contentWidth),
+          ...navigation.map(renderTuiActionHint),
+        ],
         body,
-        footer: 'Esc close',
+        footer: this.options.footer?.() ?? 'Esc close',
       },
       width,
       'signal',

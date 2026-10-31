@@ -1,6 +1,10 @@
 import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { redactTuiSensitiveText } from '../user-facing-failure.js';
+import type {
+  TuiClipboardImageDiagnostic,
+  TuiClipboardImageErrorCode,
+} from '../host/clipboard-image.js';
 
 export type TuiObservabilitySurface = 'tui' | 'headless' | 'acp' | 'inspection';
 export type TuiRuntimeAccessSource = 'process-local';
@@ -154,8 +158,32 @@ export interface TuiSideSessionFailureObservation {
   readonly error: unknown;
 }
 
+export interface TuiClipboardReadObservation {
+  readonly sessionId?: string;
+  readonly outcome: 'succeeded' | 'failed' | 'empty' | 'cancelled';
+  readonly durationMs: number;
+  readonly errorCode?: TuiClipboardImageErrorCode;
+  readonly diagnostic?: TuiClipboardImageDiagnostic;
+}
+
+/**
+ * What Esc decided about delegated agents, and why: the `conversation.stopSubAgent`
+ * value it read from config.yaml and where that value came from.
+ */
+export interface TuiStopPolicyObservation {
+  readonly sessionId: string;
+  readonly stopSubAgent: boolean;
+  /** Per key: `explicit`, `default`, or `read_failed` (default used, file unreadable). */
+  readonly policySource: Readonly<Record<'stopSubAgent' | 'stopAsyncBash', string>>;
+  readonly delegationStop: 'requested' | 'skipped_by_policy';
+  /** Fixed reason code when config.yaml could not be read; never its content. */
+  readonly readFailure?: string;
+}
+
 export interface TuiObservability {
+  recordClipboardRead?(observation: TuiClipboardReadObservation): void;
   recordSideSessionFailure?(observation: TuiSideSessionFailureObservation): void;
+  recordStopPolicy?(observation: TuiStopPolicyObservation): void;
   recordStartup(observation: TuiStartupObservation): void;
   recordAccess(observation: TuiRuntimeAccessObservation): void;
   recordEventStream(observation: TuiEventStreamObservation): void;
@@ -270,9 +298,17 @@ class LocalTuiObservability implements TuiObservability {
       .catch(() => undefined);
   }
 
+  recordClipboardRead(observation: TuiClipboardReadObservation): void {
+    this.record('clipboard.read', observation);
+  }
+
   recordSideSessionFailure(observation: TuiSideSessionFailureObservation): void {
     const { error, ...context } = observation;
     this.record('session.side.failed', { ...context, errors: describeSideSessionErrors(error) });
+  }
+
+  recordStopPolicy(observation: TuiStopPolicyObservation): void {
+    this.record('stop.policy', observation);
   }
 
   recordStartup(observation: TuiStartupObservation): void {

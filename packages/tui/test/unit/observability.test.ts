@@ -43,6 +43,13 @@ describe('Minimax Code observability', () => {
       retryDelayMs: 250,
       errorKind: 'Error',
     });
+    observability.recordClipboardRead?.({
+      sessionId: 'session-clipboard',
+      outcome: 'failed',
+      durationMs: 5_002,
+      errorCode: 'unavailable',
+      diagnostic: { stage: 'windows-clipboard', reason: 'timeout', signal: 'SIGTERM' },
+    });
     observability.recordProcessStop({
       source: 'terminal.write.sync',
       terminalDead: true,
@@ -112,6 +119,13 @@ describe('Minimax Code observability', () => {
         errorKind: 'Error',
       }),
       expect.objectContaining({
+        type: 'clipboard.read',
+        sessionId: 'session-clipboard',
+        outcome: 'failed',
+        durationMs: 5_002,
+        diagnostic: { stage: 'windows-clipboard', reason: 'timeout', signal: 'SIGTERM' },
+      }),
+      expect.objectContaining({
         type: 'process.stop',
         source: 'terminal.write.sync',
         terminalDead: true,
@@ -139,6 +153,47 @@ describe('Minimax Code observability', () => {
       },
       reconnects: 1,
     });
+  });
+
+  it('persists stop policy decisions as stop.policy events', async () => {
+    const writes: Array<{ path: string; content: string }> = [];
+    const observability = createTuiObservability('/data', {
+      surface: 'tui',
+      pid: 42,
+      startedAtMs: 900,
+      now: () => 1_000,
+      append: vi.fn(async (path: string, content: string) => {
+        writes.push({ path, content });
+      }),
+      ensureDirectory: vi.fn(async () => undefined),
+      prune: vi.fn(async () => undefined),
+    });
+
+    observability.recordStopPolicy?.({
+      sessionId: 'session-1',
+      stopSubAgent: false,
+      policySource: { stopSubAgent: 'read_failed', stopAsyncBash: 'read_failed' },
+      delegationStop: 'skipped_by_policy',
+      readFailure: 'yaml_error',
+    });
+    await observability.flush();
+
+    const events = writes
+      .flatMap((write) => write.content.trim().split('\n'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toEqual([
+      expect.objectContaining({
+        schemaVersion: 1,
+        observedAtMs: 1_000,
+        surface: 'tui',
+        type: 'stop.policy',
+        sessionId: 'session-1',
+        stopSubAgent: false,
+        policySource: { stopSubAgent: 'read_failed', stopAsyncBash: 'read_failed' },
+        delegationStop: 'skipped_by_policy',
+        readFailure: 'yaml_error',
+      }),
+    ]);
   });
 
   it('keeps bounded render latency aggregates and emits a final summary', async () => {

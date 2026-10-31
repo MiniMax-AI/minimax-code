@@ -57,6 +57,13 @@ const BUILTIN_TOOL_DEFINITIONS: readonly TranscriptToolDefinition[] = [
     failedAction: 'List failed',
   },
   {
+    names: ['run_code'],
+    runningAction: 'Running code',
+    completedAction: 'Ran code',
+    failedAction: 'Code failed',
+    previewLines: { running: 3, completed: 3, failed: 8 },
+  },
+  {
     names: ['memory'],
     runningAction: 'Updating memory',
     completedAction: 'Updated memory',

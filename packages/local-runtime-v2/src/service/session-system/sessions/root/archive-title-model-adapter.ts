@@ -48,12 +48,18 @@ export class ArchiveTitleModelAdapter<TAgentConfig, TModel> implements RootArchi
 
   async summarize(input: RootArchiveTitleModelInput): Promise<string | null> {
     const turnId = this.makeTurnId();
+    // 记下这次生成标题用的模型要不要审，标题出来后据此决定是否送审。
+    let contentReviewRequired: boolean | undefined;
     let raw: string;
     try {
       raw = await completeTitleModel(
         {
           buildAgentConfig: this.options.buildAgentConfig,
-          resolveModel: this.options.resolveModel,
+          resolveModel: async (resolveInput) => {
+            const resolved = await this.options.resolveModel(resolveInput);
+            contentReviewRequired = resolved.contentReviewRequired;
+            return resolved;
+          },
           stream: this.options.stream,
           nowMs: this.nowMs,
         },
@@ -65,6 +71,7 @@ export class ArchiveTitleModelAdapter<TAgentConfig, TModel> implements RootArchi
     }
     const title = raw ? parseArchiveTitleVerdict(raw) : null;
     if (!title) return null;
+    if (contentReviewRequired === false) return title;
     return this.reviewTitle(title);
   }
 

@@ -261,6 +261,22 @@ export interface TuiSessionForkPort {
   forkSession(input: ForkTuiSessionInput): Promise<TuiSessionForkResult>;
 }
 
+/**
+ * Programmatic Tool Calling as new Sessions see it. A Session keeps the mode it
+ * was created (or last compacted) with, so a change never rewrites a running one.
+ */
+export interface TuiPtcSetting {
+  /** Effective switch for this process: `beta.ptc`, the build default, or `--ptc`. */
+  readonly enabled: boolean;
+  /**
+   * What config.yaml (shared with Desktop) resolves to without `--ptc`: the
+   * value a switch shows and flips. Equals `enabled` when there is no override.
+   */
+  readonly saved: boolean;
+  /** `--ptc` keeps PTC on for this process whatever config.yaml says. */
+  readonly launchOverride: boolean;
+}
+
 export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   getRuntimeDiagnostics(): Promise<TuiRuntimeDiagnostics>;
   getInstructionSources(workspaceDir: string): Promise<readonly TuiInstructionSource[]>;
@@ -270,6 +286,20 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   ): Promise<TuiAccountStatus>;
   getPermissionMode(): Promise<TuiPermissionMode | undefined>;
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode>;
+  /** Effective next-message suggestion switch; undefined when the Runtime has none. */
+  getPromptSuggestionEnabled?(): Promise<boolean | undefined>;
+  /**
+   * Persists `promptSuggestion.enabled`; resolves the effective value, or
+   * undefined when the Runtime cannot persist it.
+   */
+  setPromptSuggestionEnabled?(enabled: boolean): Promise<boolean | undefined>;
+  /** Effective PTC switch for new Sessions; undefined when the Runtime has none. */
+  getPtcSetting?(): Promise<TuiPtcSetting | undefined>;
+  /**
+   * Persists `beta.ptc`; resolves the effective setting, or undefined when the
+   * Runtime cannot persist it.
+   */
+  setPtcEnabled?(enabled: boolean): Promise<TuiPtcSetting | undefined>;
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;
@@ -535,7 +565,6 @@ export interface TuiDelegatedAgent {
   agentName?: string;
   task?: string;
   status: TuiDelegatedAgentStatus;
-  backgroundTaskId?: string;
   createdAtMs?: number;
   updatedAtMs?: number;
   errorMessage?: string;
@@ -570,9 +599,18 @@ export type TuiBackgroundTaskStatus =
   | 'canceled'
   | 'lost';
 
+/**
+ * Runtime fact for a terminal Task's root notification: `pending` until a Turn takes it,
+ * `settled` once it is steered into or admitted as a Turn, read, or stopped by the user.
+ */
+export interface TuiBackgroundTaskNotification {
+  readonly state: 'pending' | 'settled';
+  readonly turnId?: string;
+}
+
 export interface TuiBackgroundTask {
   readonly taskId: string;
-  readonly kind: 'bash' | 'workflow' | 'custom';
+  readonly kind: 'bash' | 'subagent' | 'workflow' | 'custom';
   readonly status: TuiBackgroundTaskStatus;
   readonly ownerSessionId: string;
   readonly description?: string;
@@ -586,10 +624,25 @@ export interface TuiBackgroundTask {
   readonly lastError?: string;
   /** Bash still owned by its foreground tool call (not auto-promoted to the background). */
   readonly foreground?: true;
+  /** Sub-Agent Task only: the child Session that runs it. */
+  readonly childSessionId?: string;
+  /** Terminal Tasks only, when the Runtime reports it; absent means settled. */
+  readonly notification?: TuiBackgroundTaskNotification;
+}
+
+export interface TuiBackgroundTaskListOptions {
+  /**
+   * `[V]` machine status only: also list sub-Agent Tasks and ask the Runtime for each terminal
+   * Task's root notification. Without it the list holds bash/workflow/custom Tasks only.
+   */
+  readonly machineStatus?: boolean;
 }
 
 export interface TuiBackgroundTaskCapability {
-  listBackgroundTasks?(ownerSessionId: string): Promise<readonly TuiBackgroundTask[]>;
+  listBackgroundTasks?(
+    ownerSessionId: string,
+    options?: TuiBackgroundTaskListOptions,
+  ): Promise<readonly TuiBackgroundTask[]>;
 }
 
 export interface TuiActiveRunSnapshot {
@@ -600,6 +653,11 @@ export interface TuiActiveRunSnapshot {
   actions: {
     steer: boolean;
   };
+  /**
+   * Present only when another live MCode process owns the running Turn. This
+   * process can read the Session but cannot steer, queue, or stop that Turn.
+   */
+  runningElsewhere?: true;
   retryReason?: string;
 }
 

@@ -114,16 +114,15 @@ path:
    and `nextOffset`; do not restart inspection or guess a selector or coordinate.
 3. Call `click_and_wait_for_navigation` with that stable opaque `ref`.
 4. Call `inspect` once on the destination and verify that the login form is present.
-5. Treat email, phone number, password, verification code, CAPTCHA, security-key response, recovery
-   code, and every other authentication input as user-controlled. If the provider exposes a visible
-   same-tab takeover surface, make an actual `ask_user` tool call for takeover and end the turn. If
-   it is headless and has no takeover surface, stop and report that interactive login is required;
-   do not issue another Browser action.
+5. If the provider exposes a visible same-tab takeover surface, treat email, phone number, password,
+   verification code, CAPTCHA, security-key response, recovery code, and every other authentication
+   input as user-controlled: make an actual `ask_user` tool call for takeover and end the turn. If
+   it is headless and has no takeover surface, follow the headless sign-in paragraph below.
 
-If the requested workflow reaches a login or sign-in form, inspect only enough page state to explain
-what the user must do. Never read, request, generate, reveal, type, or fill an email address, phone
-number, password, verification code, CAPTCHA, security key response, recovery code, or another
-authentication input.
+If the requested workflow reaches a login or sign-in form on a provider with a visible takeover
+surface, inspect only enough page state to explain what the user must do. On such a provider, never
+read, request, generate, reveal, type, or fill an email address, phone number, password,
+verification code, CAPTCHA, security key response, recovery code, or another authentication input.
 
 When the provider exposes a visible interactive surface, use `ask_user` to pause the turn and ask
 the user to take over the existing FilePanel Browser for the authentication step. Keep the question
@@ -131,13 +130,21 @@ specific to the current site and explain that the same Browser tab and profile w
 not substitute Computer Use, shell credential reads, standalone Playwright, or a second browser. Do
 not click a final sign-in or authorization button on the user's behalf when it would submit
 credentials or grant account access. After the actual `ask_user` call reports that it is waiting,
-stop the turn immediately. A headless provider without a visible takeover surface must stop at the
-login boundary instead of asking the user to interact with a panel that does not exist.
+stop the turn immediately.
 
-After the user reports that they completed login, call `inspect` again on the same Browser session
+On headless Chrome there is no surface to take over, so complete the sign-in yourself: fill the
+credentials the user or task supplied, or an account the site's sign-in page publishes for that
+user or task, and submit. If required values are missing, request them with `ask_user` when that
+tool is available; otherwise report which site needs which value and continue the rest of the
+task. Never guess credentials or echo secret values in prose; report CAPTCHA and security-key
+challenges.
+
+After login completes, call `inspect` again on the same Browser session
 and verify a signed-in page marker before continuing. Do not inspect cookies, local storage, tokens,
 or profile files to prove authentication. If the page still shows login, ask the user to take over
-again or report the site-provided failure; never guess credentials or retry secrets.
+again when a visible surface exists; on headless Chrome, check the entered values against their
+source once, then request corrected values with `ask_user` when available or report the
+site-provided failure. Never guess credentials or retry the same rejected values.
 
 When Electron is the active provider, never tell the user that this tool cannot see the right-side
 Browser because it is a different browser instance. Do not switch to desktop screenshots merely to
@@ -170,7 +177,10 @@ the user refers to a page that is already or currently open in this Browser.
 When the active provider exposes `return_to_previous_tab`, use it to close the current headless tab
 and resume the page most recently preserved by `open_tab`. `back` and `forward` only traverse
 history inside the active tab and never return to a preserved tab. Do not call the return action
-when the provider does not expose it.
+when the provider does not expose it. Prefer `back` over re-`navigate` when returning to the
+previous page in the same tab and its state may not be reconstructable from its URL — form drafts,
+one-time or session-scoped results, post-redirect pages; re-navigating rebuilds the page and may
+replay server-side effects. After `back`, use `forward` to return instead of re-navigating.
 
 If the user says the page is already or currently open in the Browser, inspect that existing page
 first. Do not navigate or reload it merely because the request also mentions its URL or domain. Use
@@ -188,7 +198,7 @@ browser({ action: "inspect", input: {} })
 refs. Do not ask the user to provide the URL or a screenshot before trying `inspect`.
 
 `actionable` means Chromium identified the element as interactable. Before `click`, `double_click`,
-`hover`, `drag`, `check`, or `uncheck`, also require `pointerActionable: true`. A ref with
+`triple_click`, `hover`, `drag`, `check`, or `uncheck`, also require `pointerActionable: true`. A ref with
 `coordinateSpace: "unavailable"` is intentionally unsafe for pointer input; do not guess coordinates
 or fall back to a position. Non-pointer actions that accept the ref, such as ordinary `fill`/`type`,
 `select_option`, `paste`, or `upload_files`, may still operate through its DOM identity.
@@ -315,6 +325,25 @@ opaque refs for actions.
 Call one Browser action at a time and wait for its result before issuing the next action. Browser
 actions share page, snapshot, frame, and navigation state; never emit parallel Browser calls.
 
+When this turn exposes Browser only inside `run_code`, "one at a time" means awaiting each Browser
+call in order inside the program, not one model response per action. There, and only there,
+page-changing actions also accept a top-level `observe` next to `action` and `input`. After a
+successful action, the same call reads the page and returns it as `result.observation`:
+`{ kind: "inspect" }` gives fresh refs, `{ kind: "text", selector? }` gives visible text, and
+`waitForText` first waits for text you expect the action to produce (a search suggestion, a
+confirmation). It also runs when a click navigates (`UNEXPECTED_NAVIGATION`), so the observation is
+the new page. Prefer `observe` to a separate `inspect` or `query` after an action. The observation
+is evidence for your judgment; it does not turn `effect.verified: false` into a verified effect. Put
+one whole bounded step in a single program: fill the related fields, type a search term with
+`observe.waitForText`, click the matching option from that observation, and read the form back.
+Check `r.isError` after every call and return early; the host refuses the remaining Browser calls of
+a program after one fails (`BROWSER_PTC_STOPPED`). An irreversible or externally visible commit
+(submit, send, save, pay, delete, share) is the last Browser call of its program, made only after
+the program read back what it commits; give the commit `observe` so its result already shows the
+outcome. `safety.requiredNextTool` still means returning from the program and making that call
+directly. A turn that lists `browser` as a top-level tool has no `observe`; read the page there with
+`inspect` or `query`.
+
 1. `inspect` the current tab.
 2. Choose an opaque element ref or an action supported by the compact Browser schema.
 3. Call `browser` with the selected `action` and only that action's `input` fields.
@@ -327,7 +356,7 @@ compressed post-action visual automatically. Native `input` and `textarea` write
 because their structured value/effect verification is cheaper. The automatic image is supplemental
 evidence: it never changes the action's `success`, authorizes a sensitive action, or turns
 `effect.verified: false` into a runtime-verified postcondition. Do not call `screenshot` merely to
-repeat an attached visual that already answers the question. At most two automatic images are
+repeat an attached visual that already answers the question. At most four automatic images are
 attached in one turn; use explicit `screenshot` only when later visual evidence is actually needed.
 
 If an inspected icon control has no meaningful name and exposes only a numeric counter such as a
@@ -373,16 +402,20 @@ the workspace, local files, test metadata, or unrelated tools to reinterpret the
 mismatch; report the visible choices and ask the user directly.
 
 Navigation and interaction actions return short status metadata and may include one bounded
-post-action visual; they do not return a fresh structured page snapshot. Call `inspect` or `query`
-explicitly when page details are needed after an action. Do not expect `browserState`, ElementMap
-indices, or local map paths in compact action results.
+post-action visual; without `observe` (available only inside `run_code`) they do not return a fresh
+structured page snapshot. Call `inspect` or `query` explicitly when page details are needed after an
+action and no observation answers it. Do not expect `browserState`, ElementMap indices, or local map
+paths in compact action results.
 
 An ordinary `click` result means the input was dispatched, but the requested page effect is not
 verified. Its `effect.verified` remains `false` and `verificationRequired` remains `true`. Use
 `inspect`, `query`, or `screenshot` and observe the expected panel, control, text, or state before
-claiming that the click achieved the user's goal. `UNEXPECTED_NAVIGATION` means an ordinary in-page
-click changed the document or URL; inspect the current page before deciding whether to go back or
-retry with a newly observed target. An attached `visualObservation` can establish a visible UI
+claiming that the click achieved the user's goal; inside `run_code`, `observe` on the click returns
+that evidence in the same call. When an ordinary click navigates the page, the result reports
+`navigation.detected: true`; every earlier ref is invalid, so inspect the new page (or use the refs
+of an `observe` read of it) before the next interaction. A provider that treats that navigation as
+unexpected reports `UNEXPECTED_NAVIGATION`; read the current page before deciding whether to go back
+or retry with a newly observed target. An attached `visualObservation` can establish a visible UI
 effect, but it does not rewrite the structured click effect or navigation status.
 
 When clicking a link or control is expected to navigate the main document, use the atomic action:
@@ -404,8 +437,8 @@ and other in-page buttons default to plain `click`; use the atomic navigation ac
 inspected link or a control whose page state explicitly indicates main-document navigation.
 
 Compact Browser actions never accept ElementMap `index` or editable-query ordinals. Use the opaque
-`ref` returned by the latest `inspect` or `query`. For `click`, `double_click`, `hover`, and drag
-endpoints, `ref` or `selector` means the center of that DOM element. Use `position: { x, y }` only
+`ref` returned by the latest `inspect` or `query`. For `click`, `double_click`, `triple_click`,
+`hover`, and drag endpoints, `ref` or `selector` means the center of that DOM element. Use `position: { x, y }` only
 for a precise non-DOM target such as a canvas square, map point, or drawing surface; its values are
 absolute CSS pixels in the main Frame's current viewport. An inspected element `rect`, when present,
 uses that same coordinate space and is equivalent to its main-Frame `getBoundingClientRect()`.
@@ -417,14 +450,20 @@ stable element or absolute position is available.
 
 Do not combine `ref` or `selector` with `position` or `normalized_position`, and do not combine
 `position` with `normalized_position`; ambiguous targets fail validation instead of silently
-choosing one. `fill` and `type` may use `ref`, `selector`, or `normalized_position` as allowed by
-their schemas; prefer the latest opaque ref. `paste` and `upload_files` require an opaque ref from
+choosing one. Every element action (`click`, `double_click`, `triple_click`, `hover`, `fill`,
+`type`, `check`, `uncheck`, `select_option`) accepts the same locator family: `ref`, `selector`,
+`position`, or `normalized_position`; prefer the latest opaque ref. `scroll` takes the same locator
+fields directly inside `input` together with `direction` and `distance`; only `drag` nests its two
+endpoints as `source` and `target`, so never wrap a scroll or other single-target locator in a
+`target` object. With a coordinate locator,
+`fill`/`type` click the point and type into the focused field, and `check`/`uncheck`/
+`select_option` act on the checkbox, radio, or select under the point (a point on its label also
+resolves to the control). Use `triple_click` to select a whole line or field of text. `paste` and `upload_files` require an opaque ref from
 the latest inspect/query. Compact `paste` is available only when the active provider advertises it
 and requires explicit non-empty plain text:
 `browser({ action: "paste", input: { ref: "<opaque-ref>", text: "<plain-text>" } })`. Do not omit
 `text` to read ambient OS clipboard contents, and do not pass legacy `html` or `waitMs` fields. The
-TUI headless provider keeps clipboard state isolated to the logical Browser session. `check`,
-`uncheck`, and `select_option` do not accept coordinates. `fill` always clears before entering text,
+TUI headless provider keeps clipboard state isolated to the logical Browser session. `fill` always clears before entering text,
 so do not pass a `clear` field to `fill`; use `type` with `clear: true` only when per-key typing
 behavior is required.
 
@@ -454,6 +493,68 @@ read, stat, `test`, `ls`, or another filesystem tool; call `upload_files` direct
    returned recovery guidance; do not fall back to shell, standalone Playwright, AppleScript, or
    Computer Use.
 
+## Scripted Input With run_script
+
+Use `run_script` only when the active provider advertises it and single-step actions cannot
+express the check: holding keys (game movement), modifier plus mouse combinations, timed or repeated
+input, or a loop that reads page state before choosing where to act. Ordinary forms, links and
+one-off key presses stay on the single-step actions.
+
+The input is an async function body, either inline `code` or a saved active-workspace `.js` `path`
+(exactly one), with an optional `timeout` (1000-120000 ms, default 30000). The script body runs in an
+isolated worker with no Node.js APIs, filesystem, network or `require`; `page.evaluate` runs inside
+the page with that page's full capabilities, including `fetch` with its cookies. In scope:
+
+- `page.keyboard.down/up/press/type` and `page.mouse.move/down/up/click/wheel`: real input to the
+  page. Keys accept `KeyW`, `ArrowUp`, `Shift`, `Enter` style names; clicks made while a modifier is
+  held carry that modifier. Coordinates are main-Frame viewport CSS pixels. The pointer position
+  does not carry over between actions: call `page.mouse.move` or `page.mouse.click` before
+  `mouse.down`/`mouse.up`/`mouse.wheel` in every script.
+- `page.waitForTimeout(ms)`, `page.waitForFunction(fn, arg, { timeout, polling })`.
+- `page.evaluate(fn, arg)`: page JavaScript returning a JSON value.
+- `page.screenshot({ label })`, `page.consoleMessages({ levels })`, `page.url()`, `page.title()`,
+  `page.viewportSize()`.
+- `assert.ok/equal/notEqual/deepEqual/fail` and `console.log`.
+
+Example:
+
+```js
+await page.keyboard.down('Shift');
+await page.keyboard.down('KeyD');
+for (let i = 0; i < 7; i += 1) {
+  await page.waitForTimeout(140);
+  await page.mouse.click(520, 330);
+}
+await page.keyboard.up('KeyD');
+await page.keyboard.up('Shift');
+const state = await page.evaluate(() => window.__game.previewMismatches);
+assert.equal(state, 0, 'preview and click disagreed');
+await page.screenshot({ label: 'after-clicks' });
+return { mismatches: state };
+```
+
+Evidence rules:
+
+- Drive the behavior under test with `page.keyboard` and `page.mouse`. Use `page.evaluate` to read
+  state or arrange a precondition, never to perform the action being verified. The result lists every
+  `page.evaluate` call site in `pageEvaluate`; report a conclusion as input-verified only when the
+  asserted behavior came from real input.
+- Every key and mouse button still held when the script returns, throws, times out or is cancelled is
+  released automatically and listed in `input.autoReleased`. Treat a non-empty list as a script bug
+  to fix, not as a verified release.
+- A failure returns `code`, `error.message` and `error.location` (script line and column) plus one
+  failure screenshot. Fix the script or the page and rerun; do not retry an unchanged script.
+- Refs from earlier `inspect` calls are invalid after `run_script`; inspect again before a ref
+  action.
+- Keep `page.evaluate` short and synchronous where possible. An async `page.evaluate` interrupted by
+  a timeout or cancellation can still finish in the page later; when `pageEvaluate.interrupted` is
+  present, reload or re-inspect the page before trusting its state.
+- `assert.deepEqual` compares JSON data only; convert a Set, Map or Date first (for example
+  `[...set].sort()`, `date.getTime()`).
+- Save scripts that should be rerun after code changes under the workspace and call them by `path`.
+- Headless rendering may be software rendering. Do not report frame rate or GPU performance from a
+  script as real-hardware performance.
+
 ## Screenshot Visibility Boundary
 
 A Browser `screenshot` result is model-visible inspection evidence and is not shown to the user by
@@ -472,7 +573,10 @@ Element and frame refs are snapshot-scoped. After navigation, reload, or a stale
 
 ## Safety And Recovery
 
-- Arbitrary JavaScript execution is unavailable and must not be simulated through another tool.
+- Arbitrary JavaScript execution is unavailable outside `run_script`: when the active provider
+  exposes `run_script`, page JavaScript runs only through its `page.evaluate` under the evidence
+  rules above; otherwise it is unavailable entirely. Never simulate JavaScript execution through
+  another tool.
 - Do not inspect cookies, local storage, passwords, profiles, or authentication secrets.
 - A passive read request must not trigger interaction. An explicitly requested read-only search may
   fill its filters and activate a clearly non-mutating search control, but must not submit, save,

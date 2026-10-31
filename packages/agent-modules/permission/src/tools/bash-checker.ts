@@ -25,7 +25,8 @@ import path from 'node:path';
 import type { ToolPermissionChecker, ToolCheckResult } from '../engine.js';
 import type { ToolPermissionContext } from '../context.js';
 import type { PermissionDecision, CandidateScope, CandidateScopeGroup } from '../types.js';
-import { withWindowsTrashExecution } from '../windows-trash-execution.js';
+import { isNonRecursiveWindowsRm, withWindowsTrashExecution } from '../windows-trash-execution.js';
+import { resolvePermissionPath } from '../path-resolver.js';
 import { logger, backgroundCtx } from '../host-utils.js';
 import { isKnownSafeCommand } from './safe-command.js';
 import { parseScriptPlainCommands } from './bash-ast.js';
@@ -34,9 +35,10 @@ import {
   checkBashPermission,
   evaluateBashStatic,
   splitCommand,
-  parseRmTargetsWithMetadata,
+  parseRmCommand,
   buildTrashCommand,
   resolveHomeInTarget,
+  resolveRmCommandPaths,
 } from './bash-permission.js';
 import type { BashCheckContext } from './bash-context.js';
 import { findHeredocBodyRanges, type HeredocBodyRange } from './bash-split.js';
@@ -48,7 +50,20 @@ import {
 } from './path-capability.js';
 import { pureReadFirstWord } from './bash-fast-allow.js';
 
+import {
+  rewritePosixRm,
+  readPosixTrashExecution,
+  withPosixTrashExecution,
+} from './rm-shell-rewrite.js';
+
 const ENV_VAR_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function parseSingleTopLevelCommand(command: string): string[] | undefined {
+  const commands = parseScriptPlainCommands(command);
+  // splitCommand also recognizes newline separators, which the plain argv
+  // parser treats as whitespace.
+  return commands?.length === 1 && splitCommand(command).length === 1 ? commands[0] : undefined;
+}
 
 // Pure producers: positional args are literal data, never file reads. A `$VAR`
 // in their args is data, not a path, so the dynamic-operand bail below must NOT
@@ -634,6 +649,7 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
       (r) => r.ruleValue.toolName === 'write' && r.ruleBehavior === 'allow',
     );
     const bashCtx: BashCheckContext = {
+      nativeDelete: context.nativeDelete,
       platform: context.platform,
       shellFamily: context.shellFamily,
       sessionId: context.sessionId,
@@ -679,6 +695,26 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
       behavior: rewriteEvidence.verdict === 'undecided' ? 'allow' : rewriteEvidence.verdict,
       reason: rewriteEvidence.reason,
     };
+
+    // Native-delete evidence belongs to a subcommand. Its host-owned argv
+    // replaces the entire input, so enforce the single-command boundary before
+    // either rewrite path can discard surrounding control flow (including rm aliases).
+    if (
+      context.platform === 'win32' &&
+      rewriteEvidence.reason.type === 'subcommandResults' &&
+      [...rewriteEvidence.reason.reasons.values()].some(
+        (result) => result.reason.type === 'recoverableDeleteRewrite',
+      ) &&
+      !parseSingleTopLevelCommand(command)
+    ) {
+      return {
+        behavior: 'deny',
+        reason: {
+          type: 'safetyCheck',
+          description: 'Recoverable Windows deletion requires a single plain top-level command.',
+        },
+      };
+    }
 
     // Surface path-capability ASK/allow and the local-script fast-allow ONLY
     // when the static analysis did not already produce a terminal deny.
@@ -769,7 +805,15 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
           rewriteEvidenceDecision,
           context,
         );
-        if (earlyRmRewrite) pendingAsk.rewrittenInput = earlyRmRewrite;
+        if (earlyRmRewrite) {
+          pendingAsk.rewrittenInput = earlyRmRewrite;
+          if (
+            readPosixTrashExecution(earlyRmRewrite)?.dynamic &&
+            !context.sandboxEnabled &&
+            context.mode !== 'bypassPermissions'
+          )
+            pendingAsk.skipAutoClassifier = true;
+        }
         return pendingAsk;
       }
 
@@ -882,6 +926,23 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     );
     if (rewrittenInput) {
       result.rewrittenInput = rewrittenInput;
+      // Static path rules cannot authorize values that only exist at execution
+      // time. Full permission mode is explicit authorization; otherwise require
+      // an active sandbox or user approval, without an LLM guessing the path.
+      if (
+        readPosixTrashExecution(rewrittenInput)?.dynamic &&
+        !context.sandboxEnabled &&
+        context.mode !== 'bypassPermissions'
+      ) {
+        result.skipAutoClassifier = true;
+        if (result.behavior === 'allow') {
+          result.behavior = 'ask';
+          result.reason = {
+            type: 'safetyCheck',
+            description: 'Dynamic rm paths require an enabled sandbox or explicit approval.',
+          };
+        }
+      }
     }
 
     return result;
@@ -899,7 +960,12 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     decision: PermissionDecision,
     context: ToolPermissionContext,
   ): Record<string, unknown> | undefined {
-    if (decision.reason.type !== 'subcommandResults') return undefined;
+    if (
+      context.nativeDelete ||
+      decision.behavior === 'deny' ||
+      decision.reason.type !== 'subcommandResults'
+    )
+      return undefined;
 
     const originalCommand =
       typeof originalInput.command === 'string' ? originalInput.command : undefined;
@@ -908,8 +974,23 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     const { dataDir } = context;
     if (!dataDir) return undefined;
 
+    const singleWindowsRm =
+      context.platform === 'win32' && parseSingleTopLevelCommand(originalCommand)?.[0] === 'rm';
     for (const [subcmd, result] of decision.reason.reasons) {
-      if (result.reason.type !== 'recoverableDeleteRewrite') continue;
+      // The legacy rm rewrite uses the same host-owned argv contract as native
+      // Windows deletes. Only a single plain top-level rm can replace the whole
+      // command; wrappers, redirects and compound commands keep their own flow.
+      const rmPaths =
+        singleWindowsRm &&
+        (result.reason.type === 'rmRewrite' || result.reason.type === 'recoverableDeleteRewrite')
+          ? resolveRmCommandPaths(subcmd, context, context.shellFamily)
+          : undefined;
+      const rawTargets = rmPaths
+        ? rmPaths.map((target) => target.raw)
+        : result.reason.type === 'recoverableDeleteRewrite'
+          ? result.reason.targets
+          : undefined;
+      if (!rawTargets?.length) continue;
       if (
         context.platform !== 'win32' &&
         context.platform !== 'darwin' &&
@@ -918,7 +999,24 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         return undefined;
       }
 
-      const rawTargets = result.reason.targets;
+      // The marker and execution plan must describe the same normalized targets.
+      const resolvedTargets = rmPaths
+        ? rmPaths.map((target) => target.resolved ?? target.raw)
+        : rawTargets.map(
+            (target) =>
+              resolvePermissionPath(target, context, context.shellFamily).resolved ?? target,
+          );
+      const hasOutsideWorkspaceFile =
+        context.platform === 'win32' &&
+        !!context.workingDirectory &&
+        isNonRecursiveWindowsRm(originalCommand) &&
+        resolvedTargets.some((target) => {
+          if (!/^[A-Za-z]:[\\/]/.test(target)) return false;
+          const relative = path.win32.relative(context.workingDirectory, target);
+          return (
+            relative === '..' || relative.startsWith('..\\') || path.win32.isAbsolute(relative)
+          );
+        });
       const rewrittenCommand = 'mavis-trash --';
       const executionKind = context.platform === 'win32' ? 'windows-trash' : 'host-trash';
       logger.info(
@@ -928,7 +1026,7 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
             {
               subcmd,
               rawTargets,
-              resolvedTargets: rawTargets,
+              resolvedTargets,
               rewrittenSubcmd: rewrittenCommand,
             },
           ],
@@ -944,8 +1042,20 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
       // plan's target-set check remains the hard consistency backstop.
       return withWindowsTrashExecution(
         { ...originalInput, command: rewrittenCommand, run_in_background: false },
-        rawTargets,
+        resolvedTargets,
+        hasOutsideWorkspaceFile ? { allowOutsideWorkspaceFiles: true } : {},
       );
+    }
+
+    if (context.platform === 'darwin' || context.platform === 'linux') {
+      const launcher = path.join(dataDir, 'bin', 'mavis-trash');
+      const rewritten = rewritePosixRm(originalCommand, launcher);
+      if (rewritten) {
+        return withPosixTrashExecution(
+          { ...originalInput, command: rewritten.command },
+          { launcher, dynamic: rewritten.dynamic },
+        );
+      }
     }
 
     let hasRmRewrite = false;
@@ -973,7 +1083,8 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
           context.platform === 'win32'
             ? path.win32.join(dataDir, 'bin', 'mavis-trash.cmd')
             : path.join(dataDir, 'bin', 'mavis-trash');
-        const rawTargetsWithMeta = parseRmTargetsWithMetadata(subcmd);
+        const parsedRm = parseRmCommand(subcmd, context.platform);
+        const rawTargetsWithMeta = parsedRm.targets;
         // Only HOME-expand unquoted targets; single/double-quoted or
         // backslash-escaped targets stay literal (matches bash semantics —
         // `rm '~/x'` and `rm \~/x` name a literal `~/x` in cwd, not the
@@ -983,7 +1094,10 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         const resolvedTargets = rawTargetsWithMeta.map((t) =>
           t.quoted ? t.value : resolveHomeInTarget(t.value),
         );
-        const rewrittenSubcmd = buildTrashCommand(trashBin, rawTargetsWithMeta);
+        const rewrittenSubcmd = [
+          buildTrashCommand(trashBin, rawTargetsWithMeta, parsedRm.force),
+          ...parsedRm.redirects,
+        ].join(' ');
         rewrittenParts.set(subcmd, rewrittenSubcmd);
         rewriteAudit.push({ subcmd, rawTargets, resolvedTargets, rewrittenSubcmd });
       }

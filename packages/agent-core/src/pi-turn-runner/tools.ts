@@ -14,7 +14,8 @@ import {
 } from '@earendil-works/pi-coding-agent/tools';
 import { createBashEnvSpawnHook, resolveBashEnvPolicy } from '../bash-subprocess-env.js';
 import type { TSchema } from '@sinclair/typebox';
-import type { RuntimeTool, ToolExecutionContext } from '../tools/index.js';
+import { isTurnTerminatingToolResultDetails } from '../tools/turn-termination.js';
+import type { RuntimeTool, ToolExecutionContext, ToolResult } from '../tools/index.js';
 import type { RuntimeToolSource } from '../tools/types.js';
 import type { turnState } from './turn.js';
 
@@ -39,7 +40,7 @@ export function newTools<TCtx extends ToolExecutionContext>(
       throw new Error(`PiTurnRunner: duplicate tool name '${b.def.name}'`);
     }
     seen.add(b.def.name);
-    out.push(newTool(b, ctx, options.readAssistantMessageId));
+    out.push(newRuntimeTool(b, ctx, options.readAssistantMessageId));
   }
   if (!options.disableBuiltinFallback) {
     if (!seen.has('read')) out.push(withFallbackExecutionMode(createReadTool(cwd), 'parallel'));
@@ -74,6 +75,15 @@ export function setToolHooks(agent: Agent, turn: turnState): void {
       .map((tool) => [tool.name, readRuntimeToolSource(tool)] as const)
       .filter((entry): entry is readonly [string, RuntimeToolSource] => entry[1] !== undefined),
   );
+  for (const tool of turn.input.toolConfig.ptcTools ?? []) {
+    if (tool.source === undefined) continue;
+    const existing = sourceByToolName.get(tool.def.name);
+    if (existing !== undefined && existing !== tool.source) {
+      throw new Error(`PiTurnRunner: conflicting source for PTC tool '${tool.def.name}'`);
+    }
+    if (existing !== undefined) continue;
+    sourceByToolName.set(tool.def.name, tool.source);
+  }
 
   if (turn.hooks.beforeTool.length > 0) {
     agent.beforeToolCall = async (toolContext, signal) => {
@@ -103,6 +113,7 @@ export function setToolHooks(agent: Agent, turn: turnState): void {
 
   agent.afterToolCall = async (toolContext, signal) => {
     let merged = toolResultErrorPatch(toolContext);
+    const mustTerminatePtcOuter = isPtcOuterTermination(turn, toolContext);
     let currentContext = attachRuntimeToolSource(
       merged ? applyToolResult(toolContext, merged) : toolContext,
       sourceByToolName,
@@ -112,6 +123,9 @@ export function setToolHooks(agent: Agent, turn: turnState): void {
       if (!patch) continue;
       merged = mergeToolResult(merged, patch);
       currentContext = applyToolResult(currentContext, patch);
+    }
+    if (mustTerminatePtcOuter) {
+      merged = mergeToolResult(merged, { terminateAgent: true });
     }
     return merged;
   };
@@ -124,10 +138,24 @@ function withFallbackExecutionMode(
   return { ...tool, executionMode: tool.executionMode ?? executionMode };
 }
 
-function newTool<TCtx extends ToolExecutionContext>(
+/**
+ * Sees a tool's own return value or thrown error before Pi hooks run. Only the
+ * PTC executor installs one: it needs the `programmatic` payload, which this
+ * adapter deliberately never copies into Pi's content/details (so it can never
+ * reach model history or persisted details), and the original content to tell
+ * the tool's result apart from a hook rewrite.
+ */
+export interface RuntimeToolResultObserver {
+  onResult(result: ToolResult): void;
+  onError(error: unknown): void;
+}
+
+/** Build one Pi tool wrapper around a runtime tool and its per-call context. */
+export function newRuntimeTool<TCtx extends ToolExecutionContext>(
   b: RuntimeTool<TSchema, TCtx>,
   ctx: TCtx,
   readAssistantMessageId?: () => string | undefined,
+  observer?: RuntimeToolResultObserver,
 ): AgentTool {
   const tool: SourcedAgentTool = {
     name: b.def.name,
@@ -154,7 +182,17 @@ function newTool<TCtx extends ToolExecutionContext>(
         toolCallId,
         ...(assistantMessageId ? { assistantMessageId } : {}),
       } as TCtx;
-      const result = await b.impl.execute(callCtx, input, signal, onUpdate);
+      let result: ToolResult;
+      try {
+        result = await b.impl.execute(callCtx, input, signal, onUpdate);
+      } catch (error) {
+        // Pi keeps only the message of a thrown error; PTC may still need the
+        // raw protocol error attached to it. The error propagates unchanged.
+        observer?.onError(error);
+        throw error;
+      }
+      observer?.onResult(result);
+      // `programmatic` is intentionally dropped here: model calls never carry it.
       return {
         content: result.content as AgentToolResult<Record<string, unknown>>['content'],
         details: toolResultDetails(result.details, result.isError),
@@ -163,6 +201,16 @@ function newTool<TCtx extends ToolExecutionContext>(
     },
   };
   return tool;
+}
+
+/**
+ * Whether Pi will treat this tool result as failed. Mirrors
+ * `toolResultErrorPatch` on the details this adapter produces, so the PTC
+ * executor can tell the tool's own error state from one a hook changed.
+ */
+export function runtimeToolResultIsError(result: ToolResult): boolean {
+  const details = toolResultDetails(result.details, result.isError);
+  return details.is_error === true || details.ok === false;
 }
 
 function readRuntimeToolSource(tool: AgentTool): RuntimeToolSource | undefined {
@@ -197,6 +245,11 @@ function mergeToolResult(
     ...(patch.content !== undefined ? { content: patch.content } : {}),
     ...(patch.details !== undefined ? { details: patch.details } : {}),
     ...(patch.isError !== undefined ? { isError: patch.isError } : {}),
+    ...(patch.isError !== undefined
+      ? {
+          isErrorOrigin: patch.isError ? (patch.isErrorOrigin ?? 'hook') : undefined,
+        }
+      : {}),
     ...(patch.terminate !== undefined ? { terminate: patch.terminate } : {}),
     ...(patch.terminateAgent !== undefined ? { terminateAgent: patch.terminateAgent } : {}),
   };
@@ -224,8 +277,23 @@ function toolResultErrorPatch(context: AfterToolCallContext): AfterToolCallResul
     return undefined;
   }
   return context.result.details.is_error === true || context.result.details.ok === false
-    ? { isError: true }
+    ? { isError: true, isErrorOrigin: 'tool' }
     : undefined;
+}
+
+function isPtcOuterTermination(turn: turnState, context: AfterToolCallContext): boolean {
+  if (
+    context.toolCall.name !== 'run_code' ||
+    turn.input.toolConfig.ptcTools === undefined ||
+    !isTurnTerminatingToolResultDetails(context.result.details)
+  ) {
+    return false;
+  }
+  return (
+    turn.input.toolConfig.tools?.some(
+      (tool) => tool.def.name === 'run_code' && tool.source === 'builtin',
+    ) === true
+  );
 }
 
 function toolResultDetails(

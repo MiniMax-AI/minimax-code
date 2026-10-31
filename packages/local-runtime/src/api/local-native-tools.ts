@@ -22,6 +22,7 @@ import {
 } from "@mavis/agent-tools/desktop";
 import { MatrixWebSearchToolDef } from "@mavis/agent-tools";
 import {
+  getConfig,
   resolveAgentCapabilities,
   type AgentBuiltinMcpToolId,
   type AgentBuiltinSkillId,
@@ -63,6 +64,7 @@ export type {
 
 export function buildLocalNativeRuntimeTools(input: {
   dataDir?: string;
+  configGetter?: LocalTurnToolSourcesInput['configGetter'];
   workspaceRoot: string;
   agentName: string;
   excludeAgentResources?: boolean;
@@ -73,6 +75,13 @@ export function buildLocalNativeRuntimeTools(input: {
   bashAdapter?: LocalBashAdapter;
   sandboxOperationsFactory?: LocalSandboxBashOperationsFactory;
   authContext?: LocalRuntimeAuthContext;
+  /** Live host auth read per request; preferred over the `authContext` snapshot. */
+  authContextGetter?: () => LocalRuntimeAuthContext | undefined;
+  /** Host recovery for a rejected managed access token; enables one retry after a 401. */
+  authContextInvalidator?: (
+    rejectedAccessToken?: string,
+    loginEpoch?: string,
+  ) => void | Promise<void>;
   routingContextGetter?: () => LocalRuntimeRoutingContext | undefined;
   fetchImpl?: typeof fetch;
   webFetchAdapter?: LocalWebFetchAdapter;
@@ -194,7 +203,13 @@ export function buildLocalNativeRuntimeTools(input: {
       bashAdapter: input.bashAdapter,
       sandboxOperationsFactory: input.sandboxOperationsFactory,
       hostTrashRuntime: buildLocalHostTrashRuntime(input),
-      bashEnvPolicy: resolveAgentBashEnvPolicy(input.dataDir),
+      bashEnvPolicy: (plan) =>
+        resolveAgentBashEnvPolicy(
+          input.dataDir,
+          process.platform,
+          plan?.nativeDelete ??
+            (input.configGetter ?? getConfig)().permission?.nativeDelete === true,
+        ),
       webFetchAdapter,
       webSearchAdapter,
       taskAdapter: input.taskAdapter,
@@ -277,6 +292,7 @@ export async function buildLocalTurnToolSources(
     input.enableTaskTool !== false && builtinCapabilities.features.delegation;
   const nativeTools = buildLocalNativeRuntimeTools({
     dataDir: input.dataDir,
+    configGetter: input.configGetter,
     workspaceRoot: input.workspaceRoot,
     agentName: input.agentName,
     ...(input.excludeAgentResources ? { excludeAgentResources: true } : {}),

@@ -4,7 +4,10 @@ import { describe, expect, it } from 'vitest';
 import { LocalModelResolver } from '../../../model-system/resolution/local-model-resolver.js';
 import { modelRefForModel } from '../../../model-system/resolution/model-ref.js';
 import type { LocalModelConfig } from '../../../model-system/contracts.js';
-import { buildLocalRequestPayloadTransform } from './local-turn-payload-transform.js';
+import {
+  buildLocalRequestPayloadTransform,
+  buildPromptSuggestionPayloadTransform,
+} from './local-turn-payload-transform.js';
 
 // Mirrors the bundled MiniMax catalog entries that matter for thinking.
 const M31_FLASH = {
@@ -138,5 +141,66 @@ describe('API-key MiniMax thinking effort', () => {
     });
     expect(body.thinking).toEqual({ type: 'adaptive' });
     expect(body).not.toHaveProperty('output_config');
+  });
+});
+
+describe('prompt suggestion thinking policy', () => {
+  // The suggestion follows whatever thinking the user selected for the main
+  // Turn: same transform, only the main Turn's output contract is dropped.
+  const messagesApiModel = { api: 'anthropic-messages' } as never;
+  const input = (thinkingLevel: 'off' | 'high', thinkingMode: number, effort?: string) => ({
+    agentConfig: {
+      model: {
+        thinking_level: thinkingLevel,
+        ...(effort ? { thinking_effort: effort } : {}),
+        capabilities: { thinking_mode: thinkingMode },
+      },
+    },
+    llm: {
+      model: messagesApiModel,
+      managedProvider: true,
+      thinkingLevel,
+    },
+    sessionId: 'suggestion',
+    signal: new AbortController().signal,
+  });
+
+  it.each([
+    ['switchable model, thinking on with effort', 'high', 1, 'high'],
+    ['switchable model, thinking off', 'off', 1, undefined],
+    ['forced-on model with the user effort', 'high', 2, 'low'],
+  ] as const)(
+    'produces the same thinking payload as the main request: %s',
+    async (_label, level, mode, effort) => {
+      const main = buildLocalRequestPayloadTransform(input(level, mode, effort) as never, {});
+      const suggestion = buildPromptSuggestionPayloadTransform(
+        input(level, mode, effort) as never,
+        {},
+      );
+      const mainPayload: Record<string, unknown> = { messages: [], thinking: { type: 'disabled' } };
+      const suggestionPayload: Record<string, unknown> = {
+        messages: [],
+        thinking: { type: 'disabled' },
+      };
+
+      await main(mainPayload, messagesApiModel);
+      await suggestion(suggestionPayload, messagesApiModel);
+
+      expect(suggestionPayload).toEqual(mainPayload);
+    },
+  );
+
+  it('drops the main Turn output contract', async () => {
+    const contracted = { ...input('off', 1), outputContract: { type: 'json_object' } };
+    const main = buildLocalRequestPayloadTransform(contracted as never, {});
+    const suggestion = buildPromptSuggestionPayloadTransform(contracted as never, {});
+    // This Provider API cannot enforce json_object, so the main request refuses;
+    // the suggestion never carries the contract and is unaffected.
+    await expect(main({ messages: [] }, messagesApiModel)).rejects.toMatchObject({
+      code: 'MODEL_CAPABILITY_UNAVAILABLE',
+    });
+    const payload: Record<string, unknown> = { messages: [] };
+    await suggestion(payload, messagesApiModel);
+    expect(payload).not.toHaveProperty('response_format');
   });
 });

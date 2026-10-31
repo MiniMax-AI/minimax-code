@@ -39,6 +39,7 @@ import {
   configurePermissionHost,
   AUTO_CLASSIFIER_TIMEOUT_MS_DEFAULT,
   type PermissionHostUtils,
+  type ShellFamily,
 } from '@mavis/permission';
 import type { AgentMessageProtocol } from '@mavis/agent-core/protocol/agent-message';
 import type { RuntimeConversation } from '@mavis/conversation-contract';
@@ -84,6 +85,8 @@ export function isLocalAgentResolverError(
 }
 
 export interface LocalPermissionServiceDeps {
+  /** Explicit host startup policy; never read from permission request input. */
+  skipWindowsHardSafetyChecks?: boolean;
   configGetter: () => LocalRuntimeConfig;
   authContextGetter?: () => LocalRuntimeAuthContext | undefined;
   ruleStore: LocalPermissionRuleStore;
@@ -92,7 +95,7 @@ export interface LocalPermissionServiceDeps {
   messageStore?: LocalPermissionMessageSource;
   configUpdater: (body: Record<string, unknown>) => Promise<unknown>;
   /** Explicit shell family from the host executor; never inferred from command text. */
-  shellFamily?: 'cmd' | 'powershell';
+  shellFamily?: ShellFamily;
   metricsClient?: MetricsClient;
 }
 
@@ -174,6 +177,7 @@ export function createLocalPermissionService(
     getLocalAgent: deps.getLocalAgent,
     messageStore: deps.messageStore,
     shellFamily: deps.shellFamily,
+    skipWindowsHardSafetyChecks: deps.skipWindowsHardSafetyChecks,
     metricsClient: deps.metricsClient,
   });
   // Fire-and-forget: when the persisted permissionMode is `acceptEdits`, seed
@@ -257,6 +261,7 @@ function resolveBuildEnv(_deps: LocalPermissionServiceDeps): MavisBuildEnv {
 }
 
 export interface LocalPermissionHostHandle {
+  skipWindowsHardSafetyChecks?: boolean;
   configGetter: () => LocalRuntimeConfig;
   authContextGetter?: () => LocalRuntimeAuthContext | undefined;
   permissionRules: LocalPermissionRuleStore;
@@ -267,7 +272,7 @@ export interface LocalPermissionHostHandle {
   runtimeConversation?: Pick<RuntimeConversation, 'query'>;
   messageStore?: LocalPermissionMessageSource;
   configUpdater: (body: Record<string, unknown>) => Promise<unknown>;
-  shellFamily?: 'cmd' | 'powershell';
+  shellFamily?: ShellFamily;
   metricsClient?: MetricsClient;
 }
 
@@ -287,6 +292,7 @@ export function resolveLocalPermissionService(
       messageStore: resolvePermissionMessageSource(host),
       configUpdater: (body) => host.configUpdater(body),
       shellFamily: host.shellFamily,
+      skipWindowsHardSafetyChecks: host.skipWindowsHardSafetyChecks,
       metricsClient: host.metricsClient,
     });
     _serviceCache.set(host.permissionRules, service);

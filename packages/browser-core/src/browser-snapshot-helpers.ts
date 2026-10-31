@@ -38,6 +38,18 @@ const MAX_EXPOSED_ATTRIBUTE_KEY_LENGTH = 120;
 const MAX_EXPOSED_ATTRIBUTE_VALUE_LENGTH = 300;
 const MAX_EXPOSED_PARENT_REGIONS = 16;
 
+/**
+ * The scanner falls back to `[data-backend-node-id="N"]` as an internal handle;
+ * no such attribute exists in the page DOM, so exposing it invites selectors
+ * that can never match (eval 784094: 85 results carried it, the model reused it
+ * twice and both missed). Real selectors such as `input[name="q"]` stay.
+ */
+const SYNTHETIC_SELECTOR_PATTERN = /data-backend-node-id/i;
+
+export function isSyntheticSelector(selector: string): boolean {
+  return SYNTHETIC_SELECTOR_PATTERN.test(selector);
+}
+
 export function exposeElement(
   element: ElementRecord,
   viewport: { width: number; height: number },
@@ -51,7 +63,7 @@ export function exposeElement(
     tag: element.tag.slice(0, MAX_EXPOSED_TAG_LENGTH),
     role: element.role.slice(0, MAX_EXPOSED_ROLE_LENGTH),
     type: element.type.slice(0, MAX_EXPOSED_TYPE_LENGTH),
-    ...(element.selector
+    ...(element.selector && !isSyntheticSelector(element.selector)
       ? { selector: element.selector.slice(0, MAX_EXPOSED_SELECTOR_LENGTH) }
       : {}),
     text: element.text.slice(0, MAX_EXPOSED_TEXT_LENGTH),

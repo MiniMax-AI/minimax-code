@@ -11,6 +11,7 @@ import type {
   TurnAdmissionCandidate,
   TurnAdmissionPolicy,
   TurnAdmissionRejectionReason,
+  TurnClientRequestBinding,
   TurnIngressReceipt,
   TurnSessionAdmissionCapability,
 } from '../admission-contracts.js';
@@ -68,6 +69,8 @@ export interface AdmitTurnInput extends TurnAdmissionCandidate {
   /** Admission consumes durable QueuePaused without changing Turn foreground semantics. */
   readonly consumeQueuePause?: true;
   readonly clientRequestId?: string;
+  /** Per-item receipt ids bound to this Turn with `clientRequestId`; existing ids are kept. */
+  readonly receiptAliases?: readonly string[];
   readonly queueIngress?: QueueIngressIdentity;
   /** Internal Edit admission only; never accepted from a public Turn request. */
   readonly bypassPriorityFence?: true;
@@ -148,9 +151,15 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
     readonly terminalFacts: readonly TurnRecoveryTerminalFact[];
   }>;
   findReceipt(turnId: string): Promise<TurnIngressReceipt | undefined>;
-  findActiveTurn(
-    sessionId: string,
-  ): Promise<{ readonly turnId: string; readonly busyReason: TurnBusyReason } | undefined>;
+  findActiveTurn(sessionId: string): Promise<
+    | {
+        readonly turnId: string;
+        readonly busyReason: TurnBusyReason;
+        /** Present only when another live Runtime owns the Session lock. */
+        readonly ownedByOtherRuntime?: true;
+      }
+    | undefined
+  >;
   /** Latest durable Turn clock used to reject stale process-local idle decisions. */
   findLatestTurnActivity(sessionId: string): Promise<
     | {
@@ -203,13 +212,20 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
     readonly sessionId: string;
     readonly clientRequestId: string;
     readonly turnId: string;
+    /** Per-item receipt ids bound in the same write; existing ids are kept. */
+    readonly receiptAliases?: readonly string[];
   }): Promise<ReserveSteeringReceiptResult>;
   /** Only used after a synchronous controller result proves no push happened. */
   releaseSteeringReceipt(input: {
     readonly sessionId: string;
     readonly clientRequestId: string;
     readonly turnId: string;
+    readonly receiptAliases?: readonly string[];
   }): Promise<void>;
+  findClientRequestBindings(input: {
+    readonly sessionId: string;
+    readonly clientRequestIds: readonly string[];
+  }): Promise<readonly TurnClientRequestBinding[]>;
   /** Revokes a pre-controller activation whose admission hook rejected synchronously. */
   revokeAdmission(input: {
     readonly sessionId: string;

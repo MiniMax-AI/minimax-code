@@ -8,6 +8,7 @@ import {
   SESSION_STATUSES,
   SESSION_VISIBILITIES,
   type AppMode,
+  type SessionToolCallMode,
   type SessionDataOrigin,
   type SessionOrigin,
   type SessionInteractionMode,
@@ -25,6 +26,7 @@ export type SessionStorageRow = typeof sessions.$inferSelect;
 export interface SessionExtraData {
   readonly runLocation?: SessionRunLocation;
   readonly appMode?: AppMode;
+  readonly toolCallMode?: SessionToolCallMode;
   readonly interactionMode?: SessionInteractionMode;
   readonly memoryPolicy?: SessionMemoryPolicy;
   readonly errorSource?: string;
@@ -148,6 +150,7 @@ export function sessionExtraDataFromRecord(record: SessionRecord): SessionExtraD
   return compactExtraData({
     runLocation: record.runLocation,
     appMode: record.sessionType === 'branch' ? record.appMode : undefined,
+    toolCallMode: record.toolCallMode,
     interactionMode: record.interactionMode,
     memoryPolicy: record.memoryPolicy,
     errorSource: record.errorSource,
@@ -223,7 +226,16 @@ export function parseSessionExtraData(raw: string): SessionExtraData {
       ['local-runtime', 'legacy-opencode', 'unknown'],
       'extra_data_json',
     ),
+    toolCallMode: readToolCallMode(record.toolCallMode),
   });
+}
+
+/**
+ * Lenient: a value this build does not know (written by a newer client) reads as absent,
+ * i.e. `native`, instead of making the whole Session undecodable.
+ */
+function readToolCallMode(value: unknown): SessionToolCallMode | undefined {
+  return value === 'native' || value === 'ptc' ? value : undefined;
 }
 
 function validateExtraData(data: SessionExtraData): void {

@@ -14,6 +14,22 @@ import { DESKTOP_BASH_MAX_BYTES } from '../../src/desktop/output-limit.js';
 import { readPluginHookCompatibleToolResponse } from '../../src/plugin-hooks/vendor-tool-response.js';
 import type { LocalRuntimeToolContext } from '../../src/desktop/types.js';
 
+// LocalBashTool builds the Pi bash tool per invocation; tests swap its execute.
+const piBashExecute = vi.hoisted(() => ({
+  override: undefined as undefined | ((...args: unknown[]) => Promise<unknown>),
+}));
+vi.mock('@earendil-works/pi-coding-agent/tools', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent/tools')>();
+  return {
+    ...actual,
+    createBashTool: (...args: Parameters<typeof actual.createBashTool>) => {
+      const tool = actual.createBashTool(...args);
+      const override = piBashExecute.override;
+      return override ? { ...tool, execute: override } : tool;
+    },
+  };
+});
+
 const SESSION_CTX = {
   sessionId: 'sess-test',
   turnId: 'turn-test',
@@ -26,6 +42,7 @@ describe('LocalBashTool — foreground output truncation', () => {
     workspace = await mkdtemp(join(tmpdir(), 'bash-output-'));
   });
   afterEach(async () => {
+    piBashExecute.override = undefined;
     await rm(workspace, { recursive: true, force: true });
   });
 
@@ -83,13 +100,12 @@ describe('LocalBashTool — foreground output truncation', () => {
 
   it('caps a thrown timeout result while preserving the error ToolResult status', async () => {
     const tool = new LocalBashTool(workspace, undefined, { mode: 'off' });
-    const innerExecute = vi
-      .spyOn((tool as unknown as { tool: { execute: unknown } }).tool, 'execute')
-      .mockRejectedValue(
-        new Error(
-          `${'timeout-output\n'.repeat(2_000)}\n\nCommand timed out after 1 seconds`,
-        ),
+    const innerExecute = vi.fn(async () => {
+      throw new Error(
+        `${'timeout-output\n'.repeat(2_000)}\n\nCommand timed out after 1 seconds`,
       );
+    });
+    piBashExecute.override = innerExecute;
 
     const result = await tool.execute(SESSION_CTX, { command: 'ignored', timeout: 1 });
 
@@ -115,12 +131,10 @@ describe('LocalBashTool — foreground output truncation', () => {
   it('still propagates an active AbortSignal instead of converting cancellation to a tool result', async () => {
     const tool = new LocalBashTool(workspace, undefined, { mode: 'off' });
     const controller = new AbortController();
-    vi.spyOn((tool as unknown as { tool: { execute: unknown } }).tool, 'execute').mockImplementation(
-      async () => {
-        controller.abort();
-        throw new Error('Command aborted');
-      },
-    );
+    piBashExecute.override = async () => {
+      controller.abort();
+      throw new Error('Command aborted');
+    };
 
     await expect(
       tool.execute(SESSION_CTX, { command: 'ignored' }, controller.signal),

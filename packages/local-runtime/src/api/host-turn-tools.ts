@@ -49,6 +49,20 @@ export type BuildOwnerTurnToolSourcesInput = {
 export type OwnerTurnToolSources = LocalTurnToolSources;
 
 /**
+ * Passes the host getter itself, not its result: the host swaps in a new auth
+ * object on every token refresh, so a Turn that outlives one access token must
+ * read it per request instead of the Turn-start snapshot in `authContext`.
+ */
+function liveAuthSources(host: LocalRuntimeApiHost) {
+  return {
+    ...(host.authContextGetter ? { authContextGetter: host.authContextGetter } : {}),
+    ...(host.authContextInvalidator
+      ? { authContextInvalidator: host.authContextInvalidator }
+      : {}),
+  };
+}
+
+/**
  * Exposes only raw v1 product-domain tool sources to the hosted v2 runtime.
  * Final model gates, MCP disclosure and catalog ordering stay in AgentRuntime.
  */
@@ -68,6 +82,7 @@ export async function buildLocalTurnToolSourcesForHost(
   return buildLocalTurnToolSources({
     toolsDisabled: input.toolsDisabled,
     dataDir: runtimeConfig.dataDir,
+    configGetter: input.host.configGetter,
     workspaceRoot: input.session.workspaceDir,
     agentName: input.resourceAgentName,
     ...(input.excludeAgentResources ? { excludeAgentResources: true } : {}),
@@ -77,6 +92,7 @@ export async function buildLocalTurnToolSourcesForHost(
     ...(input.skipAgentResolution ? { skipAgentResolution: true } : {}),
     sessionId: input.session.sessionId,
     authContext: input.host.authContextGetter?.(),
+    ...liveAuthSources(input.host),
     routingContextGetter: input.host.routingContextGetter,
     fetchImpl: input.host.fetchImpl,
     nativeWebSearchEnabled: ['electron', 'tui', 'cli'].includes(input.host.getRuntimeOwnerKind()),
