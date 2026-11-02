@@ -19,9 +19,9 @@ const READ_ONLY_CANONICAL_BLOCKED_TOOL_NAMES = new Set([
   'request_feature_enable',
 ]);
 
-/** Computer-use tools share the desktop_* namespace across native and MCP paths. */
+/** Computer-use tools share the computer_* namespace across native and MCP paths. */
 export function isComputerUseRuntimeToolName(name: string): boolean {
-  return name.startsWith('desktop_');
+  return name.startsWith('computer_');
 }
 
 /**

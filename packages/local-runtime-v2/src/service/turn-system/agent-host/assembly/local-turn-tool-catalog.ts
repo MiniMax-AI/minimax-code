@@ -805,7 +805,7 @@ function isReadyTurnToolAllowed(input: {
   readonly profile: LocalTurnAgentProfileFacts | undefined;
 }): boolean {
   if (input.excludedNames.has(input.tool.def.name)) return false;
-  if (!isDesktopToolAvailable(input.tool, input.cuRuntimeAvailable)) return false;
+  if (!isComputerToolAvailable(input.tool, input.cuRuntimeAvailable)) return false;
   if (
     !input.selector.allowsTool(input.tool.def.name, input.options.selectorAlias, {
       featureOwned: isFeatureOwnedBuiltinTool(input.profile, input.tool.def.name, input.source),
@@ -844,8 +844,8 @@ function isFeatureOwnedBuiltinTool(
   );
 }
 
-function isDesktopToolAvailable(tool: RuntimeTool, cuRuntimeAvailable: boolean): boolean {
-  return cuRuntimeAvailable || !tool.def.name.startsWith('desktop_');
+function isComputerToolAvailable(tool: RuntimeTool, cuRuntimeAvailable: boolean): boolean {
+  return cuRuntimeAvailable || !tool.def.name.startsWith('computer_');
 }
 
 /** `mcpServers` applies to MCP tools only; without a server it fails closed. */
