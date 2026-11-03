@@ -2,7 +2,8 @@
 
 Python SDK for driving the local [MiniMax Code](https://agent.minimax.io) agent (`mcode`).
 
-It mirrors the TypeScript SDK [`@minimax-ai/code-sdk`](../code-sdk): every Turn runs
+It mirrors the TypeScript SDK
+[`@minimax-ai/code-sdk`](https://github.com/MiniMax-AI/minimax-code/tree/main/packages/code-sdk): every Turn runs
 `mcode exec --output-format=stream-json` and continues the Session with `--session`.
 
 ## Requirements
@@ -100,6 +101,11 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 
 End-to-end tests against a real CLI and model are opt-in:
 `MCODE_SDK_E2E=1 MCODE_BIN=/path/to/mcode uv run pytest -m e2e`.
+
+Release notes are in
+[CHANGELOG.md](https://github.com/MiniMax-AI/minimax-code/blob/main/packages/code-sdk-python/CHANGELOG.md);
+maintainers publish with
+[RELEASING.md](https://github.com/MiniMax-AI/minimax-code/blob/main/packages/code-sdk-python/RELEASING.md).
 
 ## License
 
