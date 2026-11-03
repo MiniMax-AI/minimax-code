@@ -20,6 +20,7 @@ export function formatTuiExecFailure(error: TuiExecError): string {
   }
   if (error.kind === 'runtime') {
     if (isOutputLimitExhaustedFailure(error.message)) return OUTPUT_LIMIT_EXHAUSTED_GUIDANCE;
+    if (!error.retryable) return asSentence(`The run failed: ${tuiErrorDiagnostic(error)}`);
     return `The run failed: ${tuiErrorDiagnostic(error)}. Retry after the connection recovers.`;
   }
   return `MCode encountered an internal error: ${tuiErrorDiagnostic(error)}. Retry; if it keeps happening, report it through an available support channel.`;
@@ -43,5 +44,10 @@ export function formatTuiExecResultFailure(result: ExecResult): string {
   }
   if (isOutputLimitExhaustedFailure(result.error?.message)) return OUTPUT_LIMIT_EXHAUSTED_GUIDANCE;
   const reason = result.error?.message ? `: ${tuiErrorDiagnostic(result.error.message)}` : '';
+  if (result.error?.retryable === false) return asSentence(`The run failed${reason}`);
   return `The run failed${reason}. Retry after the connection recovers.`;
+}
+
+function asSentence(value: string): string {
+  return /[.!?…]$/u.test(value) ? value : `${value}.`;
 }

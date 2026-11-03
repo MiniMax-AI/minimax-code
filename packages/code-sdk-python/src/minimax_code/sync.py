@@ -48,6 +48,8 @@ class SyncMCode:
         return SyncThread(self._loop, self._client.start_thread(options))
 
     def resume_thread(self, thread_id: str, options: ThreadOptions | None = None) -> SyncThread:
+        """Continues an existing Session; pass the ``cwd`` it was created with (see
+        ``MCode.resume_thread``)."""
         return SyncThread(self._loop, self._client.resume_thread(thread_id, options))
 
     def close(self) -> None:

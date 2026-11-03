@@ -33,7 +33,12 @@ class MCode:
         return Thread(self._host, options, None)
 
     def resume_thread(self, thread_id: str, options: ThreadOptions | None = None) -> Thread:
-        """Continues an existing Session, for example one persisted from ``thread.id``."""
+        """Continues an existing Session, for example one persisted from ``thread.id``.
+
+        Pass the same ``ThreadOptions.cwd`` the Session was created with. When ``cwd`` is omitted
+        the current working directory is used, and the CLI rejects a Session whose workspace
+        differs (``MCodeRunError`` with "belongs to workspace ...").
+        """
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise MCodeInvocationError("resume_thread requires a non-empty Session id.")
         options = options or ThreadOptions()
