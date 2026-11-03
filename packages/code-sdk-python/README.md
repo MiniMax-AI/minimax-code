@@ -71,15 +71,20 @@ async for event in streamed:
         print("failed:", event.get("error"))
 ```
 
-Events are the CLI's stream-json events, passed through unchanged (unknown types included).
-`turn.failed` is an ordinary event; iteration raises only for process or protocol failures.
+Events are the CLI's stream-json events, passed through unchanged (unknown types included),
+with one exception: an `item.updated` snapshot (no `contentDelta`) identical to the previous
+snapshot of the same item is skipped. Text deltas are never skipped. `turn.failed` is an ordinary
+event; iteration raises only for process or protocol failures.
 
 ### Cancellation
 
 - `streamed.cancel()` sends SIGINT; the stream ends with the CLI's final events.
-- Leaving the `async for` early, or cancelling the task running `thread.run()`, stops the CLI
-  (SIGINT, then SIGKILL after a grace period).
-- `RunOptions(timeout_ms=...)` is enforced by the CLI.
+- Leaving the `async for` early (`break` or an exception in the loop body), or cancelling the
+  task running `thread.run()`, stops the CLI (SIGINT, then SIGKILL after a grace period). The
+  next Turn on the same Thread waits for that shutdown instead of raising `ThreadBusyError`;
+  `async with streamed:` or `await streamed.aclose()` stops it deterministically.
+- `RunOptions(timeout_ms=...)` is enforced by the CLI. If the CLI is still running 30 seconds
+  after `timeout_ms`, the SDK kills it and raises `MCodeRunError` with `status="timeout"`.
 
 ### Blocking API
 
@@ -93,11 +98,14 @@ with SyncMCode() as client:
         print(event["type"])
 ```
 
+The blocking API runs its own event loop, so it cannot be used where a loop is already running,
+such as a Jupyter notebook or an `async def` function. Use the async API with `await` there.
+
 ## Options
 
 | Object | Fields |
 | --- | --- |
-| `MCodeOptions` | `bin`, `data_dir` (`MINIMAX_DATA_DIR`), `env` (replaces `os.environ`), `config_path` |
+| `MCodeOptions` | `bin`, `data_dir` (`MINIMAX_DATA_DIR`), `env` (replaces `os.environ`; values hidden in `repr()`), `config_path` |
 | `ThreadOptions` | `cwd`, `model` (`provider/model`), `effort`, `permission` (`smart`/`full`/`off`), `mode`, `prompt_mode`, `system_prompt`, `append_system_prompt` |
 | `RunOptions` | `files`, `timeout_ms`, `max_steps` |
 
@@ -106,6 +114,7 @@ with SyncMCode() as client:
 All errors subclass `MCodeError` (with `exit_code`, `stderr`, `session_id`, `result`, `items`):
 `MCodeNotFoundError`, `MCodeVersionError`, `MCodeInvocationError`, `MCodeRunError`
 (`status`, `category`), `MCodeAbortError`, `MCodeProtocolError`, `ThreadBusyError`.
+Errors can be pickled, for example to return them from a `ProcessPoolExecutor` worker.
 
 ## Limitations
 

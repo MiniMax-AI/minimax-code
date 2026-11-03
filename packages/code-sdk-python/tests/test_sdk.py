@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from minimax_code import (
     AgentMessageItem,
     MCode,
     MCodeAbortError,
+    MCodeError,
     MCodeInvocationError,
     MCodeNotFoundError,
     MCodeOptions,
@@ -170,6 +172,84 @@ async def test_break_releases_thread(fake_env: dict[str, str]) -> None:
             break
     fake_env["FAKE_MCODE_SCENARIO"] = "ok"
     assert (await thread.run("again")).final_response == "Hello: again"
+
+
+async def test_break_without_aclose_stops_cli_and_frees_thread(fake_env: dict[str, str]) -> None:
+    fake_env["FAKE_MCODE_SCENARIO"] = "slow"
+    thread = MCode(MCodeOptions(env=fake_env)).start_thread()
+    streamed = await thread.run_streamed("x")
+    async for _event in streamed:
+        break  # no async with, no aclose(): the SDK must still stop the CLI
+    fake_env["FAKE_MCODE_SCENARIO"] = "ok"
+    # The next Turn waits for the abandoned one instead of raising ThreadBusyError.
+    assert (await thread.run("again")).final_response == "Hello: again"
+    with pytest.raises(StopAsyncIteration):
+        await streamed.events.__anext__()  # the abandoned stream was closed
+
+
+async def test_exception_in_loop_body_stops_cli_and_frees_thread(fake_env: dict[str, str]) -> None:
+    fake_env["FAKE_MCODE_SCENARIO"] = "slow"
+    thread = MCode(MCodeOptions(env=fake_env)).start_thread()
+    streamed = await thread.run_streamed("x")
+    with pytest.raises(RuntimeError, match="user code failed"):
+        async for _event in streamed:
+            raise RuntimeError("user code failed")
+    fake_env["FAKE_MCODE_SCENARIO"] = "ok"
+    assert (await thread.run("again")).final_response == "Hello: again"
+
+
+async def test_timeout_backstop_raises_timeout_error(
+    fake_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("minimax_code.thread.BACKSTOP_EXTRA_S", 0.3)
+    fake_env["FAKE_MCODE_SCENARIO"] = "hang"
+    thread = MCode(MCodeOptions(env=fake_env)).start_thread()
+    with pytest.raises(MCodeRunError, match="exceeded timeout_ms") as info:
+        await thread.run("x", RunOptions(timeout_ms=100))
+    assert info.value.status == "timeout"
+    assert info.value.exit_code is not None and info.value.exit_code < 0
+
+
+@pytest.mark.parametrize(
+    ("scenario", "error", "text"),
+    [
+        ("no_duration", MCodeProtocolError, "durationMs"),
+        ("error_no_message", MCodeRunError, "status failed"),
+    ],
+)
+async def test_incomplete_results_raise_sdk_errors(
+    fake_env: dict[str, str], scenario: str, error: type[MCodeError], text: str
+) -> None:
+    fake_env["FAKE_MCODE_SCENARIO"] = scenario
+    with pytest.raises(error, match=text):
+        await MCode(MCodeOptions(env=fake_env)).start_thread().run("x")
+
+
+def test_errors_survive_pickling() -> None:
+    run = MCodeRunError(
+        "run failed", status="failed", category="runtime", exit_code=4, session_id="s1"
+    )
+    clone = pickle.loads(pickle.dumps(run))
+    assert type(clone) is MCodeRunError and str(clone) == "run failed"
+    assert (clone.status, clone.category, clone.exit_code, clone.session_id) == (
+        "failed",
+        "runtime",
+        4,
+        "s1",
+    )
+    busy = pickle.loads(pickle.dumps(ThreadBusyError("s1")))
+    assert type(busy) is ThreadBusyError
+    assert str(busy) == "Thread s1 already has a Turn in progress."
+    abort = pickle.loads(pickle.dumps(MCodeAbortError("stopped", stderr="tail")))
+    assert type(abort) is MCodeAbortError and abort.stderr == "tail"
+
+
+def test_options_repr_hides_env_values() -> None:
+    options = MCodeOptions(bin="/bin/mcode", env={"MINIMAX_API_KEY": "sk-SECRET-123"})
+    text = repr(options)
+    assert "sk-SECRET-123" not in text
+    assert "MINIMAX_API_KEY" in text and "/bin/mcode" in text
+    assert "None" in repr(MCodeOptions())
 
 
 async def test_busy_thread(fake_env: dict[str, str]) -> None:
