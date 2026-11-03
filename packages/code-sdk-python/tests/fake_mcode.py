@@ -93,6 +93,21 @@ if scenario == "slow":
     emit("exec.completed", result=result("cancelled"))
     sys.exit(130)
 
+if scenario == "hang":  # ignores SIGINT and never finishes: only SIGKILL stops it
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    time.sleep(60)
+    sys.exit(0)
+
+if scenario == "no_duration":
+    bad = result("succeeded", output="ok")
+    del bad["durationMs"]
+    emit("exec.completed", result=bad)
+    sys.exit(0)
+
+if scenario == "error_no_message":
+    emit("exec.completed", result=result("failed", error={"category": "runtime"}))
+    sys.exit(4)
+
 if scenario == "failed":
     err = {"category": "runtime", "message": "model unavailable"}
     emit("turn.failed", status="failed", error=err, durationMs=5)

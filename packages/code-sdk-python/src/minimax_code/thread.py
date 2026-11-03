@@ -53,9 +53,44 @@ class ThreadHost:
         self.prepare_cli = prepare_cli
 
 
+# Strong references to background cleanups of abandoned Turns, so they are not garbage collected.
+_BACKGROUND_CLOSES: set[asyncio.Task[None]] = set()
+
+
+class _TurnIterator:
+    """What ``async for`` iterates. Python never calls ``aclose()`` on an iterator left by
+    ``break`` or by an exception in the loop body (PEP 525), so the Turn is closed in the
+    background as soon as this iterator is dropped without being exhausted."""
+
+    def __init__(self, turn: StreamedTurn) -> None:
+        self._turn = turn
+        self._done = False
+
+    def __aiter__(self) -> _TurnIterator:
+        return self
+
+    async def __anext__(self) -> ThreadEvent:
+        if self._done:
+            raise StopAsyncIteration
+        try:
+            return await self._turn.events.__anext__()
+        except BaseException:
+            # End of stream or a failure: the event generator has already cleaned up.
+            self._done = True
+            raise
+
+    def __del__(self) -> None:
+        if not self._done:
+            self._done = True
+            # Never raise from a finalizer, for example during interpreter shutdown.
+            with contextlib.suppress(Exception):
+                self._turn._close_in_background()
+
+
 class StreamedTurn:
     """Events of one running Turn. Iterate with ``async for``; leaving the loop early (``break``,
-    an exception, or task cancellation) cancels the Turn and waits for the CLI to exit."""
+    an exception, or task cancellation) cancels the Turn and stops the CLI (SIGINT, then SIGKILL
+    after a grace period). The next Turn on the same Thread waits for that shutdown to finish."""
 
     def __init__(
         self,
@@ -66,9 +101,41 @@ class StreamedTurn:
         self.events = events
         self._cancel = cancel
         self._finalize = finalize
+        self._loop = asyncio.get_running_loop()
+        self._closing: asyncio.Task[None] | None = None
 
     def __aiter__(self) -> AsyncIterator[ThreadEvent]:
-        return self.events
+        return _TurnIterator(self)
+
+    def _start_close(self) -> asyncio.Task[None]:
+        """Starts closing the Turn once; every caller shares the same task. Must run on the loop."""
+        if self._closing is None:
+            task = self._loop.create_task(self._close())
+            self._closing = task
+            _BACKGROUND_CLOSES.add(task)
+            task.add_done_callback(_BACKGROUND_CLOSES.discard)
+        return self._closing
+
+    def _close_in_background(self) -> None:
+        """Starts closing the Turn without waiting. Safe to call from ``__del__``."""
+        if self._closing is not None or self._loop.is_closed():
+            return
+        try:
+            running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        try:
+            if running is self._loop:
+                self._start_close()
+            else:
+                self._loop.call_soon_threadsafe(self._close_in_background)
+        except RuntimeError:  # The loop closed meanwhile; nothing is left to clean up from here.
+            pass
+
+    async def _wait_closing(self) -> None:
+        """Waits for a close that is already in progress, if any."""
+        if self._closing is not None:
+            await asyncio.shield(self._closing)
 
     def cancel(self) -> None:
         """Asks the CLI to stop (SIGINT). The stream then ends with the CLI's final events."""
@@ -76,6 +143,9 @@ class StreamedTurn:
 
     async def aclose(self) -> None:
         """Stops the Turn if it is still running and releases the Thread."""
+        await asyncio.shield(self._start_close())
+
+    async def _close(self) -> None:
         aclose = getattr(self.events, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -102,12 +172,21 @@ class _Exec:
         self.stderr_tail = ""
         self._stderr_task = asyncio.ensure_future(self._drain_stderr())
         self._interrupted = False
+        #: Set when the ``timeout_ms`` backstop had to kill the CLI.
+        self.backstop_fired = False
 
     async def _drain_stderr(self) -> None:
         assert self.proc.stderr is not None
         while chunk := await self.proc.stderr.read(65536):
             text = self.stderr_tail + chunk.decode("utf-8", "replace")
             self.stderr_tail = text[-STDERR_TAIL_BYTES:]
+
+    def kill_for_timeout(self) -> None:
+        """The ``timeout_ms`` backstop: the CLI did not stop on its own, so kill it."""
+        if self.proc.returncode is None:
+            self.backstop_fired = True
+            with contextlib.suppress(ProcessLookupError):
+                self.proc.kill()
 
     def interrupt(self) -> None:
         if self.proc.returncode is not None or self._interrupted:
@@ -145,6 +224,7 @@ class Thread:
         self._options = options
         self._session_id = thread_id
         self._busy = False
+        self._current: StreamedTurn | None = None
 
     @property
     def id(self) -> str | None:
@@ -168,6 +248,16 @@ class Thread:
             raise error_for_result(
                 result, items, exit_code=state.get("exit_code"), stderr=state.get("stderr", "")
             )
+        duration_ms = result.get("durationMs")
+        if not isinstance(duration_ms, int) or isinstance(duration_ms, bool):
+            raise MCodeProtocolError(
+                "mcode exec.completed result has no valid durationMs.",
+                exit_code=state.get("exit_code"),
+                stderr=state.get("stderr", ""),
+                session_id=result["sessionId"],
+                result=result,
+                items=items,
+            )
         output = result.get("output")
         final = output if isinstance(output, str) else "" if output is None else json.dumps(output)
         return Turn(
@@ -175,7 +265,7 @@ class Thread:
             items=items,
             session_id=result["sessionId"],
             turn_id=result["turnId"],
-            duration_ms=result["durationMs"],
+            duration_ms=duration_ms,
             result=result,
             usage=result.get("usage"),
             model=result.get("model"),
@@ -187,6 +277,9 @@ class Thread:
         return await self._start(input, options or RunOptions(), {})
 
     async def _start(self, input: str, options: RunOptions, state: dict[str, Any]) -> StreamedTurn:
+        if self._busy and self._current is not None:
+            # The previous Turn's loop was left early; let its CLI finish shutting down first.
+            await self._current._wait_closing()
         if self._busy:
             raise ThreadBusyError(self._session_id)
         if not isinstance(input, str):
@@ -247,7 +340,9 @@ class Thread:
             await _quiet_shutdown(child)
             release()
 
-        return StreamedTurn(events, child.interrupt, finalize)
+        streamed = StreamedTurn(events, child.interrupt, finalize)
+        self._current = streamed
+        return streamed
 
     async def _events(
         self,
@@ -263,7 +358,7 @@ class Thread:
         backstop: asyncio.TimerHandle | None = None
         if options.timeout_ms is not None:
             delay = options.timeout_ms / 1000 + BACKSTOP_EXTRA_S
-            backstop = asyncio.get_running_loop().call_later(delay, _kill, child.proc)
+            backstop = asyncio.get_running_loop().call_later(delay, child.kill_for_timeout)
         try:
             assert child.proc.stdin is not None and child.proc.stdout is not None
             with contextlib.suppress(BrokenPipeError, ConnectionResetError):
@@ -302,6 +397,7 @@ class Thread:
                     stderr=child.stderr_tail,
                     items=items.items(),
                     session_id=self._session_id,
+                    timed_out=child.backstop_fired,
                 )
         except BaseException:
             await _quiet_shutdown(child)
@@ -315,12 +411,6 @@ class Thread:
         self._busy = False
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def _kill(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
 
 
 async def _quiet_shutdown(child: _Exec) -> None:

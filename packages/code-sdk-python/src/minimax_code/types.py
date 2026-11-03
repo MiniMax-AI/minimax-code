@@ -152,7 +152,8 @@ class MCodeOptions:
 
     ``bin``: explicit ``mcode`` executable (or JS entry). Otherwise ``$MCODE_BIN``, then ``PATH``.
     ``data_dir``: passed to the CLI as ``MINIMAX_DATA_DIR``.
-    ``env``: child environment; replaces ``os.environ`` when provided.
+    ``env``: child environment; replaces ``os.environ`` when provided. ``repr()`` shows only its
+    variable names, never the values, so options can be logged without leaking secrets.
     ``config_path``: runtime config file, passed as ``--config``.
     """
 
@@ -160,6 +161,13 @@ class MCodeOptions:
     data_dir: str | None = None
     env: dict[str, str] | None = None
     config_path: str | None = None
+
+    def __repr__(self) -> str:
+        env = None if self.env is None else {key: "***" for key in self.env}
+        return (
+            f"MCodeOptions(bin={self.bin!r}, data_dir={self.data_dir!r}, env={env!r}, "
+            f"config_path={self.config_path!r})"
+        )
 
 
 @dataclass(frozen=True)

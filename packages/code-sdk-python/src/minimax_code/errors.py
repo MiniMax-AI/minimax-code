@@ -44,6 +44,16 @@ class MCodeError(Exception):
         self.result = result
         self.items = list(items)
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        # The default reduce calls ``cls(*self.args)``, which breaks subclasses whose
+        # ``__init__`` takes other arguments. Rebuild from ``args`` and restore the attributes.
+        return (_restore_error, (type(self), self.args), self.__dict__)
+
+
+def _restore_error(cls: type[MCodeError], args: tuple[Any, ...]) -> MCodeError:
+    """Unpickles an ``MCodeError`` without calling its ``__init__``."""
+    return cls.__new__(cls, *args)
+
 
 class MCodeInvocationError(MCodeError):
     """Invalid SDK options, or the CLI rejected the invocation (exit code 2)."""
@@ -103,17 +113,29 @@ def error_for_result(
     if result["status"] == "cancelled":
         return MCodeAbortError("The MCode run was cancelled.", **common)
     status = "failed" if result["status"] == "succeeded" else result["status"]
-    error = result.get("error")
-    reason = error["message"] if error else f"status {result['status']}"
-    category = error["category"] if error else None
+    error: Any = result.get("error")
+    if not isinstance(error, dict):
+        error = {}
+    message = error.get("message")
+    reason = message if isinstance(message, str) and message else f"status {result['status']}"
+    category = error.get("category")
+    if not isinstance(category, str):
+        category = None
     return MCodeRunError(
         f"The MCode run ended with {status}: {reason}", status=status, category=category, **common
     )
 
 
 def error_for_exit(
-    *, exit_code: int | None, stderr: str, items: Sequence[ThreadItem], session_id: str | None
+    *,
+    exit_code: int | None,
+    stderr: str,
+    items: Sequence[ThreadItem],
+    session_id: str | None,
+    timed_out: bool = False,
 ) -> MCodeError:
+    """Maps a CLI exit without ``exec.completed`` to an error. ``timed_out`` means the SDK's
+    ``timeout_ms`` backstop killed the CLI, which is a timeout and not a cancellation."""
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     reason = lines[-1] if lines else f"exit code {exit_code}"
     common: dict[str, Any] = {
@@ -122,6 +144,12 @@ def error_for_exit(
         "items": items,
         "session_id": session_id,
     }
+    if timed_out:
+        return MCodeRunError(
+            "The MCode run exceeded timeout_ms and was force-stopped by the SDK.",
+            status="timeout",
+            **common,
+        )
     if exit_code == MCODE_EXEC_EXIT_CODES["invocation"]:
         return MCodeInvocationError(f"mcode rejected the invocation: {reason}", **common)
     if exit_code == MCODE_EXEC_EXIT_CODES["cancelled"] or (exit_code is not None and exit_code < 0):

@@ -1,4 +1,9 @@
-"""Blocking wrappers around the async API, for scripts and notebooks without an event loop."""
+"""Blocking wrappers around the async API, for code that has no running event loop.
+
+They cannot be called where an event loop is already running, such as a Jupyter notebook cell or
+an ``async def`` function (``RuntimeError: Cannot run the event loop while another loop is
+running``); use the async API with ``await`` there.
+"""
 
 from __future__ import annotations
 
