@@ -1,0 +1,139 @@
+name: Python SDK release
+on:
+  push:
+    tags: ['code-sdk-python-v*']
+  pull_request:
+    paths:
+      - '.github/workflows/python-sdk-release.yml'
+      - 'packages/code-sdk-python/scripts/**'
+      - 'packages/code-sdk-python/pyproject.toml'
+      - 'packages/code-sdk-python/CHANGELOG.md'
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'none builds and checks only; testpypi also uploads to TestPyPI'
+        required: false
+        default: none
+        type: choice
+        options: [none, testpypi]
+permissions:
+  contents: read
+concurrency:
+  group: python-sdk-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    defaults:
+      run:
+        working-directory: packages/code-sdk-python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.13'
+      - name: Check release metadata
+        id: metadata
+        shell: bash
+        run: |
+          args=()
+          if [ "$EVENT_NAME" = push ]; then
+            git merge-base --is-ancestor HEAD origin/main
+            args+=(--tag "$TAG" --index pypi)
+          elif [ "$TARGET" = testpypi ]; then
+            args+=(--index testpypi)
+          fi
+          version="$(uv run --no-project python scripts/release_check.py metadata "${args[@]}")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ inputs.repository || 'none' }}
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest -W error
+      - name: Build
+        run: uv build --out-dir "$RUNNER_TEMP/dist"
+      - name: Check package metadata
+        run: uvx twine check --strict "$RUNNER_TEMP"/dist/*
+      - name: Check distribution contents
+        run: uv run --no-project python scripts/release_check.py dist "$RUNNER_TEMP/dist" --version "$VERSION" --extract "$RUNNER_TEMP/extracted"
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+      - name: Scan distribution with the public text policy
+        working-directory: .
+        run: |
+          node --input-type=module -e '
+          import { readdirSync, readFileSync } from "node:fs";
+          import path from "node:path";
+          import { embeddedCredential, internalSourceReference } from "./scripts/lib/public-text-policy.mjs";
+          const root = process.argv[1];
+          const hits = readdirSync(root, { recursive: true, withFileTypes: true })
+            .filter((entry) => entry.isFile())
+            .map((entry) => path.join(entry.parentPath ?? entry.path, entry.name))
+            .filter((file) => { const text = readFileSync(file, "utf8"); return internalSourceReference.test(text) || embeddedCredential.test(text); });
+          if (hits.length) { console.error(hits.map((file) => path.relative(root, file)).join("\n")); process.exit(1); }
+          ' "$RUNNER_TEMP/extracted"
+      - uses: ./.github/actions/setup-gitleaks
+      - name: Scan distribution with Gitleaks
+        working-directory: .
+        run: gitleaks dir "$RUNNER_TEMP/extracted" --redact --config .gitleaks.toml
+      - name: Install the wheel into an empty environment
+        run: |
+          uv venv --no-project "$RUNNER_TEMP/smoke"
+          uv pip install --python "$RUNNER_TEMP/smoke" "$RUNNER_TEMP"/dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/smoke/bin/python" -c 'import sys, minimax_code; assert minimax_code.__version__ == sys.argv[1], minimax_code.__version__' "$VERSION"
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: python-sdk-dist
+          path: ${{ runner.temp }}/dist/
+          retention-days: 14
+          if-no-files-found: error
+  publish-pypi:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/minimax-code-sdk/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-sdk-dist
+          path: ${{ runner.temp }}/dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: ${{ runner.temp }}/dist
+  publish-testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/minimax-code-sdk/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-sdk-dist
+          path: ${{ runner.temp }}/dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: ${{ runner.temp }}/dist
+          repository-url: https://test.pypi.org/legacy/
