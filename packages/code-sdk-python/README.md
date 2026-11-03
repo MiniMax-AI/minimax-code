@@ -11,6 +11,15 @@ It mirrors the TypeScript SDK
 - Python 3.10+
 - The `mcode` CLI (0.6.3 or newer): `npm install -g @minimax-ai/code`
 
+## Install
+
+```bash
+pip install --pre minimax-code-sdk   # or: uv add --prerelease=allow minimax-code-sdk
+```
+
+The SDK is in beta, so installers need `--pre` (or an exact version such as
+`minimax-code-sdk==0.1.0b1`) until `0.1.0` is released. Import it as `minimax_code`.
+
 The CLI is found from `MCodeOptions(bin=...)`, then the `MCODE_BIN` environment variable,
 then `PATH`.
 

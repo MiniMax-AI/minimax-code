@@ -4,9 +4,10 @@ All notable changes to the `minimax-code-sdk` Python package are documented here
 versioned independently of the MiniMax Code CLI and of the TypeScript SDK. The first
 `## X.Y.Z · YYYY-MM-DD` heading is the version being released; see [RELEASING.md](RELEASING.md).
 
-## 0.1.0 · 2026-11-03
+## 0.1.0b1 · 2026-11-03
 
-First public release.
+First public beta. Install it with `pip install --pre minimax-code-sdk`; the API may still
+change before `0.1.0`.
 
 ### Added
 

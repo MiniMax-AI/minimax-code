@@ -38,6 +38,20 @@ def test_repository_metadata_is_consistent() -> None:
     assert rc.check_metadata() == minimax_code.__version__
 
 
+@pytest.mark.parametrize("version", ["0.1.0b1", "1.0.0a2", "2.3.4rc10", "1.2.3"])
+def test_metadata_accepts_stable_and_pre_release_versions(tmp_path: Path, version: str) -> None:
+    root = project(tmp_path, version=version, init=version, log=version)
+    assert rc.check_metadata(root, tag=f"code-sdk-python-v{version}") == version
+
+
+@pytest.mark.parametrize(
+    "version", ["0.1.0-beta.1", "0.1.0.dev1", "0.1.0beta1", "01.0.0", "0.1.0b"]
+)
+def test_metadata_rejects_non_canonical_versions(tmp_path: Path, version: str) -> None:
+    with pytest.raises(rc.ReleaseCheckError, match=r"X\.Y\.Z"):
+        rc.check_metadata(project(tmp_path, version=version, init=version, log=version))
+
+
 def test_metadata_accepts_matching_tag(tmp_path: Path) -> None:
     assert rc.check_metadata(project(tmp_path), tag="code-sdk-python-v1.2.3") == "1.2.3"
 
