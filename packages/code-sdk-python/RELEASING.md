@@ -12,8 +12,10 @@ independently of the CLI and of `@minimax-ai/code-sdk`.
 - A published version is immutable. PyPI never accepts the same file name twice, even after a
   release is deleted. Fix problems in a new version; prefer **yanking** a broken release over
   deleting it.
-- Versions are stable `X.Y.Z`. There is no prerelease channel yet.
-- Release tags are `code-sdk-python-vX.Y.Z`. They are separate from CLI tags (`vX.Y.Z`) and
+- Versions are stable `X.Y.Z` or PEP 440 pre-releases `X.Y.ZaN`, `X.Y.ZbN` and `X.Y.ZrcN` (for
+  example `0.1.0b1`), written in canonical form. Never use npm-style `0.1.0-beta.1`. See
+  [Pre-releases](#pre-releases).
+- Release tags are `code-sdk-python-v<version>`, for example `code-sdk-python-v0.1.0b1`. They are separate from CLI tags (`vX.Y.Z`) and
   TypeScript SDK tags (`code-sdk-vX.Y.Z`). Never move or delete a pushed release tag.
 - Do not upload from a workstation. If the workflow is unavailable, fix the workflow.
 
@@ -85,6 +87,19 @@ The tag push starts the workflow. Its `build` job:
 
 The `publish-pypi` job then waits for approval on the `pypi` environment and uploads exactly the
 checked files with `pypa/gh-action-pypi-publish`, which also attaches PyPI attestations.
+
+## Pre-releases
+
+Pre-releases go to the real PyPI index through the same workflow and checks; only the version
+differs. Installers skip them unless the user passes `--pre` (pip), `--prerelease=allow` (uv) or
+pins the exact version, so `pip install minimax-code-sdk` keeps resolving to the newest stable
+release once one exists. Keep the README install instructions in line with the latest release.
+
+- Fix a broken pre-release with the next number (`0.1.0b2`), not by reusing a version.
+- Promote by releasing `0.1.0` with its own CHANGELOG section; earlier pre-releases stay in the
+  history and need no cleanup.
+- When the first stable release ships, drop `--pre` from the README install instructions and
+  replace `Development Status :: 4 - Beta` in `pyproject.toml` as appropriate.
 
 ## 4. Read back
 

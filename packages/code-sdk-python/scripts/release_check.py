@@ -26,7 +26,10 @@ TAG_PREFIX = "code-sdk-python-v"
 ROOT = Path(__file__).resolve().parent.parent
 INDEXES = {"pypi": "https://pypi.org", "testpypi": "https://test.pypi.org"}
 
-_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# Stable X.Y.Z or a PEP 440 pre-release X.Y.Z{a|b|rc}N, in canonical form.
+_VERSION = re.compile(
+    r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:(?:a|b|rc)(?:0|[1-9]\d*))?"
+)
 _PROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]*)"\s*$', re.MULTILINE)
 _INIT_VERSION = re.compile(r'^__version__\s*=\s*"([^"]*)"\s*$', re.MULTILINE)
 _CHANGELOG_HEADING = re.compile(r"^## (\S+) · (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
@@ -73,7 +76,10 @@ def check_metadata(root: Path = ROOT, tag: str | None = None) -> str:
     version = meta.project_version
     problems: list[str] = []
     if version is None or not _VERSION.fullmatch(version):
-        problems.append(f"pyproject.toml [project].version must be X.Y.Z; found {version!r}.")
+        problems.append(
+            "pyproject.toml [project].version must be X.Y.Z or X.Y.Z{a|b|rc}N; "
+            f"found {version!r}."
+        )
     if meta.init_version != version:
         problems.append(
             f"src/{IMPORT_NAME}/__init__.py __version__ is {meta.init_version!r}, "
@@ -81,11 +87,11 @@ def check_metadata(root: Path = ROOT, tag: str | None = None) -> str:
         )
     if meta.changelog_version != version:
         problems.append(
-            "The first CHANGELOG.md heading must be '## X.Y.Z · YYYY-MM-DD' for the release "
+            "The first CHANGELOG.md heading must be '## <version> · YYYY-MM-DD' for the release "
             f"version {version!r}; found {meta.changelog_version!r}."
         )
     if tag is not None and tag != f"{TAG_PREFIX}{version}":
-        problems.append(f"Tag {tag!r} does not match version {version!r} ({TAG_PREFIX}X.Y.Z).")
+        problems.append(f"Tag {tag!r} does not match version {version!r} ({TAG_PREFIX}<version>).")
     if problems:
         raise ReleaseCheckError("\n".join(problems))
     assert version is not None
@@ -178,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     sub = parser.add_subparsers(dest="command", required=True)
     meta = sub.add_parser("metadata", help="check versions, changelog and tag")
-    meta.add_argument("--tag", help=f"release tag, {TAG_PREFIX}X.Y.Z")
+    meta.add_argument("--tag", help=f"release tag, {TAG_PREFIX}<version>")
     meta.add_argument("--index", choices=sorted(INDEXES), help="fail if already published there")
     dist = sub.add_parser("dist", help="check the built wheel and sdist")
     dist.add_argument("dist_dir", type=Path)
