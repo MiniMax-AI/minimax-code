@@ -18,11 +18,16 @@ export type TuiExecErrorKind = keyof Pick<
   'invocation' | 'config' | 'runtime' | 'internal' | 'cancelled' | 'brokenPipe'
 >;
 
+export interface TuiExecErrorOptions extends ErrorOptions {
+  /** Defaults to true for runtime errors. Set false when retrying cannot succeed. */
+  readonly retryable?: boolean;
+}
+
 export class TuiExecError extends TuiFailure {
   constructor(
     public readonly kind: TuiExecErrorKind,
     message: string,
-    options?: ErrorOptions,
+    options?: TuiExecErrorOptions,
   ) {
     super(kind, message, {
       code: `exec.${kind}`,

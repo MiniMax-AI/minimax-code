@@ -40,12 +40,24 @@ async def main() -> None:
     # Same Session, next Turn.
     turn = await thread.run("Now list its top-level directories.")
 
-    # Persist thread.id and continue later.
-    later = client.resume_thread(thread.id)
+    # Persist thread.id and continue later, in the same workspace.
+    later = client.resume_thread(thread.id, ThreadOptions(cwd="."))
     print((await later.run("What did I ask first?")).final_response)
 
 
 asyncio.run(main())
+```
+
+### Resuming a Session
+
+A Session belongs to the workspace it was created in. Pass the same `cwd` to `resume_thread()`;
+when `cwd` is omitted, the current working directory is used. A different workspace fails with
+`MCodeRunError` ("Session ... belongs to workspace ..."), and retrying does not help.
+
+```python
+thread = client.start_thread(ThreadOptions(cwd="/path/to/project"))
+await thread.run("...")
+later = client.resume_thread(thread.id, ThreadOptions(cwd="/path/to/project"))
 ```
 
 ### Streaming

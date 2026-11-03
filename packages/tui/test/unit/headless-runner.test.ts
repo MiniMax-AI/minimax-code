@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { formatTuiExecResultFailure } from '../../src/headless/error-presentation.js';
 import { runTuiExec } from '../../src/headless/runner.js';
 import type { TuiMessage, TuiStreamEvent } from '../../src/runtime/stream-events.js';
 
@@ -1314,5 +1315,57 @@ describe('runTuiExec', () => {
     expect(runtime.createSession).not.toHaveBeenCalled();
     expect(runtime.listSessionPage).not.toHaveBeenCalled();
     expect(runtime.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('runTuiExec Session guidance', () => {
+  async function run(input: { sessionId?: string; continueSession?: boolean }, runtime: ReturnType<typeof runtimeWith>) {
+    const stderr = vi.fn();
+    const code = await runTuiExec(
+      { prompt: 'Fix it', workspaceDir: '/tmp/workspace', version: '0.1.0', ...input },
+      { runtime, stdout: vi.fn(), stderr, shutdown: async () => undefined },
+    );
+    return { code, stderr: stderr.mock.calls.map(([line]) => line).join('') };
+  }
+
+  it('names the Session workspace on a --cwd mismatch instead of suggesting a retry', async () => {
+    const runtime = runtimeWith();
+    runtime.getSession.mockResolvedValue({ sessionId: 'session-1', workspaceDir: '/tmp/other', archived: false } as never);
+
+    const { code, stderr } = await run({ sessionId: 'session-1' }, runtime);
+
+    expect(code).toBe(4);
+    expect(stderr).toBe(
+      'mcode exec failed: The run failed: Session session-1 belongs to workspace /tmp/other, not --cwd /tmp/workspace; rerun with --cwd /tmp/other.\n',
+    );
+    expect(runtime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not suggest a retry for archived Sessions or a missing --continue target', async () => {
+    const archived = runtimeWith();
+    archived.getSession.mockResolvedValue({ sessionId: 'session-1', workspaceDir: '/tmp/workspace', archived: true } as never);
+    const missing = runtimeWith();
+
+    const results = [await run({ sessionId: 'session-1' }, archived), await run({ continueSession: true }, missing)];
+
+    expect(results.map((result) => result.code)).toEqual([4, 4]);
+    expect(results[0]?.stderr).toBe(
+      'mcode exec failed: The run failed: Session session-1 is archived; unarchive it in MCode or start a new Session.\n',
+    );
+    expect(results[1]?.stderr).toBe(
+      'mcode exec failed: The run failed: No active Session exists for workspace /tmp/workspace; omit --continue to start a new Session.\n',
+    );
+    for (const result of results) expect(result.stderr).not.toContain('Retry');
+  });
+
+  it('keeps the retry hint only for retryable failed results', () => {
+    const failed = (retryable: boolean | undefined) => formatTuiExecResultFailure({
+      status: 'failed',
+      error: { category: 'runtime', message: 'Upstream disconnected', ...(retryable === undefined ? {} : { retryable }) },
+    } as never);
+
+    expect(failed(true)).toBe('The run failed: Upstream disconnected. Retry after the connection recovers.');
+    expect(failed(undefined)).toBe('The run failed: Upstream disconnected. Retry after the connection recovers.');
+    expect(failed(false)).toBe('The run failed: Upstream disconnected.');
   });
 });

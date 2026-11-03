@@ -898,7 +898,8 @@ async function resolveSession(
     if (!session) {
       throw new TuiExecError(
         "runtime",
-        `No active Session exists for workspace ${input.workspaceDir}.`,
+        `No active Session exists for workspace ${input.workspaceDir}; omit --continue to start a new Session.`,
+        { retryable: false },
       );
     }
     assertSessionUsable(session, input.workspaceDir);
@@ -946,16 +947,23 @@ function assertSessionUsable(session: TuiSession, workspaceDir: string): void {
   if (session.archived) {
     throw new TuiExecError(
       "runtime",
-      `Session is archived: ${session.sessionId}`,
+      `Session ${session.sessionId} is archived; unarchive it in MCode or start a new Session.`,
+      { retryable: false },
     );
   }
-  if (
-    !session.workspaceDir ||
-    !sameWorkspace(session.workspaceDir, workspaceDir)
-  ) {
+  if (!session.workspaceDir) {
     throw new TuiExecError(
       "runtime",
-      `Session workspace does not match --cwd: ${session.sessionId}`,
+      `Session ${session.sessionId} has no recorded workspace and cannot be continued.`,
+      { retryable: false },
+    );
+  }
+  if (!sameWorkspace(session.workspaceDir, workspaceDir)) {
+    // Retrying cannot succeed: a Session only continues in the workspace it was created in.
+    throw new TuiExecError(
+      "runtime",
+      `Session ${session.sessionId} belongs to workspace ${session.workspaceDir}, not --cwd ${workspaceDir}; rerun with --cwd ${session.workspaceDir}.`,
+      { retryable: false },
     );
   }
 }
