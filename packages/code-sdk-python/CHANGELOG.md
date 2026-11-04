@@ -20,6 +20,23 @@ versioned independently of the MiniMax Code CLI and of the TypeScript SDK. The f
 - SDK errors survive pickling: `MCodeRunError` can be unpickled, and `ThreadBusyError` keeps its
   message instead of repeating it.
 - `repr(MCodeOptions(...))` no longer prints `env` values, which could expose secrets in logs.
+- Cancellation sends SIGTERM instead of SIGINT. After Ctrl+C in a terminal had already delivered
+  SIGINT to the CLI, the SDK's second SIGINT hit the CLI's default action and killed it before it
+  could persist the Turn and write `exec.completed`.
+- Cancellation waits for the CLI's 60 second shutdown budget before SIGKILL (was 10 seconds), and
+  the `timeout_ms` backstop fires 90 seconds after `timeout_ms` (was 30), matching the
+  TypeScript SDK. The shorter values could kill a CLI that was still shutting down cleanly.
+- `exec.completed` ends the Turn: later output is ignored and a CLI that does not exit within
+  5 seconds is killed. A background process that inherited the CLI's stdout or stderr no longer
+  keeps `thread.run()` waiting until it exits; after the CLI exits, remaining output is read for
+  at most 2 seconds.
+- A Thread pins `ThreadOptions.cwd` (default: the current directory) when it is created. A later
+  `os.chdir()` used to move the next Turn to another workspace, which the CLI rejects for an
+  existing Session.
+- Windows: `mcode.cmd` launchers from the official installer and npm / pnpm are no longer run
+  through cmd.exe. The SDK runs the JS entry and Node runtime behind them, so arguments are not
+  reinterpreted by cmd.exe and cancelling stops the CLI itself rather than only cmd.exe.
+  `MCODE_BIN` and `PATH` are looked up case-insensitively on Windows.
 
 ### Documentation
 

@@ -536,6 +536,7 @@
     "packages/code-sdk-python/src/minimax_code/types.py",
     "packages/code-sdk-python/tests/conftest.py",
     "packages/code-sdk-python/tests/fake_mcode.py",
+    "packages/code-sdk-python/tests/test_cli.py",
     "packages/code-sdk-python/tests/test_e2e.py",
     "packages/code-sdk-python/tests/test_release_check.py",
     "packages/code-sdk-python/tests/test_sdk.py",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 
 from ._args import validate_thread_options
@@ -27,23 +28,27 @@ class MCode:
         )
 
     def start_thread(self, options: ThreadOptions | None = None) -> Thread:
-        """Starts a new Thread. The Session is created by its first Turn."""
+        """Starts a new Thread. The Session is created by its first Turn.
+
+        ``ThreadOptions.cwd`` defaults to the current working directory and is resolved now, so a
+        later ``os.chdir()`` does not move the Thread to another workspace.
+        """
         options = options or ThreadOptions()
         validate_thread_options(options, resuming=False)
-        return Thread(self._host, options, None)
+        return Thread(self._host, _with_absolute_cwd(options), None)
 
     def resume_thread(self, thread_id: str, options: ThreadOptions | None = None) -> Thread:
         """Continues an existing Session, for example one persisted from ``thread.id``.
 
         Pass the same ``ThreadOptions.cwd`` the Session was created with. When ``cwd`` is omitted
-        the current working directory is used, and the CLI rejects a Session whose workspace
-        differs (``MCodeRunError`` with "belongs to workspace ...").
+        the current working directory at this call is used, and the CLI rejects a Session whose
+        workspace differs (``MCodeRunError`` with "belongs to workspace ...").
         """
         if not isinstance(thread_id, str) or not thread_id.strip():
             raise MCodeInvocationError("resume_thread requires a non-empty Session id.")
         options = options or ThreadOptions()
         validate_thread_options(options, resuming=True)
-        return Thread(self._host, options, thread_id.strip())
+        return Thread(self._host, _with_absolute_cwd(options), thread_id.strip())
 
     def _child_env(self) -> dict[str, str]:
         env = dict(self._options.env if self._options.env is not None else os.environ)
@@ -64,3 +69,8 @@ class MCode:
                 # Only cached on success, so a later run works after installing the CLI.
                 self._cli = cli
             return self._cli
+
+
+def _with_absolute_cwd(options: ThreadOptions) -> ThreadOptions:
+    """Pins the workspace when the Thread is created; every Turn of a Session must use it."""
+    return dataclasses.replace(options, cwd=os.path.abspath(options.cwd or os.getcwd()))
