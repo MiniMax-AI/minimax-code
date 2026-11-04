@@ -363,3 +363,29 @@ async def test_thread_cwd_is_pinned_when_the_thread_is_created(
     await default.run("a")
     await relative.run("b")
     assert [c["args"][4] for c in calls(fake_env)] == [f"--cwd={first}", f"--cwd={first / 'sub'}"]
+
+
+async def test_readme_streaming_loop_keeps_delta_on_item_started(fake_env: dict[str, str]) -> None:
+    # The CLI can put the first (or only) text delta on item.started; the README loop must keep it.
+    thread = MCode(MCodeOptions(env=fake_env)).start_thread()
+    streamed = await thread.run_streamed("x")
+    text = ""
+    async for event in streamed:
+        item = event.get("item")
+        if item and item["type"] == "agent_message":
+            text += item.get("contentDelta", "")
+    assert text == "Hello"
+
+
+async def test_sync_client_inside_running_loop_raises_once(fake_env: dict[str, str]) -> None:
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RuntimeError, match="running event loop"):  # noqa: SIM117
+            with SyncMCode(MCodeOptions(env=fake_env)) as client:
+                client.start_thread().run("x")
+        import gc
+
+        gc.collect()
+    assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]

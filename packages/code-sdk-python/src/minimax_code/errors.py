@@ -42,7 +42,7 @@ class MCodeError(Exception):
         self.stderr = stderr
         self.session_id = session_id
         self.result = result
-        self.items = list(items)
+        self.items: list[ThreadItem] = list(items)
 
     def __reduce__(self) -> tuple[Any, ...]:
         # The default reduce calls ``cls(*self.args)``, which breaks subclasses whose
