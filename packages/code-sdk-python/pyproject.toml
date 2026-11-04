@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "minimax-code-sdk"
-version = "0.1.0b1"
+version = "0.1.0"
 description = "Python SDK for driving the local MiniMax Code (mcode) agent."
 readme = "README.md"
 license = "MIT"
