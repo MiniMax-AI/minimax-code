@@ -4,6 +4,19 @@ All notable changes to the `minimax-code-sdk` Python package are documented here
 versioned independently of the MiniMax Code CLI and of the TypeScript SDK. The first
 `## X.Y.Z · YYYY-MM-DD` heading is the version being released; see [RELEASING.md](RELEASING.md).
 
+## 0.1.1 · 2026-11-04
+
+### Fixed
+
+- The README streaming example now reads `contentDelta` from every `agent_message` item event.
+  The CLI can send the first (or only) delta on `item.started`, which the old example skipped, so
+  a short reply printed nothing. The example also uses `event.get("item")`, so it type-checks in
+  pyright's default mode.
+- Calling `SyncMCode` / `SyncThread` inside a running event loop raises a single `RuntimeError`
+  that points to the async API. `close()` / leaving `with SyncMCode()` no longer raises a second
+  `RuntimeError`, and no "coroutine was never awaited" warning is left behind.
+- `MCodeError.items` is annotated as `list[ThreadItem]`.
+
 ## 0.1.0 · 2026-11-04
 
 First stable release. `pip install minimax-code-sdk` installs it without `--pre`. The public
