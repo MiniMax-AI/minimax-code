@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pickle
+import signal
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import minimax_code.thread as thread_module
 from minimax_code import (
     AgentMessageItem,
     MCode,
@@ -28,7 +32,7 @@ from minimax_code import (
 
 
 def calls(env: dict[str, str]) -> list[dict[str, Any]]:
-    text = Path(env["FAKE_MCODE_RECORD"]).read_text()
+    text = Path(env["FAKE_MCODE_RECORD"]).read_text(encoding="utf-8")
     return [json.loads(line) for line in text.splitlines()]
 
 
@@ -278,3 +282,84 @@ def test_sync_client(fake_env: dict[str, str]) -> None:
         types = [e["type"] for e in thread.run_streamed("b")]
         assert types[-1] == "exec.completed"
         assert thread.id == "sess-new"
+
+
+async def test_cancel_uses_sigterm_after_terminal_sigint(
+    fake_env: dict[str, str], tmp_path: Path
+) -> None:
+    # Ctrl+C in a terminal delivers SIGINT to the CLI too. The SDK's own cancel must not send a
+    # second SIGINT, which would hit the CLI's default action and skip exec.completed.
+    log, pid_file = tmp_path / "cli.log", tmp_path / "cli.pid"
+    fake_env.update(
+        FAKE_MCODE_SCENARIO="slow",
+        FAKE_MCODE_LOG=str(log),
+        FAKE_MCODE_PID=str(pid_file),
+        FAKE_MCODE_SHUTDOWN_S="0.5",
+    )
+    thread = MCode(MCodeOptions(env=fake_env)).start_thread()
+    streamed = await thread.run_streamed("x")
+    events = streamed.__aiter__()
+    await events.__anext__()
+    os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGINT)
+    await asyncio.sleep(0.1)
+    await streamed.aclose()
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "signal SIGINT",
+        "signal SIGTERM",
+        "completed",
+    ]
+
+
+def test_cancel_timings_cover_the_cli_shutdown_budget() -> None:
+    assert thread_module.CANCEL_GRACE_S >= thread_module.CLI_SHUTDOWN_BUDGET_S == 60
+    assert thread_module.BACKSTOP_EXTRA_S >= 90
+
+
+async def test_completed_turn_does_not_wait_for_grandchild_holding_stdout(
+    fake_env: dict[str, str],
+) -> None:
+    fake_env["FAKE_MCODE_SCENARIO"] = "grandchild"
+    started = time.monotonic()
+    turn = await MCode(MCodeOptions(env=fake_env)).start_thread().run("x")
+    assert turn.final_response == "ok"
+    assert time.monotonic() - started < 5
+
+
+async def test_exit_without_result_does_not_wait_for_grandchild(
+    fake_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(thread_module, "EXIT_DRAIN_S", 0.2)
+    fake_env["FAKE_MCODE_SCENARIO"] = "grandchild_crash"
+    started = time.monotonic()
+    with pytest.raises(MCodeRunError):
+        await MCode(MCodeOptions(env=fake_env)).start_thread().run("x")
+    assert time.monotonic() - started < 5
+
+
+async def test_cli_lingering_after_exec_completed_is_stopped(
+    fake_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(thread_module, "TERMINATE_GRACE_S", 0.3)
+    fake_env["FAKE_MCODE_SCENARIO"] = "linger"
+    thread = MCode(MCodeOptions(env=fake_env)).start_thread()
+    started = time.monotonic()
+    assert (await thread.run("x")).final_response == "ok"
+    types = [event["type"] async for event in await thread.run_streamed("y")]
+    assert types[-1] == "exec.completed" and "after.completed" not in types
+    assert time.monotonic() - started < 5
+
+
+async def test_thread_cwd_is_pinned_when_the_thread_is_created(
+    fake_env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = tmp_path / "first", tmp_path / "second"
+    (first / "sub").mkdir(parents=True)
+    second.mkdir()
+    client = MCode(MCodeOptions(env=fake_env))
+    monkeypatch.chdir(first)
+    default = client.start_thread()
+    relative = client.start_thread(ThreadOptions(cwd="sub"))
+    monkeypatch.chdir(second)
+    await default.run("a")
+    await relative.run("b")
+    assert [c["args"][4] for c in calls(fake_env)] == [f"--cwd={first}", f"--cwd={first / 'sub'}"]

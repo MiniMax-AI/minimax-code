@@ -23,7 +23,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.10", "3.13"]
+        python: ["3.10", "3.13", "3.14"]
+        include:
+          # Launcher resolution and option tests; fake-CLI process tests are POSIX-only.
+          - os: windows-latest
+            python: "3.13"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -38,3 +42,6 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest -W error
+        env:
+          # Fail on implicit text encodings, which use the locale code page on Windows.
+          PYTHONWARNDEFAULTENCODING: "1"

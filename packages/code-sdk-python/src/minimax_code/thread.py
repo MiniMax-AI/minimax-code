@@ -33,8 +33,22 @@ from .errors import (
 from .types import ExecResult, RunOptions, ThreadEvent, ThreadOptions, Turn
 
 STDERR_TAIL_BYTES = 64 * 1024
-CANCEL_GRACE_S = 10.0
-BACKSTOP_EXTRA_S = 30.0
+#: CLI runtime shutdown budget. Cancellation waits at least this long before SIGKILL so a CLI that
+#: is already shutting down can still persist the Turn and write ``exec.completed``.
+CLI_SHUTDOWN_BUDGET_S = 60.0
+#: Slack for work the CLI does (access, Session and model resolution) before it starts its own
+#: ``timeout_ms`` timer; the SDK's timer starts at spawn.
+CLI_STARTUP_SLACK_S = 30.0
+#: Cancel signal → SIGKILL. Read at call time so tests can shorten it.
+CANCEL_GRACE_S = CLI_SHUTDOWN_BUDGET_S
+#: Extra time after ``timeout_ms`` before the SDK force-kills a CLI that did not stop itself.
+BACKSTOP_EXTRA_S = CLI_SHUTDOWN_BUDGET_S + CLI_STARTUP_SLACK_S
+#: After ``exec.completed``, how long a lingering CLI may take to exit before SIGKILL.
+TERMINATE_GRACE_S = 5.0
+#: After the CLI exits, how long to keep reading stdout. A grandchild process that inherited the
+#: pipe can keep it open indefinitely.
+EXIT_DRAIN_S = 2.0
+_EXIT_POLL_S = 0.05
 _STDOUT_LINE_LIMIT = 64 * 1024 * 1024
 
 
@@ -171,9 +185,20 @@ class _Exec:
         self.proc = proc
         self.stderr_tail = ""
         self._stderr_task = asyncio.ensure_future(self._drain_stderr())
+        self._exit_task = asyncio.ensure_future(self._watch_exit())
+        self._drain_deadline: float | None = None
         self._interrupted = False
         #: Set when the ``timeout_ms`` backstop had to kill the CLI.
         self.backstop_fired = False
+
+    async def _watch_exit(self) -> None:
+        # ``Process.wait()`` resolves only after every pipe is closed, so a grandchild that
+        # inherited stdout or stderr would hold it. ``returncode`` is set once the CLI is reaped.
+        while self.proc.returncode is None:
+            await asyncio.sleep(_EXIT_POLL_S)
+
+    async def wait_exited(self) -> None:
+        await asyncio.shield(self._exit_task)
 
     async def _drain_stderr(self) -> None:
         assert self.proc.stderr is not None
@@ -188,7 +213,30 @@ class _Exec:
             with contextlib.suppress(ProcessLookupError):
                 self.proc.kill()
 
+    async def read_line(self) -> bytes:
+        """Next stdout line, ``b""`` at the end. Once the CLI has exited, the rest of its output is
+        read for at most ``EXIT_DRAIN_S``: a grandchild holding the pipe must not stall the Turn."""
+        assert self.proc.stdout is not None
+        loop = asyncio.get_running_loop()
+        read = asyncio.ensure_future(self.proc.stdout.readline())
+        try:
+            if self._drain_deadline is None:
+                await asyncio.wait({read, self._exit_task}, return_when=asyncio.FIRST_COMPLETED)
+                if read.done():
+                    return read.result()
+                self._drain_deadline = loop.time() + EXIT_DRAIN_S
+            remaining = max(0.0, self._drain_deadline - loop.time())
+            done, _ = await asyncio.wait({read}, timeout=remaining)
+            return read.result() if done else b""
+        finally:
+            if not read.done():
+                read.cancel()
+
     def interrupt(self) -> None:
+        """Asks the CLI to cancel. SIGTERM is the CLI's cancel signal, like SIGINT, but has its own
+        one-shot handler: after a terminal Ctrl+C already delivered SIGINT to the CLI's process
+        group, a second SIGINT would hit the default action and skip the graceful shutdown. On
+        Windows this is a hard kill."""
         if self.proc.returncode is not None or self._interrupted:
             return
         self._interrupted = True
@@ -196,20 +244,24 @@ class _Exec:
             if sys.platform == "win32":
                 self.proc.terminate()
             else:
-                self.proc.send_signal(signal.SIGINT)
+                self.proc.send_signal(signal.SIGTERM)
 
-    async def shutdown(self, grace: float = CANCEL_GRACE_S) -> None:
-        """Interrupts a live CLI, then kills it after ``grace`` seconds."""
+    async def wait_exit(self, grace: float) -> None:
+        """Waits up to ``grace`` seconds for the CLI to exit, then kills it."""
+        try:
+            await asyncio.wait_for(asyncio.shield(self._exit_task), timeout=grace)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                self.proc.kill()
+            await asyncio.shield(self._exit_task)
+
+    async def shutdown(self, grace: float | None = None) -> None:
+        """Interrupts a live CLI, then kills it after ``grace`` seconds (``CANCEL_GRACE_S``)."""
         if self.proc.returncode is None:
             self.interrupt()
-            try:
-                await asyncio.wait_for(asyncio.shield(self.proc.wait()), timeout=grace)
-            except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    self.proc.kill()
-                await self.proc.wait()
+            await self.wait_exit(CANCEL_GRACE_S if grace is None else grace)
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(self._stderr_task), timeout=2)
+            await asyncio.wait_for(asyncio.shield(self._stderr_task), timeout=EXIT_DRAIN_S)
         # Close the pipes now, while the loop is alive; asyncio has no public API for this.
         transport = getattr(self.proc, "_transport", None)
         if transport is not None:
@@ -368,7 +420,7 @@ class Thread:
             line_no = 0
             while True:
                 try:
-                    raw = await child.proc.stdout.readline()
+                    raw = await child.read_line()
                 except ValueError as error:
                     raise MCodeProtocolError("mcode stdout line exceeds the size limit.") from error
                 if not raw:
@@ -387,7 +439,14 @@ class Thread:
                     completed = True
                 if items.apply(event):
                     yield event
-            await child.proc.wait()
+                if completed:
+                    # exec.completed is terminal; anything the CLI prints afterwards is ignored.
+                    break
+            if completed:
+                # A CLI that lingers after exec.completed is force-stopped.
+                await child.wait_exit(TERMINATE_GRACE_S)
+            else:
+                await child.wait_exited()
             await child.shutdown()
             state["exit_code"] = child.proc.returncode
             state["stderr"] = child.stderr_tail

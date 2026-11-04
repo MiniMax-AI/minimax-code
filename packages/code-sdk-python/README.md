@@ -21,7 +21,10 @@ The SDK is in beta, so installers need `--pre` (or an exact version such as
 `minimax-code-sdk==0.1.0b1`) until `0.1.0` is released. Import it as `minimax_code`.
 
 The CLI is found from `MCodeOptions(bin=...)`, then the `MCODE_BIN` environment variable,
-then `PATH`.
+then `PATH`. The SDK never starts it through a shell. On Windows, the `mcode.cmd` launcher
+written by the official installer or by npm / pnpm is followed to the JS entry and Node runtime
+it runs (the installer's release pointer is read again before every Turn, so a CLI self-update
+is picked up); an unrecognized `.cmd` file is rejected, and you can pass the JS entry as `bin`.
 
 ## Quick start
 
@@ -51,7 +54,8 @@ asyncio.run(main())
 ### Resuming a Session
 
 A Session belongs to the workspace it was created in. Pass the same `cwd` to `resume_thread()`;
-when `cwd` is omitted, the current working directory is used. A different workspace fails with
+when `cwd` is omitted, the current working directory at that call is used. A Thread pins its
+`cwd` when it is created, so a later `os.chdir()` does not affect it. A different workspace fails with
 `MCodeRunError` ("Session ... belongs to workspace ..."), and retrying does not help.
 
 ```python
@@ -78,13 +82,19 @@ event; iteration raises only for process or protocol failures.
 
 ### Cancellation
 
-- `streamed.cancel()` sends SIGINT; the stream ends with the CLI's final events.
+- `streamed.cancel()` sends SIGTERM, the CLI's cancel signal; the stream ends with the CLI's
+  final events. SIGTERM is used instead of SIGINT because Ctrl+C in a terminal already sends
+  SIGINT to the CLI, and a second SIGINT would skip its graceful shutdown.
 - Leaving the `async for` early (`break` or an exception in the loop body), or cancelling the
-  task running `thread.run()`, stops the CLI (SIGINT, then SIGKILL after a grace period). The
-  next Turn on the same Thread waits for that shutdown instead of raising `ThreadBusyError`;
-  `async with streamed:` or `await streamed.aclose()` stops it deterministically.
-- `RunOptions(timeout_ms=...)` is enforced by the CLI. If the CLI is still running 30 seconds
-  after `timeout_ms`, the SDK kills it and raises `MCodeRunError` with `status="timeout"`.
+  task running `thread.run()`, stops the CLI: SIGTERM, then SIGKILL if it is still running after
+  the CLI's 60 second shutdown budget. The next Turn on the same Thread waits for that shutdown
+  instead of raising `ThreadBusyError`; `async with streamed:` or `await streamed.aclose()`
+  stops it deterministically. On Windows, cancellation stops the CLI immediately.
+- `RunOptions(timeout_ms=...)` is enforced by the CLI. If the CLI is still running 90 seconds
+  after `timeout_ms` (its shutdown budget plus startup time), the SDK kills it and raises
+  `MCodeRunError` with `status="timeout"`.
+- `exec.completed` ends the Turn. A CLI that keeps running afterwards is stopped after 5 seconds,
+  and a background process that inherited the CLI's output does not keep the Turn open.
 
 ### Blocking API
 

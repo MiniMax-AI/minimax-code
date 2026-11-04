@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -17,6 +18,20 @@ if args == ["--version"]:
     sys.exit(0)
 
 prompt = json.loads(sys.stdin.read())["prompt"]
+pid_file = os.environ.get("FAKE_MCODE_PID")
+if pid_file:
+    with open(pid_file, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+
+
+def note(text: str) -> None:
+    """Appends to FAKE_MCODE_LOG, for assertions about how the SDK stopped the CLI."""
+    path = os.environ.get("FAKE_MCODE_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+
+
 record = os.environ.get("FAKE_MCODE_RECORD")
 if record:
     with open(record, "a", encoding="utf-8") as fh:
@@ -78,23 +93,46 @@ emit("item.completed", item={**tool, "toolCall": {"id": "t1", "name": "bash", "s
 emit("future.event", payload=True)
 
 if scenario == "slow":
+    # Like the CLI: SIGINT and SIGTERM each have a one-shot cancel handler; a repeated signal hits
+    # the default action and kills the process before exec.completed.
     cancelled = False
 
-    def on_sigint(_sig: int, _frame: object) -> None:
+    def on_signal(sig: int, _frame: object) -> None:
         global cancelled
+        note(f"signal {signal.Signals(sig).name}")
+        signal.signal(sig, signal.SIG_DFL)
         cancelled = True
 
-    signal.signal(signal.SIGINT, on_sigint)
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
     for _ in range(200):
         if cancelled:
             break
         time.sleep(0.05)
+    time.sleep(float(os.environ.get("FAKE_MCODE_SHUTDOWN_S", "0")))
     emit("turn.failed", status="cancelled", durationMs=5)
     emit("exec.completed", result=result("cancelled"))
+    note("completed")
     sys.exit(130)
 
-if scenario == "hang":  # ignores SIGINT and never finishes: only SIGKILL stops it
+if scenario == "hang":  # ignores cancel signals and never finishes: only SIGKILL stops it
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    time.sleep(60)
+    sys.exit(0)
+
+if scenario in ("grandchild", "grandchild_crash"):
+    # A background process inherits stdout and stderr and outlives the CLI.
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    if scenario == "grandchild_crash":
+        sys.exit(4)
+    emit("exec.completed", result=result("succeeded", output="ok"))
+    sys.exit(0)
+
+if scenario == "linger":  # exec.completed, then the CLI never exits on its own
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    emit("exec.completed", result=result("succeeded", output="ok"))
+    emit("after.completed")
     time.sleep(60)
     sys.exit(0)
 

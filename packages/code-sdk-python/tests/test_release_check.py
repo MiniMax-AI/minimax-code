@@ -25,11 +25,14 @@ def project(
 ) -> Path:
     (tmp_path / "src" / "minimax_code").mkdir(parents=True)
     (tmp_path / "pyproject.toml").write_text(
-        f'[build-system]\nrequires = []\n\n[project]\nname = "x"\nversion = "{version}"\n'
+        f'[build-system]\nrequires = []\n\n[project]\nname = "x"\nversion = "{version}"\n',
+        encoding="utf-8",
     )
-    (tmp_path / "src" / "minimax_code" / "__init__.py").write_text(f'__version__ = "{init}"\n')
+    (tmp_path / "src" / "minimax_code" / "__init__.py").write_text(
+        f'__version__ = "{init}"\n', encoding="utf-8"
+    )
     (tmp_path / "CHANGELOG.md").write_text(
-        f"# Changelog\n\n## {log} · 2026-01-02\n\n## 0.0.1 · 2025-01-01\n"
+        f"# Changelog\n\n## {log} · 2026-01-02\n\n## 0.0.1 · 2025-01-01\n", encoding="utf-8"
     )
     return tmp_path
 
