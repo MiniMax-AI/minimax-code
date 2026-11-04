@@ -42,3 +42,6 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest -W error
+        env:
+          # Fail on implicit text encodings, which use the locale code page on Windows.
+          PYTHONWARNDEFAULTENCODING: "1"

@@ -32,7 +32,7 @@ from minimax_code import (
 
 
 def calls(env: dict[str, str]) -> list[dict[str, Any]]:
-    text = Path(env["FAKE_MCODE_RECORD"]).read_text()
+    text = Path(env["FAKE_MCODE_RECORD"]).read_text(encoding="utf-8")
     return [json.loads(line) for line in text.splitlines()]
 
 
@@ -300,10 +300,14 @@ async def test_cancel_uses_sigterm_after_terminal_sigint(
     streamed = await thread.run_streamed("x")
     events = streamed.__aiter__()
     await events.__anext__()
-    os.kill(int(pid_file.read_text()), signal.SIGINT)
+    os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGINT)
     await asyncio.sleep(0.1)
     await streamed.aclose()
-    assert log.read_text().splitlines() == ["signal SIGINT", "signal SIGTERM", "completed"]
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "signal SIGINT",
+        "signal SIGTERM",
+        "completed",
+    ]
 
 
 def test_cancel_timings_cover_the_cli_shutdown_budget() -> None:
