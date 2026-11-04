@@ -14,11 +14,10 @@ It mirrors the TypeScript SDK
 ## Install
 
 ```bash
-pip install --pre minimax-code-sdk   # or: uv add --prerelease=allow minimax-code-sdk
+pip install minimax-code-sdk   # or: uv add minimax-code-sdk
 ```
 
-The SDK is in beta, so installers need `--pre` (or an exact version such as
-`minimax-code-sdk==0.1.0b1`) until `0.1.0` is released. Import it as `minimax_code`.
+Import it as `minimax_code`.
 
 The CLI is found from `MCodeOptions(bin=...)`, then the `MCODE_BIN` environment variable,
 then `PATH`. The SDK never starts it through a shell. On Windows, the `mcode.cmd` launcher

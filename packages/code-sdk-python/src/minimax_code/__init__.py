@@ -31,7 +31,7 @@ from .types import (
     Usage,
 )
 
-__version__ = "0.1.0b1"
+__version__ = "0.1.0"
 
 __all__ = [
     "MCODE_EXEC_EXIT_CODES",
