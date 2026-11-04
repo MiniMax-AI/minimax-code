@@ -283,8 +283,10 @@ describe('bash child calls', () => {
 
   it('keeps the status line after the whole output of a failing command', async () => {
     const tool = new LocalBashTool(workspace, undefined, { mode: 'off' });
+    // process.exit() would drop stdout still queued on the POSIX pipe, so the
+    // child sets exitCode and lets Node flush the 400 rows before exiting.
     const command = nodeCommand(
-      `for(let i=0;i<400;i++) console.log('row-'+i+'-'+'x'.repeat(90)); process.exit(3)`,
+      `for(let i=0;i<400;i++) console.log('row-'+i+'-'+'x'.repeat(90)); process.exitCode = 3`,
     );
     const result = await tool.execute(CHILD, { command });
 
