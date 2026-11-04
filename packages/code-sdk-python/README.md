@@ -68,8 +68,10 @@ later = client.resume_thread(thread.id, ThreadOptions(cwd="/path/to/project"))
 ```python
 streamed = await thread.run_streamed("Fix the failing test.")
 async for event in streamed:
-    if event["type"] == "item.updated" and event["item"]["type"] == "agent_message":
-        print(event["item"].get("contentDelta", ""), end="")
+    item = event.get("item")
+    if item and item["type"] == "agent_message":
+        # Text deltas arrive on item.started as well as item.updated.
+        print(item.get("contentDelta", ""), end="")
     elif event["type"] == "turn.failed":
         print("failed:", event.get("error"))
 ```
