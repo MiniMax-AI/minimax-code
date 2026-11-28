@@ -521,6 +521,16 @@ function createClient(
 	});
 }
 
+function urlHostMatches(baseUrl: string, domain: string): boolean {
+	try {
+		const host = new URL(baseUrl).hostname.toLowerCase();
+		const target = domain.toLowerCase();
+		return host === target || host.endsWith(`.${target}`);
+	} catch {
+		return false;
+	}
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -537,7 +547,7 @@ function buildParams(
 		stream: true,
 		prompt_cache_key:
 			!isMistralApiModel(model) &&
-			((model.baseUrl.includes("api.openai.com") && cacheRetention !== "none") ||
+			((urlHostMatches(model.baseUrl, "api.openai.com") && cacheRetention !== "none") ||
 				(cacheRetention === "long" && compat.supportsLongCacheRetention))
 				? clampOpenAIPromptCacheKey(options?.sessionId)
 				: undefined,
@@ -1126,10 +1136,13 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isSiliconFlow = /^https?:\/\/api\.siliconflow\.(?:cn|com)(?::\d+)?(?:\/|$)/i.test(baseUrl);
 	const isMistralApi = isMistralApiModel(model);
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
-	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
-	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
-	const isNvidia = provider === "nvidia" || baseUrl.includes("integrate.api.nvidia.com");
-	const isAntLing = provider === "ant-ling" || baseUrl.includes("api.ant-ling.com");
+	const isCloudflareWorkersAI =
+		provider === "cloudflare-workers-ai" || urlHostMatches(baseUrl, "api.cloudflare.com");
+	const isCloudflareAiGateway =
+		provider === "cloudflare-ai-gateway" || urlHostMatches(baseUrl, "gateway.ai.cloudflare.com");
+	const isNvidia = provider === "nvidia" || urlHostMatches(baseUrl, "integrate.api.nvidia.com");
+	const isAntLing = provider === "ant-ling" || urlHostMatches(baseUrl, "api.ant-ling.com");
+	const isDeepSeekHost = urlHostMatches(baseUrl, "deepseek.com");
 
 	const isNonStandard =
 		isNvidia ||
@@ -1139,7 +1152,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		baseUrl.includes("api.x.ai") ||
 		isTogether ||
 		baseUrl.includes("chutes.ai") ||
-		baseUrl.includes("deepseek.com") ||
+		isDeepSeekHost ||
 		isZai ||
 		isMoonshot ||
 		isMistralApi ||
@@ -1159,7 +1172,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isMistralApi;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+	const isDeepSeek = provider === "deepseek" || isDeepSeekHost;
 	const isOpenRouterDeveloperRoleModel =
 		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;

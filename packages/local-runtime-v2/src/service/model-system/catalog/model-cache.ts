@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes, scryptSync } from 'node:crypto';
 import fs, { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
@@ -59,7 +59,7 @@ export function modelCacheStatusFor(
 
 export function modelConfigFingerprint(value: unknown): string {
   const canonical = JSON.stringify(sortForFingerprint(value));
-  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+  return `sha256:${scryptSync(canonical, 'mcode-model-config-fingerprint-v1', 32, { N: 1024 }).toString('hex')}`;
 }
 
 export class LocalModelCache implements LocalModelCacheLike {

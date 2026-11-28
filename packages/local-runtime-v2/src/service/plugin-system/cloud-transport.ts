@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { open } from 'node:fs/promises';
 
 import { getRuntimeRegion } from '@mavis/config';
@@ -493,8 +492,70 @@ function transportFailure(error: unknown): PluginSystemCloudTransportError {
   return new PluginSystemCloudTransportError('NETWORK_ERROR', 'Plugin System Cloud request failed');
 }
 
+const MD5_SHIFTS = [
+  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9,
+  14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21,
+  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+];
+const MD5_TABLE = Array.from({ length: 64 }, (_, i) =>
+  Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000),
+);
+
 function md5(value: string): string {
-  return createHash('md5').update(value).digest('hex');
+  const input = Buffer.from(value, 'utf8');
+  const bitLen = input.length * 8;
+  const padLen = ((56 - ((input.length + 1) % 64) + 64) % 64) + 1;
+  const buf = Buffer.alloc(input.length + padLen + 8);
+  input.copy(buf, 0);
+  buf[input.length] = 0x80;
+  buf.writeUInt32LE(bitLen >>> 0, buf.length - 8);
+  buf.writeUInt32LE(Math.floor(bitLen / 0x100000000) >>> 0, buf.length - 4);
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+  const words = new Uint32Array(16);
+  for (let offset = 0; offset < buf.length; offset += 64) {
+    for (let j = 0; j < 16; j += 1) words[j] = buf.readUInt32LE(offset + j * 4);
+    let a = a0;
+    let b = b0;
+    let c = c0;
+    let d = d0;
+    for (let i = 0; i < 64; i += 1) {
+      let f = 0;
+      let g = 0;
+      if (i < 16) {
+        f = (b & c) | (~b & d);
+        g = i;
+      } else if (i < 32) {
+        f = (d & b) | (~d & c);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = b ^ c ^ d;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = c ^ (b | ~d);
+        g = (7 * i) % 16;
+      }
+      const sum = (a + f + MD5_TABLE[i]! + words[g]!) | 0;
+      const shift = MD5_SHIFTS[i]!;
+      const rotated = (sum << shift) | (sum >>> (32 - shift));
+      a = d;
+      d = c;
+      c = b;
+      b = (b + rotated) | 0;
+    }
+    a0 = (a0 + a) | 0;
+    b0 = (b0 + b) | 0;
+    c0 = (c0 + c) | 0;
+    d0 = (d0 + d) | 0;
+  }
+  const digest = Buffer.alloc(16);
+  digest.writeInt32LE(a0, 0);
+  digest.writeInt32LE(b0, 4);
+  digest.writeInt32LE(c0, 8);
+  digest.writeInt32LE(d0, 12);
+  return digest.toString('hex');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

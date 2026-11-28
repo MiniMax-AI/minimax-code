@@ -256,17 +256,40 @@ export function everyToCronExpression(every: string): string {
   return intervalSecondsToCron(seconds, every);
 }
 
+function isAsciiDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
 function parseIntervalSeconds(raw: string, original: string): number {
-  const re = /(\d+(?:\.\d+)?)(s|m|h|d|w)/g;
   let total = 0;
-  let consumed = '';
-  for (const match of raw.matchAll(re)) {
-    const amount = Number(match[1]);
-    const unit = match[2]!;
-    consumed += match[0];
+  let index = 0;
+  let valid = raw.length > 0;
+  while (valid && index < raw.length) {
+    const numStart = index;
+    while (index < raw.length && isAsciiDigit(raw.charCodeAt(index))) index += 1;
+    if (index === numStart) {
+      valid = false;
+      break;
+    }
+    if (raw[index] === '.') {
+      index += 1;
+      const fracStart = index;
+      while (index < raw.length && isAsciiDigit(raw.charCodeAt(index))) index += 1;
+      if (index === fracStart) {
+        valid = false;
+        break;
+      }
+    }
+    const unit = raw[index];
+    if (unit !== 's' && unit !== 'm' && unit !== 'h' && unit !== 'd' && unit !== 'w') {
+      valid = false;
+      break;
+    }
+    const amount = Number(raw.slice(numStart, index));
+    index += 1;
     total += amount * (DURATION_UNIT_MS[unit]! / 1000);
   }
-  if (!total || consumed !== raw) {
+  if (!valid || !total || index !== raw.length) {
     throw new LocalMavisCronValidationError(
       `cannot parse cron self interval ${JSON.stringify(original)}: expected a duration like "5m" or a cron expression`,
     );

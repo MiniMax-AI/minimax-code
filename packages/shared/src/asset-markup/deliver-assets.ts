@@ -79,14 +79,20 @@ export function decodeSessionDeliverableCanvasReference(reference: string): stri
 }
 
 /** Stable workspace-local identity used after a Session deliverable is imported. */
+function trimTrailingDotsAndSpaces(value: string): string {
+  let end = value.length;
+  while (end > 0 && (value[end - 1] === '.' || value[end - 1] === ' ')) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
 export function getCanvasDeliverableRelativePath(sourcePath: string): string {
   const normalized = sourcePath.trim().replace(/\\/gu, '/');
   const rawName = normalized.slice(normalized.lastIndexOf('/') + 1) || 'deliverable';
   const safeName =
-    rawName
-      .replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '-')
-      .replace(/[. ]+$/gu, '')
-      .slice(-120) || 'deliverable';
+    trimTrailingDotsAndSpaces(rawName.replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '-')).slice(-120) ||
+    'deliverable';
   return `${CANVAS_DELIVERABLE_DIRECTORY}/${stablePathHash(normalized)}-${safeName}`;
 }
 
@@ -98,11 +104,9 @@ export function getCanvasAssetRelativePath(assetId: string, fileName: string): s
       .replace(/[^A-Za-z0-9_-]/gu, '-')
       .slice(0, 256) || 'asset';
   const safeName =
-    fileName
-      .trim()
-      .replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '-')
-      .replace(/[. ]+$/gu, '')
-      .slice(-120) || 'asset';
+    trimTrailingDotsAndSpaces(
+      fileName.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '-'),
+    ).slice(-120) || 'asset';
   return `${CANVAS_DELIVERABLE_DIRECTORY}/${safeAssetId}-${safeName}`;
 }
 
@@ -151,10 +155,7 @@ export function isBlobUrl(path: string): boolean {
 const DELIVER_ASSETS_RE = /<(deliver-assets|deliver_assets)\b[^>]*>([\s\S]*?)<\/\1>/g;
 const DELIVER_ASSETS_TAG_RE = /<\/?deliver[-_]assets\b[^>]*>/g;
 const ITEM_RE = /<item>([\s\S]*?)<\/item>/g;
-const ITEM_TAG_RE = /<item>[\s\S]*?<\/item>/g;
 const MEDIA_TAG_RE = /<media\s+([^>]*?)\/>/g;
-const MEDIA_TAG_STRIP_RE = /<media\s+[^>]*?\/>/g;
-const MEDIA_ATTR_RE = /(\w+)="([^"]*)"/g;
 const INTERNAL_ARTIFACT_WRAPPER_RE = /<\/?publish[_-]artifact\b[^>]*>/gi;
 const PREVIEW_CARD_RE = /<preview_card\b[^>]*>([\s\S]*?)<\/preview_card>/gi;
 const PREVIEW_CARD_LABEL_RE = /^\s*preview_cards?:\s*$/gim;
@@ -394,8 +395,56 @@ function parseDeliverAssetsBlock(
   return items;
 }
 
+function stripDelimitedBlocks(content: string, openTag: string, closeTag: string): string {
+  let out = '';
+  let pos = 0;
+  while (pos < content.length) {
+    const openIdx = content.indexOf(openTag, pos);
+    if (openIdx === -1) break;
+    const closeIdx = content.indexOf(closeTag, openIdx + openTag.length);
+    if (closeIdx === -1) break;
+    out += content.slice(pos, openIdx);
+    pos = closeIdx + closeTag.length;
+  }
+  return pos === 0 ? content : out + content.slice(pos);
+}
+
+function stripSelfClosingMediaTags(content: string): string {
+  let out = '';
+  let pos = 0;
+  while (pos < content.length) {
+    const openIdx = content.indexOf('<media', pos);
+    if (openIdx === -1) break;
+    const afterName = content[openIdx + 6];
+    if (afterName === undefined || !/\s/u.test(afterName)) {
+      out += content.slice(pos, openIdx + 6);
+      pos = openIdx + 6;
+      continue;
+    }
+    const gt = content.indexOf('>', openIdx + 7);
+    if (gt === -1) break;
+    if (content[gt - 1] === '/') {
+      out += content.slice(pos, openIdx);
+      pos = gt + 1;
+    } else {
+      out += content.slice(pos, gt + 1);
+      pos = gt + 1;
+    }
+  }
+  return pos === 0 ? content : out + content.slice(pos);
+}
+
 function stripAssetTags(content: string): string {
-  return content.replace(ITEM_TAG_RE, '').replace(MEDIA_TAG_STRIP_RE, '').trim();
+  return stripSelfClosingMediaTags(stripDelimitedBlocks(content, '<item>', '</item>')).trim();
+}
+
+function isAsciiWordCode(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    code === 95
+  );
 }
 
 function parseMediaItem(
@@ -403,13 +452,25 @@ function parseMediaItem(
   cloudDrivePathDetection: boolean,
 ): DeliverAssetItem | null {
   const attrs: Record<string, string> = {};
-  MEDIA_ATTR_RE.lastIndex = 0;
-  let attrMatch: RegExpExecArray | null;
-
-  while ((attrMatch = MEDIA_ATTR_RE.exec(attrString)) !== null) {
-    const [, key, value] = attrMatch;
-    if (key && value) {
-      attrs[key] = decodeAssetMarkupText(value);
+  let index = 0;
+  while (index < attrString.length) {
+    if (!isAsciiWordCode(attrString.charCodeAt(index))) {
+      index += 1;
+      continue;
+    }
+    const keyStart = index;
+    while (index < attrString.length && isAsciiWordCode(attrString.charCodeAt(index))) {
+      index += 1;
+    }
+    if (attrString[index] === '=' && attrString[index + 1] === '"') {
+      const closeQuote = attrString.indexOf('"', index + 2);
+      if (closeQuote === -1) break;
+      const key = attrString.slice(keyStart, index);
+      const value = attrString.slice(index + 2, closeQuote);
+      if (key && value) {
+        attrs[key] = decodeAssetMarkupText(value);
+      }
+      index = closeQuote + 1;
     }
   }
 

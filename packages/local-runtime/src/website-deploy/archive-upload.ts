@@ -189,5 +189,10 @@ export function totalBytes(files: readonly DeployableFile[]): number {
 }
 
 export function sanitizeStem(name: string): string {
-  return name.replace(/[^A-Za-z0-9_-]/gu, '_').replace(/^_+|_+$/gu, '');
+  const normalized = name.replace(/[^A-Za-z0-9_-]/gu, '_');
+  let start = 0;
+  let end = normalized.length;
+  while (start < end && normalized.charCodeAt(start) === 95) start += 1;
+  while (end > start && normalized.charCodeAt(end - 1) === 95) end -= 1;
+  return normalized.slice(start, end);
 }

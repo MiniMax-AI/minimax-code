@@ -6,9 +6,20 @@ import { theme } from "../theme/theme.ts";
  * Format: "+123 content" or "-123 content" or " 123 content" or "     ..."
  */
 function parseDiffLine(line: string): { prefix: string; lineNum: string; content: string } | null {
-	const match = line.match(/^([+-\s])(\s*\d*)\s(.*)$/);
-	if (!match) return null;
-	return { prefix: match[1], lineNum: match[2], content: match[3] };
+	if (line.length < 2 || line.includes("\n") || line.includes("\r")) return null;
+	const prefix = line[0]!;
+	if (prefix !== "+" && prefix !== "-" && !/\s/.test(prefix)) return null;
+	let wsEnd = 1;
+	while (wsEnd < line.length && /\s/.test(line[wsEnd]!)) wsEnd += 1;
+	if (wsEnd < line.length && line[wsEnd]! >= "0" && line[wsEnd]! <= "9") {
+		let digEnd = wsEnd;
+		while (digEnd < line.length && line[digEnd]! >= "0" && line[digEnd]! <= "9") digEnd += 1;
+		if (digEnd < line.length && /\s/.test(line[digEnd]!)) {
+			return { prefix, lineNum: line.slice(1, digEnd), content: line.slice(digEnd + 1) };
+		}
+	}
+	if (wsEnd <= 1) return null;
+	return { prefix, lineNum: line.slice(1, wsEnd - 1), content: line.slice(wsEnd) };
 }
 
 /**

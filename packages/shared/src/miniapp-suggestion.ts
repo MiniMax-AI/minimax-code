@@ -93,25 +93,36 @@ export function miniAppSuggestionFromText(text: string): MiniAppSuggestionBrief 
   if (body === undefined) return undefined;
   const attributes: Record<string, string> = {};
   let offset = 0;
-  const pattern = /([a-z]+)[ \t\r\n]*=[ \t\r\n]*"([^"]*)"/y;
   while (offset < body.length) {
     const start = offset;
     while (offset < body.length && /\s/u.test(body[offset]!)) offset += 1;
     if (offset >= body.length) break;
     if (offset === start) return undefined;
-    pattern.lastIndex = offset;
-    const match = pattern.exec(body);
-    if (
-      !match ||
-      match[1] === undefined ||
-      match[2] === undefined ||
-      Object.hasOwn(attributes, match[1])
-    )
-      return undefined;
-    attributes[match[1]] = match[2];
-    offset = pattern.lastIndex;
+    const keyStart = offset;
+    while (offset < body.length) {
+      const code = body.charCodeAt(offset);
+      if (code < 97 || code > 122) break;
+      offset += 1;
+    }
+    if (offset === keyStart) return undefined;
+    const key = body.slice(keyStart, offset);
+    if (Object.hasOwn(attributes, key)) return undefined;
+    while (offset < body.length && isAsciiHtmlSpace(body.charCodeAt(offset))) offset += 1;
+    if (body[offset] !== '=') return undefined;
+    offset += 1;
+    while (offset < body.length && isAsciiHtmlSpace(body.charCodeAt(offset))) offset += 1;
+    if (body[offset] !== '"') return undefined;
+    offset += 1;
+    const closeQuote = body.indexOf('"', offset);
+    if (closeQuote === -1) return undefined;
+    attributes[key] = body.slice(offset, closeQuote);
+    offset = closeQuote + 1;
   }
   return readMiniAppSuggestionBrief(attributes);
+}
+
+function isAsciiHtmlSpace(code: number): boolean {
+  return code === 32 || code === 9 || code === 13 || code === 10;
 }
 
 function decode(value: string): string {
