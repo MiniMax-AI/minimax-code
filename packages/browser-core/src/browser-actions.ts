@@ -1864,7 +1864,7 @@ export abstract class BrowserActionSupport extends BrowserActionTargetSupport {
     return (
       (await evaluate<boolean>(
         session,
-        `(() => { try { const element = document.querySelector(${JSON.stringify(selector)}); return element !== null && (element === document.body || element === document.documentElement || element === document.scrollingElement); } catch { return false; } })()`,
+        `(() => { try { const element = document.querySelector(${JSON.stringify(selector).replace(/[<>/\u2028\u2029]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}); return element !== null && (element === document.body || element === document.documentElement || element === document.scrollingElement); } catch { return false; } })()`,
       ).catch((error: unknown) => {
         if (isBrowserOperationInterruption(error)) throw error;
         return false;

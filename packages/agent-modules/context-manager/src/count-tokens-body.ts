@@ -47,14 +47,15 @@ export interface CountTokensRequestBody {
   temperature: number;
   messages: CountTokensMessage[];
   system?: CountTokensTextBlock[];
-  /** 参与计数的工具声明；缺省表示本次请求不带工具。 */
+  /** Tool declarations included in the count; omitted when the request has no tools. */
   tools?: CountTokensTool[];
 }
 
 /**
- * Messages-compatible count_tokens 端点的工具声明形状。工具声明是真实 LLM 请求
- * payload 的一部分（MCP 重的会话可达数万 token），计数请求必须带上同样的
- * 声明，否则计出来的值系统性偏低。`input_schema` 即工具参数的 JSON Schema。
+ * Tool declaration shape for the Messages-compatible count_tokens endpoint. Tool declarations are
+ * part of the actual LLM request payload (tens of thousands of tokens in MCP-heavy sessions), so
+ * count requests must include the same declarations to avoid systematic undercounting.
+ * `input_schema` is the tool parameter JSON Schema.
  */
 export interface CountTokensTool {
   name: string;
@@ -151,9 +152,9 @@ export function buildCountTokensRequestBody(
 ): CountTokensRequestBody {
   const llm = convertToLlm(messages);
   const turns = flattenToAlternatingText(llm);
-  // 归一化而不是过滤：真实 LLM 请求会带上所有已注册工具，哪怕 description
-  // 为空、schema 缺失；在这里悄悄丢掉这类工具会系统性低估 payload。所以只
-  // 剔除连 name 都没有的非法项，缺失字段补上合法默认值。
+  // Normalize rather than filter: real LLM requests include all registered tools, even with empty
+  // descriptions or missing schemas. Silently dropping them would underestimate the payload. Only
+  // discard invalid entries without a name, and fill missing fields with valid defaults.
   const countTools = tools
     ?.filter((tool) => tool.name)
     .map((tool) => ({
@@ -215,18 +216,18 @@ export function cjkFallbackTokens(
 }
 
 /**
- * {@link cjkFallbackTokens} 的 body 版变体：调用方（如 local-runtime 的
- * `HttpRemoteTokenCounter`）为发远程请求已经构建过一次 count_tokens body，
- * 远程失败走 fallback 时直接复用该 body 估算，避免把全量转录再
- * convert + flatten 一遍。两条路径基于同一个 body，保证 trigger 看到的
- * 形状与远程计数一致。
+ * Body-based variant of {@link cjkFallbackTokens}: callers such as local-runtime's
+ * `HttpRemoteTokenCounter` have already built a count_tokens body for the remote request. Reuse it
+ * for fallback estimation after remote failure instead of converting and flattening the full
+ * transcript again. Both paths use the same body, keeping the trigger's view aligned with remote
+ * counting.
  */
 export function cjkFallbackTokensForBody(body: CountTokensRequestBody): number {
   let total = body.system ? estimateCharsToTokensCjkAware(body.system[0]!.text) : 0;
   for (const m of body.messages) {
     total += FALLBACK_MESSAGE_OVERHEAD + estimateCharsToTokensCjkAware(m.content[0]!.text);
   }
-  // 工具声明同样计入 fallback 估算，与远程端点看到的 body 保持同一口径。
+  // Include tool declarations in fallback estimates, matching the body seen by the remote endpoint.
   for (const tool of body.tools ?? []) {
     total +=
       FALLBACK_MESSAGE_OVERHEAD +

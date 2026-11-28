@@ -13,7 +13,7 @@ import path from 'node:path';
  *
  * Rule: a feature that hands the Agent a path under the private data directory
  * must register a source, or every read of that path becomes an ask nobody
- * expects (tool outputs; attachments
+ * expects (MCT-202610-E6ZLNV7Z: tool outputs; MCT-202610-A2VA9DM3: attachments
  * and the default Session workspace).
  *
  * Sources only name candidate paths. The engine enforces the boundary: a grant

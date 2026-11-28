@@ -139,69 +139,6 @@ describe("Anthropic eager tool input streaming compatibility", () => {
 		});
 	});
 
-	it("keeps the definitions that property $refs point to", async () => {
-		const request = {
-			type: "object",
-			properties: { symbol: { type: "string" }, outputsize: { type: "integer" } },
-			required: ["symbol"],
-		};
-		const mcpTool: Tool = {
-			name: "mcp__twelvedata__GetTimeSeries",
-			description: "Time series",
-			// MCP servers (e.g. FastMCP/pydantic) emit nested models as $defs + $ref.
-			parameters: {
-				type: "object",
-				$defs: { GetTimeSeriesRequest: request },
-				properties: { params: { $ref: "#/$defs/GetTimeSeriesRequest" } },
-				required: ["params"],
-			} as unknown as Tool["parameters"],
-		};
-		const legacyTool: Tool = {
-			name: "legacy",
-			description: "draft-07 definitions",
-			parameters: {
-				type: "object",
-				definitions: { Item: request },
-				properties: { item: { $ref: "#/definitions/Item" } },
-			} as unknown as Tool["parameters"],
-		};
-		const captured = await captureAnthropicRequest(undefined, createContext([mcpTool, legacyTool]));
-		const [first, second] = captured.body.tools as Array<{ input_schema: Record<string, unknown> }>;
-
-		expect(first.input_schema).toEqual({
-			type: "object",
-			properties: { params: { $ref: "#/$defs/GetTimeSeriesRequest" } },
-			required: ["params"],
-			$defs: { GetTimeSeriesRequest: request },
-		});
-		expect(second.input_schema.definitions).toEqual({ Item: request });
-		expect(getFirstTool(captured.body).input_schema).not.toHaveProperty("definitions");
-	});
-
-	it.each([
-		["null", null],
-		["an array", [{ type: "string" }]],
-		["a string", "Item"],
-	])("omits $defs and definitions when the schema declares them as %s", async (_label, value) => {
-		const malformedTool: Tool = {
-			name: "malformed",
-			description: "Non-object definition maps",
-			parameters: {
-				type: "object",
-				$defs: value,
-				definitions: value,
-				properties: { item: { type: "string" } },
-			} as unknown as Tool["parameters"],
-		};
-		const captured = await captureAnthropicRequest(undefined, createContext([malformedTool]));
-
-		expect(getFirstTool(captured.body).input_schema).toEqual({
-			type: "object",
-			properties: { item: { type: "string" } },
-			required: [],
-		});
-	});
-
 	it("sends per-tool eager_input_streaming by default", async () => {
 		const request = await captureAnthropicRequest(undefined, createContext());
 

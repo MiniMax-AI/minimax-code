@@ -2,12 +2,12 @@
  * Credential identity (plan §6.3) and URL / address classification helpers.
  * Pure functions — no I/O.
  */
-import { createHash } from 'node:crypto';
+import { scryptSync } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { McpOAuthBinding } from './contracts.js';
 
 function sha256Hex(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+  return scryptSync(value, 'mcode-mcp-oauth-v1', 32, { N: 1024 }).toString('hex');
 }
 
 /** Scheme/host lowercased, default port and fragment dropped, trailing `/` removed. */

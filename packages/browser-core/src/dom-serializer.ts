@@ -1,21 +1,20 @@
 /**
- * DOM Serializer
- * 参考 browser-use 的实现，提供高效的 DOM 树序列化
+ * DOM Serializer. Follows browser-use to serialize DOM trees efficiently.
  *
- * 核心功能：
- * 1. 树优化 - 移除无意义中间节点
- * 2. Paint Order 过滤 - 过滤被遮挡元素
- * 3. Bounding Box 过滤 - 过滤被父元素完全包含的子元素
- * 4. 层级文本输出 - 更省 token 的输出格式
+ * Core features:
+ * 1. Tree optimization: Remove meaningless intermediate nodes.
+ * 2. Paint-order filtering: Remove occluded elements.
+ * 3. Bounding-box filtering: Remove children fully contained by their parents.
+ * 4. Hierarchical text output: A more token-efficient format.
  */
 
 import type { InteractiveElement } from './browser-core-contracts.js';
 
 // ============================================
-// 类型定义
+// Type definitions
 // ============================================
 
-/** 简化的 DOM 节点（用于树优化） */
+/** Simplified DOM node for tree optimization. */
 export interface SimplifiedNode {
   element: InteractiveElement;
   children: SimplifiedNode[];
@@ -26,14 +25,14 @@ export interface SimplifiedNode {
   depth: number;
 }
 
-/** 传播边界（用于 bbox 过滤） */
+/** Propagation boundary for bbox filtering. */
 interface PropagatingBounds {
   tag: string;
   bounds: { x: number; y: number; width: number; height: number };
   backendNodeId: number;
 }
 
-/** 序列化配置 */
+/** Serialization configuration. */
 export interface SerializerConfig {
   enableTreeOptimization: boolean;
   enablePaintOrderFiltering: boolean;
@@ -41,13 +40,13 @@ export interface SerializerConfig {
   bboxContainmentThreshold: number;
   maxTextLength: number;
   outputFormat: 'tree' | 'flat';
-  /** 最大输出字符数（默认 20000） */
+  /** Maximum output characters; defaults to 20000. */
   maxOutputChars: number;
-  /** 最大元素数量（默认 100） */
+  /** Maximum number of elements; defaults to 100. */
   maxElements: number;
 }
 
-/** 序列化结果 */
+/** Serialization result. */
 export interface SerializedResult {
   text: string;
   elementCount: number;
@@ -56,19 +55,19 @@ export interface SerializedResult {
 }
 
 // ============================================
-// 常量
+// Constants
 // ============================================
 
-/** 会传播边界的元素（点击父元素等同于点击子元素） */
+/** Elements that propagate boundaries: clicking the parent is equivalent to clicking the child. */
 const PROPAGATING_ELEMENTS = new Set(['a', 'button']);
 
-/** 会传播边界的 role */
+/** Roles that propagate boundaries. */
 const PROPAGATING_ROLES = new Set(['button', 'link', 'menuitem', 'option']);
 
-/** 表单元素（不应被 bbox 过滤排除） */
+/** Form elements that must not be excluded by bbox filtering. */
 const FORM_ELEMENTS = new Set(['input', 'select', 'textarea', 'label']);
 
-/** 类型缩写映射 */
+/** Type abbreviation mapping. */
 const TYPE_ABBREV: Record<string, string> = {
   button: 'btn',
   link: 'lnk',
@@ -90,7 +89,7 @@ const TYPE_ABBREV: Record<string, string> = {
 };
 
 // ============================================
-// DOM 序列化器
+// DOM serializer
 // ============================================
 
 export class DOMSerializer {
@@ -103,18 +102,18 @@ export class DOMSerializer {
       enablePaintOrderFiltering: true,
       enableBboxFiltering: true,
       bboxContainmentThreshold: 0.95,
-      maxTextLength: 30, // 精简：从 50 减少到 30
+      maxTextLength: 30, // Shorten from 50 to 30.
       outputFormat: 'tree',
-      maxOutputChars: 20000, // 限制总输出字符数
-      maxElements: 80, // 限制最大元素数量
+      maxOutputChars: 20000, // Limit total output characters.
+      maxElements: 80, // Limit the maximum element count.
       ...config,
     };
   }
 
   /**
-   * 序列化可交互元素列表
-   * @param elements 可交互元素列表
-   * @param pageInfo 页面信息
+   * Serialize a list of interactive elements.
+   * @param elements List of interactive elements.
+   * @param pageInfo Page information.
    */
   serialize(
     elements: InteractiveElement[],
@@ -141,7 +140,7 @@ export class DOMSerializer {
     let filteredElements = elements;
     let filteredCount = 0;
 
-    // Step 1: Paint Order 过滤
+    // Step 1: Paint-order filtering.
     if (this.config.enablePaintOrderFiltering) {
       const startPaint = Date.now();
       const result = this.filterByPaintOrder(filteredElements);
@@ -150,7 +149,7 @@ export class DOMSerializer {
       this.timingInfo.paintOrderFilter = Date.now() - startPaint;
     }
 
-    // Step 2: Bounding Box 过滤
+    // Step 2: Bounding-box filtering.
     if (this.config.enableBboxFiltering) {
       const startBbox = Date.now();
       const result = this.filterByBoundingBox(filteredElements);
@@ -159,7 +158,7 @@ export class DOMSerializer {
       this.timingInfo.bboxFilter = Date.now() - startBbox;
     }
 
-    // Step 3: 生成输出
+    // Step 3: Generate output.
     const startOutput = Date.now();
     const text =
       this.config.outputFormat === 'tree'
@@ -178,22 +177,22 @@ export class DOMSerializer {
   }
 
   // ============================================
-  // Paint Order 过滤
+  // Paint-order filtering
   // ============================================
 
   /**
-   * 根据 paint order 过滤被遮挡的元素
-   * 原理：paint order 较小的元素会被 paint order 较大的元素遮挡
+   * Filter occluded elements by paint order: elements with lower paint order can be covered by
+   * those with higher paint order.
    */
   private filterByPaintOrder(elements: InteractiveElement[]): {
     elements: InteractiveElement[];
     filteredCount: number;
   } {
-    // 按位置分组，检测重叠
+    // Group by position to detect overlap.
     const filtered: InteractiveElement[] = [];
     const excluded = new Set<number>();
 
-    // 按 paint order 排序（从大到小，后绘制的在前）
+    // Sort by descending paint order, placing later-painted elements first.
     const sortedByPaint = [...elements].sort((a, b) => {
       const paintA = (a as unknown as { paintOrder?: number }).paintOrder ?? 0;
       const paintB = (b as unknown as { paintOrder?: number }).paintOrder ?? 0;
@@ -205,7 +204,7 @@ export class DOMSerializer {
       if (!current) continue;
       if (excluded.has(current.index)) continue;
 
-      // 检查是否被后面（paint order 更大）的元素完全遮挡
+      // Check whether a later-painted element (higher paint order) fully occludes this element.
       let isOccluded = false;
       for (let j = 0; j < i; j++) {
         const other = sortedByPaint[j];
@@ -230,12 +229,12 @@ export class DOMSerializer {
   }
 
   // ============================================
-  // Bounding Box 过滤
+  // Bounding-box filtering
   // ============================================
 
   /**
-   * 根据边界框过滤被父元素包含的子元素
-   * 原理：对于 <a> 和 <button> 等可点击容器，点击父元素等同于点击子元素
+   * Filter children contained within a parent's bounding box. For clickable containers such as <a>
+   * and <button>, clicking the parent is equivalent to clicking the child.
    */
   private filterByBoundingBox(elements: InteractiveElement[]): {
     elements: InteractiveElement[];
@@ -244,7 +243,7 @@ export class DOMSerializer {
     const filtered: InteractiveElement[] = [];
     const excluded = new Set<number>();
 
-    // 找出所有传播边界的元素
+    // Find all boundary-propagating elements.
     const propagatingElements: PropagatingBounds[] = [];
     for (const el of elements) {
       if (this.isPropagatingElement(el)) {
@@ -257,13 +256,13 @@ export class DOMSerializer {
     }
 
     for (const el of elements) {
-      // 表单元素不应被排除
+      // Do not exclude form elements.
       if (FORM_ELEMENTS.has(el.tag.toLowerCase())) {
         filtered.push(el);
         continue;
       }
 
-      // 检查是否被传播元素包含
+      // Check containment by a boundary-propagating element.
       let isContained = false;
       for (const parent of propagatingElements) {
         if (parent.backendNodeId === el.index) continue;
@@ -293,7 +292,7 @@ export class DOMSerializer {
   }
 
   /**
-   * 检查元素是否是传播边界的元素
+   * Check whether the element propagates boundaries.
    */
   private isPropagatingElement(el: InteractiveElement): boolean {
     const tag = el.tag.toLowerCase();
@@ -306,7 +305,7 @@ export class DOMSerializer {
   }
 
   /**
-   * 检查 A 是否完全包含在 B 中
+   * Check whether A is fully contained in B.
    */
   private isFullyContained(
     a: { x: number; y: number; width: number; height: number },
@@ -318,14 +317,14 @@ export class DOMSerializer {
   }
 
   /**
-   * 检查 A 是否被 B 包含（带阈值）
+   * Check whether A is contained in B, with a threshold.
    */
   private isContainedWithThreshold(
     a: { x: number; y: number; width: number; height: number },
     b: { x: number; y: number; width: number; height: number },
     threshold: number,
   ): boolean {
-    // 计算交集面积
+    // Compute the intersection area.
     const intersectX = Math.max(a.x, b.x);
     const intersectY = Math.max(a.y, b.y);
     const intersectRight = Math.min(a.x + a.width, b.x + b.width);
@@ -342,11 +341,11 @@ export class DOMSerializer {
   }
 
   // ============================================
-  // 输出格式化
+  // Output formatting
   // ============================================
 
   /**
-   * 计算滚动信息
+   * Compute scroll information.
    */
   private calculateScrollInfo(pageInfo: {
     viewport: { width: number; height: number };
@@ -364,13 +363,13 @@ export class DOMSerializer {
     const scrollY = pageInfo.scrollPosition.y;
     const pageHeight = pageInfo.pageHeight;
 
-    // 计算上方和下方还有多少页
+    // Compute the number of pages above and below.
     const pagesAbove = viewportHeight > 0 ? Math.round((scrollY / viewportHeight) * 10) / 10 : 0;
     const contentBelow = Math.max(0, pageHeight - viewportHeight - scrollY);
     const pagesBelow =
       viewportHeight > 0 ? Math.round((contentBelow / viewportHeight) * 10) / 10 : 0;
 
-    // 计算滚动百分比
+    // Compute scroll percentage.
     const maxScrollY = Math.max(0, pageHeight - viewportHeight);
     const scrollPercentY = maxScrollY > 0 ? Math.round((scrollY / maxScrollY) * 100) : 0;
 
@@ -384,7 +383,7 @@ export class DOMSerializer {
   }
 
   /**
-   * 格式化页面头部信息（精简版）
+   * Format compact page header information.
    */
   private formatHeader(
     pageInfo: {
@@ -399,10 +398,10 @@ export class DOMSerializer {
   ): string {
     const scrollInfo = this.calculateScrollInfo(pageInfo);
 
-    // 精简标题（最多 50 字符）
+    // Shorten the title to at most 50 characters.
     const title = pageInfo.title.length > 50 ? pageInfo.title.slice(0, 47) + '...' : pageInfo.title;
 
-    // 精简 URL（只保留 path）
+    // Shorten the URL, keeping only the path.
     let urlPath = pageInfo.url;
     try {
       const url = new URL(pageInfo.url);
@@ -411,10 +410,10 @@ export class DOMSerializer {
         urlPath = urlPath.slice(0, 57) + '...';
       }
     } catch {
-      // 保持原样
+      // Keep unchanged.
     }
 
-    // 滚动信息：简化格式
+    // Use a simplified scroll information format.
     let scrollStr = '';
     if (scrollInfo.canScrollUp || scrollInfo.canScrollDown) {
       const parts: string[] = [];
@@ -423,13 +422,12 @@ export class DOMSerializer {
       scrollStr = ` ${parts.join(' ')}`;
     }
 
-    // 单行紧凑格式
+    // Compact single-line format.
     return `[${title}] ${urlPath} | ${elementCount}el${scrollStr}\n---`;
   }
 
   /**
-   * 格式化为层级树结构（更省 token）
-   * 应用字符限制和元素数量限制
+   * Format as a token-efficient hierarchical tree, applying character and element-count limits.
    */
   private formatAsTree(
     elements: InteractiveElement[],
@@ -442,10 +440,10 @@ export class DOMSerializer {
       pageWidth?: number;
     },
   ): string {
-    // 只输出视口内的元素
+    // Output only elements in the viewport.
     let viewportElements = elements.filter((el) => el.isInViewport);
 
-    // 限制元素数量
+    // Limit the number of elements.
     const maxElements = this.config.maxElements;
     const truncatedByCount = viewportElements.length > maxElements;
     if (truncatedByCount) {
@@ -455,13 +453,13 @@ export class DOMSerializer {
     const lines: string[] = [this.formatHeader(pageInfo, elements.length)];
     let totalChars = lines[0]?.length ?? 0;
 
-    // 逐个添加元素，检查字符限制
+    // Add elements one at a time, checking the character limit.
     let truncatedByChars = false;
     let addedCount = 0;
     for (const el of viewportElements) {
       const line = this.formatElement(el);
       if (totalChars + line.length + 1 > this.config.maxOutputChars - 100) {
-        // 预留 100 字符给尾部信息
+        // Reserve 100 characters for the footer.
         truncatedByChars = true;
         break;
       }
@@ -470,7 +468,7 @@ export class DOMSerializer {
       addedCount++;
     }
 
-    // 添加截断提示
+    // Add a truncation notice.
     const hiddenInViewport = viewportElements.length - addedCount;
     const hiddenBelowViewport = elements.length - elements.filter((el) => el.isInViewport).length;
     const totalHidden = hiddenInViewport + hiddenBelowViewport;
@@ -486,7 +484,7 @@ export class DOMSerializer {
   }
 
   /**
-   * 格式化为扁平 JSON（兼容旧格式）
+   * Format as flat JSON for compatibility with the legacy format.
    */
   private formatAsFlat(
     elements: InteractiveElement[],
@@ -518,26 +516,26 @@ export class DOMSerializer {
   }
 
   /**
-   * 格式化单个元素
-   * 格式: @{index} [{type}] "{text}" {attributes}
+   * Format one element.
+   * Format: @{index} [{type}] "{text}" {attributes}
    */
   private formatElement(el: InteractiveElement): string {
     const parts: string[] = [];
 
-    // 索引
+    // Index
     parts.push(`@${el.index}`);
 
-    // 类型
+    // Type
     const type = this.getTypeAbbrev(el.type);
     parts.push(`[${type}]`);
 
-    // 文本
+    // Text
     if (el.text) {
       const text = this.truncateText(el.text);
       parts.push(`"${text}"`);
     }
 
-    // 关键属性
+    // Key attributes
     const attrs = this.formatAttributes(el);
     if (attrs) {
       parts.push(attrs);
@@ -547,7 +545,7 @@ export class DOMSerializer {
   }
 
   /**
-   * 获取类型缩写
+   * Get the type abbreviation.
    */
   private getTypeAbbrev(type: string): string {
     const lower = type.toLowerCase();
@@ -555,7 +553,7 @@ export class DOMSerializer {
   }
 
   /**
-   * 截断文本
+   * Truncate text.
    */
   private truncateText(text: string): string {
     const cleaned = text.replace(/\s+/g, ' ').trim();
@@ -566,12 +564,12 @@ export class DOMSerializer {
   }
 
   /**
-   * 格式化关键属性（精简版，只保留最重要的）
+   * Format a compact set of only the most important attributes.
    */
   private formatAttributes(el: InteractiveElement): string {
     const attrs: string[] = [];
 
-    // placeholder（对输入框很重要）
+    // placeholder is important for input fields.
     if (el.attributes.placeholder && el.type.includes('text')) {
       const ph = this.truncateText(el.attributes.placeholder);
       if (ph.length <= 20) {
@@ -579,21 +577,21 @@ export class DOMSerializer {
       }
     }
 
-    // href（只显示短路径，对链接重要）
+    // href is important for links; show only a short path.
     if (el.attributes.href && el.type === 'link') {
       try {
         const url = new URL(el.attributes.href, 'http://placeholder.local');
         const path = url.pathname;
-        // 只显示短路径
+        // Show only a short path.
         if (path.length > 1 && path.length <= 20 && path !== '/') {
           attrs.push(`→${path}`);
         }
       } catch {
-        // 忽略
+        // Ignore.
       }
     }
 
-    // 状态属性（用简短符号）
+    // State attributes, represented with short symbols.
     if (el.attributes['aria-expanded'] === 'true') attrs.push('▼');
     if (el.attributes['aria-expanded'] === 'false') attrs.push('▶');
     if (el.attributes.checked) attrs.push('✓');
@@ -604,11 +602,11 @@ export class DOMSerializer {
 }
 
 // ============================================
-// 导出便捷函数
+// Export convenience functions.
 // ============================================
 
 /**
- * 序列化可交互元素（使用默认配置）
+ * Serialize interactive elements with default configuration.
  */
 export function serializeElements(
   elements: InteractiveElement[],

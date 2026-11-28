@@ -226,7 +226,11 @@ export class MetricsReporter implements MetricsBatchReporter {
       ...options,
       ...(options.endpoint
         ? {
-            endpoint: options.endpoint.replace(/\/+$/, ''),
+            endpoint: (() => {
+              let end = options.endpoint.length;
+              while (end > 0 && options.endpoint.charCodeAt(end - 1) === 47) end -= 1;
+              return options.endpoint.slice(0, end);
+            })(),
             batchPath: normalizeBatchPath(options.batchPath ?? DEFAULT_METRICS_BATCH_PATH),
           }
         : {}),

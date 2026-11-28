@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { retryWindowsFileSystemOperation } from '@mavis/shared';
@@ -151,5 +151,5 @@ function writeCliAccountIdentity(
 }
 
 function fingerprintAccessToken(accessToken: string): string {
-  return `sha256:${createHash('sha256').update(accessToken.trim()).digest('hex')}`;
+  return `scrypt:${scryptSync(accessToken.trim(), 'mcode-cli-account-identity-v1', 16, { N: 1024 }).toString('hex')}`;
 }

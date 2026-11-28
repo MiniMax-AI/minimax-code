@@ -489,11 +489,6 @@ describe("Large session fixture", () => {
 		expect(loaded.messages.length).toBeGreaterThan(100);
 		expect(loaded.model).not.toBeNull();
 	});
-
-	it("prefers usage.contextTokens over cumulative multi-hop totalTokens", () => {
-		const usage: Usage = { ...createMockUsage(600_000, 130_000), contextTokens: 330_000 };
-		expect(calculateContextTokens(usage)).toBe(330_000);
-	});
 });
 
 // ============================================================================

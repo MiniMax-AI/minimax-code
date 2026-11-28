@@ -1,7 +1,7 @@
 // Local skill domain application service. Single business entry point for skill
 // capabilities consumed by both the DesktopService thrift adapter and runtime
 // callers (turn agent config, native skill tool). It accepts runtime/domain
-// DTOs — never generated wire request/response envelopes — and signals failures with
+// DTOs — never thrift-gen request/response envelopes — and signals failures with
 // sentinels (`undefined` / `'protected'`) or the hub's own
 // `LocalSkillHubInstallError`; it never throws HTTP/contract errors. Contract
 // DTO conversion and HTTP error mapping stay in the thrift adapter

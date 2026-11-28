@@ -1,20 +1,15 @@
-import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 import JSZip from 'jszip';
 
 import type { LocalWebsiteDeployStage } from '@mavis/agent-tools/desktop';
 
-import { logger } from '../common/logger.js';
 import { deployFailure, ensureNotAborted, runDeployStage } from './deploy-failure.js';
 
 const GET_UPLOAD_URL_PATH = '/mavis/api/v1/mcp/get_upload_url';
 const ARCHIVE_MIME = 'application/zip';
-const ARCHIVE_GENERATE_OPTIONS = {
-  type: 'nodebuffer',
-  compression: 'DEFLATE',
-  compressionOptions: { level: 6 },
-} as const;
 
 /** Default exclusions keep dev output and credentials out of public archives. */
 export const DEFAULT_IGNORE_PATTERNS: readonly RegExp[] = [
@@ -178,59 +173,15 @@ async function packZip(
   const zip = new JSZip();
   for (const file of files) {
     ensureNotAborted(signal, 'during packaging', stage);
-    zip.file(file.relPath, await readPackagedFile(file.absPath, stage));
+    zip.file(file.relPath, createReadStream(file.absPath));
   }
-  const archive = await generateArchive(zip, signal, stage);
+  const archive = await zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
   ensureNotAborted(signal, 'after packaging', stage);
   return archive;
-}
-
-async function readPackagedFile(absPath: string, stage: LocalWebsiteDeployStage): Promise<Buffer> {
-  try {
-    return await readFile(absPath);
-  } catch (err) {
-    logger.warn(
-      { stage, result: 'failed', error_code: fsErrorCode(err) },
-      'website deploy packaging read failed',
-    );
-    throw err;
-  }
-}
-
-function fsErrorCode(err: unknown): string {
-  return err instanceof Error && 'code' in err && typeof err.code === 'string'
-    ? err.code
-    : 'unknown';
-}
-
-async function generateArchive(
-  zip: JSZip,
-  signal: AbortSignal | undefined,
-  stage: LocalWebsiteDeployStage,
-): Promise<Buffer> {
-  if (signal === undefined) return zip.generateAsync(ARCHIVE_GENERATE_OPTIONS);
-  const { promise: aborted, dispose } = abortRejection(signal, stage);
-  try {
-    return await Promise.race([zip.generateAsync(ARCHIVE_GENERATE_OPTIONS), aborted]);
-  } finally {
-    dispose();
-  }
-}
-
-function abortRejection(
-  signal: AbortSignal,
-  stage: LocalWebsiteDeployStage,
-): { promise: Promise<never>; dispose: () => void } {
-  let rejectAbort: ((reason: unknown) => void) | undefined;
-  const onAbort = (): void => {
-    logger.warn({ stage, result: 'aborted' }, 'website deploy aborted during archive generation');
-    rejectAbort?.(deployFailure('website_deploy aborted during packaging', 'aborted', stage));
-  };
-  const promise = new Promise<never>((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  signal.addEventListener('abort', onAbort, { once: true });
-  return { promise, dispose: () => signal.removeEventListener('abort', onAbort) };
 }
 
 export function totalBytes(files: readonly DeployableFile[]): number {

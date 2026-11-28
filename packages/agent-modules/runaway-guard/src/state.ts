@@ -8,7 +8,7 @@ import type {
 export interface ProgressStreak {
   readonly progressKey: string;
   readonly occurrences: number;
-  /** Continuous task polling persists across text-only steps for one task. */
+  /** Continuous task polling persists across text and reads of other tasks. */
   readonly continuousPolling?: boolean;
   readonly reminderEligible?: boolean;
 }

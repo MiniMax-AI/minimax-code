@@ -1,10 +1,6 @@
 import type { ThreadGoalAttachment } from '../types.js';
 
-/**
- * Fixed, readonly worker-session transcript captured before verifier dispatch.
- * It does not contain the verifier child's trajectory. A worker's self-check or
- * claim to be verifying does not change the actor of its captured tool events.
- */
+/** Fixed, readonly transcript captured before verifier dispatch. */
 export interface TranscriptWindow {
   readonly messages: readonly unknown[];
   readonly truncated: boolean;

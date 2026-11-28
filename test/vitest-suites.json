@@ -305,7 +305,6 @@
       "packages/shared/test/unit/local-resource-errors.test.ts",
       "packages/shared/test/unit/local-runtime-managed-skills.test.ts",
       "packages/shared/test/unit/next-step.test.ts",
-      "packages/shared/test/unit/provider-error-summary.test.ts",
       "packages/shared/test/unit/rollout-bucket.test.ts",
       "packages/mcode-tools-host/test/unit/broker-endpoint.test.ts",
       "packages/mcode-tools-host/test/unit/integration.test.ts",

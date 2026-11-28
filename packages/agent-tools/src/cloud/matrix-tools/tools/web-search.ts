@@ -1,9 +1,8 @@
 /**
- * matrix_web_search —— Pattern A:无文件 I/O,input/output 直接透传 matrix-tools。
+ * matrix_web_search — Pattern A: No file I/O; forward input/output directly to matrix-tools.
  *
- * 留 `_ossMediaClient` / `_workspaceScope` 在构造函数里只是为了让所有 18 个
- * matrix-tools tool 共享同一个 `buildMatrixTools(...)` 实例化口径,搜索类
- * 工具本身不会用到这两个依赖。
+ * Constructor parameters `_ossMediaClient` / `_workspaceScope` only keep `buildMatrixTools(...)`
+ * construction uniform across all 18 tools; search tools do not use these dependencies.
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

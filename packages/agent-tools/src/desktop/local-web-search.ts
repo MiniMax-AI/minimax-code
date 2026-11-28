@@ -35,9 +35,9 @@ export class LocalWebSearchTool implements ToolImpl<
 function wrapLegacyMatrixMcpResult(result: ToolResult): ToolResult {
   // Electron no longer starts the Matrix MCP process, but model-visible content and
   // Tool events must remain byte/shape compatible with the old MCP runtime adapter.
-  // A rejected or failed request (details.ok false from callMatrixTool) is an error
-  // on both paths. One deliberate difference: a payload that reports an error is
-  // an error here too, so its text is not taken for search results.
+  // One deliberate difference: a rejected or failed request (details.ok false from
+  // callMatrixTool), or a payload that reports an error, is an error, so its text
+  // is not taken for search results.
   const mcpResult = {
     content: result.content,
     isError:

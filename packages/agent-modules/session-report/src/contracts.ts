@@ -22,7 +22,7 @@ export interface ReportSessions {
 interface SessionReportArtifactBase {
   readonly name: string;
   readonly bytes: number;
-  /** Legacy wire marker: prioritized, whole, unredacted evidence; not an all-or-nothing upload. */
+  /** Local collection priority only. Uploaders must minimize these artifacts before transfer. */
   readonly required: true;
 }
 

@@ -277,7 +277,9 @@ function buildLimitedResult(
 }
 
 function splitBodyLines(text: string): string[] {
-  const body = text.replace(/\n+$/, '');
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) end -= 1;
+  const body = text.slice(0, end);
   return body ? body.split('\n') : [];
 }
 

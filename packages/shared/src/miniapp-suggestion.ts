@@ -93,9 +93,12 @@ export function miniAppSuggestionFromText(text: string): MiniAppSuggestionBrief 
   if (body === undefined) return undefined;
   const attributes: Record<string, string> = {};
   let offset = 0;
-  const pattern = /\s+([a-z]+)\s*=\s*"([^"]*)"/gy;
+  const pattern = /([a-z]+)[ \t\r\n]*=[ \t\r\n]*"([^"]*)"/y;
   while (offset < body.length) {
-    if (!body.slice(offset).trim()) break;
+    const start = offset;
+    while (offset < body.length && /\s/u.test(body[offset]!)) offset += 1;
+    if (offset >= body.length) break;
+    if (offset === start) return undefined;
     pattern.lastIndex = offset;
     const match = pattern.exec(body);
     if (

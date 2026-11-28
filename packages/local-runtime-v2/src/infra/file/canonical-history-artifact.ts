@@ -4,7 +4,6 @@ const PARENT_SNAPSHOT_KEYS = new Set(['generation', 'compactionId', 'revision'])
 export interface CanonicalHistoryArtifact {
   readonly schemaVersion: 1;
   readonly generation: number;
-  /** Segment checkpoints are written as `llm_checkpoint` too. */
   readonly producedBy: 'tool_archive' | 'tool_trim' | 'llm_checkpoint';
   readonly parentSnapshot: {
     readonly generation: number;

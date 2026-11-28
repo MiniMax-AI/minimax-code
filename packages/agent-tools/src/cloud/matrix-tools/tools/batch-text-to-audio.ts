@@ -1,7 +1,7 @@
 /**
- * matrix_batch_text_to_audio —— Pattern C 批量:跟 batch_synthesize_speech
- * 同形(N 个 AudioParams → 各自 mp3),只是 archon-server 路由不同。用
- * `slot_<i>.mp3` 占位符 + 响应里 `output_file` 回显反查 LLM 给的本地路径。
+ * matrix_batch_text_to_audio — Pattern C batch: Same shape as batch_synthesize_speech (N
+ * AudioParams → individual mp3 files), but a different archon-server route. Use `slot_<i>.mp3`
+ * placeholders and echoed `output_file` fields to recover LLM-specified local paths.
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

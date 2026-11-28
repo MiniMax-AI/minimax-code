@@ -382,9 +382,6 @@
       "@mavis/shared/logging": [
         "./packages/shared/src/logging/index.ts"
       ],
-      "@mavis/shared/logging/provider-error-summary": [
-        "./packages/shared/src/logging/provider-error-summary.ts"
-      ],
       "@mavis/shared/logging/redact-log-secret": [
         "./packages/shared/src/logging/redact-log-secret.ts"
       ],

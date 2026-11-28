@@ -1,8 +1,8 @@
 /**
- * matrix_images_search_and_download —— Pattern C-special:服务端按 query 列出
- * 候选图片(每 query 至多 5 张),本工具按 LLM 给的 `output_dir_path` 把每个
- * `image_url` 下载到 `<dir>/<n>.<ext>`。单张失败不阻断 batch,在 details 里
- * 汇总成功 / 失败计数。
+ * matrix_images_search_and_download — Pattern C-special: The server lists candidate images per
+ * query (up to five). Download each `image_url` to `<dir>/<n>.<ext>` under the LLM's
+ * `output_dir_path`. Individual failures do not block the batch; details summarize success/failure
+ * counts.
  */
 
 import { extname } from 'node:path';

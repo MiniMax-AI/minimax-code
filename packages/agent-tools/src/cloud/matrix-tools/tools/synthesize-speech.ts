@@ -1,6 +1,6 @@
 /**
- * matrix_synthesize_speech —— Pattern C:服务端 TTS 后返回 CDN URL,本工具
- * 把 URL 拉回 LLM 指定的 workspace 路径再交差。
+ * matrix_synthesize_speech — Pattern C: The server returns a CDN URL after TTS; download it to the
+ * LLM-specified workspace path before returning.
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

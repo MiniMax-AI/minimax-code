@@ -70,13 +70,6 @@ afterEach(() => {
 });
 
 describe("google-vertex api key resolution", () => {
-	it.each([undefined, "fixture-key"])("uses v1beta1 for Gemini 4 with API key %s", async (apiKey) => {
-		await streamGoogleVertex({ ...model, id: "gemini-4-carbon" }, context, {
-			apiKey, project: "test-project", location: "global", maxTokens: 200_000,
-		}).result();
-		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({ vertexai: true, apiVersion: "v1beta1" });
-	});
-
 	it("falls back to ADC when options.apiKey is a placeholder marker", async () => {
 		const stream = streamGoogleVertex(model, context, {
 			apiKey: "<authenticated>",

@@ -12,10 +12,10 @@ export const MODEL_PROVIDER_SOURCES = ['provider', 'minimax_api', 'custom_provid
 export type ModelProviderSource = (typeof MODEL_PROVIDER_SOURCES)[number];
 
 /**
- * The generic BYOK wire protocols: a user-supplied base URL plus a bearer,
- * `x-api-key` or `x-goog-api-key` credential that this runtime drives itself.
- * Membership decides base-URL normalization, connection-test and discovery URL
- * shapes, and whether a Thinking request patch is synthesized for the provider.
+ * The generic BYOK wire protocols: a user-supplied base URL plus a bearer or
+ * `x-api-key` credential that this runtime drives itself. Membership decides
+ * base-URL normalization, connection-test and discovery URL shapes, and whether
+ * a Thinking request patch is synthesized for the provider.
  *
  * `openai-codex-responses` is deliberately excluded even though
  * `LocalCustomProviderConfig.api` accepts it. The Codex OAuth provider is not a

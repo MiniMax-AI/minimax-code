@@ -1,10 +1,10 @@
 /**
- * Workspace 路径围栏(desktop local 版)—— local tool 访问 fs 前先过这一关,
- * 防止 LLM 用 `..` / 绝对路径 / 符号链接 跳出工作目录。
+ * Workspace path boundary (desktop local version). Local tools must pass this check before fs
+ * access to prevent the LLM escaping the working directory with `..`, absolute paths, or symlinks.
  *
- * NOTE(shared-logic): 逻辑与 `../cloud/path-guard.ts` 等价。两端目前各自
- * 持有一份以维持 local / cloud 工具目录的隔离边界(见 AGENTS.md §1);
- * 后续若做共享逻辑抽取,这是首选合并项之一。
+ * NOTE(shared-logic): Equivalent to `../cloud/path-guard.ts`. Each side currently keeps a copy to
+ * preserve local / cloud tool directory isolation (AGENTS.md §1). This is a prime candidate for
+ * future shared-logic extraction.
  */
 
 import { realpath } from 'node:fs/promises';
@@ -44,8 +44,8 @@ async function assertWithinWorkspace(absolutePath: string, workspaceRoot: string
 }
 
 /**
- * 把用户给定的(可能相对)路径解析成绝对路径并过 workspace 围栏,
- * 返回经 `path.resolve` 的绝对路径供 fs 操作直接使用。
+ * Resolve a user-supplied, possibly relative path to an absolute path within the workspace
+ * boundary. Return the `path.resolve` result for direct fs use.
  */
 export async function resolveWithinWorkspace(
   inputPath: string,

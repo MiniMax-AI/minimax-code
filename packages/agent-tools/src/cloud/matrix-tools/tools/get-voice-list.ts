@@ -1,7 +1,7 @@
 /**
- * matrix_get_voice_list —— Pattern A:无入参、无文件 I/O,纯透传给 matrix-tools
- * 拿 voice_id + voice_name 列表。`_ossMediaClient` / `_workspaceScope` 留着只
- * 为统一 `buildMatrixTools` 实例化口径,本工具不会用到。
+ * matrix_get_voice_list — Pattern A: No input or file I/O; forward directly to matrix-tools for
+ * voice_id + voice_name pairs. `_ossMediaClient` / `_workspaceScope` exist only to keep
+ * `buildMatrixTools` construction uniform and are unused here.
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

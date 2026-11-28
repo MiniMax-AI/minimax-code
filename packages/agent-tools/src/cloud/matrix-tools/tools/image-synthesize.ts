@@ -1,7 +1,7 @@
 /**
- * matrix_image_synthesize —— Pattern D 批量:每个 request 可带参考图
- * (input_file_paths)和输出路径(output_file_path)。上传阶段失败即整 batch
- * 退;响应阶段单个 slot 下载失败只记录在 details,batch 不退。
+ * matrix_image_synthesize — Pattern D batch: Each request may include reference images
+ * (input_file_paths) and an output path (output_file_path). Upload failure aborts the batch;
+ * response-stage download failures are recorded in details without aborting the batch.
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';
@@ -203,17 +203,7 @@ export class MatrixImageSynthesizeTool implements ToolImpl<
 
     const downloaded = perRequest.filter((s) => s.status === 'downloaded').length;
     const failed = perRequest.filter((s) => s.status !== 'downloaded').length;
-    // `details` is UI metadata, not guaranteed to reach the model. Expose the
-    // actual saved paths in content so it need not reconstruct cwd-relative
-    // destinations when producing Markdown or <media> links.
-    const text = [
-      `${downloaded}/${perRequest.length} images saved (${failed} failed/missing).`,
-      ...perRequest.map((slot) =>
-        slot.status === 'downloaded'
-          ? `Saved image: ${JSON.stringify(slot.output_file_path)}`
-          : `Image ${slot.index + 1} ${slot.status}: ${slot.error ?? 'No image file was saved.'}`,
-      ),
-    ].join('\n');
+    const text = `${downloaded}/${perRequest.length} images saved (${failed} failed/missing).`;
     return {
       tool_name: toolName,
       text,

@@ -1619,7 +1619,7 @@ export class CDPPageScanner {
     // 使用 aria-label
     const ariaLabel = this.getNodeAttribute(node, 'aria-label');
     if (ariaLabel) {
-      return `${tagName}[aria-label="${ariaLabel.replace(/"/g, '\\"')}"]`;
+      return `${tagName}[aria-label="${ariaLabel.replace(/[\\"]/g, '\\$&')}"]`;
     }
 
     // 使用 name

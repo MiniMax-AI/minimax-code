@@ -1,31 +1,30 @@
 /**
- * `systemReminderExtension` —— 把 `SystemReminderService` 装进
- * `@mavis/agent-runtime` 的 extension SPI。设计文档 §4.3 表把 system-reminder
- * 归为 `pi.registerReminderProvider`。
+ * `systemReminderExtension`: Installs `SystemReminderService` through the `@mavis/agent-runtime`
+ * extension SPI. The design document §4.3 table maps system-reminder to
+ * `pi.registerReminderProvider`.
  *
- * `SystemReminderService` 内部已有自己的 `SystemReminderRegistry` chain，
- * `buildReminder` 会一次组装成单个 `<system-reminder>` 块。本 adapter 将这个
- * aggregated block 作为一个 reminder emission 注册，而不是把它降级成 user prompt
- * prefix。这符合 `Reminder.content` 的 complete-block contract；host 消费
- * `AssemblyResult.reminders` 时按 assembler 顺序逐块注入，不再增加 wrapper。
+ * `SystemReminderService` already owns a `SystemReminderRegistry` chain; `buildReminder` assembles
+ * one `<system-reminder>` block. This adapter registers that aggregated block as one reminder
+ * emission rather than a user prompt prefix, honoring `Reminder.content`'s complete-block contract.
+ * Hosts consuming `AssemblyResult.reminders` inject blocks in assembler order without adding
+ * wrappers.
  *
- * Host resolver 契约：`SystemReminderService.buildReminder` 需要
- * `SessionInfo` + `MessageRequest`，而 SPI 层的 `TurnAssemblyCtx` 只暴露
- * `TurnAssemblyCtx.sessionId / turnId / agentName / workspaceDir / userInput / ...`
- * 只读投影（§6.2）。Host 传一个 `resolveContext(ctx) => { session, msg } | null`
- * 完成 SPI ctx → 服务 ctx 的边界转换：
- *   - 若 host 无 SR context（比如 background-task 场景），返回 `null`；本 turn
- *     直接跳过 reminder 生成。
- *   - Host 有 SR context 时，resolver 提供 SessionInfo / MessageRequest 后端
- *     根据 turn 状态查库。异常 throw 会 propagate 到 `assembleTurn`（fail-fast）。
+ * Host resolver contract: `SystemReminderService.buildReminder` needs `SessionInfo` +
+ * `MessageRequest`, while SPI `TurnAssemblyCtx` only exposes read-only projections such as
+ * `sessionId / turnId / agentName / workspaceDir / userInput / ...` (§6.2). The host supplies
+ * `resolveContext(ctx) => { session, msg } | null` to convert SPI context to service context:
+ * - Return `null` when the host has no SR context (e.g. background tasks); skip reminder generation
+ *   for this turn.
+ * - When SR context exists, the resolver supplies SessionInfo / MessageRequest from backend lookups
+ *   based on turn state. Exceptions propagate to `assembleTurn` (fail-fast).
  *
- * 备注（service fail-open）：`SystemReminderService.buildReminder` 内部有
- * try/catch 兜底——出错时返回 `{ text: undefined }` 而非 throw；extension 依赖
- * 这条契约。若未来 service 改成 fail-fast 抛错，本 extension 会把错误 propagate
- * 到 pi loop（见 `system-reminder.test.ts` 的 rejection propagation 用例）。
+ * Service fail-open note: `SystemReminderService.buildReminder` catches errors internally and
+ * returns `{ text: undefined }` instead of throwing; the extension relies on this contract. If the
+ * service later becomes fail-fast, the extension propagates errors to the pi loop (see the
+ * rejection propagation case in `system-reminder.test.ts`).
  *
- * Extension 通过 `pi.registerReminderProvider` 暴露 reminder；不会写入
- * `AssemblyResult.userPromptPrefix`。
+ * The extension exposes reminders through `pi.registerReminderProvider`; it does not write
+ * `AssemblyResult.userPromptPrefix`.
  */
 
 import type { AgentExtension, ExtensionAPI, TurnAssemblyCtx } from '@mavis/agent-runtime';

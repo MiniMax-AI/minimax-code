@@ -5,8 +5,8 @@ import path from 'node:path';
 import { isPathAllowed } from '../../../../src/tools/fs-permission.js';
 import type { PathCheckContext } from '../../../../src/types.js';
 
-const dataDir = '/home/user/.minimax';
-const homeDir = '/home/user';
+const dataDir = '/Users/user/.minimax';
+const homeDir = '/Users/user';
 
 function sessionDir(sessionId: string): string {
   const encoded = `session_${Buffer.from(sessionId, 'utf8').toString('base64url')}`;
@@ -18,7 +18,7 @@ const otherSessionId = 'mvs_other_session_00002';
 
 function makeContext(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
-    workingDirectory: '/home/user/project',
+    workingDirectory: '/Users/user/project',
     dataDir,
     homeDir,
     ...overrides,

@@ -284,7 +284,7 @@ function normalizedName(value: string): string {
 }
 
 function inlineCode(value: string): string {
-  return escapeXml(value).replace(/`/gu, '\\`');
+  return escapeXml(value).replace(/[\\`]/gu, '\\$&');
 }
 
 function escapeRegExp(value: string): string {

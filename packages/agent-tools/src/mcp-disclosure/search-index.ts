@@ -319,14 +319,16 @@ function matchesNamespace(value: string | undefined, query: string): boolean {
 
 /** `mcp__server__tool` → `tool`; names without the MCP prefix are returned unchanged. */
 export function bareToolName(name: string): string {
-  const match = /^mcp__.+?__(.+)$/u.exec(name);
-  return match ? match[1]! : name;
+  if (!name.startsWith('mcp__')) return name;
+  const splitAt = name.indexOf('__', 5);
+  return splitAt > 5 && splitAt + 2 < name.length ? name.slice(splitAt + 2) : name;
 }
 
 /** `mcp__server__tool` → `server`; other names (built-in on-demand tools) have no server. */
 export function mcpServerOfToolName(name: string): string | undefined {
-  const match = /^mcp__(.+?)__.+$/u.exec(name);
-  return match ? match[1] : undefined;
+  if (!name.startsWith('mcp__')) return undefined;
+  const splitAt = name.indexOf('__', 5);
+  return splitAt > 5 && splitAt + 2 < name.length ? name.slice(5, splitAt) : undefined;
 }
 
 /** The server an entry belongs to: its provenance, else the server segment of its name. */

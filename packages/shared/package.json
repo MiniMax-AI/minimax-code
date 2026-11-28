@@ -236,10 +236,6 @@
       "types": "./src/advisor-call.ts",
       "import": "./dist/advisor-call.js"
     },
-    "./logging/provider-error-summary": {
-      "types": "./src/logging/provider-error-summary.ts",
-      "import": "./dist/logging/provider-error-summary.js"
-    },
     "./hard-link-support": {
       "types": "./src/hard-link-support.ts",
       "import": "./dist/hard-link-support.js"
@@ -428,9 +424,6 @@
       ],
       "advisor-call": [
         "src/advisor-call.ts"
-      ],
-      "logging/provider-error-summary": [
-        "src/logging/provider-error-summary.ts"
       ],
       "hard-link-support": [
         "src/hard-link-support.ts"

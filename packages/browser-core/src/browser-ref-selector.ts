@@ -38,7 +38,7 @@ export async function interpretRefAsSelector(
   }
   const matches = await evaluate<unknown>(
     state,
-    `(() => { try { return document.querySelectorAll(${JSON.stringify(ref)}).length; } catch { return null; } })()`,
+    `(() => { try { return document.querySelectorAll(${JSON.stringify(ref).replace(/[<>/\u2028\u2029]/gu, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}).length; } catch { return null; } })()`,
   );
   // Not a valid selector (or a page that cannot answer): the ref error as before.
   if (typeof matches !== 'number') return { input };

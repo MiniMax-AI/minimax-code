@@ -45,7 +45,7 @@ const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 
-// 本地 runtime 会按 turn 重建工具实例，因此同一轮的付费提交记录必须在进程内跨实例共享。
+// Local runtime rebuilds tools each turn, so paid submissions for the same turn must be shared across instances in-process.
 const attemptedVideoSubmissions = new Set<string>();
 
 @bindTool(MatrixSubmitVideoGenerationToolDef)

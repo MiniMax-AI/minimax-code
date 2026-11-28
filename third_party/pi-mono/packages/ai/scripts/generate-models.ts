@@ -266,19 +266,8 @@ function isGemini3ProModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-pro/.test(modelId.toLowerCase());
 }
 
-/** Gemini 3.1 Pro and later Pro releases accept every level but MINIMAL, including MEDIUM. */
-function isGemini3MinorProModel(modelId: string): boolean {
-	return /gemini-3\.[1-9]\d*-pro/.test(modelId.toLowerCase());
-}
-
 function isGemini3FlashModel(modelId: string): boolean {
 	return /gemini-3(?:\.\d+)?-flash/.test(modelId.toLowerCase());
-}
-
-/** Gemini 3.7 Flash and later, and Gemini 4+, reject the MINIMAL thinking level. */
-function rejectsGeminiMinimalThinking(modelId: string): boolean {
-	const id = modelId.toLowerCase();
-	return /gemini-3\.(?:[7-9]|[1-9]\d)-flash/.test(id) || /gemini-(?:[4-9]|[1-9]\d)(?:[.-]|$)/.test(id);
 }
 
 function isGemma4Model(modelId: string): boolean {
@@ -346,18 +335,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		);
 	}
 	if (isGoogleThinkingApi(model) && isGemini3ProModel(model.id)) {
-		mergeThinkingLevelMap(
-			model,
-			isGemini3MinorProModel(model.id)
-				? { off: null, minimal: null }
-				: { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" },
-		);
+		mergeThinkingLevelMap(model, { off: null, minimal: null, low: "LOW", medium: null, high: "HIGH" });
 	}
 	if (isGoogleThinkingApi(model) && isGemini3FlashModel(model.id)) {
 		mergeThinkingLevelMap(model, { off: null });
-	}
-	if (isGoogleThinkingApi(model) && rejectsGeminiMinimalThinking(model.id)) {
-		mergeThinkingLevelMap(model, { off: null, minimal: null });
 	}
 	if (isGoogleThinkingApi(model) && isGemma4Model(model.id)) {
 		mergeThinkingLevelMap(model, { off: null, minimal: "MINIMAL", low: null, medium: null, high: "HIGH" });
@@ -1558,28 +1539,6 @@ async function generateModels() {
 		});
 	}
 
-	// Add Gemini 3.5+ and Gemini 4 models until models.dev includes them.
-	const missingGoogleModels: Model<"google-generative-ai">[] = [
-		{ id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 }, maxTokens: 65536 },
-		{ id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 }, maxTokens: 65536 },
-		{ id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 }, maxTokens: 65536 },
-		{ id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 }, maxTokens: 65536 },
-		{ id: "gemini-4-argon", name: "Gemini 4 Argon", cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 }, maxTokens: 262144 },
-	].map((model) => ({
-		...model,
-		api: "google-generative-ai",
-		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-		provider: "google",
-		reasoning: true,
-		input: ["text", "image"],
-		contextWindow: 1048576,
-	}));
-	for (const model of missingGoogleModels) {
-		if (!allModels.some((m) => m.provider === "google" && m.id === model.id)) {
-			allModels.push(model);
-		}
-	}
-
 	// Add missing gpt models
 	const missingOpenAiModels: Model<"openai-responses">[] = [
 		{
@@ -2095,78 +2054,6 @@ async function generateModels() {
 			cost: { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0 },
 			contextWindow: 1048576,
 			maxTokens: 65536,
-		},
-		{
-			id: "gemini-3.5-flash",
-			name: "Gemini 3.5 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 65536,
-		},
-		{
-			id: "gemini-3.5-flash-lite",
-			name: "Gemini 3.5 Flash Lite (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 65536,
-		},
-		{
-			id: "gemini-3.6-flash",
-			name: "Gemini 3.6 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 65536,
-		},
-		{
-			id: "gemini-3.7-flash",
-			name: "Gemini 3.7 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 65536,
-		},
-		{
-			id: "gemini-3.8-flash",
-			name: "Gemini 3.8 Flash (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 65536,
-		},
-		{
-			id: "gemini-4-argon",
-			name: "Gemini 4 Argon (Vertex)",
-			api: "google-vertex",
-			provider: "google-vertex",
-			baseUrl: VERTEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
-			contextWindow: 1048576,
-			maxTokens: 262144,
 		},
 		{
 			id: "gemini-2.0-flash",

@@ -1,7 +1,7 @@
 /**
- * matrix_audios_understand —— Pattern B:批量本地音频上传 OSS,签名 URL 列表
- * 喂给 mcp-server 后端 Gemini 理解,返回 list<MediaUnderstandResult> 文本,
- * 不下载任何产物。
+ * matrix_audios_understand — Pattern B: Batch-upload local audio to OSS and send signed URLs to
+ * mcp-server's Gemini backend for understanding. Return list<MediaUnderstandResult> text without
+ * downloading artifacts.
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

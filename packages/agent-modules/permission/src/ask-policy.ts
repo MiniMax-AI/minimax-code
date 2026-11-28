@@ -18,10 +18,10 @@ import type { PermissionMode, PermissionRule, PermissionRuleSource } from './typ
  * The three user-facing permission policies, expressed as wire strings.
  *
  * Mapping to the UI mode selector:
- *   - 'on-request'     → 询问     (PermissionMode 'default')
- *   - 'on-request-llm' → 智能授权  (PermissionMode 'auto', cloud LLM in the loop)
- *   - 'never'          → 始终允许  (PermissionMode 'bypassPermissions' / 'off')
- *   - 'deny'           → 不询问，未预授权即拒绝 (PermissionMode 'dontAsk')
+ * - 'on-request'     → Ask (PermissionMode 'default')
+ * - 'on-request-llm' → Smart approval (PermissionMode 'auto', cloud LLM in the loop)
+ * - 'never'          → Always allow (PermissionMode 'bypassPermissions' / 'off')
+ * - 'deny'           → Do not ask; deny unless preauthorized (PermissionMode 'dontAsk')
  */
 export type AskForApproval = 'on-request' | 'on-request-llm' | 'never' | 'deny';
 

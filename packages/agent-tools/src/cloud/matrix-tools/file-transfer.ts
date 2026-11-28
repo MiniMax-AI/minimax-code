@@ -1,18 +1,18 @@
 /**
- * matrix-tools 工具的文件 I/O 共用 helper —— 把"workspace 本地文件 ↔ OSS 签名
- * URL ↔ matrix-tools 远端"三段流水线封装成两个函数:
+ * Shared file-I/O helpers for matrix-tools, encapsulating the workspace file ↔ OSS signed URL ↔
+ * remote matrix-tools pipeline in two functions:
  *
  *   uploadInputFile(filePath, ctx, ossMediaClient)
- *     · 把 LLM 给的 workspace 路径过 path-guard → realpath → OSS put → 签名
- *       URL,返回 `{ signedUrl, ossKey, bytes }` 喂给 matrix-tools request body
+ *     Pass the LLM's workspace path through path-guard → realpath → OSS put → signed URL. Return `{ signedUrl, ossKey, bytes }` for the matrix-tools request body.
  *
  *   downloadOutputFile(url, filePath, ctx, ossMediaClient)
- *     · 把 matrix-tools response 里的 CDN/signed URL fetch 到 workspace 指定路径
+ *     Fetch the response CDN/signed URL into the specified workspace path.
  *
- * 失败语义统一:抛 `FileTransferError`(message 已经是 LLM 可读句子)。tool
- * 实现 catch 后包成 ToolResult { ok: false } 返回,跟 api_key 缺失同口径。
+ * Consistent failure semantics: throw `FileTransferError` with an LLM-readable message. Tools catch
+ * it and return ToolResult { ok: false }, matching missing-api_key handling.
  *
- * 不在这里做 schema 校验 —— typebox 已经做完了。这里只做 fs / OSS / 网络。
+ * No schema validation here; typebox already handled it. This module handles only fs / OSS /
+ * network.
  */
 
 import { writeFile } from 'node:fs/promises';
@@ -30,7 +30,7 @@ import {
   type MatrixPathScope,
 } from './path-guard.js';
 
-/** 文件 I/O 操作的统一异常 —— tool 实现 catch 后读 `.message` 给 LLM。 */
+/** Unified file-I/O error; tool implementations catch it and expose `.message` to the LLM. */
 export class FileTransferError extends Error {
   readonly kind:
     | 'input_not_found'
@@ -49,17 +49,17 @@ export class FileTransferError extends Error {
 }
 
 export interface UploadedInputFile {
-  /** workspace 内的绝对路径(已 resolveWithinWorkspace 过)。 */
+  /** Absolute workspace path, already checked by resolveWithinWorkspace. */
   readonly absolutePath: string;
-  /** 签名 URL,可直接喂给 matrix-tools request body。 */
+  /** Signed URL ready for the matrix-tools request body. */
   readonly signedUrl?: string;
   /** Base64 inline bytes, used by local hosts for small media files. */
   readonly inlineData?: string;
   /** MIME type for inline data or uploaded object. */
   readonly mimeType?: string;
-  /** OSS 对象 key,纯日志用途。 */
+  /** OSS object key, for logging only. */
   readonly ossKey: string;
-  /** 文件字节数,纯日志用途。 */
+  /** File size in bytes, for logging only. */
   readonly bytes: number;
 }
 
@@ -71,9 +71,9 @@ export interface MatrixMediaInfoPayload {
 }
 
 /**
- * 把 workspace 文件上传到 OSS 并返回签名 URL。
+ * Upload a workspace file to OSS and return its signed URL.
  *
- * @throws FileTransferError 文件不存在 / 越界 workspace / OSS upload 失败
+ * @throws FileTransferError if the file is missing, outside the workspace, or OSS upload fails.
  */
 export async function uploadInputFile(
   workspaceRelativeOrAbsolute: string,
@@ -119,8 +119,9 @@ export async function uploadInputFile(
 }
 
 /**
- * Batch 版本 —— 顺序上传一组本地文件(并行容易把 OSS 打死,N≤20 串行够用)。
- * 任何一个失败即抛,不做部分成功兜底:LLM 看完整失败更好排查。
+ * Batch variant: upload local files sequentially to avoid overloading OSS; serial execution is
+ * sufficient for N≤20. Throw on any failure without partial-success fallback so the LLM can
+ * diagnose the full failure.
  */
 export async function uploadInputFiles(
   paths: readonly string[],
@@ -165,15 +166,15 @@ export function requireUploadedInputFileUrl(uploaded: UploadedInputFile): string
 }
 
 /**
- * 把 matrix-tools response 里的 URL 拉到 workspace 指定路径。
+ * Download a URL from a matrix-tools response to the specified workspace path.
  *
- * `options.signal` 是 turn 级 abort 通道:中止时正在跑的下载会被 cancel,
- * 这里把它原样 rethrow(不包成 FileTransferError),让 pi agent-loop 能识别
- * abort 并停止当前 turn,而不是把"下载失败"当普通 tool-error 继续下一轮。
- * `options.timeoutMs` 透传给底层做兜底超时。
+ * `options.signal` is the turn-level abort channel. Aborting cancels an active download; rethrow
+ * unchanged (without wrapping as FileTransferError) so pi agent-loop recognizes abort and stops the
+ * turn rather than continuing with a normal download tool error. Forward `options.timeoutMs` for
+ * the underlying fallback timeout.
  *
- * @throws FileTransferError 路径越界 / 下载失败 / 写文件失败
- * @throws MatrixMediaError(kind='aborted') 当 caller signal / 超时触发
+ * @throws FileTransferError for out-of-bounds paths, download failures, or file-write failures.
+ * @throws MatrixMediaError(kind='aborted') when the caller signal or timeout fires.
  */
 export async function downloadOutputFile(
   url: string,
@@ -226,10 +227,11 @@ export async function downloadOutputFile(
 }
 
 /**
- * 文本输出 helper —— 不走 URL 下载,直接把 string content 写到 workspace 路径。
- * `image_reverse_search` 等"远端不传文件、本地直接序列化结果"的工具用。
+ * Text output helper: write string content directly to a workspace path without downloading a URL.
+ * Used by tools such as `image_reverse_search` that serialize results locally instead of
+ * transferring remote files.
  *
- * @throws FileTransferError 路径越界 / 写文件失败
+ * @throws FileTransferError for out-of-bounds paths or file-write failures.
  */
 export async function writeOutputText(
   content: string,
@@ -263,8 +265,8 @@ export async function writeOutputText(
 }
 
 /**
- * 把 FileTransferError 转成 cloud-runtime tool 统一的 failure ToolResult。
- * 这样每个 matrix-tools tool 的 execute body 里只需要:
+ * Convert FileTransferError to cloud-runtime's standard failure ToolResult. Each matrix-tools
+ * execute body only needs:
  *   try { ... } catch (err) {
  *     if (err instanceof FileTransferError) return fileTransferFailureResult(toolName, path, err);
  *     throw err;

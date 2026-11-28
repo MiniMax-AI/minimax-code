@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { scryptSync } from 'node:crypto';
 import { resolveProviderCredential } from '@mavis/config';
 
 import {
@@ -25,9 +25,9 @@ export interface StoredApiKey {
 const BYOK_API_KEY_LIMIT = 200;
 const NAME_LIMIT = 64;
 
-/** `k_` and the first 10 hex characters of the key value's sha256. @internal */
+/** `k_` and the first 10 hex characters of the key value's derived digest. @internal */
 export function apiKeyId(key: string): string {
-  return `k_${createHash('sha256').update(key.trim()).digest('hex').slice(0, 10)}`;
+  return `k_${scryptSync(key.trim(), 'mcode-byok-key-id-v1', 5, { N: 1024 }).toString('hex')}`;
 }
 
 /** Splits pasted text into keys on newlines, commas and spaces. @internal */
