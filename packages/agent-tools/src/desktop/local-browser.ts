@@ -29,10 +29,40 @@ import {
   LocalBrowserWaitForToolDef,
 } from './builtin-browser-defs.js';
 import {
+  boundedJsDialogIdentity,
+  sanitizeBrowserResult,
+  summarizeCompactActionResult,
+} from './local-browser-compact-result.js';
+import {
+  compactBrowserPageText,
+  isJsDialogPage,
+  withCompactBrowserPage,
+} from './local-browser-compact-inspect.js';
+import {
+  describeBrowserContractMismatch,
+  normalizeBrowserActionInput,
+  clampBrowserInputToContract,
+  takeBrowserArgumentAdjustments,
+  prepareBrowserToolArguments,
+  validateCompactBrowserInput,
+  hasNonEmptyString,
+} from './local-browser-input.js';
+import { BROWSER_SHORT_DESCRIPTION } from './local-browser-short-description.js';
+import {
   observationReadFailure,
   observePage,
   type BrowserObserveRequest,
 } from './local-browser-observe.js';
+import {
+  BROWSER_PROGRAM_OP_ACTION,
+  browserProgramDescription,
+  browserProgramInputSchema,
+  readBrowserProgramInput,
+  type BrowserProgramOpOutcome,
+  type BrowserProgramRunner,
+} from './local-browser-program.js';
+import { isPtcChildCall, PTC_CHILD_FULL_OUTPUT_MAX_BYTES } from './output-limit.js';
+import { isRecord } from './type-guards.js';
 import type {
   LocalBrowserAdapter,
   LocalBrowserSkillSessionStore,
@@ -44,19 +74,6 @@ import type {
 export const CONTROL_IN_APP_BROWSER_SKILL_NAME = 'control-in-app-browser';
 const SCREENSHOT_DELIVERY_INSTRUCTION =
   'This screenshot is model-visible inspection evidence and is not shown to the user by default. Do not proactively claim it was sent, shared, shown, or attached, and do not emit its delivery markup unless the user explicitly asks to see or receive this screenshot. When explicitly requested, emit userDelivery.mediaMarkup exactly once if userDelivery.available is true. Never expose Base64 or a data URL, and never fabricate a path or markup when delivery is unavailable.';
-const COMPACT_HOVER_SEMANTIC_SOURCES = new Set([
-  'aria-label',
-  'aria-labelledby',
-  'title',
-  'svg-title',
-  'alt',
-  'target-text',
-  'aria-describedby',
-  'hover-tooltip',
-  'hover-overlay',
-  'none',
-]);
-const COMPACT_HOVER_CONFIDENCE_LEVELS = new Set(['high', 'medium', 'low']);
 // A hidden long action can spend 125s in the render queue and 125s executing.
 // Keep one end-to-end tool budget for both bounded phases plus result delivery
 // and cleanup. Nested deadlines consume this budget; they do not add to it.
@@ -77,11 +94,14 @@ const pendingPostActionVisuals = new WeakMap<LocalBrowserAdapter, Map<string, Pr
 // so the second call observes the first call's result instead of failing.
 const browserSessionQueues = new WeakMap<LocalBrowserAdapter, Map<string, Promise<void>>>();
 const OBSERVABLE_ACTIONS = new Set<LocalBrowserToolAction>(BROWSER_OBSERVABLE_ACTIONS);
-/** Appended to the run_code Browser variant's description; the top-level definition never says it. */
-const OBSERVE_DESCRIPTION_SENTENCE =
-  'Page-changing actions accept observe to return the page after the action in the same call.';
-const COMPACT_INSPECT_CONTINUATION_INSTRUCTION =
-  'For truncated inspect results, continue with the returned continuation input; do not invent snapshot IDs or offsets.';
+
+/**
+ * The compact Browser is on demand: the deferred-tool catalog shows the first
+ * line of its description, cut at 120 characters, so that line is only the
+ * summary of what the tool does.
+ */
+const COMPACT_BROWSER_SUMMARY =
+  "Session Browser: open, navigate, inspect, click, type and read web pages or Mini Apps in this chat's Browser.\n";
 
 class BrowserOperationTimeoutError extends Error {
   readonly code = 'BROWSER_OPERATION_TIMEOUT';
@@ -96,20 +116,28 @@ class BrowserOperationTimeoutError extends Error {
   }
 }
 
+/**
+ * Runs `operation` under a deadline and the caller's abort. An operation that
+ * calls `dispatched()` has handed its work to the provider: a later abort is
+ * passed on through its signal but no longer pre-empts it, so the provider's
+ * own answer (Browser Core reports a write the abort interrupted as outcome
+ * unknown) is the result, still bounded by the deadline.
+ */
 async function executeWithDeadline<T>(
-  operation: (signal: AbortSignal) => Promise<T>,
+  operation: (signal: AbortSignal, dispatched: () => void) => Promise<T>,
   timeoutMs: number,
   timeoutLabel: string,
   externalSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
+  let handedOff = false;
   let rejectExternalAbort: ((error: Error) => void) | undefined;
   const externalAbortPromise = new Promise<never>((_resolve, reject) => {
     rejectExternalAbort = reject;
   });
   const onExternalAbort = () => {
     const error = Object.assign(new Error('Operation aborted'), { code: 'ABORTED' });
-    rejectExternalAbort?.(error);
+    if (!handedOff) rejectExternalAbort?.(error);
     controller.abort(error);
   };
   if (externalSignal?.aborted) {
@@ -128,7 +156,11 @@ async function executeWithDeadline<T>(
     timer.unref?.();
   });
 
-  const operationPromise = Promise.resolve().then(() => operation(controller.signal));
+  const operationPromise = Promise.resolve().then(() =>
+    operation(controller.signal, () => {
+      handedOff = true;
+    }),
+  );
   try {
     return await Promise.race([operationPromise, timeoutPromise, externalAbortPromise]);
   } catch (error) {
@@ -138,8 +170,8 @@ async function executeWithDeadline<T>(
     // otherwise keep the generic cancellation.
     if (externalSignal?.aborted) {
       let cancelGrace = (): void => undefined;
-      const specific = await Promise.race<unknown>([
-        (operationPromise as Promise<unknown>).then(
+      const specific = await Promise.race([
+        operationPromise.then(
           () => undefined,
           (operationError: unknown) => operationError,
         ),
@@ -176,12 +208,96 @@ export interface LocalBrowserRuntimeToolOptions {
   exposure?: LocalBrowserToolExposure;
   preprocessScreenshot?: LocalBrowserScreenshotPreprocessor;
   browserSkillSessionStore?: LocalBrowserSkillSessionStore;
+  /** Receives metric observations; never changes what an action returns. */
+  observer?: LocalBrowserObserver;
+  /**
+   * Whether a Browser call inside a run_code program gets the automatic
+   * post-action screenshot (`browser.screenshot.ptcAuto`); read per call.
+   * Omitted: it does.
+   */
+  postActionVisualInPtc?: () => boolean;
+  /**
+   * `browser.compactInspect`: the model reads inspect and semantic query
+   * pages as one line per element. Read per call. Omitted: full records (the
+   * product default is decided by the config, `resolveBrowserCompactInspect`).
+   */
+  compactInspect?: () => boolean;
+  /**
+   * `browser.compactInspect` for the Browser description, fixed for the
+   * tool's Turn: the short description, with the same contract. Omitted: the
+   * full one.
+   */
+  shortDescription?: boolean;
+  /**
+   * Browser programs (PTC Turns only): with a provider that declares
+   * `programOps`, run_script runs its code through this runner as a page
+   * program (run_code calls it as tools.browser). Omitted: run_script is the
+   * provider's page script, unchanged.
+   */
+  programRunner?: BrowserProgramRunner;
+}
+
+/** One provider call made for a Browser action the model requested. */
+export interface LocalBrowserActionObservation {
+  readonly sessionId: string;
+  readonly turnId: LocalRuntimeToolContext['turnId'];
+  readonly action: LocalBrowserToolAction;
+  /** Raw provider result; absent when the provider threw. */
+  readonly result?: unknown;
+  /** Structured code of a provider throw. */
+  readonly errorCode?: string;
+}
+
+export type LocalBrowserPostActionVisualOutcome =
+  | 'attached'
+  | 'deduplicated'
+  | 'empty'
+  | 'failed'
+  | 'timeout';
+
+/** Provider-measured split of a screenshot call (`captureTiming` on the raw result). */
+export interface LocalBrowserScreenshotCaptureTiming {
+  readonly queueMs?: number;
+  readonly captureMs?: number;
+  readonly encodeMs?: number;
+}
+
+/**
+ * One automatic post-action screenshot, timed from the end of the action.
+ * `requestMs + providerMs + compressMs` adds up to `waitMs` for a returned
+ * capture; a capture that missed its deadline reports only `waitMs`.
+ */
+export interface LocalBrowserPostActionVisualObservation {
+  readonly sessionId: string;
+  readonly turnId: LocalRuntimeToolContext['turnId'];
+  readonly action: LocalBrowserToolAction;
+  readonly outcome: LocalBrowserPostActionVisualOutcome;
+  /** Action end until the visual is ready or abandoned, including every queue. */
+  readonly waitMs: number;
+  /** Action end until the screenshot request left the tool. */
+  readonly requestMs: number;
+  /** Screenshot request to provider response. */
+  readonly providerMs?: number;
+  readonly providerTiming?: LocalBrowserScreenshotCaptureTiming;
+  /** Runtime decode, resize and compression of the returned image. */
+  readonly compressMs?: number;
+}
+
+export interface LocalBrowserObserver {
+  actionExecuted(observation: LocalBrowserActionObservation): void;
+  postActionVisualSettled(observation: LocalBrowserPostActionVisualObservation): void;
 }
 
 interface BrowserRuntimeInternalOptions extends LocalBrowserRuntimeToolOptions {
   postActionVisualCountByTurn: Map<string, number>;
   interactiveTakeover: boolean;
   providerNavigationGuidance: string;
+}
+
+interface CompactBrowserToolContract {
+  readonly description: string;
+  readonly input: TSchema;
+  readonly programRunner?: BrowserProgramRunner;
 }
 
 export function buildLocalBrowserRuntimeTools(
@@ -203,7 +319,31 @@ export function buildLocalBrowserRuntimeTools(
   ).filter((action) => action in LOCAL_BROWSER_ACTION_INPUT_CONTRACTS);
   const tools: LocalRuntimeTool[] = [];
   if ((exposure === 'compact' || exposure === 'both') && compactActions.length > 0) {
-    tools.push(createBrowserCompactRuntimeTool(adapter, runtimeOptions, compactActions));
+    const programRunner =
+      options.programRunner && capabilities?.programOps === true
+        ? options.programRunner
+        : undefined;
+    // A program Turn's run_script is the program itself, run through
+    // `program_op`: a provider without page scripts still gets it, and the
+    // provider's own run_script is never called.
+    const surfaceActions =
+      programRunner && !compactActions.includes('run_script')
+        ? [...compactActions, 'run_script' as const]
+        : compactActions;
+    const description = options.shortDescription
+      ? BROWSER_SHORT_DESCRIPTION
+      : LocalBrowserToolDef.description;
+    const contract: CompactBrowserToolContract = programRunner
+      ? {
+          description: browserProgramDescription(description),
+          input: browserProgramInputSchema(),
+          programRunner,
+        }
+      : {
+          description,
+          input: LocalBrowserToolDef.schema.properties.input,
+        };
+    tools.push(createBrowserCompactRuntimeTool(adapter, runtimeOptions, surfaceActions, contract));
   }
   if (exposure === 'full' || exposure === 'both') {
     tools.push(...buildDetailedBrowserRuntimeTools(adapter, runtimeOptions, declaredActions));
@@ -215,9 +355,7 @@ export function buildLocalBrowserRuntimeTools(
  * Builds the exact compact Browser input contract disclosed by a Host Binding.
  * The Host uses it only to validate a Plugin PreToolUse rewrite of the admitted
  * `mcp_browser` call; it never reaches a model request. Page-changing actions
- * accept `observe` here so a rewrite of a run_code child that carries it stays
- * valid; the model can send `observe` only where the definition declares it
- * (the PTC variant, `withLocalBrowserObserve`).
+ * accept `observe` here, as the Browser definition does.
  */
 export function describeLocalBrowserToolInput(target: RuntimeTool): TSchema {
   const actions: unknown = target.def.schema.properties?.action?.enum;
@@ -238,43 +376,6 @@ export function describeLocalBrowserToolInput(target: RuntimeTool): TSchema {
         ),
       ),
   );
-}
-
-/**
- * The compact Browser definition a PTC Turn lists inside run_code: the same
- * tool plus a declared `observe`, so a program acts and reads the result in
- * one call. Only run_code's child catalog uses it (and a direct call of that
- * hidden child); a Turn that lists Browser as a top-level tool keeps its
- * definition byte for byte. The compact argument repair moves unknown
- * top-level keys into `input`, so `observe` is set aside around it. Returns
- * undefined for any definition that is not the compact Browser shape.
- */
-export function withLocalBrowserObserve(def: ToolDefinition): ToolDefinition | undefined {
-  const properties: unknown = def.schema.properties;
-  if (
-    def.schema.type !== 'object' ||
-    !isRecord(properties) ||
-    !('action' in properties) ||
-    !('input' in properties) ||
-    'observe' in properties
-  ) {
-    return undefined;
-  }
-  const prepare = def.prepareArguments;
-  return {
-    ...def,
-    description: `${def.description} ${OBSERVE_DESCRIPTION_SENTENCE}`,
-    schema: {
-      ...def.schema,
-      properties: { ...properties, observe: Type.Optional(LocalBrowserObserveInput) },
-    },
-    prepareArguments: (args: unknown) => {
-      if (!isRecord(args) || !('observe' in args)) return prepare ? prepare(args) : args;
-      const { observe, ...rest } = args;
-      const prepared: unknown = prepare ? prepare(rest) : rest;
-      return isRecord(prepared) ? { ...prepared, observe } : prepared;
-    },
-  };
 }
 
 function buildDetailedBrowserRuntimeTools(
@@ -354,6 +455,7 @@ function createBrowserCompactRuntimeTool(
   adapter: LocalBrowserAdapter,
   options: BrowserRuntimeInternalOptions,
   availableActions: readonly LocalBrowserToolAction[],
+  surface: CompactBrowserToolContract,
 ): LocalRuntimeTool {
   const actions = availableActions;
   const compactActions = actions.filter((action) =>
@@ -365,11 +467,13 @@ function createBrowserCompactRuntimeTool(
   });
   const def = {
     ...LocalBrowserToolDef,
-    description: `${LocalBrowserToolDef.description} ${options.providerNavigationGuidance} ${COMPACT_INSPECT_CONTINUATION_INSTRUCTION} Available actions for this turn: ${actions.join(', ')}.`,
+    loading: 'on_demand' as const,
+    description: `${COMPACT_BROWSER_SUMMARY}${surface.description} ${options.providerNavigationGuidance}`,
     schema: Type.Object(
       {
         action: actionSchema,
-        input: LocalBrowserToolDef.schema.properties.input,
+        input: surface.input,
+        observe: LocalBrowserToolDef.schema.properties.observe,
       },
       {
         additionalProperties: false,
@@ -381,7 +485,7 @@ function createBrowserCompactRuntimeTool(
   return defineRuntimeTool<typeof def.schema, LocalRuntimeToolContext>({
     ...def,
     prepareArguments: (args) =>
-      prepareCompactBrowserArguments(args, compactActions) as Static<typeof def.schema>,
+      prepareBrowserToolArguments(args, compactActions, surface.input) as Static<typeof def.schema>,
     async execute(ctx, input, signal) {
       const action = input.action as LocalBrowserToolAction;
       if (!actionSet.has(action)) {
@@ -390,6 +494,20 @@ function createBrowserCompactRuntimeTool(
           action,
           `Browser action "${action}" is not available from the current provider.`,
           'capability_unavailable',
+        );
+      }
+      if (action === 'run_script' && surface.programRunner) {
+        const adjustments = takeBrowserArgumentAdjustments(input);
+        return withArgumentAdjustments(
+          await runBrowserProgram(
+            adapter,
+            options,
+            surface.programRunner,
+            ctx,
+            input.input,
+            signal,
+          ),
+          adjustments,
         );
       }
       const contract =
@@ -406,9 +524,7 @@ function createBrowserCompactRuntimeTool(
         );
       }
 
-      // Declared only by the run_code variant (withLocalBrowserObserve); the
-      // top-level schema rejects it before execute, so a direct Turn never
-      // gets here with it.
+      // Only page-changing actions take observe; the flat schema cannot say which.
       const observe = (input as { readonly observe?: unknown }).observe;
       if (observe !== undefined) {
         if (!OBSERVABLE_ACTIONS.has(action)) {
@@ -429,7 +545,11 @@ function createBrowserCompactRuntimeTool(
         }
       }
 
-      const rawInput = normalizeBrowserActionInput(action, input.input ?? {});
+      const adjustments = [...takeBrowserArgumentAdjustments(input)];
+      const normalized = normalizeBrowserActionInput(action, input.input ?? {}, adjustments);
+      const rawInput = isRecord(normalized)
+        ? clampBrowserInputToContract(contract.schema, normalized, adjustments)
+        : normalized;
       if (!Value.Check(contract.schema, rawInput)) {
         return browserToolError(
           LocalBrowserToolDef.name,
@@ -445,22 +565,244 @@ function createBrowserCompactRuntimeTool(
         return browserToolError(LocalBrowserToolDef.name, action, semanticError, 'invalid_input');
       }
 
-      return executeBrowserAction(
+      const compactLines = options.compactInspect?.() === true;
+      const result = await runBrowserAction(
         LocalBrowserToolDef.name,
         action,
         adapter,
         ctx,
         validatedInput,
         signal,
-        'compact',
+        compactLines ? 'compact-lines' : 'compact',
         options.preprocessScreenshot,
         options.browserSkillSessionStore,
         options.postActionVisualCountByTurn,
         options.interactiveTakeover,
         observe as BrowserObserveRequest | undefined,
+        options.observer,
+        options.postActionVisualInPtc,
       );
+      const adjusted = withArgumentAdjustments(result, adjustments);
+      return compactLines ? withCompactBrowserPage(adjusted) : adjusted;
     },
   });
+}
+
+/**
+ * Says which values of the call were adjusted (a length or timeout cut to
+ * its maximum, an inferred wait kind) in the result the model reads.
+ */
+function withArgumentAdjustments(result: ToolResult, adjustments: readonly string[]): ToolResult {
+  if (adjustments.length === 0) return result;
+  const details = isRecord(result.details) ? result.details : {};
+  if (isRecord(details.result)) {
+    const adjusted = { ...details.result, argumentsAdjusted: [...adjustments] };
+    const text = JSON.stringify({ action: details.action, result: adjusted }, null, 2);
+    return {
+      ...result,
+      text,
+      content: [{ type: 'text', text }, ...result.content.slice(1)],
+      details: { ...details, result: adjusted },
+      ...(result.programmatic
+        ? { programmatic: { data: { action: details.action, result: adjusted } } }
+        : {}),
+    };
+  }
+  if (/<\/browser_error>$/u.test(result.text)) {
+    const text = result.text.replace(
+      /<\/browser_error>$/u,
+      ` Adjusted arguments: ${adjustments.join(' ')}</browser_error>`,
+    );
+    return { ...result, text, content: [{ type: 'text', text }] };
+  }
+  // A program's report: the note leads its text, and run_code reads it in data.
+  const text = `Adjusted arguments: ${adjustments.join(' ')}\n${result.text}`;
+  const data = result.programmatic?.data;
+  return {
+    ...result,
+    text,
+    content: [{ type: 'text', text }, ...result.content.slice(1)],
+    details: { ...details, argumentsAdjusted: [...adjustments] },
+    ...(result.programmatic && data
+      ? {
+          programmatic: {
+            ...result.programmatic,
+            data: { ...data, argumentsAdjusted: [...adjustments] },
+          },
+        }
+      : {}),
+  };
+}
+
+/**
+ * One run_script program. Ops bypass the Browser action input contracts
+ * (Browser Core validates each op) but not the rest of this path: the Skill
+ * receipt, the per-session queue shared with every Browser call, waiting for
+ * a pending post-action visual, and a deadline per op.
+ */
+async function runBrowserProgram(
+  adapter: LocalBrowserAdapter,
+  options: BrowserRuntimeInternalOptions,
+  runner: BrowserProgramRunner,
+  ctx: LocalRuntimeToolContext,
+  rawInput: unknown,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
+  if (!isBrowserSkillLoaded(options.browserSkillSessionStore, ctx)) {
+    return browserSkillRequiredError(
+      LocalBrowserToolDef.name,
+      'run_script',
+      options.browserSkillSessionStore,
+    );
+  }
+  const request = readBrowserProgramInput(rawInput);
+  if ('error' in request) {
+    return browserToolError(LocalBrowserToolDef.name, 'run_script', request.error, 'invalid_input');
+  }
+  const lifecycle = { sessionId: ctx.sessionId, turnId: ctx.turnId };
+  adapter.notifyLifecycle?.({ type: 'program_start', ...lifecycle });
+  try {
+    return await runner.run({
+      ctx,
+      code: request.code,
+      timeoutMs: request.timeoutMs,
+      ...(signal ? { signal } : {}),
+      runOp: (op, opSignal) => runBrowserProgramOp(adapter, options, ctx, op, opSignal),
+    });
+  } finally {
+    adapter.notifyLifecycle?.({ type: 'program_end', ...lifecycle });
+  }
+}
+
+/**
+ * The Skill receipt. A supplied session store is authoritative because committed
+ * history replacement clears it while the current turn's loadedSkills Set survives.
+ */
+function isBrowserSkillLoaded(
+  store: LocalBrowserSkillSessionStore | undefined,
+  ctx: LocalRuntimeToolContext,
+): boolean {
+  return store
+    ? store.hasLoaded(ctx.sessionId)
+    : !ctx.loadedSkills || ctx.loadedSkills.has(CONTROL_IN_APP_BROWSER_SKILL_NAME);
+}
+
+/** Nothing ran: the Skill loads by a top-level skill call, which run_code cannot make. */
+function browserSkillRequiredError(
+  toolName: string,
+  action: LocalBrowserToolAction,
+  store: LocalBrowserSkillSessionStore | undefined,
+): ToolResult {
+  const skill = store?.requiredSkillName ?? CONTROL_IN_APP_BROWSER_SKILL_NAME;
+  return browserToolError(
+    toolName,
+    action,
+    `Nothing ran on the page: the ${skill} skill is not loaded in this session. Next step: call the skill tool directly (a top-level call, never inside run_code) with { "name": "${skill}" } as the only tool call of that step, wait for its complete result, then repeat this Browser call. Re-read the skill the same way if the installed Skill has changed.`,
+    'SKILL_REQUIRED',
+  );
+}
+
+async function runBrowserProgramOp(
+  adapter: LocalBrowserAdapter,
+  options: BrowserRuntimeInternalOptions,
+  ctx: LocalRuntimeToolContext,
+  op: Readonly<Record<string, unknown>>,
+  signal: AbortSignal,
+): Promise<BrowserProgramOpOutcome> {
+  const name = typeof op.op === 'string' ? op.op : 'unknown';
+  let release: (() => void) | undefined;
+  let dispatched = false;
+  try {
+    release = await acquireBrowserSessionTurn(adapter, ctx.sessionId, signal);
+    return await executeWithDeadline(
+      async (operationSignal, handOff) => {
+        await waitForPendingPostActionVisual(adapter, ctx.sessionId, operationSignal);
+        dispatched = true;
+        handOff();
+        const raw = await adapter.execute(
+          ctx,
+          BROWSER_PROGRAM_OP_ACTION,
+          { ...op },
+          operationSignal,
+        );
+        if (!isRecord(raw)) {
+          const mayHaveWritten = PROGRAM_WRITE_OPS[name] === true;
+          return programOpRefusal(name, 'BROWSER_OP_FAILED', 'No result.', mayHaveWritten);
+        }
+        if (name !== 'screenshot' || raw.ok !== true) return { result: raw };
+        const shot = options.preprocessScreenshot
+          ? await options.preprocessScreenshot(raw.value, ctx, operationSignal)
+          : raw.value;
+        const image = screenshotContent(shot);
+        return {
+          result: { ...raw, value: { attached: image !== undefined } },
+          ...(image ? { media: [image] } : {}),
+        };
+      },
+      LOCAL_BROWSER_TOOL_TIMEOUT_MS,
+      'Browser program op',
+      signal,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = thrownBrowserErrorCode(error) ?? 'BROWSER_OP_FAILED';
+    return programOpRefusal(name, code, message, dispatched && PROGRAM_WRITE_OPS[name] === true);
+  } finally {
+    release?.();
+  }
+}
+
+/**
+ * Program ops that can change the page: Browser Core's write ops and page
+ * JavaScript, the same list as PAGE_WRITE_OPS in local-runtime-v2's
+ * program-result.ts (this package does not depend on either).
+ */
+const PROGRAM_WRITE_OPS: Readonly<Record<string, true>> = {
+  click: true,
+  dblclick: true,
+  mouseClick: true,
+  check: true,
+  uncheck: true,
+  fill: true,
+  type: true,
+  press: true,
+  selectOption: true,
+  evaluate: true,
+};
+
+/**
+ * An op that ended without Browser Core's own result. One that may have
+ * reached the page (a write handed to the provider) is outcome unknown, so the
+ * program reads before repeating it and the run_script result lists it as
+ * such instead of "No page writes ran.".
+ */
+function programOpRefusal(
+  op: string,
+  code: string,
+  message: string,
+  mayHaveWritten = false,
+): BrowserProgramOpOutcome {
+  const text = message.startsWith(`${code}:`) ? message : `${code}: ${message}`;
+  return {
+    result: {
+      ok: false,
+      error: {
+        code,
+        message: mayHaveWritten
+          ? `${text} The ${op} may already have taken effect: read the page before repeating it.`
+          : text,
+        retryable: false,
+        ...(mayHaveWritten ? { writeOutcomeUnknown: true } : {}),
+      },
+      step: {
+        op,
+        write: mayHaveWritten,
+        durationMs: 0,
+        code,
+        ...(mayHaveWritten ? { outcome: 'uncertain' } : {}),
+      },
+    },
+  };
 }
 
 function createBrowserRuntimeTool<S extends TSchema>(
@@ -475,7 +817,7 @@ function createBrowserRuntimeTool<S extends TSchema>(
       ? { description: `${def.description} ${options.providerNavigationGuidance}` }
       : {}),
     async execute(ctx, input, signal) {
-      return executeBrowserAction(
+      return runBrowserAction(
         def.name,
         action,
         adapter,
@@ -487,6 +829,9 @@ function createBrowserRuntimeTool<S extends TSchema>(
         options.browserSkillSessionStore,
         options.postActionVisualCountByTurn,
         options.interactiveTakeover,
+        undefined,
+        options.observer,
+        options.postActionVisualInPtc,
       );
     },
   });
@@ -494,17 +839,21 @@ function createBrowserRuntimeTool<S extends TSchema>(
 
 function browserProviderNavigationGuidance(provider: string | undefined): string {
   if (provider === 'electron-file-panel') {
-    return 'Active Browser provider: electron-file-panel. Use navigate only when the current FilePanel tab is absent or blank. A loaded FilePanel tab is user-visible, so use open_tab by default to preserve it. Use navigate with replaceCurrentTab: true only when the user explicitly asks to replace the current tab; omitting the flag on a loaded tab fails closed, and you must not add it merely to recover from choosing navigate incorrectly.';
+    return 'Active Browser provider: electron-file-panel. Agent control: you write to exactly one controlled tab per turn. A new turn starts with no controlled tab; page-changing actions return TAB_NOT_CONTROLLED until you open_tab (new tab, becomes controlled) or select_tab an existing tab. select_tab never changes the page the user is viewing. Reads (inspect, query, screenshot) use the controlled tab, or the user\'s current tab when none is controlled. Tab reuse: the <in-app-browser-context> block lists this chat\'s tabs as the turn starts (list_tabs gives the current ones); when this turn has no such tab list, call list_tabs before open_tab. Before open_tab, when a tab already shows the site you need, select_tab it and work inside it (type in its search box, follow its links) instead of opening a duplicate (do not navigate a tab already at the target URL); with no tab on that site, open_tab. navigate replaces only the page of a tab you control; on the user\'s tab or the page the user is viewing, navigate to another URL only when the user asked to change that page. Browser work stays in the background and the Browser panel does not open by itself; list_tabs reports panelVisible (whether the user can see this chat\'s Browser) and visibleTabId. Show a page (show_tab { tabId } or open_tab { url, show: true }) only when the request is mainly to put that page in front of the user or let them watch (for example "show me X", "打开给我", "给我看看"); do not show it when the page is only a means to answer a question or verify something. A page the user asked to look at themselves stays theirs after this turn: mark it deliverable too. Opening a page to read or check something in it ("用内置浏览器打开 X 看一下标题") is a lookup: neither show nor keep it. When the user must act in a page themselves (sign in, verification), show_tab it, then release_tab so their input is not blocked (release_tab keeps an Agent page for the next turn), then ask_user; afterwards select_tab it and inspect it before writing again. ask_user alone does not hand the page over: while you control it the user\'s input stays blocked. Pages you open are temporary and close when the turn ends unless the user used them or you mark them. mark_tab { tabId, retention: "deliverable" } only when the live page itself is the user-facing result: a page the user asked to look at themselves, something you created or edited (a document, a draft, a filled cart or checkout), a submitted form\'s result, or a page the user asked to keep open; it becomes the user\'s page. mark_tab { tabId, retention: "carryover" } only when your work must continue from this live page in a later turn (waiting for the user\'s reply or go-ahead, sign-in, approval, payment, an unfinished flow); it lasts one turn: in the next turn the page is listed as temporary again (expected, not a lost mark) and closes at that turn\'s end unless you mark it again, before asking the user anything. A request to keep a page for the next turn is carryover. Do not mark research, search, source, intermediate, duplicate, blank, error or routine pages: once you have what you need, cite the URL in your reply and let turn-end cleanup close them. A link the controlled tab opens in a new tab becomes the controlled tab; the result reports openedTab and previousTabId. To leave such a tab and continue on the page it came from, close_tab it, then select_tab previousTabId. close_tab closes any tab of this session; close only your own pages you no longer need, and close the user\'s pages only when asked. To open a Mini App, use open_tab input { miniAppId: "<plugin ID>" }; it reuses this session\'s page of that app and shows it to the user. Call open_tab without observe, wait for its result, then call inspect separately. close_tab on a running Mini App stops the app and closes its pages in every session; do it only when the user asks to close the app. A Browser program follows the same rules in its own calls: a write on a page you opened takes control of it, a write on the user\'s page needs page.bringToFront() (select_tab) first, browser.newPage(url) opens a page like open_tab and page.keep() is mark_tab. If any Browser call returns BROWSER_USER_TAKEOVER, the user took over the Browser: stop Browser calls for this turn, say in plain words which step you stopped at and what the user can do next, then end the turn without calling ask_user (an ask_user answer does not return control); control returns after the user sends a new message.';
   }
   if (provider === 'native-headless-chrome') {
-    return 'Active Browser provider: native-headless-chrome. Use fully qualified absolute HTTP(S) URLs. Use navigate to replace the current headless working page by default. Use open_tab only when the user explicitly requests another tab or the task requires preserving the current page.';
+    return 'Active Browser provider: native-headless-chrome. Use fully qualified absolute HTTP(S) URLs. Agent control: you write to exactly one controlled tab per turn. A new turn starts with no controlled tab; page-changing actions return TAB_NOT_CONTROLLED until you open_tab (new tab, becomes controlled) or select_tab a tab from list_tabs. When the session has no tab, the first action opens a blank tab you control. Use navigate to replace the controlled tab\'s page by default; use open_tab only when the user explicitly requests another tab or the task requires preserving the current page. Reads (inspect, query, screenshot) use the controlled tab, or the tab you controlled last when none is. A link the controlled tab opens in a new tab becomes the controlled tab (the result reports openedTab and previousTabId); when that tab closes itself, control returns to the tab that opened it (leaseReturnedTo). To leave such a tab and continue on the page it came from, close_tab it, then select_tab previousTabId. close_tab { tabId } closes a tab; closing the controlled tab releases control. Pages you open are temporary and close when the turn ends. mark_tab { tabId, retention: "deliverable" } only when the live page itself is the result (a page the user asked to look at themselves, something you created or edited, a submitted form\'s result, a page the user asked to keep open); mark_tab { tabId, retention: "carryover" } only when your work must continue from this page in a later turn (one turn: in the next turn it is listed as temporary again and closes at that turn\'s end unless you mark it again). Do not mark research, search, source or intermediate pages. A Browser program follows the same rules in its own calls: a write on a page you opened takes control of it, page.bringToFront() selects a tab like select_tab, browser.newPage(url) opens one like open_tab and page.keep() is mark_tab.';
   }
-  return 'Follow the active Browser provider navigation policy when choosing between navigate and open_tab.';
+  return 'Follow the active Browser provider navigation policy when choosing between navigate and open_tab. Page-changing actions need the one tab you control this turn (TAB_NOT_CONTROLLED until you open_tab or select_tab); pages you open close at turn end unless mark_tab keeps them.';
 }
 
-type BrowserResultExposure = 'compact' | 'full';
+/**
+ * `compact` is the short result of the compact tool; `compact-lines` is that
+ * result when `browser.compactInspect` turns its pages into element lines.
+ */
+type BrowserResultExposure = 'compact' | 'compact-lines' | 'full';
 
-async function executeBrowserAction(
+async function runBrowserAction(
   toolName: string,
   action: LocalBrowserToolAction,
   adapter: LocalBrowserAdapter,
@@ -517,32 +866,27 @@ async function executeBrowserAction(
   postActionVisualCountByTurn?: Map<string, number>,
   interactiveTakeover = true,
   observe?: BrowserObserveRequest,
+  observer?: LocalBrowserObserver,
+  postActionVisualInPtc?: () => boolean,
 ): Promise<ToolResult> {
   let releaseSession: (() => void) | undefined;
   try {
     releaseSession = await acquireBrowserSessionTurn(adapter, ctx.sessionId, signal);
     return await executeWithDeadline(
       async (operationSignal) => {
-        // A supplied session store is authoritative because committed history
-        // replacement clears it while the current turn's loadedSkills Set survives.
-        const browserSkillLoaded = browserSkillSessionStore
-          ? browserSkillSessionStore.hasLoaded(ctx.sessionId)
-          : !ctx.loadedSkills || ctx.loadedSkills.has(CONTROL_IN_APP_BROWSER_SKILL_NAME);
-        if (!browserSkillLoaded) {
-          const requiredSkillName =
-            browserSkillSessionStore?.requiredSkillName ?? CONTROL_IN_APP_BROWSER_SKILL_NAME;
-          return browserToolError(
-            toolName,
-            action,
-            `Load the current complete ${requiredSkillName} skill before using Browser. Re-read it if the installed Skill has changed.`,
-            'SKILL_REQUIRED',
-          );
+        if (!isBrowserSkillLoaded(browserSkillSessionStore, ctx)) {
+          return browserSkillRequiredError(toolName, action, browserSkillSessionStore);
         }
 
         const rawInput = isRecord(input) ? input : {};
         await waitForPendingPostActionVisual(adapter, ctx.sessionId, operationSignal);
-        const rawResult = await Promise.resolve(
-          adapter.execute(ctx, action, rawInput, operationSignal),
+        const rawResult = await executeObservedProviderAction(
+          adapter,
+          ctx,
+          action,
+          rawInput,
+          operationSignal,
+          observer,
         );
         const result =
           action === 'screenshot' && preprocessScreenshot
@@ -567,6 +911,8 @@ async function executeBrowserAction(
                 operationSignal,
                 preprocessScreenshot,
                 postActionVisualCountByTurn,
+                observer,
+                postActionVisualInPtc,
               );
         const actionResult = browserToolResult(
           toolName,
@@ -575,6 +921,7 @@ async function executeBrowserAction(
           exposure,
           postActionVisual,
           interactiveTakeover,
+          isPtcChildCall(ctx),
         );
         // An ordinary click that navigated reports UNEXPECTED_NAVIGATION: the
         // input did run and the page moved, which is exactly when the model
@@ -608,6 +955,7 @@ async function executeBrowserAction(
             exposure,
             undefined,
             interactiveTakeover,
+            isPtcChildCall(ctx),
           );
         } catch (error) {
           // Cancellation keeps its existing path; any other read failure is
@@ -623,21 +971,7 @@ async function executeBrowserAction(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const errorCode =
-      isRecord(error) &&
-      typeof error.code === 'string' &&
-      /^[A-Za-z][A-Za-z0-9_]*$/u.test(error.code)
-        ? error.code
-        : undefined;
-    const normalizedErrorCode =
-      errorCode === 'aborted'
-        ? 'ABORTED'
-        : errorCode === 'browser_operation_timeout' ||
-            errorCode === 'background_render_operation_timeout' ||
-            errorCode === 'background_render_queue_timeout'
-          ? 'BROWSER_OPERATION_TIMEOUT'
-          : errorCode;
-    const structuredCode = normalizedErrorCode ?? /^([A-Z][A-Z0-9_]+):/u.exec(message)?.[1];
+    const structuredCode = thrownBrowserErrorCode(error);
     const label =
       isRecord(error) && typeof error.label === 'string'
         ? error.label.trim().slice(0, 200)
@@ -676,9 +1010,33 @@ async function executeBrowserAction(
  */
 const BROWSER_INTERRUPTION_RECOVERY: Readonly<Record<string, string>> = {
   BROWSER_OPERATION_TIMEOUT:
-    'The page did not respond in time, so the action outcome is unknown. Refs issued before this error may no longer resolve and the tab may have been reset; inspect the current page (navigate again if it is about:blank) before retrying.',
+    'The page did not respond in time. Refs issued before this error may no longer resolve and the tab may have been reset; inspect the current page (navigate again if it is about:blank) before retrying.',
   ACTION_TIMEOUT:
-    'The action outcome is unknown. Refs issued before this error may no longer resolve; inspect the current page before retrying.',
+    'Refs issued before this error may no longer resolve; inspect the current page before retrying.',
+};
+
+/**
+ * Page writes: Browser Core's BROWSER_WRITE_ACTIONS (this package does not
+ * depend on Browser Core) plus run_script, whose page JavaScript can send a
+ * write like any of them. Desktop eval: timed-out submits had reached the
+ * server and were submitted again, so an interrupted write says its outcome is
+ * unknown; a read never does.
+ */
+const BROWSER_WRITE_ACTIONS: Readonly<Record<string, true>> = {
+  click: true,
+  click_and_wait_for_navigation: true,
+  double_click: true,
+  triple_click: true,
+  drag: true,
+  fill: true,
+  type: true,
+  paste: true,
+  press_key: true,
+  check: true,
+  uncheck: true,
+  select_option: true,
+  upload_files: true,
+  run_script: true,
 };
 
 function browserToolError(
@@ -688,7 +1046,21 @@ function browserToolError(
   code: string,
   metadata: { label?: string; timeoutMs?: number; brokerCode?: string } = {},
 ): ToolResult {
-  const recovery = BROWSER_INTERRUPTION_RECOVERY[code];
+  const interruption = BROWSER_INTERRUPTION_RECOVERY[code];
+  // Browser Core already ends an uncertain write's message with this advice
+  // when the deadline was its own; a provider deadline does not.
+  const uncertainWrite =
+    interruption !== undefined &&
+    BROWSER_WRITE_ACTIONS[action] === true &&
+    !message.includes('may already have taken effect');
+  const recovery = [
+    ...(uncertainWrite
+      ? [
+          `The ${action} outcome is unknown and it may already have taken effect: check its result on the page or site before repeating it.`,
+        ]
+      : []),
+    ...(interruption ? [interruption] : []),
+  ].join(' ');
   const text = `<browser_error action="${action}" code="${code}">${message}${recovery ? ` ${recovery}` : ''}</browser_error>`;
   return {
     tool_name: toolName,
@@ -706,22 +1078,24 @@ function browserToolResult(
   exposure: BrowserResultExposure,
   postActionVisual?: PostActionVisualCapture,
   interactiveTakeover = true,
+  ptcChild = false,
 ): ToolResult {
   const resultIsFailure = isRecord(result) && result.success === false;
   const screenshot = screenshotContent(result);
   const postActionScreenshot = screenshotContent(postActionVisual?.result);
   const scriptScreenshots = action === 'run_script' ? scriptScreenshotContents(result) : [];
+  const shortTexts = exposure !== 'full';
   let sanitized =
     action === 'screenshot'
       ? summarizeScreenshotResult(result, screenshot !== undefined && !resultIsFailure)
       : action === 'run_script'
         ? summarizeScriptResult(result, resultIsFailure)
-        : exposure === 'compact' && action !== 'inspect' && action !== 'query'
+        : shortTexts && action !== 'inspect' && action !== 'query'
           ? summarizeCompactActionResult(action, result)
-          : exposure === 'compact'
-            ? sanitizeBrowserResult(result, COMPACT_PRIVATE_RESULT_KEYS)
-            : sanitizeBrowserResult(result);
-  if (exposure === 'compact') sanitized = appendBrowserReadingGuidance(action, sanitized);
+          : shortTexts
+            ? sanitizeBrowserReadResult(action, result, COMPACT_PRIVATE_RESULT_KEYS)
+            : sanitizeBrowserReadResult(action, result);
+  if (shortTexts) sanitized = appendBrowserReadingGuidance(action, sanitized);
   sanitized = appendBrowserSafetyGuidance(action, sanitized, interactiveTakeover);
   if (
     !resultIsFailure &&
@@ -735,7 +1109,29 @@ function browserToolResult(
   }
   let text = JSON.stringify({ action, result: sanitized }, null, 2);
   let resultTooLarge = false;
-  if (exposure === 'compact' && Buffer.byteLength(text, 'utf8') > MAX_COMPACT_BROWSER_TEXT_BYTES) {
+  // With compact lines the model reads the lines withCompactBrowserPage makes
+  // of this result, so the budget measures those, and a page that fits keeps
+  // its records whole: their attributes give the lines names, types and link
+  // addresses. Measuring the indented JSON instead sends most inspect pages to
+  // the fallback below, which drops every attribute the lines are made from.
+  const shownBytes = (): number =>
+    Buffer.byteLength(
+      (exposure === 'compact-lines' ? compactBrowserPageText(action, sanitized) : undefined) ??
+        text,
+      'utf8',
+    );
+  // Inside run_code only the program's return value reaches the model, and
+  // the program needs the whole records to pick a target (session
+  // mvs_6d7eb2b6: two textareas with one box, told apart only by the id and
+  // name this budget dropped). A child result is therefore measured by the
+  // records the program receives, against PTC_BROWSER_RESULT_MAX_BYTES, and
+  // only past that takes the same compaction steps.
+  const overBudget = (): boolean =>
+    ptcChild
+      ? Buffer.byteLength(JSON.stringify({ action, result: sanitized }), 'utf8') >
+        PTC_BROWSER_RESULT_MAX_BYTES
+      : shownBytes() > MAX_COMPACT_BROWSER_TEXT_BYTES;
+  if (shortTexts && overBudget()) {
     // Browser Core budgets pages as compact JSON; two-space indentation alone
     // can push a fitting page past 64 KiB (eval 761096: 8 bare inspects
     // failed with BROWSER_RESULT_TOO_LARGE). Oversized results are therefore
@@ -744,7 +1140,7 @@ function browserToolResult(
     sanitized = compactOversizedInspectResult(action, sanitized);
     sanitized = appendBrowserReadingGuidance(action, sanitized);
     text = JSON.stringify({ action, result: sanitized });
-    if (Buffer.byteLength(text, 'utf8') > MAX_COMPACT_BROWSER_TEXT_BYTES) {
+    if (overBudget()) {
       const shortened = shortenOversizedInspectPage(action, sanitized);
       if (shortened !== sanitized) {
         sanitized = appendBrowserReadingGuidance(action, shortened);
@@ -752,12 +1148,14 @@ function browserToolResult(
       }
     }
   }
-  if (exposure === 'compact' && Buffer.byteLength(text, 'utf8') > MAX_COMPACT_BROWSER_TEXT_BYTES) {
+  if (shortTexts && overBudget()) {
     const safety = readAuthenticationTakeoverSafety(sanitized);
     sanitized = {
       success: false,
       code: 'BROWSER_RESULT_TOO_LARGE',
-      message: 'Browser result exceeded the compact 64 KiB budget. Narrow the request and retry.',
+      message: ptcChild
+        ? `Browser result exceeded the ${PTC_BROWSER_RESULT_MAX_BYTES / 1024 / 1024} MiB run_code result budget. Narrow the request and retry.`
+        : 'Browser result exceeded the compact 64 KiB budget. Narrow the request and retry.',
       ...(safety ? { safety } : {}),
     };
     text = JSON.stringify({ action, result: sanitized }, null, 2);
@@ -776,6 +1174,7 @@ function browserToolResult(
     content.push(...scriptScreenshots);
   }
 
+  const deliveryRefs = isError ? [] : screenshotDeliveryRefs(action, sanitized);
   return {
     tool_name: toolName,
     text,
@@ -783,6 +1182,10 @@ function browserToolResult(
     details: {
       action,
       result: sanitized,
+      // The saved file of a deliverable screenshot. Inside run_code the
+      // screenshot text stays with the program, so the host lists these refs
+      // next to the attached image; without them the model has no real path.
+      ...(deliveryRefs.length > 0 ? { refs: deliveryRefs } : {}),
     },
     // A run_code program reads refs, effects and URLs from data instead of
     // re-parsing the text; it carries exactly the bounded result the text
@@ -791,6 +1194,21 @@ function browserToolResult(
     programmatic: { data: { action, result: sanitized } },
     ...(isError ? { isError: true } : {}),
   };
+}
+
+function screenshotDeliveryRefs(
+  action: LocalBrowserToolAction,
+  result: unknown,
+): { readonly uri: string; readonly mimeType?: string }[] {
+  if (action !== 'screenshot' || !isRecord(result) || !isRecord(result.userDelivery)) return [];
+  const delivery = result.userDelivery;
+  if (delivery.available !== true || !hasNonEmptyString(delivery.filePath)) return [];
+  return [
+    {
+      uri: delivery.filePath,
+      ...(hasNonEmptyString(delivery.mimeType) ? { mimeType: delivery.mimeType } : {}),
+    },
+  ];
 }
 
 /**
@@ -844,6 +1262,9 @@ const SCRIPT_RESULT_KEYS = [
   'pageErrors',
   'screenshotsSkipped',
   'recovery',
+  // Page JavaScript's code and effects; a page write makes the next write wait for a read.
+  'pageScript',
+  'uncertainWrite',
 ] as const;
 
 function summarizeScriptResult(result: unknown, imagesOmitted = false): unknown {
@@ -852,6 +1273,10 @@ function summarizeScriptResult(result: unknown, imagesOmitted = false): unknown 
   for (const key of SCRIPT_RESULT_KEYS) {
     if (result[key] !== undefined) summary[key] = sanitizeBrowserResult(result[key]);
   }
+  const jsDialog = boundedJsDialogIdentity(result.dialog);
+  if (jsDialog !== undefined) summary.dialog = jsDialog;
+  if (typeof result.trigger === 'string') summary.trigger = result.trigger.slice(0, 64);
+  if (result.awaitingUser === true) summary.awaitingUser = true;
   if (Array.isArray(result.screenshots)) {
     summary.screenshots = result.screenshots.filter(isRecord).map((shot, index) => ({
       image: index + 1,
@@ -877,7 +1302,7 @@ function readResultCode(result: ToolResult): string | undefined {
  * Nests the read under `observation` of the action result. The action keeps its
  * own effect fields; the observation is evidence the model judges. An
  * observation that itself requires user takeover keeps that marker, so the
- * Browser guard still demands ask_user next.
+ * model is still told to call ask_user next.
  *
  * A click that navigated (UNEXPECTED_NAVIGATION) fails only because it asks
  * the caller to read the new page before continuing. Once the observation has
@@ -982,10 +1407,16 @@ async function capturePostActionVisual(
   signal: AbortSignal | undefined,
   preprocessScreenshot: LocalBrowserScreenshotPreprocessor | undefined,
   postActionVisualCountByTurn: Map<string, number> | undefined,
+  observer?: LocalBrowserObserver,
+  postActionVisualInPtc?: () => boolean,
 ): Promise<PostActionVisualCapture | undefined> {
+  // Called synchronously after the provider returned the action result.
+  const actionEndedAt = Date.now();
   if (!preprocessScreenshot || process.env.MAVIS_BROWSER_POST_ACTION_VISUAL_V1 === '0') {
     return undefined;
   }
+  // 6a: inside a run_code program the next Browser call reads what it needs.
+  if (postActionVisualInPtc && isPtcChildCall(ctx) && !postActionVisualInPtc()) return undefined;
   const capabilities = adapter.getCapabilities?.();
   if (capabilities && !capabilities.actions.includes('screenshot')) return undefined;
   const budgetKey = `${ctx.sessionId}:${ctx.turnId}`;
@@ -995,34 +1426,149 @@ async function capturePostActionVisual(
   const request = resolvePostActionVisualRequest(action, input, result);
   if (!request) return undefined;
 
+  const marks: {
+    requestedAt?: number;
+    respondedAt?: number;
+    processedAt?: number;
+    providerTiming?: LocalBrowserScreenshotCaptureTiming;
+  } = {};
+  let outcome: LocalBrowserPostActionVisualOutcome = 'failed';
   try {
     return await executeWithDeadline(
       async (visualSignal) => {
+        marks.requestedAt = Date.now();
         const screenshotCall = Promise.resolve(
           adapter.execute(ctx, 'screenshot', screenshotRequestPayload(request), visualSignal),
         );
         trackPendingPostActionVisual(adapter, ctx.sessionId, screenshotCall);
-        const rawScreenshot = await screenshotCall;
-        const processed = await preprocessScreenshot(rawScreenshot, ctx, visualSignal, {
+        const screenshot = takeScreenshotCaptureTiming(await screenshotCall);
+        marks.respondedAt = Date.now();
+        if (screenshot.timing) marks.providerTiming = screenshot.timing;
+        const processed = await preprocessScreenshot(screenshot.result, ctx, visualSignal, {
           purpose: 'post-action',
           action,
         });
+        marks.processedAt = Date.now();
         if (!screenshotContent(processed)) {
-          return isDeduplicatedVisual(processed) ? { request, result: processed } : undefined;
+          if (!isDeduplicatedVisual(processed)) {
+            outcome = 'empty';
+            return undefined;
+          }
+          outcome = 'deduplicated';
+          return { request, result: processed };
         }
         if (postActionVisualCountByTurn) {
           recordPostActionVisual(postActionVisualCountByTurn, budgetKey);
         }
+        outcome = 'attached';
         return { request, result: processed };
       },
       POST_ACTION_VISUAL_TIMEOUT_MS,
       'Browser post-action visual',
       signal,
     );
-  } catch {
+  } catch (error) {
     // Visual evidence is supplemental. A capture/compression failure must not
     // replace the Browser action's authoritative success or failure result.
+    outcome = error instanceof BrowserOperationTimeoutError ? 'timeout' : 'failed';
     return undefined;
+  } finally {
+    const { requestedAt, respondedAt, processedAt, providerTiming } = marks;
+    notifyObserver(() =>
+      observer?.postActionVisualSettled({
+        sessionId: ctx.sessionId,
+        turnId: ctx.turnId,
+        action,
+        outcome,
+        waitMs: (processedAt ?? Date.now()) - actionEndedAt,
+        requestMs: (requestedAt ?? actionEndedAt) - actionEndedAt,
+        ...(requestedAt !== undefined && respondedAt !== undefined
+          ? { providerMs: respondedAt - requestedAt }
+          : {}),
+        ...(providerTiming ? { providerTiming } : {}),
+        ...(respondedAt !== undefined && processedAt !== undefined
+          ? { compressMs: processedAt - respondedAt }
+          : {}),
+      }),
+    );
+  }
+}
+
+/**
+ * The provider call behind one requested Browser action. Reports the raw
+ * result (or the throw) to the observer and drops the provider's screenshot
+ * timing so it never reaches a model-visible result.
+ */
+async function executeObservedProviderAction(
+  adapter: LocalBrowserAdapter,
+  ctx: LocalRuntimeToolContext,
+  action: LocalBrowserToolAction,
+  input: Record<string, unknown>,
+  signal: AbortSignal,
+  observer: LocalBrowserObserver | undefined,
+): Promise<unknown> {
+  let result: unknown;
+  try {
+    result = await Promise.resolve(adapter.execute(ctx, action, input, signal));
+  } catch (error) {
+    const errorCode = thrownBrowserErrorCode(error);
+    notifyObserver(() =>
+      observer?.actionExecuted({
+        sessionId: ctx.sessionId,
+        turnId: ctx.turnId,
+        action,
+        ...(errorCode ? { errorCode } : {}),
+      }),
+    );
+    throw error;
+  }
+  notifyObserver(() =>
+    observer?.actionExecuted({ sessionId: ctx.sessionId, turnId: ctx.turnId, action, result }),
+  );
+  return action === 'screenshot' ? takeScreenshotCaptureTiming(result).result : result;
+}
+
+function takeScreenshotCaptureTiming(result: unknown): {
+  result: unknown;
+  timing?: LocalBrowserScreenshotCaptureTiming;
+} {
+  if (!isRecord(result) || !('captureTiming' in result)) return { result };
+  const { captureTiming, ...rest } = result;
+  if (!isRecord(captureTiming)) return { result: rest };
+  const timing: { queueMs?: number; captureMs?: number; encodeMs?: number } = {};
+  for (const key of ['queueMs', 'captureMs', 'encodeMs'] as const) {
+    const value = captureTiming[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) timing[key] = value;
+  }
+  return { result: rest, timing };
+}
+
+/** Provider codes as the model and metrics see them, the same on every path. */
+const NORMALIZED_PROVIDER_CODES: Readonly<Record<string, string>> = {
+  aborted: 'ABORTED',
+  browser_operation_timeout: 'BROWSER_OPERATION_TIMEOUT',
+  background_render_operation_timeout: 'BROWSER_OPERATION_TIMEOUT',
+  background_render_queue_timeout: 'BROWSER_OPERATION_TIMEOUT',
+};
+
+/**
+ * The structured code of an error a provider threw: its `code` (provider
+ * spellings normalized), else a `CODE:` prefix of its message.
+ */
+function thrownBrowserErrorCode(error: unknown): string | undefined {
+  if (isRecord(error) && typeof error.code === 'string' && /^[A-Za-z]\w*$/u.test(error.code)) {
+    return NORMALIZED_PROVIDER_CODES[error.code] ?? error.code;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /^([A-Z][A-Z0-9_]+):/u.exec(message)?.[1];
+}
+
+/** Observers feed metrics; a throwing observer must not change the action. */
+function notifyObserver(notify: () => void): void {
+  try {
+    notify();
+  } catch {
+    // Metrics are best effort.
   }
 }
 
@@ -1124,11 +1670,15 @@ async function waitForPendingPostActionVisual(
  *
  * Built as an allow-list rather than by omitting `framing`, so any future
  * summary-only field also stays out of the provider payload by default.
+ * `__postActionVisual` tells Browser Core this capture is not a read the model
+ * chose: it does not verify an earlier uncertain write it does not frame.
  */
 function screenshotRequestPayload(request: PostActionVisualRequest): Record<string, unknown> {
-  return request.clip === undefined
-    ? { scope: request.scope }
-    : { scope: request.scope, clip: request.clip };
+  return {
+    scope: request.scope,
+    ...(request.clip === undefined ? {} : { clip: request.clip }),
+    __postActionVisual: true,
+  };
 }
 
 function recordPostActionVisual(countByTurn: Map<string, number>, budgetKey: string): void {
@@ -1152,6 +1702,10 @@ function resolvePostActionVisualRequest(
   // This includes failures that detected an unexpected navigation; the model
   // is routed to inspect/screenshot the landed page instead.
   if (result.success === false) return undefined;
+  // An uncertain write (a page load it started still pending) must be checked
+  // by a read the model chooses; an automatic capture of the old page would
+  // count as that read in Browser Core's write record.
+  if (isRecord(result.uncertainWrite)) return undefined;
   const navigation = isRecord(result.navigation) ? result.navigation : {};
   if (navigation.detected === true) return { scope: 'viewport' };
 
@@ -1369,6 +1923,14 @@ function appendErrorVisualOmissionNote(action: LocalBrowserToolAction, result: u
 }
 
 const MAX_COMPACT_BROWSER_TEXT_BYTES = 64 * 1024;
+/**
+ * Bound on the records a run_code child receives (`{ action, result }` as
+ * JSON). The bridge carries them as `data` next to `output` (the text, never
+ * larger) and fails results past 16 MiB; a quarter of the child output cap
+ * (output-limit.ts) leaves room for both, for escaping, and for an action
+ * result merged with an observation that is itself within this bound.
+ */
+const PTC_BROWSER_RESULT_MAX_BYTES = PTC_CHILD_FULL_OUTPUT_MAX_BYTES / 4;
 
 function compactOversizedInspectResult(action: LocalBrowserToolAction, value: unknown): unknown {
   if (action !== 'inspect' || !isRecord(value) || typeof value.snapshotId !== 'string') {
@@ -1476,40 +2038,51 @@ function shortenOversizedInspectPage(action: LocalBrowserToolAction, value: unkn
   return fitting ?? value;
 }
 
-const COMPACT_STATUS_STRING_LIMITS = {
-  url: 4_096,
-  title: 1_024,
-  error: 4_096,
-  message: 4_096,
-  code: 256,
-} as const;
 const COMPACT_PRIVATE_RESULT_KEYS = new Set(['browserState', 'sessionId', 'tabId']);
 
+/** Elements of the snapshot after this page, when the page says where it ends. */
+function remainingSnapshotElements(page: Record<string, unknown>): number | undefined {
+  const { totalElements, offset, returnedElements } = page;
+  if (typeof totalElements !== 'number' || typeof returnedElements !== 'number') return undefined;
+  const start = typeof offset === 'number' ? offset : 0;
+  const remaining = Math.floor(totalElements - start - returnedElements);
+  return Number.isFinite(remaining) && remaining > 0 ? remaining : undefined;
+}
+
+/**
+ * A cut inspect page is rarely continued; the reading block says how many
+ * elements are left. Prose urging the model to continue before taking a
+ * screenshot did not make it continue more often, so only the number stays.
+ */
 function appendBrowserReadingGuidance(action: LocalBrowserToolAction, result: unknown): unknown {
   if (action !== 'inspect' || !isRecord(result) || !Array.isArray(result.elements)) return result;
-
-  return typeof result.truncated === 'boolean'
-    ? {
-        ...result,
-        reading: result.truncated
-          ? {
-              snapshotComplete: false,
-              ifRequestedEvidencePresent: 'stop',
-              requiredNextAction: 'inspect',
-              requiredNextInput: isRecord(result.continuation)
-                ? result.continuation.input
-                : undefined,
-              instruction:
-                'If the requested evidence is already present, stop reading. Otherwise continue with the returned inspect continuation input; do not invent snapshot IDs or offsets.',
-            }
-          : {
-              snapshotComplete: true,
-              ifRequestedEvidencePresent: 'stop',
-              instruction:
-                'If the requested evidence is present in this complete snapshot, do not call query, inspect, or screenshot again; answer now.',
-            },
-      }
-    : result;
+  if (typeof result.truncated !== 'boolean') return result;
+  // The model has to handle a held dialog; "answer now" would tell it not to.
+  if (isJsDialogPage(result)) return result;
+  if (!result.truncated) {
+    return {
+      ...result,
+      reading: {
+        snapshotComplete: true,
+        ifRequestedEvidencePresent: 'stop',
+        instruction:
+          'If the requested evidence is present in this complete snapshot, do not call query, inspect, or screenshot again; answer now.',
+      },
+    };
+  }
+  const remaining = remainingSnapshotElements(result);
+  return {
+    ...result,
+    reading: {
+      snapshotComplete: false,
+      ...(remaining === undefined ? {} : { remainingElements: remaining }),
+      ifRequestedEvidencePresent: 'stop',
+      requiredNextAction: 'inspect',
+      requiredNextInput: isRecord(result.continuation) ? result.continuation.input : undefined,
+      instruction:
+        'If the requested evidence is already present, stop reading. Otherwise continue with the returned inspect continuation input; do not invent snapshot IDs or offsets.',
+    },
+  };
 }
 
 const AUTHENTICATION_TAKEOVER_SAFETY = {
@@ -1517,7 +2090,7 @@ const AUTHENTICATION_TAKEOVER_SAFETY = {
   mutationAllowed: false,
   requiredNextTool: 'ask_user',
   instruction:
-    'Call the actual ask_user tool call now so the user can take over this same Browser tab. Do not write <ask_user>, ask_user(...), or a prose placeholder; text does not pause the turn.',
+    "If you have not already asked about this sign-in, call the actual ask_user tool now as a question that waits for the user's answer, so the user can sign in on this same Browser tab. Do not write <ask_user>, ask_user(...), or a prose placeholder; text does not pause the turn. Inspect this tab again only after the user answers that they signed in.",
 } as const;
 
 const CREDENTIAL_SIGN_IN_SAFETY = {
@@ -1546,8 +2119,7 @@ function appendBrowserSafetyGuidance(
       (collection) => Array.isArray(collection) && collection.some(isAuthenticationSecretField),
     ) ||
     ((action === 'query' || action === 'get_dom') &&
-      typeof result.html === 'string' &&
-      containsAuthenticationSecretMarkup(result.html));
+      queryHtmlFragments(result).some(containsAuthenticationSecretMarkup));
   if (!containsAuthenticationSecretField) return result;
 
   const redacted = redactAuthenticationSecrets(action, result);
@@ -1589,7 +2161,25 @@ function redactAuthenticationSecrets(
   if ((action === 'query' || action === 'get_dom') && typeof result.html === 'string') {
     redacted.html = redactAuthenticationSecretMarkup(result.html);
   }
+  // query kind "dom" with all: true carries one sanitized fragment per match.
+  if (action === 'query' && Array.isArray(result.matches)) {
+    redacted.matches = result.matches.map((match) =>
+      isRecord(match) && typeof match.html === 'string'
+        ? { ...match, html: redactAuthenticationSecretMarkup(match.html) }
+        : match,
+    );
+  }
   return redacted;
+}
+
+function queryHtmlFragments(result: Record<string, unknown>): string[] {
+  const fragments = typeof result.html === 'string' ? [result.html] : [];
+  if (Array.isArray(result.matches)) {
+    for (const match of result.matches) {
+      if (isRecord(match) && typeof match.html === 'string') fragments.push(match.html);
+    }
+  }
+  return fragments;
 }
 
 function redactAuthenticationSecretField(element: unknown): unknown {
@@ -1689,684 +2279,6 @@ function readAuthenticationTakeoverSafety(
   return undefined;
 }
 
-function summarizeCompactActionResult(action: LocalBrowserToolAction, result: unknown): unknown {
-  if (!isRecord(result)) return sanitizeBrowserResult(result);
-
-  const summary: Record<string, unknown> = {};
-  if (typeof result.success === 'boolean') summary.success = result.success;
-  if (typeof result.openedInNewTab === 'boolean') {
-    summary.openedInNewTab = result.openedInNewTab;
-  }
-  if (action === 'return_to_previous_tab' && typeof result.returnedToPreviousTab === 'boolean') {
-    summary.returnedToPreviousTab = result.returnedToPreviousTab;
-  }
-  const preservedTabs = result.preservedTabs;
-  if (typeof preservedTabs === 'number' && Number.isFinite(preservedTabs)) {
-    summary.preservedTabs = Math.max(0, Math.floor(preservedTabs));
-  }
-  if (typeof result.duration === 'number' && Number.isFinite(result.duration)) {
-    summary.duration = result.duration;
-  }
-  if (typeof result.durationMs === 'number' && Number.isFinite(result.durationMs)) {
-    summary.durationMs = Math.max(0, Math.floor(result.durationMs));
-  }
-  for (const [key, limit] of Object.entries(COMPACT_STATUS_STRING_LIMITS)) {
-    const value = result[key];
-    if (typeof value === 'string') summary[key] = value.slice(0, limit);
-  }
-  if (action === 'drag') {
-    if (result.mode === 'pointer' || result.mode === 'html5') summary.mode = result.mode;
-    if (typeof result.dragStarted === 'boolean') summary.dragStarted = result.dragStarted;
-    if (typeof result.dropDispatched === 'boolean') {
-      summary.dropDispatched = result.dropDispatched;
-    }
-  }
-  if (action === 'upload_files') {
-    const effect = isRecord(result.effect) ? result.effect : undefined;
-    const filesAttached =
-      typeof result.filesAttached === 'number' && Number.isFinite(result.filesAttached)
-        ? result.filesAttached
-        : typeof effect?.fileCount === 'number' && Number.isFinite(effect.fileCount)
-          ? effect.fileCount
-          : undefined;
-    if (filesAttached !== undefined) {
-      summary.filesAttached = Math.max(0, Math.floor(filesAttached));
-    }
-    if (typeof result.chooserOpened === 'boolean') summary.chooserOpened = result.chooserOpened;
-  }
-  if (action === 'click' || action === 'double_click' || action === 'triple_click') {
-    const download = boundedBrowserDownload(result.download);
-    if (download) summary.download = download;
-  }
-  const target = boundedWriteTarget(result.target);
-  if (target) summary.target = target;
-  const effect =
-    action === 'scroll'
-      ? boundedScrollEffect(result.effect)
-      : action === 'hover'
-        ? boundedHoverEffect(result.effect)
-        : boundedWriteEffect(result.effect);
-  if (effect) summary.effect = effect;
-  const navigation = boundedNavigation(result.navigation);
-  if (navigation) summary.navigation = navigation;
-  if (typeof result.retryable === 'boolean') summary.retryable = result.retryable;
-  if (typeof result.recovery === 'string') summary.recovery = result.recovery.slice(0, 1_024);
-  // Diagnostics Browser Core attaches to failures so the model can correct the
-  // call instead of re-querying (eval 761096: SELECT_OPTION_NOT_FOUND on the
-  // wrong select, selector misses on a wrong ancestor chain).
-  const availableOptions = boundedSelectOptions(result.availableOptions);
-  if (availableOptions) {
-    summary.availableOptions = availableOptions;
-    if (result.availableOptionsTruncated === true) summary.availableOptionsTruncated = true;
-    if (
-      typeof result.availableOptionCount === 'number' &&
-      Number.isFinite(result.availableOptionCount)
-    ) {
-      summary.availableOptionCount = Math.max(0, Math.floor(result.availableOptionCount));
-    }
-  }
-  const selectorTail = boundedSelectorTail(result.selectorTail);
-  if (selectorTail) summary.selectorTail = selectorTail;
-  return summary;
-}
-
-const MAX_COMPACT_SELECT_OPTIONS = 30;
-
-function boundedSelectOptions(value: unknown): Array<Record<string, string>> | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const options = value
-    .slice(0, MAX_COMPACT_SELECT_OPTIONS)
-    .filter(isRecord)
-    .map((option) => ({
-      value: typeof option.value === 'string' ? option.value.slice(0, 80) : '',
-      label: typeof option.label === 'string' ? option.label.slice(0, 80) : '',
-    }));
-  return options.length > 0 ? options : undefined;
-}
-
-function boundedSelectorTail(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value) || typeof value.selector !== 'string') return undefined;
-  if (typeof value.matchCount !== 'number' || !Number.isFinite(value.matchCount)) return undefined;
-  return {
-    selector: value.selector.slice(0, 256),
-    matchCount: Math.max(0, Math.floor(value.matchCount)),
-  };
-}
-
-function boundedBrowserDownload(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) return undefined;
-  const download: Record<string, unknown> = {};
-  if (value.state === 'inProgress' || value.state === 'completed' || value.state === 'canceled') {
-    download.state = value.state;
-  }
-  if (value.observation === 'timeout') download.observation = 'timeout';
-  const suggestedFilename =
-    typeof value.suggestedFilename === 'string'
-      ? value.suggestedFilename
-      : typeof value.fileName === 'string'
-        ? value.fileName
-        : '';
-  if (suggestedFilename) download.suggestedFilename = suggestedFilename.slice(0, 255);
-  for (const key of ['receivedBytes', 'totalBytes'] as const) {
-    if (typeof value[key] === 'number' && Number.isFinite(value[key])) {
-      download[key] = Math.max(0, Math.floor(value[key]));
-    }
-  }
-  return Object.keys(download).length > 0 ? download : undefined;
-}
-
-function boundedWriteTarget(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) return undefined;
-  const target: Record<string, unknown> = {};
-  if (typeof value.resolved === 'boolean') target.resolved = value.resolved;
-  if (typeof value.tag === 'string') target.tag = value.tag.slice(0, 80);
-  if (typeof value.role === 'string') target.role = value.role.slice(0, 80);
-  if (typeof value.inputType === 'string') target.inputType = value.inputType.slice(0, 40);
-  if (typeof value.name === 'string') target.name = value.name.slice(0, 80);
-  if (typeof value.contentEditable === 'boolean') {
-    target.contentEditable = value.contentEditable;
-  }
-  return Object.keys(target).length > 0 ? target : undefined;
-}
-
-function boundedWriteEffect(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) return undefined;
-  const effect: Record<string, unknown> = {};
-  if (typeof value.dispatched === 'boolean') effect.dispatched = value.dispatched;
-  if (typeof value.verified === 'boolean') effect.verified = value.verified;
-  if (typeof value.verificationRequired === 'boolean') {
-    effect.verificationRequired = value.verificationRequired;
-  }
-  if (typeof value.focused === 'boolean') effect.focused = value.focused;
-  if (typeof value.textChanged === 'boolean') effect.textChanged = value.textChanged;
-  if (typeof value.textLength === 'number' && Number.isFinite(value.textLength)) {
-    effect.textLength = Math.max(0, Math.floor(value.textLength));
-  }
-  return Object.keys(effect).length > 0 ? effect : undefined;
-}
-
-function boundedHoverEffect(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) return undefined;
-  const effect: Record<string, unknown> = {};
-  if (typeof value.hovered === 'boolean') effect.hovered = value.hovered;
-  if (typeof value.tooltipObserved === 'boolean') {
-    effect.tooltipObserved = value.tooltipObserved;
-  }
-  if (isRecord(value.semantic)) {
-    const semantic: Record<string, unknown> = {};
-    if (typeof value.semantic.name === 'string') {
-      semantic.name = value.semantic.name.slice(0, 256);
-    }
-    if (
-      typeof value.semantic.source === 'string' &&
-      COMPACT_HOVER_SEMANTIC_SOURCES.has(value.semantic.source)
-    ) {
-      semantic.source = value.semantic.source;
-    }
-    if (
-      typeof value.semantic.confidence === 'string' &&
-      COMPACT_HOVER_CONFIDENCE_LEVELS.has(value.semantic.confidence)
-    ) {
-      semantic.confidence = value.semantic.confidence;
-    }
-    if (typeof value.semantic.supportingText === 'string') {
-      semantic.supportingText = value.semantic.supportingText.slice(0, 256);
-    }
-    if (Object.keys(semantic).length > 0) effect.semantic = semantic;
-  }
-  return Object.keys(effect).length > 0 ? effect : undefined;
-}
-
-function boundedScrollEffect(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) return undefined;
-  const effect: Record<string, unknown> = {};
-  if (typeof value.observed === 'boolean') effect.observed = value.observed;
-  if (typeof value.moved === 'boolean') effect.moved = value.moved;
-  const numericFields = ['actualDeltaX', 'actualDeltaY'] as const;
-  for (const field of numericFields) {
-    const numericValue = value[field];
-    if (typeof numericValue === 'number' && Number.isFinite(numericValue)) {
-      effect[field] = Math.round(numericValue);
-    }
-  }
-  if (typeof value.atStart === 'boolean') effect.atStart = value.atStart;
-  if (typeof value.atEnd === 'boolean') effect.atEnd = value.atEnd;
-  return Object.keys(effect).length > 0 ? effect : undefined;
-}
-
-function boundedNavigation(value: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(value)) return undefined;
-  const navigation: Record<string, unknown> = {};
-  if (typeof value.detected === 'boolean') navigation.detected = value.detected;
-  if (typeof value.urlChanged === 'boolean') navigation.urlChanged = value.urlChanged;
-  if (typeof value.loaded === 'boolean') navigation.loaded = value.loaded;
-  if (typeof value.generation === 'number' && Number.isFinite(value.generation)) {
-    navigation.generation = Math.max(0, Math.floor(value.generation));
-  }
-  if (typeof value.beforeHost === 'string') navigation.beforeHost = value.beforeHost.slice(0, 255);
-  if (typeof value.afterHost === 'string') navigation.afterHost = value.afterHost.slice(0, 255);
-  return Object.keys(navigation).length > 0 ? navigation : undefined;
-}
-
-const POINTER_TARGET_ACTIONS = new Set<LocalBrowserToolAction>([
-  'click',
-  'click_and_wait_for_navigation',
-  'double_click',
-  'triple_click',
-  'hover',
-  'fill',
-  'type',
-  'check',
-  'uncheck',
-  'select_option',
-]);
-const ELEMENT_TARGET_ACTIONS = new Set<LocalBrowserToolAction>(['paste']);
-
-/**
- * Repair envelope-level slips whose intent is certain before schema
- * validation. Eval 769392 lost 8 calls to the outer validator:
- * - the action name carried a leaked markup tail (`"press_key\">"`,
- *   `"select_option\">"`); only a tail of quotes/backslashes/`>`/whitespace is
- *   stripped, and only when the remainder is an available action;
- * - action fields were sent beside `input` instead of inside it
- *   (`{ action: "inspect", limit: "100" }`, `{ action, ref }`); they are moved
- *   into `input` only when no key collides with one already there.
- * Everything else is left untouched so the validator reports it as before.
- */
-export function prepareCompactBrowserArguments(args: unknown, actions: readonly string[]): unknown {
-  if (!isRecord(args)) return args;
-  let prepared: Record<string, unknown> = args;
-  if (typeof args.action === 'string' && !actions.includes(args.action)) {
-    let repaired = args.action.trim();
-    // Linear trim (no backtracking regex) of stray quote/backslash/`>`/space.
-    while (repaired.length > 0 && /["'\\>\s]/u.test(repaired.at(-1) ?? '')) {
-      repaired = repaired.slice(0, -1);
-    }
-    if (actions.includes(repaired)) prepared = { ...prepared, action: repaired };
-  }
-  const stray = Object.keys(prepared).filter((key) => key !== 'action' && key !== 'input');
-  const input = prepared.input;
-  if (stray.length > 0 && (input === undefined || isRecord(input))) {
-    const target = input ?? {};
-    if (stray.every((key) => !(key in target))) {
-      const moved: Record<string, unknown> = { ...target };
-      for (const key of stray) moved[key] = prepared[key];
-      prepared = { action: prepared.action, input: moved };
-    }
-  }
-  if (isRecord(prepared.input)) {
-    const coerced = coerceBrowserInputEnvelope(prepared.action, prepared.input);
-    if (coerced !== prepared.input) prepared = { ...prepared, input: coerced };
-  }
-  return prepared;
-}
-
-const NUMERIC_BROWSER_INPUT_FIELDS = [
-  'maxChars',
-  'limit',
-  'offset',
-  'afterSequence',
-  'distance',
-  'timeout',
-  'delay',
-] as const;
-const NUMERIC_STRING = /^\s*\d+(?:\.\d+)?\s*$/u;
-
-/**
- * Eval 774252 lost 5 more calls to the outer validator on value encodings
- * whose meaning is certain:
- * - numbers sent as decimal strings (`maxChars: "5000"`, `distance: "100"`);
- *   only plain non-negative decimals are converted, range checks still apply;
- * - select_option `values` serialized through an XML-style array wrapper
- *   (`values: { item: "Task" }`) or as a bare string; only a lone `item` key
- *   holding a string or string array is unwrapped;
- * - select_option `value` (singular) when `values` is absent, since
- *   select_option has no other field it could mean.
- */
-function coerceBrowserInputEnvelope(
-  action: unknown,
-  input: Record<string, unknown>,
-): Record<string, unknown> {
-  let next = input;
-  const set = (key: string, value: unknown) => {
-    if (next === input) next = { ...input };
-    next[key] = value;
-  };
-  for (const key of NUMERIC_BROWSER_INPUT_FIELDS) {
-    const value = input[key];
-    if (typeof value === 'string' && NUMERIC_STRING.test(value)) set(key, Number(value));
-  }
-  if (action === 'select_option') {
-    if (next.values === undefined && 'value' in next) {
-      const { value, ...rest } = next;
-      next = { ...rest, values: value };
-    }
-    const values = next.values;
-    if (typeof values === 'string' && values.length > 0) set('values', [values]);
-    else if (isRecord(values) && Object.keys(values).length === 1 && 'item' in values) {
-      const item = values.item;
-      if (typeof item === 'string') set('values', [item]);
-      else if (Array.isArray(item) && item.every((entry) => typeof entry === 'string')) {
-        set('values', item);
-      }
-    }
-  }
-  return next;
-}
-
-function validateCompactBrowserInput(
-  action: LocalBrowserToolAction,
-  input: Record<string, unknown>,
-): string | undefined {
-  if (action === 'drag') {
-    return (
-      validateBrowserTarget(action, 'source', input.source, true) ??
-      validateBrowserTarget(action, 'target', input.target, true)
-    );
-  }
-  if (POINTER_TARGET_ACTIONS.has(action)) {
-    const error = validateBrowserTarget(action, 'target', input, true);
-    // Eval 769392: `type { text }` after clicking a field assumed "type into
-    // the focused element" (4 calls). Name the supported way instead.
-    if (error && (action === 'type' || action === 'fill') && !hasAnyBrowserTarget(input)) {
-      return `${error} ${action} does not write to the current focus: pass the ref of the field to write into (for example the one you just clicked), or use press_key for individual keys.`;
-    }
-    return error;
-  }
-  if (ELEMENT_TARGET_ACTIONS.has(action)) {
-    return validateBrowserTarget(action, 'target', input, false);
-  }
-  if (action === 'upload_files') {
-    if (!hasNonEmptyString(input.ref)) {
-      return 'Browser upload_files target requires an opaque element ref from inspect/query.';
-    }
-    return validateBrowserTarget(action, 'target', input, false);
-  }
-  if (action === 'scroll' && hasNonEmptyString(input.frame) && !hasNonEmptyString(input.ref)) {
-    return 'Browser scroll frame targeting requires an opaque element ref.';
-  }
-  if (action === 'run_script' && hasNonEmptyString(input.code) === hasNonEmptyString(input.path)) {
-    return 'Browser run_script requires exactly one of code or path.';
-  }
-  // press_key and scroll target an element optionally: validate only when one is given.
-  if ((action === 'press_key' || action === 'scroll') && hasAnyBrowserTarget(input)) {
-    return validateBrowserTarget(action, 'target', input, action === 'scroll');
-  }
-  return undefined;
-}
-
-function hasAnyBrowserTarget(input: Record<string, unknown>): boolean {
-  return (
-    hasNonEmptyString(input.ref) ||
-    hasNonEmptyString(input.selector) ||
-    hasNonEmptyString(input.frame) ||
-    isRecord(input.position) ||
-    isRecord(input.normalized_position)
-  );
-}
-
-/**
- * Accept unambiguous, harmless variants before contract validation. Eval 762809
- * rejected both shapes even though intent was certain:
- * - `wait { timeout }` without `kind` can only mean a plain timeout wait;
- * - `fill { clear: true }` restates fill's own always-clear semantics.
- * `fill { clear: false }` stays rejected: it asks for append semantics that
- * fill does not provide, and the contract error points the model at `type`.
- *
- * Eval 766011 added three more: the flat provider schema advertises union-wide
- * fields (`filter`, `includeDom`, `limit`, `maxChars`, `clip`) so every kind
- * looks like it accepts them. Redirect the shapes whose intent is certain, and
- * drop only the fields that are a no-op for the selected kind:
- * - query `kind: text|dom` with a `filter` (or a bare `text`) is a "find the
- *   element whose visible text contains X" intent, which is exactly
- *   `kind: semantic`; forwarding it there replaces 12 failed probes per run;
- * - query `kind: snapshot|editable` `maxChars` and `kind: dom` `includeDom`
- *   restate what those kinds already do, so they are dropped the way
- *   `fill { clear: true }` is.
- * Everything else still reaches the contract error, which now names the field
- * the model should have used instead.
- */
-export function normalizeBrowserActionInput(action: string, rawInput: unknown): unknown {
-  if (!isRecord(rawInput)) return rawInput;
-  if (
-    action === 'wait' &&
-    rawInput.kind === undefined &&
-    typeof rawInput.timeout === 'number' &&
-    Object.keys(rawInput).every((key) => key === 'timeout' || key === 'kind')
-  ) {
-    return { kind: 'timeout', timeout: rawInput.timeout };
-  }
-  if (action === 'fill' && rawInput.clear === true) {
-    return Object.fromEntries(Object.entries(rawInput).filter(([key]) => key !== 'clear'));
-  }
-  if (action === 'query') return normalizeQueryInput(rawInput);
-  if (action === 'screenshot') return normalizeScreenshotInput(rawInput);
-  return rawInput;
-}
-
-/**
- * A bare `text` string that is not one of query's own fields is the model's
- * semantic search term. Empty strings are not intent, so they fall through to
- * the contract error instead of silently becoming a different query.
- */
-function queryTextIntent(value: unknown, spec: { allowText: boolean }): string | undefined {
-  if (spec.allowText) return undefined;
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text.length > 0 ? text : undefined;
-}
-
-function normalizeQueryInput(rawInput: Record<string, unknown>): Record<string, unknown> {
-  const kind = rawInput.kind;
-  if (typeof kind !== 'string') return rawInput;
-  // Never rewrite a continuation: snapshotId/offset identify an existing page,
-  // so a stray field there is left for the contract error to report.
-  const isContinuation = rawInput.snapshotId !== undefined || rawInput.offset !== undefined;
-  const searchTerm = queryTextIntent(rawInput.text, { allowText: kind === 'semantic' });
-  const filterTerm =
-    typeof rawInput.filter === 'string' && rawInput.filter.trim().length > 0
-      ? rawInput.filter.trim()
-      : undefined;
-  const hasSelector = typeof rawInput.selector === 'string' && rawInput.selector.trim().length > 0;
-
-  // "Find the element whose text contains X" — the filter/text fields only ever
-  // appear on text/dom, and semantic is the kind that resolves them to refs.
-  // Terms longer than semantic's 500-char cap are not identifier lookups, so
-  // they keep the original kind and get the contract error instead.
-  const term = searchTerm ?? (kind === 'text' ? filterTerm : undefined);
-  if (
-    (kind === 'text' || kind === 'dom') &&
-    !isContinuation &&
-    !hasSelector &&
-    term !== undefined &&
-    term.length <= 500
-  ) {
-    const semantic: Record<string, unknown> = { kind: 'semantic', text: term };
-    const limit = rawInput.limit;
-    if (typeof limit === 'number' && Number.isFinite(limit)) {
-      semantic.limit = Math.min(Math.max(Math.trunc(limit), 1), 50);
-    }
-    return semantic;
-  }
-
-  // Drop only fields that are a no-op for the selected kind. Everything else —
-  // a `selector` on editable/snapshot, an unknown key — is left in place so the
-  // contract error names it, instead of being silently swallowed here.
-  const redundant =
-    kind === 'snapshot' || kind === 'editable' ? new Set(['maxChars']) : new Set<string>();
-  if (kind === 'dom') redundant.add('includeDom');
-  if (redundant.size === 0) return rawInput;
-  const kept = Object.entries(rawInput).filter(([key]) => !redundant.has(key));
-  if (kept.length === Object.keys(rawInput).length) return rawInput;
-  return Object.fromEntries(kept);
-}
-
-/**
- * `scope` is already a declared screenshot field, while `clip` alone can only
- * mean a clipped capture. Filling the implied scope removes the pointless
- * round trip eval 766011 spent on `{ clip: {...} }` without letting a real
- * scope omission (no clip) through.
- */
-function normalizeScreenshotInput(rawInput: Record<string, unknown>): Record<string, unknown> {
-  if (rawInput.scope !== undefined || !isClipRect(rawInput.clip)) return rawInput;
-  return { ...rawInput, scope: 'clip' };
-}
-
-function isClipRect(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const { x, y, width, height } = value;
-  return (
-    typeof x === 'number' &&
-    typeof y === 'number' &&
-    typeof width === 'number' &&
-    typeof height === 'number'
-  );
-}
-
-/**
- * Explain a contract mismatch in terms the model can act on: which fields are
- * not accepted, which are missing, and which fields the action (and, for kind
- * unions such as query/wait, the selected kind) does accept. A bare "does not
- * match" message gave the model nothing to correct (eval: 43 invalid_input).
- */
-export function describeBrowserContractMismatch(
-  action: string,
-  schema: TSchema,
-  rawInput: unknown,
-): string {
-  const base = `Input does not match the contract for browser action "${action}"`;
-  if (!isRecord(rawInput)) return `${base}: input must be an object.`;
-  const variants = objectVariantsOf(schema);
-  if (variants.length === 0) return `${base}.`;
-  const kinds = variants
-    .map((variant) => literalConst(variant.properties?.kind))
-    .filter((kind): kind is string => kind !== undefined);
-  let candidates = variants;
-  let kindLabel = '';
-  if (kinds.length > 0) {
-    const requestedKind = rawInput.kind;
-    candidates = variants.filter(
-      (variant) => literalConst(variant.properties?.kind) === requestedKind,
-    );
-    if (candidates.length === 0) {
-      // Eval 777827: `query { text, limit }` without kind meant a text search.
-      const selectorHint =
-        action !== 'query'
-          ? ''
-          : typeof rawInput.selector === 'string'
-            ? ' To read one element by CSS selector use kind "dom" (sanitized HTML) or kind "text" (visible text) with input.selector.'
-            : typeof rawInput.text === 'string'
-              ? ' To locate an element by its visible text use kind "semantic" with input.text.'
-              : '';
-      return `${base}: kind ${JSON.stringify(requestedKind ?? null)} is not supported. Supported kinds: ${kinds.join(', ')}.${selectorHint}`;
-    }
-    kindLabel = ` (kind "${String(requestedKind)}")`;
-  }
-  const variant = selectMismatchVariant(candidates, rawInput);
-  if (!variant) return `${base}.`;
-  const accepted = Object.keys(variant.properties ?? {});
-  const unknown = Object.keys(rawInput).filter((key) => !accepted.includes(key));
-  const required = Array.isArray(variant.required) ? (variant.required as string[]) : [];
-  const missing = required.filter((key) => rawInput[key] === undefined);
-  const problems: string[] = [];
-  if (unknown.length > 0) problems.push(`unsupported field(s): ${unknown.join(', ')}`);
-  if (missing.length > 0) problems.push(`missing required field(s): ${missing.join(', ')}`);
-  if (problems.length === 0) {
-    const first = Value.Errors(variant as TSchema, rawInput).First();
-    if (first) problems.push(`${first.path || '/'} ${first.message}`);
-  }
-  const detail = problems.length > 0 ? `: ${problems.join('; ')}` : '';
-  const hint = contractNextStepHint(action, rawInput);
-  return `${base}${kindLabel}${detail}. Accepted fields: ${accepted.join(', ') || '(none)'}.${hint}`;
-}
-
-/**
- * Name the action that already does what the rejected field was reaching for.
- * The flat provider schema advertises `filter`/`limit`/`maxChars`/`clip` at the
- * top level for every kind, so the fix is a short pointer rather than another
- * round of probing (eval 766011: the same probe was repeated 1-2 times before
- * the model found the supported spelling).
- */
-function contractNextStepHint(action: string, rawInput: Record<string, unknown>): string {
-  // Eval 827211: ~110 scroll calls copied drag's `{ source, target }` endpoint
-  // wrapper (`scroll { target: { ref }, direction }`).
-  if (action !== 'drag' && (isRecord(rawInput.target) || isRecord(rawInput.source))) {
-    return ` Only drag nests its endpoints in source/target; for ${action} put ref, selector, frame, position, or normalized_position directly inside input, for example {"action": "${action}", "input": {"ref": "<opaque-ref>"${action === 'scroll' ? ', "direction": "down"' : ''}}}.`;
-  }
-  // Eval 769392: `inspect { selector, kind }` (3 calls) expected a scoped read.
-  if (action === 'inspect' && ('selector' in rawInput || 'kind' in rawInput)) {
-    return ' inspect always lists the whole page; to read one element by CSS selector use action "query" with kind "dom" or "text" and input.selector, or kind "semantic" with input.text to locate it by visible text.';
-  }
-  if (action !== 'query' || typeof rawInput.kind !== 'string') return '';
-  const kind = rawInput.kind;
-  const names = new Set(Object.keys(rawInput));
-  // Eval 777827: kind "editable"/"snapshot" + selector (5 calls) and kind
-  // "dom" + limit (3 calls) expected a scoped or capped read.
-  if ((kind === 'snapshot' || kind === 'editable') && names.has('selector')) {
-    return ` kind "${kind}" scans the whole page and takes no selector; to read one element by CSS selector use kind "dom" or "text" with input.selector.`;
-  }
-  if ((kind === 'dom' || kind === 'text') && names.has('limit') && !names.has('text')) {
-    return ' kind "dom"/"text" reads the first element matching input.selector; bound the output with maxChars, or use kind "semantic" (which accepts limit) to list several matches.';
-  }
-  if (
-    (kind === 'text' || kind === 'dom' || kind === 'snapshot' || kind === 'editable') &&
-    (names.has('text') || names.has('filter'))
-  ) {
-    return ' To locate the element whose visible text matches, use kind "semantic" with input.text.';
-  }
-  if (kind === 'editable' && names.has('maxChars')) {
-    return ' kind "editable" pages targets with limit; drop maxChars.';
-  }
-  if (kind === 'snapshot' && names.has('maxChars')) {
-    return ' kind "snapshot" pages with limit; use action "inspect" for page reading.';
-  }
-  return '';
-}
-
-interface ObjectSchemaLike {
-  properties?: Record<string, unknown>;
-  required?: unknown;
-}
-
-/**
- * Pick the union variant the input most plausibly targets. The `kind`
- * narrowing above only helps unions discriminated by `kind`; others
- * discriminate on a different const property (screenshot uses
- * `scope: 'clip'`). Taking `candidates[0]` there reported the wrong variant's
- * fields — a clip screenshot with a bad clip was told "unsupported field(s):
- * clip". Drop variants whose const property the input explicitly contradicts,
- * then prefer the variant with the most const properties the input matches,
- * so the field hints come from the variant the model was actually using.
- */
-function selectMismatchVariant(
-  candidates: ObjectSchemaLike[],
-  rawInput: Record<string, unknown>,
-): ObjectSchemaLike | undefined {
-  let best: ObjectSchemaLike | undefined;
-  let bestScore = -1;
-  for (const variant of candidates) {
-    let score = 0;
-    let contradicted = false;
-    for (const [key, property] of Object.entries(variant.properties ?? {})) {
-      const constValue = literalConst(property);
-      if (constValue === undefined) continue;
-      if (rawInput[key] === constValue) score += 1;
-      else if (rawInput[key] !== undefined) contradicted = true;
-    }
-    if (contradicted) continue;
-    if (score > bestScore) {
-      best = variant;
-      bestScore = score;
-    }
-  }
-  return best ?? candidates[0];
-}
-
-function objectVariantsOf(schema: TSchema): ObjectSchemaLike[] {
-  const record = schema as unknown as Record<string, unknown>;
-  if (Array.isArray(record.anyOf)) {
-    return (record.anyOf as TSchema[]).flatMap((entry) => objectVariantsOf(entry));
-  }
-  return isRecord(record.properties) ? [record as ObjectSchemaLike] : [];
-}
-
-function literalConst(schema: unknown): string | undefined {
-  return isRecord(schema) && typeof schema.const === 'string' ? schema.const : undefined;
-}
-
-function validateBrowserTarget(
-  action: LocalBrowserToolAction,
-  label: 'source' | 'target',
-  value: unknown,
-  allowPosition: boolean,
-): string | undefined {
-  const target = isRecord(value) ? value : {};
-  const hasRef = hasNonEmptyString(target.ref);
-  if (hasNonEmptyString(target.frame) && !hasRef) {
-    return `Browser ${action} ${label} frame requires an opaque element ref.`;
-  }
-  const hasElementTarget = hasRef || hasNonEmptyString(target.selector);
-  const hasAbsolutePosition = allowPosition && isRecord(target.position);
-  const hasNormalizedPosition = allowPosition && isRecord(target.normalized_position);
-  const hasCoordinateTarget = hasAbsolutePosition || hasNormalizedPosition;
-  if (hasElementTarget && hasCoordinateTarget) {
-    return `Browser ${action} ${label} must use either an element ref/selector or a coordinate position, not both.`;
-  }
-  if (hasAbsolutePosition && hasNormalizedPosition) {
-    return `Browser ${action} ${label} must use either position or normalized_position, not both.`;
-  }
-  if (!hasElementTarget && !hasCoordinateTarget) {
-    const supported = allowPosition
-      ? 'ref, selector, position, or normalized_position'
-      : 'ref or selector';
-    return `Browser ${action} ${label} requires at least one of ${supported}.`;
-  }
-  return undefined;
-}
-
-function hasNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
-
 function summarizeScreenshotResult(result: unknown, imageAvailableToModel: boolean): unknown {
   const sanitizedMetadata = isRecord(result)
     ? (() => {
@@ -2410,23 +2322,20 @@ function screenshotFormat(format: unknown): 'jpeg' | 'png' | 'webp' {
   return format === 'webp' ? 'webp' : 'png';
 }
 
-function sanitizeBrowserResult(value: unknown, omittedKeys?: ReadonlySet<string>): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeBrowserResult(item, omittedKeys));
+/**
+ * query kind "rows" cells are page data keyed by field names the model chose
+ * (a grid may well have "sessionId" or "data" columns), so the key-based
+ * sanitizer must neither drop nor rewrite them. Core already bounds every cell.
+ */
+function sanitizeBrowserReadResult(
+  action: LocalBrowserToolAction,
+  result: unknown,
+  omittedKeys?: ReadonlySet<string>,
+): unknown {
+  if (action !== 'query' || !isRecord(result) || !Array.isArray(result.rows)) {
+    return sanitizeBrowserResult(result, omittedKeys);
   }
-  if (!isRecord(value)) return value;
-  const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (omittedKeys?.has(key)) continue;
-    if (key === 'data' && typeof item === 'string' && item.length > 1024) {
-      out[key] = `[base64 omitted: ${item.length} chars]`;
-      continue;
-    }
-    out[key] = sanitizeBrowserResult(item, omittedKeys);
-  }
-  return out;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  const { rows, ...rest } = result;
+  const sanitized = sanitizeBrowserResult(rest, omittedKeys);
+  return isRecord(sanitized) ? { ...sanitized, rows } : sanitized;
 }

@@ -9,6 +9,7 @@ import type { TranscriptStore } from '../../transcript/store.js';
 import type { TuiTodoItem } from '../../todo/model.js';
 import { hydrateTuiHistory } from './turn-history-projection.js';
 import { projectHookSystemMessage } from './turn-hook-message-projection.js';
+import { projectModelReplacementMessage } from './turn-model-replacement-projection.js';
 import { TuiLiveTurnProjection } from './turn-live-projection.js';
 import { TuiToolProjection } from './turn-tool-projection.js';
 import { TuiTodoProjection } from './turn-todo-projection.js';
@@ -173,6 +174,16 @@ export class TuiTurnProjection {
       return undefined;
     }
     if (event.type === 'generic') {
+      if (event.eventType === 'assistant.response_discarded') {
+        const ids = event.data.messageIds;
+        if (
+          Array.isArray(ids) &&
+          this.liveProjection.discardResponse(event.turnId ?? turnId, ids)
+        ) {
+          this.onChange();
+        }
+        return undefined;
+      }
       const hookMessage = projectHookSystemMessage({
         ...event,
         turnId: event.turnId ?? turnId,
@@ -180,6 +191,17 @@ export class TuiTurnProjection {
       });
       if (hookMessage) {
         this.transcript.upsert(hookMessage);
+        this.keepPendingSteersTrailing();
+        this.onChange();
+      }
+      const replacementMessage = projectModelReplacementMessage({
+        eventType: event.eventType,
+        data: event.data,
+        turnId: event.turnId ?? turnId,
+        timestamp: event.timestamp ?? this.now(),
+      });
+      if (replacementMessage) {
+        this.transcript.upsert(replacementMessage);
         this.keepPendingSteersTrailing();
         this.onChange();
       }

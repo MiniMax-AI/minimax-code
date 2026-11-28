@@ -236,6 +236,56 @@ describe('TuiActivityLine', () => {
     expect(component.render(80).join('\n')).toContain('8s');
   });
 
+  it('replaces only the Running label with a supplied label', () => {
+    const output = render({
+      phase: 'running',
+      runId: 'turn-1',
+      startedAtMs: 8_000,
+      label: 'Consulting advisor · gpt-x',
+    });
+
+    expect(output).toContain('Consulting advisor · gpt-x 2s');
+    expect(output).not.toContain('Running');
+    expect(
+      render({ phase: 'compacting', runId: 'turn-1', startedAtMs: 8_000, label: 'Other' }),
+    ).toContain('Compacting context');
+  });
+
+  it('reveals a note after the elapsed time once the clock reaches its threshold', () => {
+    let now = 1_000;
+    const component = new TuiActivityLine(
+      {
+        phase: 'running',
+        runId: 'turn-1',
+        startedAtMs: 1_000,
+        note: { text: 'max 5min', afterMs: 35_000 },
+      },
+      { animate: false, now: () => now },
+    );
+
+    now = 35_999;
+    expect(component.render(80).join('\n')).toContain('Running 34s');
+    expect(component.render(80).join('\n')).not.toContain('max 5min');
+    now = 36_000;
+    expect(component.render(80).join('\n')).toContain('Running 35s · max 5min');
+  });
+
+  it('drops run controls before a revealed note on a narrow line', () => {
+    const state: TuiActivityLineState = {
+      phase: 'running',
+      runId: 'turn-1',
+      startedAtMs: 8_000,
+      note: { text: 'max 5min', afterMs: 1_000 },
+      controls: ['guide', 'interrupt'],
+    };
+    const width = visibleWidth(render(state, 200)) - 1;
+
+    const output = render(state, width);
+    expect(output).toContain('Running 2s · max 5min');
+    expect(output).not.toContain('steer');
+    expect(visibleWidth(output)).toBeLessThanOrEqual(width);
+  });
+
   it('animates a Braille spinner without painting terminal backgrounds', () => {
     vi.useFakeTimers();
     try {

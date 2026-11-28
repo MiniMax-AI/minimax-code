@@ -170,6 +170,40 @@ export class TuiLiveTurnProjection {
     });
   }
 
+  discardResponse(turnId: string, messageIds: readonly unknown[]): boolean {
+    const ids = new Set(messageIds);
+    const projection = this.turns.get(turnId);
+    if (!projection || !ids.size) return false;
+    let changed = false;
+    for (const cell of this.transcript.snapshot()) {
+      if (cell.turnId !== turnId || !cell.sourceMessageId || !ids.has(cell.sourceMessageId))
+        continue;
+      if (
+        cell.kind !== 'thinking' &&
+        cell.kind !== 'assistant' &&
+        cell.kind !== 'assistant-preamble'
+      )
+        continue;
+      this.transcript.remove(cell.id);
+      changed = true;
+      projection.streamStartedAtMs.delete(cell.id);
+      if (cell.id === projection.activeThinkingId) {
+        projection.activeThinkingId = undefined;
+        projection.activeKind = undefined;
+      }
+      if (cell.id === projection.activeAssistantId) {
+        projection.activeAssistantId = undefined;
+        projection.activeAssistantMessageId = undefined;
+        projection.activeAssistantFinalized = false;
+        projection.activeKind = undefined;
+      }
+      projection.streamStartedAtMs.delete(cell.sourceMessageId);
+      projection.thinkingByMessageId.delete(cell.sourceMessageId);
+      projection.assistantByMessageId.delete(cell.sourceMessageId);
+    }
+    return changed;
+  }
+
   clearTurn(turnId: string): void {
     this.turns.delete(turnId);
   }
@@ -231,6 +265,7 @@ export class TuiLiveTurnProjection {
       this.transcript.upsert({
         id,
         kind: 'thinking',
+        ...(messageId ? { sourceMessageId: messageId } : {}),
         status: 'succeeded',
         content,
         turnId,
@@ -295,6 +330,7 @@ export class TuiLiveTurnProjection {
     this.transcript.upsert({
       id,
       kind: 'thinking',
+      ...(messageId ? { sourceMessageId: messageId } : {}),
       status: 'running',
       content: '',
       turnId,
@@ -395,6 +431,7 @@ export class TuiLiveTurnProjection {
       id,
       kind: 'assistant',
       status: 'running',
+      ...(messageId ? { sourceMessageId: messageId } : {}),
       content: '',
       turnId,
       createdAtMs: timestamp,

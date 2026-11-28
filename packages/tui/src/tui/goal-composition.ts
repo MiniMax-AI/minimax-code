@@ -4,6 +4,7 @@ import { TuiClipboardImageError } from '../host/clipboard-image.js';
 import type { TuiChatController } from './controller/chat-controller.js';
 import type { TuiChromeFlow } from './controller/product/chrome-flow.js';
 import { TuiGoalFlow } from './controller/product/goal-flow.js';
+import { parseTuiBashInput } from './commands/bash-input.js';
 import { resolveTuiAttachment } from './features/composer/attachments.js';
 import { TuiComposerDraft } from './features/composer/draft.js';
 import type { TuiGoalBanner } from './features/goal/banner.js';
@@ -77,6 +78,7 @@ export function createTuiGoalComposition(options: TuiGoalCompositionOptions): {
       : {}),
     readClipboardText: options.app.readClipboardText ?? readTuiClipboardText,
     insertTextAtCursor: (text) => options.editor.insertTextAtCursor(text),
+    acceptsPastedTextAttachment: () => !parseTuiBashInput(options.editor.getText()),
     ...(options.app.dataDir ? { draftRecoveryDataDir: options.app.dataDir } : {}),
     append: options.append,
     onAttachmentPlaceholdersChanged: (placeholders) =>

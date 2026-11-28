@@ -414,7 +414,8 @@ function workspaceError(message: string, fieldPath?: string): SandboxError {
   return new SandboxError('SANDBOX_WORKSPACE_INVALID', 'invocation', message, fieldPath);
 }
 
-function isNodeError(error: unknown, code: string): boolean {
+/** True when `error` is a Node system error carrying `code`. */
+export function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
 }
 
@@ -463,19 +464,36 @@ export class SandboxSessionTempManager {
     await this.#cleanupOrphans(root);
     const instance = join(root, `runtime-${this.#instanceId}`);
     await mkdir(instance, { mode: 0o700 });
-    await writeFile(
-      join(instance, TEMP_MARKER),
-      `${JSON.stringify({
-        schemaVersion: TEMP_MARKER_SCHEMA_VERSION,
-        pid: process.pid,
-        instanceId: this.#instanceId,
-        createdAt: this.#now(),
-      })}\n`,
-      { mode: 0o600, flag: 'wx' },
-    );
-    this.#totalRootRealPath = root;
-    this.#instanceRealPath = await realpath(instance);
-    assertDirectChild(this.#instanceRealPath, root, 'runtime temp instance');
+    try {
+      await writeFile(
+        join(instance, TEMP_MARKER),
+        `${JSON.stringify({
+          schemaVersion: TEMP_MARKER_SCHEMA_VERSION,
+          pid: process.pid,
+          instanceId: this.#instanceId,
+          createdAt: this.#now(),
+        })}\n`,
+        { mode: 0o600, flag: 'wx' },
+      );
+      const instanceRealPath = await realpath(instance);
+      assertDirectChild(instanceRealPath, root, 'runtime temp instance');
+      this.#totalRootRealPath = root;
+      this.#instanceRealPath = instanceRealPath;
+    } catch (error) {
+      // mkdir is not recursive, so this call is the one that created the
+      // directory. Leaving it behind would make every later initialize() fail
+      // with EEXIST, so one transient failure (ENOSPC, EIO) would disable the
+      // temp directory for the rest of the process even after the disk
+      // recovers; with no owner marker inside, the orphan sweep a later
+      // initialize() runs never removes it either. Removing it can only ever
+      // remove what this call created.
+      try {
+        await removeValidatedInstanceDirectory(instance, root);
+      } catch {
+        // A failed removal must not hide the original error.
+      }
+      throw error;
+    }
   }
 
   async sessionDir(sessionId: string): Promise<string> {

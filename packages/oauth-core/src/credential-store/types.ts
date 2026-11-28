@@ -33,6 +33,8 @@ export interface CredentialStore {
   put(key: CredentialKey, credential: StoredCredential): Promise<void>;
   delete(key: CredentialKey): Promise<void>;
   healthCheck(): Promise<void>;
+  /** Removes every stored record without reading them, so it works on unreadable or corrupt stores. */
+  clear(): Promise<void>;
 }
 
 export class CredentialRecordCorruptError extends Error {
@@ -47,10 +49,17 @@ export class CredentialRecordCorruptError extends Error {
 export class CredentialStorePermissionError extends Error {
   readonly code = 'AUTH_CREDENTIAL_STORE_PERMISSION';
 
-  constructor() {
-    super('The OAuth credential file permissions are not private.');
+  constructor(options?: ErrorOptions) {
+    super('The OAuth credential file permissions are not private.', options);
     this.name = 'CredentialStorePermissionError';
   }
+}
+
+/** Local store failures that signing in again cannot fix until the stored records are cleared. */
+export function requiresLocalCredentialReset(error: unknown): boolean {
+  return (
+    error instanceof CredentialStorePermissionError || error instanceof CredentialRecordCorruptError
+  );
 }
 
 function isOptionalString(value: unknown): boolean {

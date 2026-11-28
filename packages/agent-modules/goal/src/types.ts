@@ -93,8 +93,12 @@ export const THREAD_GOAL_STATUS_REASONS = [
   'complete(user_requested)',
   'paused(user_requested)',
   'paused(retracted)',
+  // A user side message the runtime received but could neither steer nor
+  // queue while the Goal was active; the running Turn may still finish.
+  'paused(message_undelivered)',
   'paused(infra_retryable)',
   'paused(accounting_unavailable)',
+  'paused(questionnaire_failed)',
   'paused(verifier_unavailable)',
   'paused(route_unavailable)',
   // Verifier pauses are split by owner layer, not by adapter error: see
@@ -151,6 +155,7 @@ export type ThreadGoalKickoffState = 'pending' | 'enqueued' | 'consumed';
  * later retry from materializing that snapshot again.
  */
 export interface ThreadGoalAttachment {
+  /** `folder` only for an asset library folder (`driveNodeId` set, empty `filePath`). */
   readonly type: 'file' | 'image';
   readonly filePath: string;
   readonly fileName: string;
@@ -158,6 +163,13 @@ export interface ThreadGoalAttachment {
   readonly dataUrl?: string;
   readonly assetId?: string;
   readonly error?: string;
+  /**
+   * Asset library node. Such a resource is a reference only: it has no local
+   * copy (`filePath` is empty) and the agent downloads it when needed.
+   */
+  readonly driveNodeId?: string;
+  readonly drivePath?: string;
+  readonly sizeBytes?: number;
 }
 
 /**
@@ -221,6 +233,33 @@ export interface ThreadGoalExecutionWait {
   readonly reason: ThreadGoalWaitReason;
   /** Unix ms the Goal entered this wait; stable while the reason is unchanged. */
   readonly sinceMs: number;
+  /**
+   * The background tasks this Goal waits for. Present only while `reason` is
+   * `required_background` and the owner has read the task list in this
+   * process; absent on a wait read back before that (for example right after
+   * a restart), which clients render without a count.
+   */
+  readonly waitedTasks?: readonly ThreadGoalWaitedTask[];
+  /**
+   * How many of this Goal's background tasks of the same family have ended
+   * (succeeded, failed, canceled or lost), cumulative across its Goal Turns.
+   * Present together with `waitedTasks`.
+   */
+  readonly finishedTaskCount?: number;
+  /**
+   * True on a `dependency_unavailable` wait caused by the background task list
+   * being unreadable; the Goal still does not continue.
+   */
+  readonly backgroundTasksUnreadable?: boolean;
+}
+
+/** One unfinished background task a waiting Goal depends on. */
+export interface ThreadGoalWaitedTask {
+  readonly taskId: string;
+  /** The task description, else the agent name, else the task kind. */
+  readonly name: string;
+  /** Unix ms the task started (or was created, before it started). */
+  readonly startedAt: number;
 }
 
 /**
@@ -273,12 +312,23 @@ export interface ThreadGoalState {
   readonly createdAt: number;
   /** Unix ms of the last status / objective mutation. */
   readonly updatedAt: number;
+  /** 完成提示被隐藏的 Unix ms；不改变 Goal 状态或 Turn admission epoch。 */
+  readonly dismissedAt?: number;
   /**
-   * Total input + output tokens spent by the model since this goal was
-   * created. Bumped at every turn-end by the runtime. 0 until the first
-   * turn finishes.
+   * Tokens charged to this Goal since it was created. A Goal with `tokenUsage`
+   * (full-usage accounting) counts input + cache write + cache read + output
+   * of every attributed request: Goal main execution, automatic compaction in
+   * a Goal Turn, sub-sessions the Goal Turn started and the subagent
+   * verifier. A legacy Goal keeps input + output of main execution plus its
+   * verifier's reported usage. Usage only grows.
    */
   readonly tokensUsed: number;
+  /**
+   * The four parts of `tokensUsed`, present exactly for a Goal metered under
+   * full-usage accounting (created after the upgrade); their sum equals
+   * `tokensUsed`. Absent for legacy local Goals and for cloud Goals.
+   */
+  readonly tokenUsage?: ThreadGoalTokenUsage;
   /** Number of terminal main-worker turns attributed to this Goal. */
   readonly turnsUsed: number;
   /**
@@ -294,6 +344,16 @@ export interface ThreadGoalState {
    * `tokensUsed >= tokenBudget`.
    */
   readonly tokenBudget: number | null;
+  /**
+   * This Goal's own work-request cap; `null`/absent means it has none and the
+   * host's global default (if any) applies. Same tri-state as `tokenBudget`.
+   */
+  readonly requestLimit?: number | null;
+  /**
+   * This Goal's own active-time cap in seconds (execution time only, as
+   * `timeUsedSeconds` counts it); `null`/absent means the global default applies.
+   */
+  readonly activeSecondsLimit?: number | null;
   /** Breaker fingerprint of the last normalized main-worker reply. */
   readonly replyFingerprint: string | null;
   /** Number of consecutive same-reply observations after the first reply. */
@@ -333,4 +393,74 @@ export interface ThreadGoalState {
    * legitimate kickoff look stale.
    */
   readonly executionWait: ThreadGoalExecutionWait | null;
+  /**
+   * Unix ms when the account quota that stopped this Goal is known to recover.
+   *
+   * Only meaningful while `status === 'usage_limited'` with
+   * `statusReason === 'usage_limited(provider_quota)'`; the read path forces it
+   * to `null` for every other state so a stale row can never schedule a resume
+   * for a Goal that has since been paused, cleared, replaced or completed.
+   *
+   * `null` means "no trustworthy recovery time" — the exhausted quota is then
+   * only recoverable by an explicit user action, never automatically. The value
+   * is a durable schedule: the process re-reads it after a restart and
+   * compensates for a recovery time that elapsed while it was offline.
+   */
+  readonly usageRecoveryAtMs?: number | null;
+  /**
+   * Request accounting of a local Goal (`accountingVersion` 2): the durable
+   * ledger of Goal main-execution LLM requests. Absent for states not read
+   * from the local store, for example cloud Goals, which keep counting Turns.
+   */
+  readonly accounting?: ThreadGoalRequestAccounting;
+}
+
+/** Four disjoint parts of a full-usage Goal's tokens, as pi-ai normalizes provider usage. */
+export interface ThreadGoalTokenUsage {
+  /** Input not read from or written to the cache. */
+  readonly input: number;
+  readonly cacheWrite: number;
+  readonly cacheRead: number;
+  /** Output, reasoning included. */
+  readonly output: number;
+  /**
+   * Some request came back through a route that counts its cache writes as
+   * input and never reports them, so `cacheWrite` is not a measurement and is
+   * not shown. The four parts still sum to `tokensUsed`.
+   */
+  readonly cacheWriteUnreported?: true;
+}
+
+/**
+ * How much of a local Goal's request budget is in use, from the durable
+ * request ledger. Every consumer reads this one projection; none of it is
+ * reconstructed from events.
+ */
+export interface ThreadGoalRequestAccounting {
+  readonly version: 2;
+  /** Requests counted for this Goal: work + wrap-up + unknown. Excludes legacy turns. */
+  readonly requestsUsed: number;
+  /** Settled work requests. */
+  readonly workRequests: number;
+  /** Settled wrap-up requests (tool-less, after the work budget closed). */
+  readonly graceRequests: number;
+  /** Pre-upgrade Turn occupancy, frozen at the Goal's `turnsUsed`. */
+  readonly legacyTurns: number;
+  /** Requests reserved or in flight, not yet settled. */
+  readonly reservedRequests: number;
+  /** Requests whose delivery could not be confirmed after an interruption. */
+  readonly unknownRequests: number;
+  /** True when at least one request's usage was not reported. */
+  readonly usageIncomplete: boolean;
+  /**
+   * Work budget occupancy compared with `defaultMainTurns`: legacy turns plus
+   * every work request that is not voided (reserved, in flight, settled or
+   * unknown). Host-internal; not part of any wire projection.
+   */
+  readonly workOccupied: number;
+  /**
+   * Goal Turns so far: legacy turns plus the Turns that sent a work request.
+   * Host-internal cadence counter (for example the periodic terminal audit).
+   */
+  readonly goalTurns: number;
 }

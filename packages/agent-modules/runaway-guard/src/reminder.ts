@@ -64,7 +64,7 @@ function pollingReminderContent(occurrences: number | undefined): string | undef
   if (!occurrences) return undefined;
   const count = occurrences === 3 ? 'Three' : String(occurrences);
   return `<system-reminder>
-${count} task_output reads for the same task have returned an unchanged status and output cursor. Avoid repeated polling; you will be notified automatically and this conversation will resume when the background task completes.
+${count} consecutive reads of the same background task have occurred. Stop polling and wait for the automatic completion notification.
 This reminder applies only to the current Turn. Do not save or generalize it into Memory, Skills, or other persistent instructions.
 </system-reminder>`;
 }

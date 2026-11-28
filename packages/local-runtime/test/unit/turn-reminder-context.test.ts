@@ -30,23 +30,23 @@ describe('per-turn agent-context trimming', () => {
   });
 
   it('keeps the session id in the slim block unless the host says it is in context', () => {
-    expect(buildSlimAgentContextBlock(env)).toContain('YOUR SESSION ID: sess-123');
+    expect(buildSlimAgentContextBlock(env)).toContain('sessionId: sess-123');
     expect(buildSlimAgentContextBlock({ ...env, sessionIdInContext: false })).toContain(
-      'YOUR SESSION ID: sess-123',
+      'sessionId: sess-123',
     );
     const trimmed = buildSlimAgentContextBlock({ ...env, sessionIdInContext: true });
     expect(trimmed).not.toContain('sess-123');
-    expect(trimmed).toContain('SESSION ROLE: root');
+    expect(trimmed).toContain('sessionRole: root');
     expect(trimmed).toContain(`date: ${env.date}`);
   });
 
   it('always keeps the session id in the first-turn full block', () => {
     expect(buildAgentContextBlock({ ...env, sessionIdInContext: true })).toContain(
-      'YOUR SESSION ID: sess-123',
+      'sessionId: sess-123',
     );
     expect(
       agentContextProvider({ env: { ...env, sessionIdInContext: true }, turnCount: 1 } as never),
-    ).toContain('YOUR SESSION ID: sess-123');
+    ).toContain('sessionId: sess-123');
     expect(
       agentContextProvider({ env: { ...env, sessionIdInContext: true }, turnCount: 2 } as never),
     ).not.toContain('sess-123');
@@ -54,6 +54,6 @@ describe('per-turn agent-context trimming', () => {
 
   it('leaves cloud scene blocks unchanged when the flag is absent', () => {
     const cloud = { ...env, scene: 'cloud' as const };
-    expect(buildSlimAgentContextBlock(cloud)).toContain('YOUR SESSION ID: sess-123');
+    expect(buildSlimAgentContextBlock(cloud)).toContain('sessionId: sess-123');
   });
 });

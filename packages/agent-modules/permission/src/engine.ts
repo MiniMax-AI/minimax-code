@@ -24,14 +24,11 @@ import type {
   ToolCheckResult,
 } from './types.js';
 import type { ToolPermissionContext } from './context.js';
-import {
-  getContentRulesForTool,
-  hasWholeToolRule,
-  isBypassMode,
-  isInteractiveTool,
-} from './context.js';
+import { hasWholeToolRule, isBypassMode, isInteractiveTool } from './context.js';
 import { decideUnknownToolPathCapabilities } from './tools/path-capability.js';
 import { reducePermissionDecision, type PermissionCheckOptions } from './permission-core.js';
+import { extractToolInputContent, matchesContentAskRule } from './content-ask-rule.js';
+import { decideMcpAllow, findMcpSubjectRule } from './mcp-rule-subject.js';
 
 export type { ToolCheckResult } from './types.js';
 
@@ -74,66 +71,9 @@ function matchesMcpServerRule(toolName: string, rule: PermissionRule): boolean {
   return !rule.ruleValue.ruleContent && matchesMcpServerRuntimeName(toolName, ruleToolName);
 }
 
-/**
- * Check if any content-specific ask rule matches the given input.
- *
- * Content-specific ask rules are bypass-immune (§4.2 point 3).
- */
-function matchesContentAskRule(
-  toolName: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- input shape varies per tool
-  input: Record<string, any>,
-  ctx: ToolPermissionContext,
-): PermissionRule | undefined {
-  const contentAskRules = getContentRulesForTool(ctx, toolName, 'ask');
-
-  for (const rule of contentAskRules) {
-    // Content rules have ruleContent defined (guaranteed by getContentRulesForTool)
-    // The engine performs a simple substring/equality check here.
-    // Tool-specific matching (wildcard, prefix) is handled by tool checkers.
-    const { ruleContent } = rule.ruleValue;
-    if (!ruleContent) continue;
-
-    // Extract the relevant input field for matching
-    const inputContent = extractToolInputContent(toolName, input);
-    if (inputContent && inputContent.includes(ruleContent)) {
-      return rule;
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Extract the primary content string from a tool input for rule matching.
- */
-function extractToolInputContent(
-  toolName: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool input shapes vary
-  input: Record<string, any>,
-): string | undefined {
-  switch (toolName) {
-    case 'bash':
-      return typeof input.command === 'string' ? input.command : undefined;
-    case 'edit':
-    case 'write':
-    case 'read':
-    case 'glob':
-      return typeof input.filePath === 'string'
-        ? input.filePath
-        : typeof input.path === 'string'
-          ? input.path
-          : typeof input.pattern === 'string'
-            ? input.pattern
-            : undefined;
-    default:
-      // For other tools, try common field names
-      return typeof input.command === 'string'
-        ? input.command
-        : typeof input.url === 'string'
-          ? input.url
-          : undefined;
-  }
+function checkerFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  return message || 'Unknown tool permission checker failure';
 }
 
 // ---------------------------------------------------------------------------
@@ -231,13 +171,18 @@ export class PermissionEngine {
         ? checker.checkPermissions(toolName, input, context)
         : decideUnknownToolPathCapabilities(toolName, input, context);
     } catch (err) {
-      checkerError = (err as Error).message;
+      checkerError = checkerFailureMessage(err);
       logger.error(
         ctx,
         `Tool permission checker threw an error: toolName=${toolName} error=${checkerError}`,
       );
     }
-    this.notifyCheckerDecision(options, Boolean(checker), checkerResult, Boolean(checkerError));
+    this.notifyCheckerDecision(
+      options,
+      Boolean(checker),
+      checkerResult,
+      checkerError !== undefined,
+    );
 
     return reducePermissionDecision({
       toolName,
@@ -245,7 +190,8 @@ export class PermissionEngine {
       context,
       checkerRegistered: Boolean(checker),
       ...(checkerResult ? { checkerResult } : {}),
-      ...(checkerError ? { checkerError } : {}),
+      ...(checkerError !== undefined ? { checkerError } : {}),
+      ...(options.mcpRuleSubject ? { mcpRuleSubject: options.mcpRuleSubject } : {}),
     });
   }
 
@@ -271,7 +217,9 @@ export class PermissionEngine {
     }
 
     // Also check MCP server-level deny rules
-    const mcpDenyRule = this.findMcpServerRule(toolName, context, 'deny');
+    const mcpDenyRule =
+      this.findMcpServerRule(toolName, context, 'deny') ??
+      findMcpSubjectRule(options.mcpRuleSubject, context, 'deny');
     if (mcpDenyRule) {
       logger.debug(ctx, `Step 1a: Tool denied by MCP server deny rule: toolName=${toolName}`);
       return { behavior: 'deny', reason: { type: 'rule', rule: mcpDenyRule } };
@@ -289,13 +237,18 @@ export class PermissionEngine {
         ? checker.checkPermissions(toolName, input, context)
         : decideUnknownToolPathCapabilities(toolName, input, context);
     } catch (err) {
-      checkerError = (err as Error).message;
+      checkerError = checkerFailureMessage(err);
       logger.error(
         ctx,
         `Tool permission checker threw an error: toolName=${toolName} error=${checkerError}`,
       );
     }
-    this.notifyCheckerDecision(options, Boolean(checker), toolCheckResult, Boolean(checkerError));
+    this.notifyCheckerDecision(
+      options,
+      Boolean(checker),
+      toolCheckResult,
+      checkerError !== undefined,
+    );
 
     if (toolCheckResult?.behavior === 'deny') {
       logger.debug(ctx, `Step 1d: Tool checker returned deny: toolName=${toolName}`);
@@ -326,7 +279,9 @@ export class PermissionEngine {
     }
 
     // Also check MCP server-level ask rules
-    const mcpAskRule = this.findMcpServerRule(toolName, context, 'ask');
+    const mcpAskRule =
+      this.findMcpServerRule(toolName, context, 'ask') ??
+      findMcpSubjectRule(options.mcpRuleSubject, context, 'ask');
     if (mcpAskRule) {
       logger.debug(ctx, `Step 1b: Tool requires ask by MCP server ask rule: toolName=${toolName}`);
       return {
@@ -337,7 +292,7 @@ export class PermissionEngine {
       };
     }
 
-    if (checkerError) {
+    if (checkerError !== undefined) {
       return {
         behavior: 'ask',
         reason: {
@@ -445,26 +400,19 @@ export class PermissionEngine {
       };
     }
 
-    // 2b. Whole tool in allow rules? → ALLOW
-    const allowRule = hasWholeToolRule(context, toolName, 'allow');
-    if (allowRule) {
-      logger.debug(ctx, `Step 2b: Tool allowed by whole-tool allow rule: toolName=${toolName}`);
-      return {
-        behavior: 'allow',
-        reason: { type: 'rule', rule: allowRule },
-        rewrittenInput: toolCheckResult?.rewrittenInput,
-      };
-    }
-
-    // Also check MCP server-level allow rules
-    const mcpAllowRule = this.findMcpServerRule(toolName, context, 'allow');
-    if (mcpAllowRule) {
-      logger.debug(ctx, `Step 2b: Tool allowed by MCP server allow rule: toolName=${toolName}`);
-      return {
-        behavior: 'allow',
-        reason: { type: 'rule', rule: mcpAllowRule },
-        rewrittenInput: toolCheckResult?.rewrittenInput,
-      };
+    // 2b. Whole tool or MCP server / identity allow rule? → ALLOW (a preview may degrade to ASK)
+    const allowDecision = decideMcpAllow(
+      options.mcpRuleSubject,
+      context,
+      (scope) =>
+        hasWholeToolRule(scope, toolName, 'allow') ??
+        this.findMcpServerRule(toolName, scope, 'allow'),
+    );
+    if (allowDecision) {
+      logger.debug(ctx, `Step 2b: allow rule decided: toolName=${toolName}`);
+      return allowDecision.behavior === 'allow'
+        ? { ...allowDecision, rewrittenInput: toolCheckResult?.rewrittenInput }
+        : { ...allowDecision, ruleContents: this.resolveRuleContents(toolName, input) };
     }
 
     // If the tool checker returned allow, use it

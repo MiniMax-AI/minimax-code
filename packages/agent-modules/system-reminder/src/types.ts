@@ -36,8 +36,8 @@ export enum SessionType {
  * distinction. Distinct from the protocol-level speaker role (`user`/`assistant`).
  */
 export enum Role {
-  User = "user",
-  Agent = "agent",
+  User = 'user',
+  Agent = 'agent',
 }
 
 /** Worker vs orchestrator agent classification. */
@@ -49,9 +49,9 @@ export enum AgentRole {
 /** Underlying agent framework. */
 export enum AgentFrameworkType {
   /** @deprecated Legacy opencode sessions are only resumable through the legacy boundary. */
-  OpenCode = "opencode",
-  PiAgent = "pi-agent",
-  Codex = "codex",
+  OpenCode = 'opencode',
+  PiAgent = 'pi-agent',
+  Codex = 'codex',
 }
 
 /**
@@ -70,6 +70,12 @@ export interface SessionInfo {
   workspaceDir?: string;
   /** Absolute path to the shared scratchpad file for this session tree. */
   scratchpadPath?: string;
+  /**
+   * Provider names this session's reminders are limited to, on top of the per-turn
+   * `systemReminders` gate. The host sets it for an Agent that owns its reminder set;
+   * absent runs every registered provider.
+   */
+  reminderAllowlist?: ReadonlySet<string>;
   createdAt: number;
   updatedAt: number;
 }
@@ -136,7 +142,7 @@ export interface AgentEnv {
   sessionId: string;
   /**
    * Host-verified fact that the model-visible context already carries
-   * `YOUR SESSION ID` (e.g. an earlier user message since the latest
+   * `sessionId` (e.g. an earlier user message since the latest
    * compaction). When true, the slim per-turn block omits the line to save
    * tokens. Absent/false keeps the line (cloud and legacy callers).
    */
@@ -146,22 +152,22 @@ export interface AgentEnv {
   /** Parent session ID — set when this is a child session. */
   parentSessionId?: string | undefined;
   /** Host-trusted result delivery mode for local task children. */
-  taskResultDelivery?: "runtime-managed" | undefined;
+  taskResultDelivery?: 'runtime-managed' | undefined;
   /** Root session ID for this agent — used by Branch sessions to report back. */
   rootSessionId?: string | undefined;
   platform: string;
   /** User/system locale resolved by the host data collector (e.g. "zh-CN"). */
   systemLocale?: string | undefined;
   /** Trusted MiniMax deployment/account region used for regional product docs. */
-  region?: "cn" | "en" | undefined;
+  region?: 'cn' | 'en' | undefined;
   /**
    * Runtime scene the env was produced in.
    * - 'local' (default) — local runtime path.
    * - 'cloud'           — cloud-runtime path; activates cloud-tailored variants
-   *   of <agent-context> (no `agentName:` line, no `IS_DEFAULT_WORKSPACE`, no
-   *   `YOUR AGENT CONFIG DIRECTORY`).
+   *   of <agent-context> (no `agentName:` line, no `isDefaultWorkspace`, no
+   *   `agentConfigDir`).
    */
-  scene?: "cloud" | "local" | undefined;
+  scene?: 'cloud' | 'local' | undefined;
   date: string;
   /** Path to the project AGENTS.md instructions file relative to workspaceDir, if found. */
   projectInstructions?: string | undefined;
@@ -178,7 +184,7 @@ export interface AgentEnv {
   /**
    * Absolute path to the shared root-session scratchpad file. Inherited by
    * child sessions from their root, so both Main and Branch sessions see
-   * the same path. Surfaces in `<agent-context>` as `YOUR SCRATCHPAD: ...`
+   * the same path. Surfaces in `<agent-context>` as `scratchpad: ...`
    * and is also exported as `MAVIS_SCRATCHPAD` in the agent's shells.
    */
   scratchpadPath?: string | undefined;
@@ -209,7 +215,7 @@ export interface AgentIdentity {
 export interface SkillEntry {
   name: string;
   description: string;
-  scope: "agent" | "global";
+  scope: 'agent' | 'global';
   location: string;
 }
 
@@ -296,7 +302,7 @@ export interface SystemReminderInput {
    * Cold-start reminders (persona_missing, bootstrap_check) only fire
    * for orchestrator agents OR manual workers — `auto` workers stay silent.
    */
-  creationSource?: "manual" | "auto" | "builtin" | undefined;
+  creationSource?: 'manual' | 'auto' | 'builtin' | undefined;
   /** Inbound context metadata extracted from <inbound-context> tag (Layer 1 — trusted metadata). */
   inboundMeta?: Record<string, unknown> | undefined;
   /** Branch sessions that finished without reporting to main. */
@@ -384,7 +390,7 @@ export interface SystemReminderInput {
   secretNames?: readonly string[] | undefined;
   /**
    * Per-turn allowlist + policy override for cloud-runtime path. Sourced from
-   * `AgentConfig.system_reminders`.
+   * `AgentConfig.system_reminders` in the runtime protocol.
    *
    * Semantics:
    * - `undefined` — legacy / daemon path, no allowlist (every registered

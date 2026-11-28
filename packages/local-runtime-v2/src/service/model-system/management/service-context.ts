@@ -1,3 +1,5 @@
+import { resolveProviderCredential } from '@mavis/config';
+
 import {
   CUSTOM_PROVIDER_ID_PREFIX,
   MINIMAX_API_PROVIDER_ID,
@@ -27,18 +29,29 @@ import {
 import {
   mergeModelsFromInputs,
   normalizeApiFormat,
-  normalizeApiKeyUpdate,
+  applyProviderCredentialUpdate,
+  normalizeProviderCredentialUpdate,
   normalizeHeaderNames,
   normalizeHeaders,
   removeHeaderCaseInsensitive,
 } from './service-input.js';
-import { customProviderKeyFromId, removeLegacyCustomProviderNpm } from './service-helpers.js';
+import {
+  customProviderKeyFromId,
+  customProviderViewOptions,
+  removeLegacyCustomProviderNpm,
+} from './service-helpers.js';
 import {
   isMiniMaxM3ModelId,
   normalizeModelThinkingEffortOptions,
   type MiniMaxM3ThinkingMode,
 } from '../resolution/model-ref.js';
 import { byokEffectiveOutputLimit } from '../resolution/model-resolver-byok.js';
+import {
+  mergeApiKeyDrafts,
+  readApiKeys,
+  replaceFirstApiKey,
+  writeApiKeys,
+} from '../byok-keys/key-list.js';
 
 export interface ResolvedUserProviderCandidate {
   providerKey: string;
@@ -85,15 +98,42 @@ function candidateOptions(
   input: UserModelProviderCandidateView,
   baseUrl: string,
 ): NonNullable<LocalCustomProviderConfig['options']> {
-  const apiKeyUpdate = normalizeApiKeyUpdate(input.apiKey);
+  const apiKeyUpdate = normalizeProviderCredentialUpdate(input);
   const options = { ...(current?.options ?? {}), baseURL: baseUrl, authMode: 'api-key' as const };
-  if (!current && apiKeyUpdate.kind !== 'set') {
+  // A new provider needs a credential it can actually use; an existing one
+  // keeps whatever it already has when the request carries none. `keep` on an
+  // edit is a no-op, not a missing-key error.
+  if (!current && apiKeyUpdate.kind !== 'set' && !input.apiKeys?.length) {
     throw new LocalModelProviderError(400, 'API key must not be empty', 'INVALID_API_KEY');
   }
-  if (apiKeyUpdate.kind === 'set') options.apiKey = apiKeyUpdate.apiKey;
-  if (apiKeyUpdate.kind === 'clear') delete options.apiKey;
+  applyCandidateApiKeys(options, current, input, apiKeyUpdate);
   applyCandidateHeaderUpdates(options, current, input);
   return options;
+}
+
+/**
+ * `apiKeys` drafts, when sent, are the whole list. Without them an `apiKey` replaces only the
+ * first key (an older client keeps the others) and a blank one clears every key.
+ */
+function applyCandidateApiKeys(
+  options: NonNullable<LocalCustomProviderConfig['options']>,
+  current: LocalCustomProviderConfig | undefined,
+  input: UserModelProviderCandidateView,
+  apiKeyUpdate: ReturnType<typeof normalizeProviderCredentialUpdate>,
+): void {
+  if (input.apiKeys !== undefined) {
+    writeApiKeys(options, mergeApiKeyDrafts(readApiKeys(current), input.apiKeys));
+    return;
+  }
+  if (apiKeyUpdate.kind === 'set' && current) {
+    writeApiKeys(options, replaceFirstApiKey(readApiKeys(current), apiKeyUpdate.apiKey));
+    return;
+  }
+  if (apiKeyUpdate.kind === 'clear') {
+    writeApiKeys(options, []);
+    return;
+  }
+  applyProviderCredentialUpdate(options, apiKeyUpdate);
 }
 
 function applyCandidateHeaderUpdates(
@@ -190,8 +230,19 @@ function connectionTestFailureMessage(result: ModelConnectionTestResult): string
 function requireCustomProviderCredentials(
   provider: LocalCustomProviderConfig | undefined,
   apiKeyOverride: string | undefined,
+  providerId: string,
 ): { apiKey: string; baseUrl: string } {
-  const apiKey = apiKeyOverride?.trim() || provider?.options?.apiKey?.trim();
+  // A request about to leave the machine must surface the resolver's own
+  // diagnosis. The probe is the view's tool: it reports a broken reference as
+  // "configured" and returns no secret, which would downgrade "environment
+  // variable GATEWAY_KEY is not set" to a generic missing key.
+  const apiKey =
+    apiKeyOverride?.trim() ||
+    resolveProviderCredential({
+      field: 'options.apiKey',
+      provider: providerId,
+      value: provider?.options?.apiKey,
+    });
   if (!apiKey) {
     throw new LocalModelProviderError(400, 'Provider API key is not configured', 'NO_API_KEY');
   }
@@ -294,7 +345,13 @@ export class ModelProviderServiceContext {
   }
 
   discoveryTargetForProvider(provider: LocalCustomProviderConfig): ModelDiscoveryTarget {
-    const apiKey = provider.options?.apiKey?.trim();
+    // Discovery talks to the upstream, so it needs the same credential the turn
+    // path uses. Reading the raw field sent a `${VAR}` literal as the key.
+    const apiKey = resolveProviderCredential({
+      field: 'options.apiKey',
+      provider: provider.name ?? 'custom_provider',
+      value: provider.options?.apiKey,
+    });
     if (!apiKey) {
       throw new LocalModelProviderError(400, 'Provider API key is not configured', 'NO_API_KEY');
     }
@@ -341,13 +398,20 @@ export class ModelProviderServiceContext {
     resolved: ResolvedConnectionTestTarget,
   ): Promise<ModelConnectionTestResult> {
     const dedupKey = `${resolved.cacheKey}@${resolved.fingerprint}`;
-    if (resolved.minimaxM3ThinkingModes?.length) {
-      return runConnectionTestCases(this.deps.tester, minimaxThinkingTestCases(resolved, dedupKey));
+    // One check is one conversation: every Think Effort case carries the same
+    // id, as a turn does when its effort changes. Added after the fingerprint,
+    // so the cached status still follows the configuration only.
+    const check: ResolvedConnectionTestTarget = {
+      ...resolved,
+      target: { ...resolved.target, sessionId: crypto.randomUUID() },
+    };
+    if (check.minimaxM3ThinkingModes?.length) {
+      return runConnectionTestCases(this.deps.tester, minimaxThinkingTestCases(check, dedupKey));
     }
-    if (resolved.effortOptions?.length) {
-      return runConnectionTestCases(this.deps.tester, effortTestCases(resolved, dedupKey));
+    if (check.effortOptions?.length) {
+      return runConnectionTestCases(this.deps.tester, effortTestCases(check, dedupKey));
     }
-    return this.deps.tester.test(dedupKey, resolved.target);
+    return this.deps.tester.test(dedupKey, check.target);
   }
 
   resolveTestTarget(
@@ -375,7 +439,11 @@ export class ModelProviderServiceContext {
       ? customProviderKeyFromId(providerId)
       : this.requireExistingProviderKey(providerId);
     const provider = options.customProviderOverride ?? config.custom_provider?.[providerKey];
-    const { apiKey, baseUrl } = requireCustomProviderCredentials(provider, options.apiKeyOverride);
+    const { apiKey, baseUrl } = requireCustomProviderCredentials(
+      provider,
+      options.apiKeyOverride,
+      `${CUSTOM_PROVIDER_ID_PREFIX}${providerKey}`,
+    );
     const chosenModelId = requireCustomProviderModelId(provider, modelId);
     const fullProviderId = `${CUSTOM_PROVIDER_ID_PREFIX}${providerKey}`;
     const api = normalizeApiFormat(provider?.api) ?? 'anthropic-messages';
@@ -404,7 +472,13 @@ export class ModelProviderServiceContext {
     modelId: string | undefined,
     options: ResolveMinimaxTestTargetOptions = {},
   ): ResolvedConnectionTestTarget {
-    const apiKey = options.apiKeyOverride?.trim() || config.minimax_api?.apiKey?.trim();
+    const apiKey =
+      options.apiKeyOverride?.trim() ||
+      resolveProviderCredential({
+        field: 'minimax_api.apiKey',
+        provider: 'minimax_api',
+        value: config.minimax_api?.apiKey,
+      });
     if (!apiKey) {
       throw new LocalModelProviderError(400, 'MiniMax API key is not configured', 'NO_API_KEY');
     }
@@ -469,6 +543,11 @@ export class ModelProviderServiceContext {
     if (!provider) {
       throw new LocalModelProviderError(404, 'Model provider not found', 'PROVIDER_NOT_FOUND');
     }
-    return buildCustomProviderView(config, this.deps.cache.load(), providerKey, provider);
+    return buildCustomProviderView(
+      config,
+      this.deps.cache.load(),
+      { providerKey, provider },
+      customProviderViewOptions(this.deps),
+    );
   }
 }

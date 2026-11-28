@@ -7,6 +7,34 @@ This changelog covers important changes that directly affect MCode TUI users. It
 
 Internal refactors, test-only changes, and changes limited to other product surfaces are excluded.
 
+## 0.8.0 · 2026-11-28
+
+### Added
+
+- Advisor (`/advisor` and `--advisor`): pair the active session model with a second advisor model that the agent can consult on complex architectural decisions or trade-offs. Set `beta.advisor: false` in `config.yaml` to disable it.
+- Remote MCP OAuth: authorize remote OAuth-protected MCP servers from `/mcp`, or with `mcode mcp login <name>` and `mcode mcp logout <name>`, covering user-configured servers, project `.mcp.json` servers (`--project`), and local Plugin servers (`--plugin`). Over SSH or with `--no-browser`, sign-in URLs can be completed by pasting back the redirect URL.
+- Custom providers support the native Google Gemini protocol (`/model` onboarding and `mcode provider add --api-format google-generative-ai`), inline audio and PDF inputs for models that declare them, video inputs over OpenAI Chat Completions and Responses (`input_video`), and multi-key rotation via `options.apiKeys` in `config.yaml`.
+- Pasting 5,000 or more characters saves the text as a `pasted-text.txt` attachment (`[Pasted text #1 +N lines]`) with single-keystroke `Backspace` removal and undo; shell commands starting with `!` stay inline.
+- PTC is enabled by default for new sessions and adds session-local `store` / `load` (opt in via `beta.ptcStore: true`) and reusable scripts via `save_run_code_script` / `import()` (opt in via `beta.ptcScripts: true`), with the 64 KiB `run_code` source-length cap removed.
+- Browser Use moves to a controlled-tab model with `mark_tab` (`page.keep()`) for one-turn carryover, isolated subagent profiles, and a dedicated QuickJS program worker (`browser.page()`, `browser.tabs()`, `browser.panel()`).
+- ACP adds region-aware terminal and `MCODE_PROVIDER_API_KEY` authentication methods, lazy `session/new` ID reservation until first use, per-member delegation messaging/transcript/stop methods, and token/turn metadata under `_meta["minimax-code/turn"]`.
+- `config.yaml` adds `smartCleanup.enabled` (default `true`) to control local data retention and backup expiry sweeps; invalid config sections now fall back to defaults with a diagnostic notice instead of blocking startup.
+
+### Improved
+
+- `mcode acp` binds stdio immediately and answers `initialize` while loading the Runtime in the background, and both `mcode acp` and `mcode exec` skip cold-start `smartCleanup` sweeps and parallelize auth lease projection with built-in tool setup. `@minimax-ai/code-acp` ships as a zero-dependency launcher.
+- Custom provider `thinking.effortOptions` keywords (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`) are ordered from weakest to strongest while keeping vendor-specific names and `default` in place; `←` / `→` in `/model` adjust thinking effort even while a search query is active.
+- Model call retries share a unified budget (up to 10 retries within 300 seconds) with offline network waiting, empty-reply retries, and streaming repetition-loop detection; `usage.totalTokens` in `mcode exec` includes cache read and write tokens.
+- `write` refuses to overwrite an existing file that has not been read in the current session or changed on disk since it was read; writes to MCode's own state directories and nested MCode launches inside `delete_guard` sandboxes are blocked before state is modified.
+- Vela `tui.statusLine: [build-mode]` outputs raw Runtime `session` and `turn` IDs while keeping `request` as a 6-character opaque ref; per-message attachment limit increases from 10 to 20 (100 MiB total); Windows and WSL default shortcuts avoid keys reserved by Windows Terminal.
+
+### Fixed
+
+- Fixed startup crashes and stuck recovery on older migrated sessions missing history checkpoints when recovering interrupted `run_code` turns, and repaired lagging Turn sequence allocators at startup.
+- Fixed deleting a session leaving its subagent and background-task child sessions behind, and fixed abnormally ended Goal turns leaving returned `session_send` steers stuck in the queue.
+- Fixed MCode launchers breaking after Homebrew or Linuxbrew Node.js upgrades by resolving the Node formula's stable `opt` path, and fixed `mcode update` under `vite-plus` shims.
+- Fixed `--timeout` execution budget reminders leaking into subsequent turns of the same session, `/btw` failing to open after an aborted turn, non-UTF-8 console output decoding on Windows, and custom provider compatibility with Mistral, Vertex AI Gemini, Gemini 3 / 4, and OpenCode Go.
+
 ## 0.7.2 · 2026-10-30
 
 ### Added

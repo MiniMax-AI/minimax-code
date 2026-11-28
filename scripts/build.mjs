@@ -83,6 +83,8 @@ const result = await build({
     // run_code resolves its Worker beside the bundled caller (ptcWorkerUrl).
     "quickjs-worker":
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/ptc/quickjs-worker.ts",
+    "browser-program-worker":
+      "packages/local-runtime-v2/src/service/browser-use/program/browser-program-worker.ts",
     'mcode-tools': 'packages/tui/src/cli/mcode-tools-entry.ts',
     'matrix-mcp-stdio': 'packages/agent-tools/src/desktop/matrix-mcp-stdio.ts',
   },

@@ -414,7 +414,7 @@ function toBuiltinCanonicalConfig(
     ...(capabilities.tools === undefined ? {} : { tools: capabilities.tools }),
     // `builtinTools` are tool IDs, not MCP server names. Absence here inherits
     // the ready server inventory, which is the bundled default.
-    ...(capabilities.skills === undefined ? {} : { skills: capabilities.skills }),
+    ...(definition.preloadSkills === undefined ? {} : { skills: [...definition.preloadSkills] }),
     features: { ...capabilities.features },
     systemPrompt: mergeBuiltinAgentSystemPrompt(content.persona, content.systemPrompt),
   };

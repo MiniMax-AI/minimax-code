@@ -186,6 +186,10 @@ function readAbsoluteTokens(message: AgentMessage): number | undefined {
     message.usage.totalTokens,
   ];
   if (values.some((value) => !Number.isSafeInteger(value) || value < 0)) return undefined;
+  const rawUsage = message.usage as unknown as Record<string, unknown>;
+  if (typeof rawUsage.contextTokens === 'number' && Number.isSafeInteger(rawUsage.contextTokens) && rawUsage.contextTokens > 0) {
+    return rawUsage.contextTokens;
+  }
   const componentTotal =
     message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
   const absoluteTokens = message.usage.totalTokens || componentTotal;

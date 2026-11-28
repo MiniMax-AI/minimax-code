@@ -119,7 +119,13 @@ function formatPluginRows(catalog: McodePluginCatalog): string {
     .map((plugin) => {
       const marker = plugin.enabled ? '[*]' : plugin.installed ? '[-]' : '[ ]';
       const state = plugin.installed ? (plugin.enabled ? 'enabled' : 'disabled') : 'available';
-      return `${marker} ${plugin.pluginId}\t${state}`;
+      const availability =
+        plugin.unavailableReason === 'FORBIDDEN_BY_CONFIG'
+          ? ' (blocked locally by config)'
+          : plugin.unavailableReason
+            ? ` (unavailable: ${plugin.unavailableReason.replace(/[\x00-\x1f\x7f]/g, ' ')})`
+            : '';
+      return `${marker} ${plugin.pluginId}\t${state}${availability}`;
     })
     .join('\n');
 }

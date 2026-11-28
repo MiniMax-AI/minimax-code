@@ -48,6 +48,20 @@ export interface HttpOAuthClientOptions {
   fetchImpl?: typeof fetch;
   sleep?: (durationMs: number) => Promise<void>;
   now?: () => number;
+  /**
+   * Per-request limit for interactive login requests (device authorization and
+   * token polling), covering connect, response headers and body. Unset keeps
+   * them unbounded. Refresh and revocation requests are never limited here.
+   */
+  loginRequestTimeoutMs?: number;
+}
+
+/** A login request got no complete response in time; `name` matches the DOM TimeoutError. */
+export class OAuthRequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`The OAuth request did not complete within ${timeoutMs} ms.`);
+    this.name = 'TimeoutError';
+  }
 }
 
 export class OAuthProtocolError extends Error {
@@ -91,6 +105,7 @@ export class HttpOAuthClient implements OAuthClient {
       {
         headers: this.options.deviceAuthorizationHeaders,
         signal: options.signal,
+        timeoutMs: this.options.loginRequestTimeoutMs,
       },
     );
     const userCode = readString(body, 'user_code');
@@ -149,7 +164,7 @@ export class HttpOAuthClient implements OAuthClient {
           client_id: MCODE_OAUTH_CLIENT_ID,
           code_verifier: authorization.codeVerifier,
         },
-        { signal: options.signal },
+        { signal: options.signal, timeoutMs: this.options.loginRequestTimeoutMs },
       );
       const pollingStatus = readString(response.body, 'status');
       if (response.ok && pollingStatus === 'pending') {
@@ -230,11 +245,21 @@ export class HttpOAuthClient implements OAuthClient {
     return response.body;
   }
 
-  private async postFormAllowOAuthError(
+  private postFormAllowOAuthError(
     endpoint: string,
     values: Record<string, string>,
     options: OAuthHttpRequestOptions = {},
-  ): Promise<{ ok: boolean; status: number; body: Record<string, unknown>; error?: string }> {
+  ): Promise<OAuthFormResponse> {
+    return withRequestTimeout(options.timeoutMs, options.signal, (signal) =>
+      this.sendForm(endpoint, values, { ...options, signal }),
+    );
+  }
+
+  private async sendForm(
+    endpoint: string,
+    values: Record<string, string>,
+    options: OAuthHttpRequestOptions,
+  ): Promise<OAuthFormResponse> {
     const response = await this.fetchImpl(endpoint, {
       method: 'POST',
       headers: {
@@ -262,6 +287,49 @@ export class HttpOAuthClient implements OAuthClient {
 interface OAuthHttpRequestOptions extends OAuthRequestOptions {
   headers?: Record<string, string>;
   allowEmptySuccess?: boolean;
+  timeoutMs?: number;
+}
+
+interface OAuthFormResponse {
+  ok: boolean;
+  status: number;
+  body: Record<string, unknown>;
+  error?: string;
+}
+
+/**
+ * Bounds one request, body read included, without changing cancellation: an
+ * external abort still rejects with its own reason. The race settles before the
+ * transport is aborted, so a transport that rejects with a generic AbortError
+ * cannot mask the timeout. AbortSignal.any is avoided because it needs Node 20.3.
+ */
+async function withRequestTimeout<T>(
+  timeoutMs: number | undefined,
+  signal: AbortSignal | undefined,
+  run: (signal: AbortSignal | undefined) => Promise<T>,
+): Promise<T> {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return run(signal);
+  }
+  signal?.throwIfAborted();
+  const controller = new AbortController();
+  let rejectInterrupted!: (reason: unknown) => void;
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    rejectInterrupted = reject;
+  });
+  const interrupt = (reason: unknown) => {
+    rejectInterrupted(reason);
+    controller.abort(reason);
+  };
+  const onAbort = () => interrupt(signal?.reason);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => interrupt(new OAuthRequestTimeoutError(timeoutMs)), timeoutMs);
+  try {
+    return await Promise.race([run(controller.signal), interrupted]);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 async function sleepWithSignal(

@@ -263,7 +263,11 @@ function synthesizeErrorResponse(frame: RuntimeTransportStreamErrorFrame): Respo
     return new Response(null, { status: 499 });
   }
   return new Response(
-    JSON.stringify({ error: frame.code ?? DEFAULT_ERROR_CODE, message: frame.message }),
+    JSON.stringify({
+      error: frame.code ?? DEFAULT_ERROR_CODE,
+      message: frame.message,
+      transportError: true,
+    }),
     { status: 502, headers: { 'Content-Type': 'application/json' } },
   );
 }
@@ -793,10 +797,18 @@ export function createRuntimeTransportFetch(
               });
             }
             const portLost = portLostRequestIds?.has(id) === true;
-            failBody(new Error(frame.message || 'runtime_transport_stream_error'), {
-              type: frame.code === ABORTED_ERROR_CODE ? 'abort' : 'error',
-              reasonCode: diagnosticReasonFromStreamError(frame, portLost),
-            });
+            // Keep the transport code on a body that fails after response-start, so the request
+            // layer can tell a dropped SSH connection from a server failure, as it does for the
+            // synthesized 502 before response-start.
+            failBody(
+              Object.assign(new Error(frame.message || 'runtime_transport_stream_error'), {
+                code: frame.code ?? DEFAULT_ERROR_CODE,
+              }),
+              {
+                type: frame.code === ABORTED_ERROR_CODE ? 'abort' : 'error',
+                reasonCode: diagnosticReasonFromStreamError(frame, portLost),
+              },
+            );
           }
         }
       }

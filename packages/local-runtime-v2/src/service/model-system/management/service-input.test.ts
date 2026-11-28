@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import { LocalModelProviderError, type LocalModelConfig } from '../contracts.js';
 import {
+  applyProviderCredentialUpdate,
   assertValidRawApiKey,
   mergeModelsFromInputs,
   modelsFromInputs,
   normalizeApiFormat,
-  normalizeApiKeyUpdate,
   normalizeHeaderNames,
   normalizeHeaders,
+  normalizeProviderCredentialUpdate,
   removeHeaderCaseInsensitive,
 } from './service-input.js';
 
@@ -25,7 +26,10 @@ describe('model provider input normalization', () => {
       max_image_bytes_inline: 1024,
     });
     const patch = [{ modelId: 'vision-model', capabilities: { support_image: false } }];
-    for (const updated of [modelsFromInputs(patch, created), mergeModelsFromInputs(created, patch)]) {
+    for (const updated of [
+      modelsFromInputs(patch, created),
+      mergeModelsFromInputs(created, patch),
+    ]) {
       expect(updated['vision-model']?.capabilities).toEqual({
         support_image: false,
         max_image_bytes_inline: 1024,
@@ -37,16 +41,21 @@ describe('model provider input normalization', () => {
     }
     expect(created['vision-model']?.capabilities?.support_image).toBe(true);
   });
+});
 
+describe('model provider value normalization', () => {
   it('normalizes API keys and formats', () => {
     expect(() => assertValidRawApiKey(undefined as unknown as string)).toThrow(
       LocalModelProviderError,
     );
     expect(() => assertValidRawApiKey('sk-a****z')).toThrow(LocalModelProviderError);
     expect(assertValidRawApiKey(' sk-raw ')).toBe('sk-raw');
-    expect(normalizeApiKeyUpdate(undefined)).toEqual({ kind: 'keep' });
-    expect(normalizeApiKeyUpdate('   ')).toEqual({ kind: 'clear' });
-    expect(normalizeApiKeyUpdate(' sk-next ')).toEqual({ kind: 'set', apiKey: 'sk-next' });
+    expect(normalizeProviderCredentialUpdate({})).toEqual({ kind: 'keep' });
+    expect(normalizeProviderCredentialUpdate({ apiKey: '   ' })).toEqual({ kind: 'clear' });
+    expect(normalizeProviderCredentialUpdate({ apiKey: ' sk-next ' })).toEqual({
+      kind: 'set',
+      apiKey: 'sk-next',
+    });
 
     expect(normalizeApiFormat(undefined)).toBeUndefined();
     expect(normalizeApiFormat('   ')).toBeUndefined();
@@ -242,5 +251,21 @@ describe('model provider input normalization', () => {
     expect(() => modelsFromInputs([{ modelId: 'model', limit: { output: 1.5 } }])).toThrowError(
       expect.objectContaining({ code: 'VALIDATION_ERROR' }),
     );
+  });
+});
+
+describe('provider credential application', () => {
+  it('writes the resolved key and clears it', () => {
+    const options: Record<string, unknown> = {};
+    applyProviderCredentialUpdate(options, { kind: 'set', apiKey: 'sk-new' });
+    expect(options).toEqual({ apiKey: 'sk-new' });
+    applyProviderCredentialUpdate(options, { kind: 'clear' });
+    expect(options).toEqual({});
+  });
+
+  it('leaves the stored key untouched on keep', () => {
+    const options: Record<string, unknown> = { apiKey: 'sk-stored' };
+    applyProviderCredentialUpdate(options, { kind: 'keep' });
+    expect(options).toEqual({ apiKey: 'sk-stored' });
   });
 });

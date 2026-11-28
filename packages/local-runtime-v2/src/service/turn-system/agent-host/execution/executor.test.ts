@@ -1078,7 +1078,7 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
       const input = executionInput();
       await executor.execute({ ...input, assembly: { ...input.assembly, tools: [bash] } });
     }
-    expect(descriptions[0]).toContain('falling back to permanent deletion');
+    expect(descriptions[0]).toContain('Never fall back to permanent deletion');
     expect(descriptions[1]).not.toMatch(/mavis-trash|deletion/i);
     expect(descriptions[0]).toContain(descriptions[1]);
     expect(descriptions[2]).toBe(descriptions[0]);
@@ -4782,87 +4782,81 @@ describe("LocalRuntimeTurnExecutor session id reminder context", () => {
   );
 });
 
-describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
+const EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE = 'execution_budget_reminder';
+
+describe('LocalRuntimeTurnExecutor execution budget reminders', () => {
   it.each([
     {
       durationMs: 600_000,
       // [elapsed ms since start, expected reminder text or undefined]
       steps: [
-        [0, "about 10 minutes of 10 minutes total. Model generation"],
+        [0, 'about 10 minutes of 10 minutes total. Model generation'],
         [1_000, undefined],
         [299_999, undefined],
-        [300_000, "about 5 minutes of 10 minutes total.</system-reminder>"],
+        [300_000, 'about 5 minutes of 10 minutes total.</system-reminder>'],
         [400_000, undefined],
-        [450_000, "about 2 minutes of 10 minutes total.</system-reminder>"],
+        [450_000, 'about 2 minutes of 10 minutes total.</system-reminder>'],
         [479_999, undefined],
-        [480_000, "about 120 seconds of 10 minutes total."],
-        [485_000, "about 110 seconds of 10 minutes total."],
-        [595_000, "under 10 seconds of 10 minutes total."],
+        [480_000, 'about 120 seconds of 10 minutes total.'],
+        [485_000, 'about 110 seconds of 10 minutes total.'],
+        [595_000, 'under 10 seconds of 10 minutes total.'],
       ],
     },
     {
       durationMs: 120_000,
       steps: [
-        [0, "about 120 seconds of 120 seconds total. Model generation"],
-        [1, "about 110 seconds of 120 seconds total.</system-reminder>"],
-        [90_000, "about 30 seconds of 120 seconds total."],
+        [0, 'about 120 seconds of 120 seconds total. Model generation'],
+        [1, 'about 110 seconds of 120 seconds total.</system-reminder>'],
+        [90_000, 'about 30 seconds of 120 seconds total.'],
       ],
     },
   ] as const)(
-    "reminds a budgeted run ($durationMs ms) only at thresholds without changing history or the system prompt",
+    'reminds a budgeted run ($durationMs ms) only at thresholds without changing the system prompt',
     async ({ durationMs, steps }) => {
       let nowMs = 1_000;
       const executorOptions = options(async (runInput) => {
-        const messages = [
-          { role: "user" as const, content: "hello", timestamp: 1 },
-        ];
         // The budget reminder is registered immediately before the background
-        // cadence reminder, so it is the second-to-last host hook.
+        // cadence reminder, and the Tool Search context's initial hook is last,
+        // so it is the third-to-last host hook.
         const hook = runInput.hooks?.beforeLlmCallHook?.at(-2);
-        const hookInput = {
+        // PiTurnRunner commits every appended marker before the next request.
+        let messages: PiBeforeLlmCallHookInput['messages'] = [
+          { role: 'user', content: 'hello', timestamp: 1 },
+        ];
+        const hookInput = (phase: 'initial' | 'iteration') => ({
           sessionId: runInput.sessionId,
           turnId: runInput.turnId,
-          phase: "initial" as const,
+          phase,
           messages,
           canonicalMessages: messages,
           model: runInput.llm.model,
-          thinkingLevel: "off" as const,
-        };
+          thinkingLevel: 'off' as const,
+        });
         for (const [elapsedMs, expected] of steps) {
           nowMs = 1_000 + elapsedMs;
-          const decision = await hook?.({
-            ...hookInput,
-            phase: elapsedMs === 0 ? "initial" : "iteration",
-          });
+          const decision = await hook?.(hookInput(elapsedMs === 0 ? 'initial' : 'iteration'));
           if (expected === undefined) {
             expect(decision).toBeUndefined();
             continue;
           }
           expect(decision).toMatchObject({
-            type: "replaceRequestMessages",
-            reason: "execution-budget-context",
-            messages: [
-              messages[0],
-              {
-                role: "user",
-                content: expect.stringContaining(
-                  `<system-reminder>Execution time remaining: ${expected}`,
-                ),
-              },
-            ],
+            type: 'appendMessage',
+            reason: EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+            message: {
+              role: 'custom',
+              customType: EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+              display: false,
+              content: expect.stringContaining(
+                `<system-reminder>Execution time remaining for this turn: ${expected}`,
+              ),
+            },
           });
+          if (decision?.type === 'appendMessage') messages = [...messages, decision.message];
         }
         nowMs = 1_000 + durationMs;
-        expect(
-          await hook?.({ ...hookInput, phase: "iteration" }),
-        ).toBeUndefined();
-        expect(messages).toEqual([
-          { role: "user", content: "hello", timestamp: 1 },
-        ]);
-        expect(runInput.systemPrompt).toBe("extension system\n\nbase system");
-        await runInput.eventWriter.pushRuntime(
-          terminalEvent(RuntimeEventStatus.COMPLETED),
-        );
+        expect(await hook?.(hookInput('iteration'))).toBeUndefined();
+        expect(runInput.systemPrompt).toBe('extension system\n\nbase system');
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
       });
       const input = executionInput();
 
@@ -4872,121 +4866,56 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
         canAppendExecutionBudgetReminder: () => true,
       }).execute({
         ...input,
-        request: {
-          ...input.request,
-          executionDeadlineAtMs: 1_000 + durationMs,
-        },
+        request: { ...input.request, executionDeadlineAtMs: 1_000 + durationMs },
       });
-
-      expect(input.onHistoryChanged).not.toHaveBeenCalled();
     },
   );
 
-  it("retries a threshold reminder that admission rejected", async () => {
-    let nowMs = 1_000;
-    let admit = false;
-    const hook = createExecutionBudgetReminder(
-      1_000 + 1_800_000,
-      () => nowMs,
-      () => admit,
-    )!;
-    const messages = [{ role: "user" as const, content: "hello", timestamp: 1 }];
-    const hookInput = {
-      sessionId: "session-1",
-      turnId: "turn-1",
-      phase: "initial" as const,
-      messages,
-      canonicalMessages: messages,
-      model: {} as never,
-      thinkingLevel: "off" as const,
-    };
-    expect(await hook(hookInput)).toBeUndefined();
-    admit = true;
-    nowMs = 2_000;
-    expect(await hook(hookInput)).toMatchObject({
-      messages: [
-        messages[0],
-        {
-          content:
-            "<system-reminder>Execution time remaining: about 29 minutes of 30 minutes total. Model generation, tools, and waiting all count against it.</system-reminder>",
-        },
-      ],
-    });
-    nowMs = 1_000 + 1_800_000 - 899_000;
-    expect(await hook(hookInput)).toMatchObject({
-      messages: [
-        messages[0],
-        {
-          content:
-            "<system-reminder>Execution time remaining: about 14 minutes of 30 minutes total.</system-reminder>",
-        },
-      ],
-    });
-    // Jumping straight past 25% and 10% emits once for the deepest threshold.
-    nowMs = 1_000 + 1_800_000 - 179_000;
-    expect(await hook(hookInput)).toMatchObject({
-      messages: [
-        messages[0],
-        {
-          content:
-            "<system-reminder>Execution time remaining: about 2 minutes of 30 minutes total.</system-reminder>",
-        },
-      ],
-    });
-    nowMs += 1_000;
-    expect(await hook(hookInput)).toBeUndefined();
-  });
-
-  it("samples budget context while preserving existing request observers", async () => {
+  it('samples budget context while preserving existing request observers', async () => {
     let nowMs = 1_000;
     const existingObserver = vi.fn();
     const logger = { info: vi.fn() };
     const executorOptions = options(async (runInput) => {
-      const messages = [
-        { role: "user" as const, content: "hello", timestamp: 1 },
-      ];
+      const messages = [{ role: 'user' as const, content: 'hello', timestamp: 1 }];
       const input = {
         sessionId: runInput.sessionId,
         turnId: runInput.turnId,
-        phase: "initial" as const,
+        phase: 'initial' as const,
         messages,
         canonicalMessages: messages,
         model: runInput.llm.model,
-        thinkingLevel: "off" as const,
+        thinkingLevel: 'off' as const,
       };
       const initial = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input);
-      if (initial?.type !== "replaceRequestMessages")
-        throw new Error("Expected initial reminder");
+      if (initial?.type !== 'appendMessage') throw new Error('Expected initial reminder');
+      // PiTurnRunner commits the marker before the request and later samples.
+      const committed = [...messages, initial.message];
+      const next = { ...input, messages: committed, canonicalMessages: committed };
       for (const observer of runInput.hooks!.onLlmCallPreparedHook!) {
         await observer({
           ...input,
-          messages: initial.messages,
-          scope: "agent",
-          systemPrompt: "",
+          messages: committed,
+          scope: 'agent',
+          systemPrompt: '',
           tools: [],
         });
       }
       expect(existingObserver).toHaveBeenCalledOnce();
       expect(logger.info).toHaveBeenCalledWith(
         expect.objectContaining({ remaining_ms: 600_000 }),
-        "execution budget context sampled",
+        'execution budget context sampled',
       );
       // 99 seconds later no threshold is crossed, so no tokens are spent.
       nowMs = 100_000;
-      expect(
-        await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input),
-      ).toBeUndefined();
+      expect(await runInput.hooks!.beforeLlmCallHook!.at(-2)!(next)).toBeUndefined();
       expect(logger.info).toHaveBeenCalledOnce();
       nowMs = 301_000;
-      const next = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(input);
-      if (next?.type !== "replaceRequestMessages")
-        throw new Error("Expected time context");
-      expect(next.messages.at(-1)).toMatchObject({
-        content: expect.stringContaining("about 5 minutes of 10 minutes total."),
+      const threshold = await runInput.hooks!.beforeLlmCallHook!.at(-2)!(next);
+      if (threshold?.type !== 'appendMessage') throw new Error('Expected time context');
+      expect(threshold.message).toMatchObject({
+        content: expect.stringContaining('about 5 minutes of 10 minutes total.'),
       });
-      await runInput.eventWriter.pushRuntime(
-        terminalEvent(RuntimeEventStatus.COMPLETED),
-      );
+      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
     });
     const input = executionInput();
     await new LocalRuntimeTurnExecutor({
@@ -4998,38 +4927,32 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
       ...input,
       assembly: {
         ...input.assembly,
-        hooks: {
-          ...input.assembly.hooks,
-          onLlmCallPreparedHook: [existingObserver],
-        },
+        hooks: { ...input.assembly.hooks, onLlmCallPreparedHook: [existingObserver] },
       },
       request: { ...input.request, executionDeadlineAtMs: 601_000 },
     });
-    expect(input.onHistoryChanged).not.toHaveBeenCalled();
   });
+});
 
-  it("does not add budget context to unbudgeted or already aborted runs", async () => {
+describe('LocalRuntimeTurnExecutor execution budget reminder registration', () => {
+  it('does not add budget context to unbudgeted or already aborted runs', async () => {
     for (const aborted of [false, true]) {
       const controller = new AbortController();
       if (aborted) controller.abort();
       const executorOptions = options(async (runInput) => {
-        const messages = [
-          { role: "user" as const, content: "hello", timestamp: 1 },
-        ];
+        const messages = [{ role: 'user' as const, content: 'hello', timestamp: 1 }];
         const decision = await runInput.hooks?.beforeLlmCallHook?.at(-2)?.({
           sessionId: runInput.sessionId,
           turnId: runInput.turnId,
-          phase: "initial",
+          phase: 'initial',
           messages,
           canonicalMessages: messages,
           model: runInput.llm.model,
-          thinkingLevel: "off",
+          thinkingLevel: 'off',
           signal: controller.signal,
         });
         expect(decision).toBeUndefined();
-        await runInput.eventWriter.pushRuntime(
-          terminalEvent(RuntimeEventStatus.COMPLETED),
-        );
+        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
       });
       const input = executionInput();
       await new LocalRuntimeTurnExecutor({
@@ -5038,50 +4961,42 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
         canAppendExecutionBudgetReminder: () => true,
       }).execute({
         ...input,
-        request: {
-          ...input.request,
-          ...(aborted ? { executionDeadlineAtMs: 601_000 } : {}),
-        },
+        request: { ...input.request, ...(aborted ? { executionDeadlineAtMs: 601_000 } : {}) },
       });
     }
   });
 
-  it('registers the request-only budget reminder before the appending background reminder', async () => {
-    // runBeforeLLM now accumulates appendMessage instead of ending the
-    // pipeline, so this order is no longer what keeps the budget reminder
-    // observable. It is still locked because it fixes the request position of
-    // the request-only marker relative to the durable background marker.
+  it('registers the budget reminder before the background reminder', async () => {
+    // runBeforeLLM accumulates appendMessage decisions, so this order only
+    // fixes where the durable budget marker sits relative to the durable
+    // background marker, identically in the request and in history.
     const backgroundHook = vi.fn(() => undefined);
     const executorOptions = options(async (runInput) => {
-      const messages = [
-        { role: "user" as const, content: "hello", timestamp: 1 },
-      ];
+      const messages = [{ role: 'user' as const, content: 'hello', timestamp: 1 }];
       const hooks = runInput.hooks?.beforeLlmCallHook ?? [];
       const decisions = await Promise.all(
         hooks.map((hook) =>
           hook({
             sessionId: runInput.sessionId,
             turnId: runInput.turnId,
-            phase: "initial",
+            phase: 'initial',
             messages,
             canonicalMessages: messages,
             model: runInput.llm.model,
-            thinkingLevel: "off",
+            thinkingLevel: 'off',
           }),
         ),
       );
       const budgetIndex = decisions.findIndex(
         (decision) =>
-          decision?.type === "replaceRequestMessages" &&
-          decision.reason === "execution-budget-context",
+          decision?.type === 'appendMessage' &&
+          decision.reason === EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
       );
       const backgroundIndex = hooks.indexOf(backgroundHook);
       expect(budgetIndex).toBeGreaterThanOrEqual(0);
       expect(backgroundIndex).toBeGreaterThanOrEqual(0);
       expect(budgetIndex).toBeLessThan(backgroundIndex);
-      await runInput.eventWriter.pushRuntime(
-        terminalEvent(RuntimeEventStatus.COMPLETED),
-      );
+      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
     });
     const input = executionInput();
     await new LocalRuntimeTurnExecutor({
@@ -5098,106 +5013,103 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
   });
 });
 
-describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
+describe('LocalRuntimeTurnExecutor budget with durable reminders', () => {
   it.each([
-    { admission: "allow", mode: "append" },
-    { admission: "deny", mode: "append" },
-    { admission: "throw", mode: "append" },
-    { admission: "allow", mode: "defer" },
-    { admission: "allow", mode: "placed" },
-    { admission: "allow", mode: "delayed" },
-    { admission: "allow", mode: "observed" },
+    { admission: 'allow', mode: 'append' },
+    { admission: 'deny', mode: 'append' },
+    { admission: 'throw', mode: 'append' },
+    { admission: 'allow', mode: 'defer' },
+    { admission: 'allow', mode: 'placed' },
+    { admission: 'allow', mode: 'delayed' },
+    { admission: 'allow', mode: 'observed' },
   ] as const)(
-    "preserves durable reminders with request-only time context ($mode, $admission)",
+    'keeps background reminders alongside the durable budget reminder ($mode, $admission)',
     async ({ admission, mode }) => {
       let nowMs = 1_000;
       const marker = {
-        role: "custom" as const,
-        customType: "background_cadence",
-        content: "A background result is ready.",
+        role: 'custom' as const,
+        customType: 'background_cadence',
+        content: 'A background result is ready.',
         display: false as const,
         timestamp: 2,
       };
       const backgroundHook = vi.fn(() => ({
-        type: "appendMessage" as const,
-        reason: "background_cadence",
+        type: 'appendMessage' as const,
+        reason: 'background_cadence',
         message: marker,
-        ...(mode === "append" || mode === "delayed" || mode === "observed"
+        ...(mode === 'append' || mode === 'delayed' || mode === 'observed'
           ? {}
-          : { placement: "before-current-user" as const }),
+          : { placement: 'before-current-user' as const }),
       }));
       const replacement = (hookInput: PiBeforeLlmCallHookInput) => ({
-        type: "replaceMessages" as const,
+        type: 'replaceMessages' as const,
         messages: hookInput.canonicalMessages,
         metadata: {
-          replacementId: "budget-test",
-          strategyVersion: "budget-test",
-          summary: "",
+          replacementId: 'budget-test',
+          strategyVersion: 'budget-test',
+          summary: '',
           firstKeptIndex: 0,
           compactedMessages: [],
           keptMessages: hookInput.canonicalMessages,
         },
         afterCommit: async () => {
-          if (mode !== "delayed") return undefined;
+          if (mode !== 'delayed') return undefined;
           nowMs += 90_000;
-          return {
-            ...marker,
-            customType: "compaction",
-            content: "Compaction callback finished.",
-          };
+          return { ...marker, customType: 'compaction', content: 'Compaction callback finished.' };
         },
       });
-      // runBeforeLLM accumulates appends, so this later hook now runs in every
-      // mode (it used to be skipped once the background reminder appended).
-      // It must see the registered marker; it replaces durable history only
+      // runBeforeLLM accumulates appends, so this later hook runs in every
+      // mode and sees the registered markers. It replaces durable history only
       // when nothing is pending, because a durable replacement after a
       // registered append fails closed (production never orders them so).
       const laterSawMarker: boolean[] = [];
       const laterHook = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
-        const pending = hookInput.messages.some((message) => message === marker);
-        laterSawMarker.push(pending);
+        const sawBackground = hookInput.messages.some((message) => message === marker);
+        laterSawMarker.push(sawBackground);
+        const pending =
+          sawBackground ||
+          hookInput.messages.some(
+            (message) =>
+              message.role === 'custom' &&
+              message.customType === EXECUTION_BUDGET_REMINDER_CUSTOM_TYPE,
+          );
         return pending ? { type: 'continue' as const } : replacement(hookInput);
       });
       const canAppend = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
-        // The request-only reminder runs before the appending background
-        // reminder and before any post-commit callback, so it samples the
-        // pre-append request view.
-        expect(hookInput.messages.some((message) => message === marker)).toBe(
-          false,
-        );
-        expect(JSON.stringify(hookInput.messages)).not.toContain(
-          "Compaction callback finished.",
-        );
-        if (admission === "throw") throw new Error("admission unavailable");
-        return admission === "allow";
+        // The budget reminder runs before the background reminder and before
+        // any post-commit callback, so it samples the pre-append request view.
+        expect(hookInput.messages.some((message) => message === marker)).toBe(false);
+        expect(JSON.stringify(hookInput.messages)).not.toContain('Compaction callback finished.');
+        if (admission === 'throw') throw new Error('admission unavailable');
+        return admission === 'allow';
       });
       const providerContexts: string[] = [];
       const preparedContexts: string[] = [];
       const executorOptions = options((runInput) =>
-        new PiTurnRunner().runTurn({
-          ...runInput,
-          toolConfig: { tools: runInput.tools, context: runInput.toolContext! },
-          llm: {
-            ...runInput.llm,
-            streamFn: (model, context) => {
-              providerContexts.push(JSON.stringify(context.messages));
-              expect(nowMs).toBe(
-                mode === "delayed" || mode === "observed" ? 91_000 : 1_000,
-              );
-              const final = {
-                ...afterToolContext().assistantMessage,
-                role: "assistant" as const,
-                api: model.api,
-                content: [{ type: "text" as const, text: "done" }],
-                stopReason: "stop" as const,
-              };
-              const stream = createAssistantMessageEventStream();
-              stream.push({ type: "done", reason: "stop", message: final });
-              stream.end(final);
-              return stream;
+        new PiTurnRunner()
+          .runTurn({
+            ...runInput,
+            toolConfig: { tools: runInput.tools, context: runInput.toolContext! },
+            llm: {
+              ...runInput.llm,
+              streamFn: (model, context) => {
+                providerContexts.push(JSON.stringify(context.messages));
+                expect(nowMs).toBe(mode === 'delayed' || mode === 'observed' ? 91_000 : 1_000);
+                const final = {
+                  ...afterToolContext().assistantMessage,
+                  role: 'assistant' as const,
+                  api: model.api,
+                  content: [{ type: 'text' as const, text: 'done' }],
+                  stopReason: 'stop' as const,
+                };
+                const stream = createAssistantMessageEventStream();
+                stream.push({ type: 'done', reason: 'stop', message: final });
+                stream.end(final);
+                return stream;
+              },
             },
-          },
-        }),
+          })
+          .then(() => undefined),
       );
       const input = executionInput();
       await expect(
@@ -5206,13 +5118,10 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
           nowMs: () => nowMs,
           canAppendExecutionBudgetReminder: canAppend,
           backgroundCadenceReminder: {
-            prepare: async () => ({
-              beforeUserMessages: [],
-              hook: backgroundHook,
-            }),
+            prepare: async () => ({ beforeUserMessages: [], hook: backgroundHook }),
           },
           resolveBeforeLlmCallHooks: async () =>
-            mode === "placed" || mode === "delayed" ? [replacement] : [],
+            mode === 'placed' || mode === 'delayed' ? [replacement] : [],
           afterCompactionBeforeLlmCallHooks: [laterHook],
         }).execute({
           ...input,
@@ -5223,43 +5132,163 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
               onLlmCallPreparedHook: [
                 async (prepared) => {
                   preparedContexts.push(JSON.stringify(prepared.messages));
-                  if (mode === "observed") nowMs += 90_000;
+                  if (mode === 'observed') nowMs += 90_000;
                 },
               ],
             },
           },
           request: { ...input.request, executionDeadlineAtMs: 121_000 },
         }),
-      ).resolves.toEqual({ status: "completed" });
+      ).resolves.toEqual({ status: 'completed' });
       expect(providerContexts).toHaveLength(1);
       expect(providerContexts).toEqual(preparedContexts);
-      const requestContext = providerContexts[0] ?? "";
-      expect(requestContext.includes(marker.content)).toBe(mode !== "defer");
-      // A later durable replaceMessages hook rebuilds the request from canonical
-      // history, which drops an earlier request-only replacement ('defer' runs
-      // laterHook because the background marker cannot be placed).
-      const keepsRequestContext = admission === "allow" && mode !== "defer";
-      expect(
-        requestContext.match(/Execution time remaining/g) ?? [],
-      ).toHaveLength(keepsRequestContext ? 1 : 0);
-      if (keepsRequestContext) {
+      const requestContext = providerContexts[0] ?? '';
+      expect(requestContext.includes(marker.content)).toBe(mode !== 'defer');
+      // The budget marker is durable, so no later hook can drop it again.
+      const budgeted = admission === 'allow';
+      expect(requestContext.match(/Execution time remaining/g) ?? []).toHaveLength(
+        budgeted ? 1 : 0,
+      );
+      if (budgeted) {
         expect(requestContext).toContain(
-          "Execution time remaining: about 120 seconds of 120 seconds total.",
+          'Execution time remaining for this turn: about 120 seconds of 120 seconds total.',
         );
       }
       expect(canAppend).toHaveBeenCalledOnce();
       expect(backgroundHook).toHaveBeenCalledOnce();
       expect(laterHook).toHaveBeenCalledOnce();
-      expect(laterSawMarker).toEqual([mode !== "defer"]);
+      expect(laterSawMarker).toEqual([mode !== 'defer']);
       const historyChanges = vi.mocked(input.onHistoryChanged).mock.calls;
       expect(historyChanges.length).toBeGreaterThan(0);
       const history = historyChanges.flatMap(([change]) => change.messages);
-      expect(JSON.stringify(history).includes(marker.content)).toBe(
-        mode !== "defer",
+      expect(JSON.stringify(history).includes(marker.content)).toBe(mode !== 'defer');
+      expect(JSON.stringify(history).match(/Execution time remaining/g) ?? []).toHaveLength(
+        budgeted ? 1 : 0,
       );
-      expect(JSON.stringify(history)).not.toContain("Execution time remaining");
     },
   );
+});
+
+describe('LocalRuntimeTurnExecutor execution budget across turns', () => {
+  // One session, several turns: only some turns carry an execution deadline
+  // (for example a headless run with --timeout, later resumed interactively).
+  // A deadline belongs to its own turn, and the provider request must stay an
+  // append-only extension of the previous one so the prompt cache survives.
+  const LIFTED = /No execution time limit applies to this turn\./u;
+
+  async function runBudgetTurn(input: {
+    readonly turnId: string;
+    readonly history: readonly unknown[];
+    readonly nowMs: number;
+    readonly executionDeadlineAtMs?: number;
+  }): Promise<{ readonly requests: string[][]; readonly committed: unknown[] }> {
+    const requests: string[][] = [];
+    const executorOptions = options(async (runInput) => {
+      await new PiTurnRunner().runTurn({
+        ...runInput,
+        toolConfig: { tools: runInput.tools, context: runInput.toolContext! },
+        llm: {
+          ...runInput.llm,
+          streamFn: (model, context) => {
+            requests.push(context.messages.map((message) => JSON.stringify(message)));
+            const final = {
+              ...afterToolContext().assistantMessage,
+              role: 'assistant' as const,
+              api: model.api,
+              content: [{ type: 'text' as const, text: `done ${input.turnId}` }],
+              stopReason: 'stop' as const,
+            };
+            const stream = createAssistantMessageEventStream();
+            stream.push({ type: 'done', reason: 'stop', message: final });
+            stream.end(final);
+            return stream;
+          },
+        },
+      });
+    });
+    const base = executionInput();
+    const execution = executionInput({
+      history: { revision: input.turnId, messages: input.history as never },
+      assemblyContext: { ...base.assemblyContext, history: input.history as never },
+      request: {
+        ...base.request,
+        ...(input.executionDeadlineAtMs === undefined
+          ? {}
+          : { executionDeadlineAtMs: input.executionDeadlineAtMs }),
+      },
+    });
+    await expect(
+      new LocalRuntimeTurnExecutor({
+        ...executorOptions,
+        nowMs: () => input.nowMs,
+        canAppendExecutionBudgetReminder: () => true,
+      }).execute(execution),
+    ).resolves.toEqual({ status: 'completed' });
+    const committed = vi
+      .mocked(execution.onHistoryChanged)
+      .mock.calls.flatMap(([change]) => change.messages as unknown[]);
+    return { requests, committed };
+  }
+
+  function indexOfText(request: readonly string[], pattern: RegExp): number[] {
+    return request.flatMap((message, index) => (pattern.test(message) ? [index] : []));
+  }
+
+  it('tells a later unbudgeted turn that the earlier limit is over, appending only', async () => {
+    const history0 = [{ role: 'user', content: 'history', timestamp: 1 }];
+    const first = await runBudgetTurn({
+      turnId: 'turn-budgeted',
+      history: history0,
+      nowMs: 1_000,
+      executionDeadlineAtMs: 121_000,
+    });
+    const firstRequest = first.requests.at(-1)!;
+    expect(indexOfText(firstRequest, /Execution time remaining/u)).toHaveLength(1);
+
+    // The deadline has long passed; the next turn has no limit at all.
+    const history1 = [...history0, ...first.committed];
+    const second = await runBudgetTurn({ turnId: 'turn-open', history: history1, nowMs: 600_000 });
+    const secondRequest = second.requests[0]!;
+    // Prompt cache: the earlier request is kept byte for byte as a prefix.
+    expect(secondRequest.slice(0, firstRequest.length)).toEqual(firstRequest);
+    // The stale reminder is still there, so the model must be told after it
+    // that it no longer applies.
+    const [stale] = indexOfText(secondRequest, /Execution time remaining/u);
+    const lifted = indexOfText(secondRequest, LIFTED);
+    expect(lifted).toHaveLength(1);
+    expect(lifted[0]).toBeGreaterThan(stale!);
+
+    // Saying it once is enough: a third unbudgeted turn adds nothing new.
+    const history2 = [...history1, ...second.committed];
+    const third = await runBudgetTurn({ turnId: 'turn-open-2', history: history2, nowMs: 700_000 });
+    const thirdRequest = third.requests[0]!;
+    expect(thirdRequest.slice(0, secondRequest.length)).toEqual(secondRequest);
+    expect(indexOfText(thirdRequest, LIFTED)).toHaveLength(1);
+    expect(indexOfText(thirdRequest, /Execution time remaining/u)).toHaveLength(1);
+  });
+
+  it('announces a new turn budget as replacing the earlier one', async () => {
+    const history0 = [{ role: 'user', content: 'history', timestamp: 1 }];
+    const first = await runBudgetTurn({
+      turnId: 'turn-budgeted',
+      history: history0,
+      nowMs: 1_000,
+      executionDeadlineAtMs: 121_000,
+    });
+    const second = await runBudgetTurn({
+      turnId: 'turn-budgeted-again',
+      history: [...history0, ...first.committed],
+      nowMs: 600_000,
+      executionDeadlineAtMs: 1_200_000,
+    });
+    const secondRequest = second.requests[0]!;
+    const reminders = indexOfText(secondRequest, /Execution time remaining/u);
+    expect(reminders).toHaveLength(2);
+    expect(secondRequest[reminders[1]!]).toContain(
+      'This replaces any earlier execution time limit.',
+    );
+    expect(indexOfText(secondRequest, LIFTED)).toHaveLength(0);
+  });
 });
 
 describe("LocalRuntimeTurnExecutor continuation recovery with compaction reminders", () => {

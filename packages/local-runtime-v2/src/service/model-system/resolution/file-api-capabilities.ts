@@ -35,15 +35,16 @@ export function normalizeLocalFileApiCapabilities(
 /**
  * Client protection budgets, not claims about a Provider's actual transport limits.
  *
- * The request body default sits below the strictest known provider transport
- * (Bedrock, 20 MB). The client cannot tell which transport serves a compatible
- * gateway, so every unconfigured model gets it; the provider request budget is
- * raised only for the first-party hosts in `KNOWN_HOST_REQUEST_BODY_BYTES`.
+ * The request body default is generous (64 MiB) so the provider's own
+ * rejection decides what is too large; the local gate only stops requests no
+ * provider would take. A rejection, by the provider or by this gate, compacts
+ * the history once and repeats the request. A gateway with a lower limit
+ * (Bedrock accepts 20 MB) may declare `max_request_body_bytes` to stop earlier.
  */
 const DEFAULT_LOCAL_MULTIMODAL_LIMITS = {
   max_image_bytes_inline: 10_485_760,
   max_video_bytes_inline: 52_428_800,
-  max_request_body_bytes: 18_874_368,
+  max_request_body_bytes: 67_108_864,
   max_attachments_count: 4,
 } as const;
 

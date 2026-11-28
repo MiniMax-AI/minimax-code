@@ -1,11 +1,31 @@
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
-import { link, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { constants as fsConstants, createReadStream, type Stats } from 'node:fs';
+import { chmod, copyFile, link, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
-const RENAME_RETRY_DELAYS_MS = [50, 100, 150] as const;
-const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+import { HardLinkUnsupportedError } from '@mavis/shared/hard-link-support';
+
+import { logger } from '../logging/logger.js';
+
+// Windows reports a handle held by another process (scanner, indexer, backup) as one of these
+// codes; the holder usually lets go within a second, so wait about 1.5s in total before failing.
+const FILE_LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800] as const;
+const TRANSIENT_FILE_LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+// `link` codes that mean the filesystem cannot create hard links: Windows reports FAT32 and exFAT
+// as EISDIR, macOS and FUSE mounts as ENOTSUP, EOPNOTSUPP or ENOSYS, and Linux vfat as EPERM; a
+// link inside one directory fails with EXDEV only where the mount refuses links. Windows also
+// reports a held file as EPERM, so that code counts only once the lock retries are exhausted.
+const HARD_LINK_UNSUPPORTED_CODES = new Set([
+  'EISDIR',
+  'ENOTSUP',
+  'EOPNOTSUPP',
+  'ENOSYS',
+  'EXDEV',
+  'EPERM',
+]);
+/** Read and write unit for streamed JSONL; a record longer than this spans several chunks. */
+const STREAM_CHUNK_BYTES = 256 * 1024;
 
 interface AppendAttempt {
   preAppendSize?: number;
@@ -32,21 +52,46 @@ export class JsonlAppendCommitUncertainError extends Error {
   }
 }
 
+/**
+ * Decoded complete lines of one file plus the identity and samples of the bytes they cover.
+ * A trailing line without a newline is decoded on every read and never cached.
+ */
 export interface JsonlReadCache<T> {
-  bytes: Buffer;
   records: readonly T[];
+  /** File bytes covered by `records`; always ends right after a newline. */
+  size: number;
+  identity?: JsonlCachedIdentity;
+}
+
+interface JsonlCachedIdentity {
+  readonly dev: number;
+  readonly ino: number;
+  readonly mtimeMs: number;
+  /** First and last bytes of the covered prefix, compared before it is reused. */
+  readonly head: Buffer;
+  readonly tail: Buffer;
+}
+
+export interface JsonlIncrementalRead<T> {
+  /** Immutable; the same array as the previous read when the file has not changed. */
+  readonly records: readonly T[];
+  /** Leading records reused from the previous cached read. */
+  readonly reusedCount: number;
+  /** Leading records now covered by the cache (excludes an unterminated last line). */
+  readonly cachedCount: number;
+}
+
+const JSONL_PREFIX_SAMPLE_BYTES = 4 * 1024;
+
+export function createJsonlReadCache<T>(): JsonlReadCache<T> {
+  return { records: [], size: 0 };
 }
 
 export async function readJsonl<T>(
   filePath: string,
   decode: (value: unknown) => T,
   onMalformedLine?: (line: JsonlMalformedLine) => void,
-  /** Strict private reads return immutable arrays when a cache is supplied. */
-  readCache?: JsonlReadCache<T>,
-  onReadBytes?: (bytes: Buffer) => void,
 ): Promise<T[]> {
-  // Tolerant readers must still report every malformed line on every read.
-  if (readCache && !onMalformedLine) return readCachedJsonl(filePath, decode, readCache, onReadBytes);
   const contents = await readFile(filePath, 'utf-8');
   const records: T[] = [];
   const lines = contents.split('\n');
@@ -64,54 +109,194 @@ export async function readJsonl<T>(
   return records;
 }
 
-async function readCachedJsonl<T>(
+/**
+ * Strict read that visits records in file order while holding one chunk and one line at a time.
+ * Lines follow readJsonl: a trailing newline ends the file and a blank line is malformed. Returns
+ * the number of records visited.
+ */
+export async function forEachJsonlRecord<T>(
+  filePath: string,
+  decode: (value: unknown) => T,
+  visit: (record: T, index: number) => void | Promise<void>,
+): Promise<number> {
+  let count = 0;
+  const visitLine = async (line: string): Promise<void> => {
+    const record = decodeCachedLine(line, decode, { path: filePath, lineNo: count + 1 });
+    count += 1;
+    await visit(record, count - 1);
+  };
+  let pending = '';
+  const stream = createReadStream(filePath, {
+    encoding: 'utf8',
+    highWaterMark: STREAM_CHUNK_BYTES,
+  });
+  for await (const chunk of stream) {
+    pending += String(chunk);
+    let start = 0;
+    let newline = pending.indexOf('\n');
+    while (newline >= 0) {
+      await visitLine(pending.slice(start, newline));
+      start = newline + 1;
+      newline = pending.indexOf('\n', start);
+    }
+    pending = pending.slice(start);
+  }
+  if (pending.length > 0) await visitLine(pending);
+  return count;
+}
+
+/**
+ * Strict read that decodes only bytes appended since the cached read. The cached prefix is
+ * reused when the file identity matches, the file did not shrink, an unchanged size keeps its
+ * mtime, and the first and last bytes of the prefix still match; otherwise the whole file is
+ * decoded again. The caller must serialize reads and writes of one file.
+ */
+export async function readJsonlIncrementally<T>(
   filePath: string,
   decode: (value: unknown) => T,
   cache: JsonlReadCache<T>,
-  onReadBytes?: (bytes: Buffer) => void,
-): Promise<T[]> {
-  // Always read fresh bytes: timestamps and file size cannot prove an unchanged
-  // prefix. Compare before decoding to avoid allocating a whole-history string.
-  const bytes = await readFile(filePath);
-  onReadBytes?.(bytes);
-  if (bytes.equals(cache.bytes)) return cache.records as T[];
-  const reuse = cache.bytes.at(-1) === 10 &&
-    bytes.length >= cache.bytes.length &&
-    bytes.subarray(0, cache.bytes.length).equals(cache.bytes);
-  const records: T[] = reuse ? [...cache.records] : [];
-  let offset = reuse ? cache.bytes.length : 0;
-  const limit = 4 * 1024 * 1024;
-  let retainedEnd = offset;
-  let retainedRecords = records.length;
+): Promise<JsonlIncrementalRead<T>> {
+  const handle = await open(filePath, 'r');
+  try {
+    const info = await handle.stat();
+    const reused = await canReuseCachedPrefix(handle, info, cache);
+    const start = reused ? cache.size : 0;
+    const bytes = await readFileRange(handle, start, Math.max(0, info.size - start));
+    return decodeIncrement({ filePath, decode, cache, info }, { reused, start, bytes });
+  } finally {
+    await handle.close();
+  }
+}
+
+async function canReuseCachedPrefix<T>(
+  handle: Awaited<ReturnType<typeof open>>,
+  info: Stats,
+  cache: JsonlReadCache<T>,
+): Promise<boolean> {
+  const identity = cache.identity;
+  if (!identity || cache.size === 0) return false;
+  if (info.dev !== identity.dev || info.ino !== identity.ino || info.size < cache.size)
+    return false;
+  if (info.size === cache.size && info.mtimeMs !== identity.mtimeMs) return false;
+  const head = await readFileRange(handle, 0, identity.head.length);
+  if (!head.equals(identity.head)) return false;
+  const tail = await readFileRange(handle, cache.size - identity.tail.length, identity.tail.length);
+  return tail.equals(identity.tail);
+}
+
+interface IncrementTarget<T> {
+  readonly filePath: string;
+  readonly decode: (value: unknown) => T;
+  readonly cache: JsonlReadCache<T>;
+  readonly info: Stats;
+}
+
+function decodeIncrement<T>(
+  target: IncrementTarget<T>,
+  read: { readonly reused: boolean; readonly start: number; readonly bytes: Buffer },
+): JsonlIncrementalRead<T> {
+  const { cache } = target;
+  const previous = read.reused ? cache.records : [];
+  const completeEnd = read.bytes.lastIndexOf(10) + 1;
+  const decoded = decodeLines(target, read.bytes.subarray(0, completeEnd), previous.length);
+  const cached = decoded.length === 0 ? previous : Object.freeze([...previous, ...decoded]);
+  if (completeEnd > 0 || !read.reused) {
+    rememberCachedPrefix(target, {
+      records: cached,
+      previousIdentity: read.reused ? cache.identity : undefined,
+      covered: read.bytes.subarray(0, completeEnd),
+      size: read.start + completeEnd,
+    });
+  }
+  if (completeEnd === read.bytes.length) {
+    return { records: cached, reusedCount: previous.length, cachedCount: cached.length };
+  }
+  const trailing = decodeCachedLine(read.bytes.toString('utf8', completeEnd), target.decode, {
+    path: target.filePath,
+    lineNo: cached.length + 1,
+  });
+  return {
+    records: Object.freeze([...cached, trailing]),
+    reusedCount: previous.length,
+    cachedCount: cached.length,
+  };
+}
+
+function decodeLines<T>(target: IncrementTarget<T>, bytes: Buffer, lineOffset: number): T[] {
+  const records: T[] = [];
+  let offset = 0;
   while (offset < bytes.length) {
-    const newline = bytes.indexOf(10, offset);
-    const end = newline === -1 ? bytes.length : newline;
-    try {
-      // Decode each line separately so parsed values cannot retain a string
-      // slice of an older whole file.
-      const line = bytes.toString('utf8', offset, end);
-      if (line.trim().length === 0) throw new Error('blank line');
-      records.push(decode(parseJsonLine(line)));
-    } catch (error) {
-      throw malformedLineError({
-        path: filePath, lineNo: records.length + 1, reason: errorReason(error),
-      });
-    }
-    offset = newline === -1 ? bytes.length : newline + 1;
-    if (newline !== -1 && offset <= limit) {
-      retainedEnd = offset;
-      retainedRecords = records.length;
-    }
+    const end = bytes.indexOf(10, offset);
+    // Decode each line separately so values cannot retain whole-file strings. On real histories
+    // the decoded records then take about 1.1x the file bytes; decoding the whole file as one
+    // string and splitting it measured about 3x.
+    records.push(
+      decodeCachedLine(bytes.toString('utf8', offset, end), target.decode, {
+        path: target.filePath,
+        lineNo: lineOffset + records.length + 1,
+      }),
+    );
+    offset = end + 1;
   }
-  if (bytes.length <= limit) {
-    cache.bytes = bytes;
-    cache.records = Object.freeze(records);
-  } else {
-    // Copy the bounded prefix so it cannot retain the entire file's buffer.
-    cache.bytes = Buffer.from(bytes.subarray(0, retainedEnd));
-    cache.records = Object.freeze(records.slice(0, retainedRecords));
+  return records;
+}
+
+function rememberCachedPrefix<T>(
+  target: IncrementTarget<T>,
+  prefix: {
+    readonly records: readonly T[];
+    readonly previousIdentity: JsonlCachedIdentity | undefined;
+    readonly covered: Buffer;
+    readonly size: number;
+  },
+): void {
+  const previousHead = prefix.previousIdentity?.head ?? Buffer.alloc(0);
+  const previousTail = prefix.previousIdentity?.tail ?? Buffer.alloc(0);
+  target.cache.records = prefix.records;
+  target.cache.size = prefix.size;
+  target.cache.identity = {
+    dev: target.info.dev,
+    ino: target.info.ino,
+    mtimeMs: target.info.mtimeMs,
+    // Copy the samples so the cache never retains the read buffer.
+    // Concatenate at most one sample of new bytes so a full read is never copied whole.
+    head: Buffer.concat([
+      previousHead,
+      prefix.covered.subarray(0, JSONL_PREFIX_SAMPLE_BYTES - previousHead.length),
+    ]),
+    tail: Buffer.concat([
+      previousTail,
+      prefix.covered.subarray(-JSONL_PREFIX_SAMPLE_BYTES),
+    ]).subarray(-JSONL_PREFIX_SAMPLE_BYTES),
+  };
+}
+
+async function readFileRange(
+  handle: Awaited<ReturnType<typeof open>>,
+  position: number,
+  length: number,
+): Promise<Buffer> {
+  const contents = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const { bytesRead } = await handle.read(contents, offset, length - offset, position + offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
   }
-  return Object.freeze(records) as T[];
+  return offset === length ? contents : contents.subarray(0, offset);
+}
+
+function decodeCachedLine<T>(
+  line: string,
+  decode: (value: unknown) => T,
+  location: { path: string; lineNo: number },
+): T {
+  try {
+    if (line.trim().length === 0) throw new Error('blank line');
+    return decode(parseJsonLine(line));
+  } catch (error) {
+    throw malformedLineError({ ...location, reason: errorReason(error) });
+  }
 }
 
 function parseJsonLine(line: string): unknown {
@@ -276,9 +461,118 @@ export async function publishJsonlIfAbsent(
   );
 }
 
+/**
+ * Publishes a byte copy of an existing file only when the target is absent. The copy shares
+ * storage where the filesystem supports copy-on-write; elsewhere Node copies the bytes.
+ */
+export async function publishFileCopyIfAbsent(
+  sourcePath: string,
+  filePath: string,
+  validateTemporary?: (temporaryPath: string) => void | Promise<void>,
+): Promise<FilePublicationOutcome> {
+  return publishStagedFileIfAbsent(
+    filePath,
+    async (stagingPath) => {
+      await copyFile(
+        sourcePath,
+        stagingPath,
+        fsConstants.COPYFILE_EXCL | fsConstants.COPYFILE_FICLONE,
+      );
+      // A copy inherits the source mode; publication keeps the private mode every writer uses.
+      await chmod(stagingPath, 0o600);
+      await syncFile(stagingPath);
+    },
+    validateTemporary,
+    'copied file',
+  );
+}
+
 async function publishFileIfAbsentWithLabel(
   filePath: string,
   payload: Buffer,
+  validateTemporary: ((temporaryPath: string) => void | Promise<void>) | undefined,
+  label: string,
+): Promise<FilePublicationOutcome> {
+  return publishStagedFileIfAbsent(
+    filePath,
+    async (stagingPath) => {
+      const handle = await open(stagingPath, 'wx', 0o600);
+      try {
+        await writeInOneCall(handle, payload, label);
+        await handle.sync();
+      } catch (error) {
+        await closeBestEffort(handle);
+        throw error;
+      }
+      await handle.close();
+    },
+    validateTemporary,
+    label,
+  );
+}
+
+/**
+ * Fails fast when the filesystem of a directory cannot create hard links, which the first
+ * publication of every file in this module needs. A probe that cannot create its own file, or
+ * whose link fails for a reason other than missing hard-link support, is inconclusive and returns,
+ * so the real write reports that failure instead.
+ */
+export async function assertHardLinkPublicationSupported(directoryPath: string): Promise<void> {
+  const probe = await probeHardLinkPublication(directoryPath);
+  if (probe.kind === 'unsupported') throw new HardLinkUnsupportedError(directoryPath, probe.error);
+}
+
+type HardLinkProbe =
+  | { readonly kind: 'supported' }
+  | { readonly kind: 'inconclusive' }
+  | { readonly kind: 'unsupported'; readonly error: unknown };
+
+/**
+ * Windows reports a filesystem without hard links and a file another process briefly holds with
+ * overlapping errno codes such as EPERM, so a failed publication link is blamed on the filesystem
+ * only when a fresh probe in the same directory fails as well.
+ */
+async function explainLinkFailure(directoryPath: string, linkError: unknown): Promise<unknown> {
+  const probe = await probeHardLinkPublication(directoryPath);
+  return probe.kind === 'unsupported'
+    ? new HardLinkUnsupportedError(directoryPath, linkError)
+    : linkError;
+}
+
+/** Creates a private file, links it, and removes both; the link waits out a transient lock. */
+async function probeHardLinkPublication(directoryPath: string): Promise<HardLinkProbe> {
+  const sourcePath = join(directoryPath, `.hard-link-probe.${process.pid}.${randomUUID()}`);
+  const linkPath = `${sourcePath}.link`;
+  try {
+    try {
+      await mkdir(directoryPath, { recursive: true });
+      const handle = await open(sourcePath, 'wx', 0o600);
+      await handle.close();
+    } catch {
+      return { kind: 'inconclusive' };
+    }
+    try {
+      await withFileLockRetries('link-probe', linkPath, () => link(sourcePath, linkPath));
+      return { kind: 'supported' };
+    } catch (error) {
+      // EIO, ENOENT, a full disk, or EBUSY/EACCES past the lock retries says nothing about links.
+      return linkErrorMeansNoHardLinks(error)
+        ? { kind: 'unsupported', error }
+        : { kind: 'inconclusive' };
+    }
+  } finally {
+    await removeBestEffort(linkPath);
+    await removeBestEffort(sourcePath);
+  }
+}
+
+/**
+ * The staging file is private, durable, and in the target directory. Publication uses an
+ * atomic hard link so a racing target is authoritative and is never overwritten.
+ */
+async function publishStagedFileIfAbsent(
+  filePath: string,
+  createStaging: (stagingPath: string) => Promise<void>,
   validateTemporary: ((temporaryPath: string) => void | Promise<void>) | undefined,
   label: string,
 ): Promise<FilePublicationOutcome> {
@@ -289,22 +583,10 @@ async function publishFileIfAbsentWithLabel(
   );
   await mkdir(parentPath, { recursive: true });
 
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  let stagingCreated = false;
   let outcome: 'published' | 'already-exists' | undefined;
   let failure: unknown;
   try {
-    handle = await open(stagingPath, 'wx', 0o600);
-    stagingCreated = true;
-    const { bytesWritten } = await handle.write(payload);
-    if (bytesWritten !== payload.length) {
-      throw new Error(
-        `Short ${label} publication: wrote ${bytesWritten} of ${payload.length} bytes`,
-      );
-    }
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
+    await createStaging(stagingPath);
     if (validateTemporary) {
       await validateTemporary(stagingPath);
       await syncFile(stagingPath);
@@ -313,19 +595,31 @@ async function publishFileIfAbsentWithLabel(
       await link(stagingPath, filePath);
       outcome = 'published';
     } catch (error) {
-      if (!hasErrorCode(error, 'EEXIST')) throw error;
+      if (!hasErrorCode(error, 'EEXIST')) throw await explainLinkFailure(parentPath, error);
       outcome = 'already-exists';
     }
   } catch (error) {
     failure = error;
   } finally {
-    if (handle) await closeBestEffort(handle);
-    if (stagingCreated) await removeBestEffort(stagingPath);
+    // The staging name is unique to this call, so removing it never touches another writer.
+    await removeBestEffort(stagingPath);
   }
   await syncDirectoryBestEffort(parentPath);
   if (failure !== undefined) throw failure;
   if (outcome === undefined) throw new Error(`${label} publication produced no outcome`);
   return outcome;
+}
+
+/** Writes the payload in one call; a short write fails the publication and is not resumed. */
+async function writeInOneCall(
+  handle: Awaited<ReturnType<typeof open>>,
+  payload: Buffer,
+  label: string,
+): Promise<void> {
+  const { bytesWritten } = await handle.write(payload);
+  if (bytesWritten !== payload.length) {
+    throw new Error(`Short ${label} publication: wrote ${bytesWritten} of ${payload.length} bytes`);
+  }
 }
 
 function errorReason(error: unknown): string {
@@ -425,7 +719,10 @@ async function openExistingAppendTarget(
 ): Promise<Awaited<ReturnType<typeof open>> | undefined> {
   try {
     // String append flags include O_CREAT; numeric flags let an absent target take the staged path.
-    return await open(filePath, fsConstants.O_RDWR | fsConstants.O_APPEND);
+    // Nothing has been written yet, so waiting out a held target cannot duplicate records.
+    return await withFileLockRetries('append-open', filePath, () =>
+      open(filePath, fsConstants.O_RDWR | fsConstants.O_APPEND),
+    );
   } catch (error) {
     if (hasErrorCode(error, 'ENOENT')) return undefined;
     throw error;
@@ -436,7 +733,8 @@ async function openExistingAppendTarget(
  * Publishes a fully durable initial payload without ever exposing an empty target.
  * Hard-link creation is atomic and fails with EEXIST instead of replacing a racing target.
  * Node has no cross-platform unlink-by-handle or rename-no-replace API, so macOS/Windows
- * filesystems that reject hard links fail conservatively before the authoritative path exists.
+ * filesystems that reject hard links fail conservatively before the authoritative path exists,
+ * with an error that names the directory once a probe confirms the limitation.
  */
 async function publishInitialJsonl(filePath: string, payload: Buffer): Promise<boolean> {
   const parentPath = dirname(filePath);
@@ -462,7 +760,7 @@ async function publishInitialJsonl(filePath: string, payload: Buffer): Promise<b
       await link(stagingPath, filePath);
     } catch (error) {
       if (hasErrorCode(error, 'EEXIST')) return false;
-      throw error;
+      throw await explainLinkFailure(parentPath, error);
     }
     return true;
   } finally {
@@ -560,23 +858,78 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 async function renameWithRetries(temporaryPath: string, filePath: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
+  await withFileLockRetries('rename', filePath, () => rename(temporaryPath, filePath));
+}
+
+async function withFileLockRetries<T>(
+  operation: FileLockRetry['operation'],
+  filePath: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  let waitedMs = 0;
+  let lockCode: string | undefined;
+  for (let attempt = 1; ; attempt += 1) {
+    const retry = (outcome: FileLockRetry['outcome'], code: string | undefined) => ({
+      operation,
+      filePath,
+      code,
+      attempts: attempt,
+      waitedMs,
+      outcome,
+    });
     try {
-      await rename(temporaryPath, filePath);
-      return;
+      const result = await run();
+      logFileLockRetry(retry('recovered', lockCode));
+      return result;
     } catch (error) {
-      const delayMs = RENAME_RETRY_DELAYS_MS[attempt];
-      if (!isTransientRenameError(error) || delayMs === undefined) throw error;
+      const code = transientFileLockCode(error);
+      const delayMs = code === undefined ? undefined : FILE_LOCK_RETRY_DELAYS_MS[attempt - 1];
+      if (delayMs === undefined) {
+        logFileLockRetry(retry(code ? 'exhausted' : 'failed', code ?? lockCode));
+        throw error;
+      }
+      lockCode = code;
       await sleep(delayMs);
+      waitedMs += delayMs;
     }
   }
 }
 
-function isTransientRenameError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    TRANSIENT_RENAME_CODES.has((error as NodeJS.ErrnoException).code ?? '')
+interface FileLockRetry {
+  readonly operation: 'append-open' | 'link-probe' | 'rename';
+  readonly filePath: string;
+  /** Last lock code seen; a `failed` wait ended on a different, non-transient error. */
+  readonly code: string | undefined;
+  readonly attempts: number;
+  readonly waitedMs: number;
+  readonly outcome: 'recovered' | 'exhausted' | 'failed';
+}
+
+function linkErrorMeansNoHardLinks(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code !== undefined && HARD_LINK_UNSUPPORTED_CODES.has(code);
+}
+
+function transientFileLockCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code !== undefined && TRANSIENT_FILE_LOCK_CODES.has(code) ? code : undefined;
+}
+
+/** Logs one line per wait; an operation that never met a lock logs nothing. */
+function logFileLockRetry(retry: FileLockRetry): void {
+  if (retry.code === undefined) return;
+  logger.warn(
+    {
+      operation: retry.operation,
+      code: retry.code,
+      attempts: retry.attempts,
+      waited_ms: retry.waitedMs,
+      outcome: retry.outcome,
+      file: basename(retry.filePath),
+    },
+    '[jsonl] file held by another process',
   );
 }
 

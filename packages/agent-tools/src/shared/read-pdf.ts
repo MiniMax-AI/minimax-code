@@ -20,7 +20,8 @@
  * ~2MB pdfjs build that must not sit on the startup path of every read.
  */
 
-import { readFile } from 'node:fs/promises';
+import type { CoreToolFs } from '../core-tools/ports.js';
+import { physicalToolFs } from './physical-fs.js';
 import { extname } from 'node:path';
 
 import type { ToolResult } from '@mavis/agent-core/tools';
@@ -107,6 +108,8 @@ export interface ReadPdfOptions {
   absolutePath: string;
   pages?: string;
   signal?: AbortSignal;
+  /** Filesystem port; defaults to physical-fs. */
+  fs?: Pick<CoreToolFs, 'readFile'>;
 }
 
 /**
@@ -114,7 +117,7 @@ export interface ReadPdfOptions {
  * reference CLI ignores them for PDFs too) — paging is expressed with `pages`.
  */
 export async function readPdfAsToolResult(opts: ReadPdfOptions): Promise<ToolResult> {
-  const { toolName, absolutePath, pages } = opts;
+  const { toolName, absolutePath, pages, fs = physicalToolFs } = opts;
 
   // 1. Pure string validation first — no file I/O for malformed input.
   if (pages !== undefined) {
@@ -126,7 +129,7 @@ export async function readPdfAsToolResult(opts: ReadPdfOptions): Promise<ToolRes
   // pi-compatible filename variants resolve them before invoking this helper.
   let data: Uint8Array;
   try {
-    data = new Uint8Array(await readFile(absolutePath));
+    data = new Uint8Array(await fs.readFile(absolutePath));
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === 'ENOENT') {

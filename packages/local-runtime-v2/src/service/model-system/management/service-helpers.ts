@@ -1,4 +1,4 @@
-import { DEFAULT_MODEL_PRESETS, getRuntimePresetKey } from '@mavis/config';
+import { DEFAULT_MODEL_PRESETS, deliveredDefaultModelId, getRuntimePresetKey } from '@mavis/config';
 
 import { parseProviderId, parseSourceQualifiedModelKey } from '../resolution/model-key.js';
 import type {
@@ -6,6 +6,7 @@ import type {
   LocalCustomProviderConfig,
   LocalCustomProvidersConfig,
   LocalModelConfig,
+  LocalModelProviderServiceDeps,
   LocalRuntimeConfig,
 } from '../contracts.js';
 import {
@@ -14,6 +15,7 @@ import {
   type ModelCacheStatusView,
 } from '../catalog/list-models.js';
 import { modelConfigFingerprint, type ModelCacheStatusEntry } from '../catalog/model-cache.js';
+import type { CustomProviderViewOptions } from '../catalog/provider-views.js';
 import { LocalModelProviderError } from '../contracts.js';
 
 const providerMutationTails = new Map<string, Promise<void>>();
@@ -32,8 +34,15 @@ export function removeLegacyCustomProviderNpm(provider: LocalCustomProviderConfi
   delete provider.npm;
 }
 
-/** Keep the global default callable after a custom Provider/model mutation. */
-export function resetUnavailableCustomDefaultModel(draft: LocalByokConfigDraft): boolean {
+/**
+ * Keep the global default callable after a custom Provider/model mutation.
+ * The replacement is the delivered default, the same rule used when an
+ * official snapshot retires the default.
+ */
+export function resetUnavailableCustomDefaultModel(
+  draft: LocalByokConfigDraft,
+  currentConfig?: Pick<LocalRuntimeConfig, 'provider'>,
+): boolean {
   const selected = parseSourceQualifiedModelKey(draft.defaultModel);
   if (selected?.source !== 'custom_provider') return false;
   const provider = (draft.custom_provider as LocalCustomProvidersConfig | undefined)?.[
@@ -42,7 +51,10 @@ export function resetUnavailableCustomDefaultModel(draft: LocalByokConfigDraft):
   const model = provider?.models?.[selected.modelId];
   if (provider?.enabled !== false && model && model.enabled !== false) return false;
 
-  draft.defaultModel = DEFAULT_MODEL_PRESETS[getRuntimePresetKey()].defaultModel;
+  const deliveredDefault = deliveredDefaultModelId(currentConfig?.provider?.minimax);
+  draft.defaultModel = deliveredDefault
+    ? `minimax/${deliveredDefault}`
+    : DEFAULT_MODEL_PRESETS[getRuntimePresetKey()].defaultModel;
   draft.defaultModelVariant = undefined;
   return true;
 }
@@ -159,4 +171,12 @@ async function ignoreMutationOutcome(value: Promise<unknown>): Promise<void> {
   } catch {
     // A failed mutation releases the queue for the next caller.
   }
+}
+
+export function customProviderViewOptions(
+  deps: Pick<LocalModelProviderServiceDeps, 'byokKeyPool'>,
+): CustomProviderViewOptions {
+  return {
+    ...(deps.byokKeyPool ? { byokKeyPool: deps.byokKeyPool } : {}),
+  };
 }

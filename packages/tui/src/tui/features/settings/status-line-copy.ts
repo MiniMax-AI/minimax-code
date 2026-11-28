@@ -42,7 +42,10 @@ const descriptions: Record<Exclude<TuiStatusLineItem, 'build-mode'>, readonly [s
   'current-dir': ['Current working directory', '当前工作目录'],
   'session-title': ['Current session title', '当前会话标题'],
   'git-branch': ['Current Git branch', '当前 Git 分支'],
-  'review-link': ['Current branch PR / MR link', '当前分支的 PR / MR 链接'],
+  'review-link': [
+    'Current branch PR / MR link, shipped with the merge request panel (internal only for now)',
+    '当前分支的 PR / MR 链接，随合并请求面板提供，目前仅内部可用',
+  ],
   'plan-mode': ['Plan mode', '计划模式'],
   'approval-mode': ['Current permission mode', '当前权限模式'],
   'model-with-reasoning': ['Model and reasoning', '模型和推理配置'],

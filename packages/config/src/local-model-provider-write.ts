@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import yaml from 'js-yaml';
 import lockfile from 'proper-lockfile';
 
+import { isAdvisorContextWindow, isModelKey, type DefaultAdvisorConfig } from './advisor-config.js';
 import { getConfig, getConfigPath, resetConfig, type Config } from './config.js';
 import { minimaxApiModels } from './byok-config.js';
 import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from './model-availability.js';
@@ -90,6 +91,7 @@ class LocalModelProviderConfigWriteError extends Error {
  */
 export async function updateLocalByokConfig(
   mutate: (draft: LocalByokConfigDraft, currentConfig: Config) => void | Promise<void>,
+  beforeCommit?: () => void,
 ): Promise<{ readonly config: Config }> {
   return withLockedConfig(async (raw, currentConfig) => {
     const draft: LocalByokConfigDraft = {
@@ -126,7 +128,7 @@ export async function updateLocalByokConfig(
     setOptionalString(raw, 'defaultModel', draft.defaultModel);
     setOptionalString(raw, 'defaultModelVariant', draft.defaultModelVariant);
     return { write: true, value: undefined };
-  }).then(({ config }) => ({ config }));
+  }, beforeCommit).then(({ config }) => ({ config }));
 }
 
 /** Atomically persist the default model and its optional variant. */
@@ -157,6 +159,32 @@ export async function updateLocalModelSelection(
     else raw.defaultModelThinking = { effort: input.thinking.effort };
     if (input.variant === undefined) delete raw.defaultModelVariant;
     else raw.defaultModelVariant = input.variant;
+    return { write: true, value: undefined };
+  }).then(({ config }) => ({ config }));
+}
+
+/** Atomically replace the new-conversation advisor selection. */
+export async function updateLocalAdvisorSelection(
+  input: DefaultAdvisorConfig,
+): Promise<{ readonly config: Config }> {
+  if (typeof input.enabled !== 'boolean') {
+    throw new LocalModelProviderConfigValidationError('Invalid default advisor');
+  }
+  const model = input.model?.trim();
+  if (model !== undefined && !isModelKey(model))
+    throw new LocalModelProviderConfigValidationError('Invalid default advisor model');
+  if (input.contextWindow !== undefined && !isAdvisorContextWindow(input.contextWindow))
+    throw new LocalModelProviderConfigValidationError('Invalid default advisor context');
+  const effort = input.thinking?.effort;
+  if (input.thinking !== undefined && (typeof effort !== 'string' || !effort.trim()))
+    throw new LocalModelProviderConfigValidationError('Invalid default advisor effort');
+  return withLockedConfig(async (raw) => {
+    raw.defaultAdvisor = {
+      enabled: input.enabled,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { thinking: { effort } }),
+      ...(input.contextWindow === undefined ? {} : { contextWindow: input.contextWindow }),
+    };
     return { write: true, value: undefined };
   }).then(({ config }) => ({ config }));
 }
@@ -210,6 +238,7 @@ async function withLockedConfig<T>(
     raw: Record<string, unknown>,
     currentConfig: Config,
   ) => Promise<{ readonly write: boolean; readonly value: T }>,
+  beforeCommit?: () => void,
 ): Promise<{ readonly config: Config; readonly value: T }> {
   const configPath = getConfigPath();
   let release: (() => Promise<void>) | undefined;
@@ -226,7 +255,11 @@ async function withLockedConfig<T>(
     const outcome = await operation(raw, getConfig());
     if (outcome.write) {
       assertSafeConfigRecord(raw);
-      await atomicWriteFile(configPath, yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }));
+      await atomicWriteFile(
+        configPath,
+        yaml.dump(raw, { indent: 2, lineWidth: -1, noRefs: true }),
+        beforeCommit,
+      );
       resetConfig();
     }
     return { config: getConfig(), value: outcome.value };
@@ -243,7 +276,11 @@ async function withLockedConfig<T>(
   }
 }
 
-async function atomicWriteFile(filePath: string, content: string): Promise<void> {
+async function atomicWriteFile(
+  filePath: string,
+  content: string,
+  beforeCommit?: () => void,
+): Promise<void> {
   const tmpPath = join(dirname(filePath), `.config-tmp-${randomBytes(6).toString('hex')}`);
   let created = false;
   try {
@@ -256,6 +293,7 @@ async function atomicWriteFile(filePath: string, content: string): Promise<void>
     } finally {
       await temporary.close();
     }
+    beforeCommit?.();
     await fs.promises.rename(tmpPath, filePath);
   } catch {
     if (created) await fs.promises.unlink(tmpPath).catch(() => undefined);

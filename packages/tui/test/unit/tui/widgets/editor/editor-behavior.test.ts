@@ -8,6 +8,7 @@ import {
   TUI_KEYBINDINGS,
   visibleWidth,
 } from '../../../../../src/tui/engine/public.js';
+import { TuiComposerDraft } from '../../../../../src/tui/features/composer/draft.js';
 import { Editor, type EditorOptions } from '../../../../../src/tui/widgets/editor/editor.js';
 
 function createEditor(options: EditorOptions = {}) {
@@ -374,6 +375,40 @@ describe('Editor behavior', () => {
       { prefix: '/', items: [{ value: 'help', label: 'help' }] },
       { value: 'help', label: 'help' },
     );
+  });
+
+  it('turns a long paste into one pasted-text element that Backspace removes and undo restores', async () => {
+    const { editor } = createEditor();
+    editor.focused = true;
+    const draft = new TuiComposerDraft({
+      workspaceDir: '/workspace',
+      resolveAttachment: vi.fn(),
+      append: vi.fn(),
+      onChanged: vi.fn(),
+      onAttachmentPlaceholdersChanged: (placeholders) =>
+        editor.syncAttachmentPlaceholders(placeholders),
+    });
+    editor.onPaste = (text) => draft.pasteLongText(text, (value) => editor.pasteInline(value));
+    editor.onAttachmentPlaceholderDeleted = (id) => void draft.removeAttachmentById(id);
+    editor.onAttachmentPlaceholderRestored = (id) => draft.restoreAttachmentById(id);
+    const pasted = `{\n${'  "panel": 1,\n'.repeat(400)}}`;
+
+    editor.handleInput('Summarize ');
+    editor.handleInput(`\u001B[200~${pasted}\u001B[201~`);
+    await vi.waitFor(() => expect(draft.snapshot().attachments).toHaveLength(1));
+
+    expect(editor.getText()).toBe('Summarize [Pasted text #1 +402 lines] ');
+    expect(editor.getExpandedText()).not.toContain('"panel"');
+    expect(editor.getAttachmentPreview()?.label).toBe('[Pasted text #1 +402 lines]');
+
+    editor.handleInput('\x7f');
+    expect(editor.getText()).toBe('Summarize ');
+    expect(draft.snapshot().attachments).toEqual([]);
+
+    editor.handleInput('\x1f');
+    expect(editor.getText()).toContain('[Pasted text #1 +402 lines]');
+    expect(draft.snapshot().attachments).toHaveLength(1);
+    await draft.completeSubmission(draft.capture());
   });
 
   it('treats a large-paste marker as one atomic segment and restores its registry on undo', () => {

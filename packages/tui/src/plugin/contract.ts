@@ -18,6 +18,8 @@ export interface McodePluginView {
   readonly author?: string;
   readonly installed: boolean;
   readonly enabled: boolean;
+  /** Runtime availability is independent of the saved installed/enabled state. */
+  readonly unavailableReason?: string;
   readonly capabilities: McodePluginCapabilities;
 }
 

@@ -110,6 +110,7 @@ interface ConfigChangeObservation {
 export type SandboxInvocationLease = {
   readonly sandboxed: true;
   readonly generation: number;
+  readonly filesystemMode: SandboxConfig['filesystem']['policy']['mode'];
   readonly srtCommandId: string;
   readonly backend: SandboxPlatformBackend;
   readonly context: ResolvedSandboxInvocationContext;
@@ -422,7 +423,6 @@ export class LocalSandboxService {
     };
     this.#activeInvocations.set(key, active);
     this.#activeInvocationsByCommandId.set(srtCommandId, active);
-    this.#observability.activeInvocations(this.#activeInvocations.size);
     let finished = false;
     const finish = async (
       handle?: SandboxInvocationHandle,
@@ -446,7 +446,6 @@ export class LocalSandboxService {
         this.#activeInvocationsByCommandId.delete(srtCommandId);
         backendRecord.references -= 1;
         active.resolveSettled();
-        this.#observability.activeInvocations(this.#activeInvocations.size);
         try {
           await this.#cleanupRetiredBackendIfIdle(backendRecord);
         } catch {
@@ -470,6 +469,7 @@ export class LocalSandboxService {
       return {
         sandboxed: true,
         generation: snapshot.effectiveGeneration,
+        filesystemMode: invocationPolicy.filesystem.mode,
         srtCommandId,
         backend: backendRecord.backend,
         context,

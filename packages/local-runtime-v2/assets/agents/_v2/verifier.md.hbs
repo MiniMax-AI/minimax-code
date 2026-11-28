@@ -14,6 +14,9 @@ criteria. If success requires modifying the deliverable or project source files,
 stop immediately and return `ROLE_MISMATCH`. Recommend either reassigning the
 task to `worker`, or removing the mutation requirement and returning findings
 only in `final_text`.
+When `save_run_code_script` is available, saving a reusable run_code script with it
+is not a deliverable modification and is allowed. Every other write still returns
+`ROLE_MISMATCH`.
 
 - Inspect the actual artifact and run the most relevant available checks.
 - Exercise important failure paths or edge cases when practical.

@@ -1,7 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
-  firstBuiltinModel,
   planCustomProviderResolution,
   planMinimaxApiResolution,
   readStringRecord,
@@ -100,6 +99,47 @@ describe('MiniMax API BYOK planning', () => {
 });
 
 describe('custom BYOK planning', () => {
+  const planningBase = { provider: 'custom_provider:work', providerKey: 'work', modelId: 'model' };
+
+  it('resolves an environment-variable credential reference without the file holding the key', () => {
+    // Stub the variable instead of depending on the shell: a clean CI worker has
+    // none of these set, and an inherited value from a developer would make the
+    // assertion pass for the wrong reason.
+    vi.stubEnv('WORK_API_KEY', 'sk-from-env');
+    const apiKeyReference = ['$', '{WORK_API_KEY}'].join('');
+    const plan = planCustomProviderResolution({
+      ...planningBase,
+      byok: {
+        custom_provider: {
+          work: {
+            options: { apiKey: apiKeyReference, baseURL: 'https://api.example.com/v1' },
+            models: { model: {} },
+          },
+        },
+      },
+    });
+    expect(plan?.apiKey).toBe('sk-from-env');
+  });
+
+  it('names the provider and field when a nested map reaches the credential reader', () => {
+    // An unquoted `apiKey: {env: VAR}` is valid YAML, so it reaches the reader as an object.
+    // The cast is the point: the declared type says string, the file can still say otherwise.
+    const nestedEnvForm = { env: 'WORK_API_KEY' } as unknown as string;
+    expect(() =>
+      planCustomProviderResolution({
+        ...planningBase,
+        byok: {
+          custom_provider: {
+            work: {
+              options: { apiKey: nestedEnvForm, baseURL: 'https://api.example.com/v1' },
+              models: { model: {} },
+            },
+          },
+        },
+      }),
+    ).toThrow('custom_provider:work');
+  });
+
   it('returns absent for missing, disabled, and unknown model configurations', () => {
     const base = { provider: 'custom_provider:work', providerKey: 'work', modelId: 'model' };
     expect(planCustomProviderResolution({ ...base, byok: undefined })).toBeUndefined();
@@ -210,20 +250,6 @@ describe('custom BYOK planning', () => {
 });
 
 describe('BYOK config helpers', () => {
-  it('selects MiniMax first, then another configured provider', () => {
-    expect(
-      firstBuiltinModel({
-        minimax: { models: { mini: {} } },
-        other: { models: { other: {} } },
-      }),
-    ).toEqual({ provider: 'minimax', modelId: 'mini' });
-    expect(firstBuiltinModel({ other: { models: { other: {} } } })).toEqual({
-      provider: 'other',
-      modelId: 'other',
-    });
-    expect(firstBuiltinModel({ empty: {} })).toBeUndefined();
-  });
-
   it.each([undefined, null, [], 'invalid', {}, { Invalid: 1 }])(
     'rejects a non-string header record %j',
     (value) => {

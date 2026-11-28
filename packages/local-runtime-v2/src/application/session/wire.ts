@@ -17,6 +17,7 @@ import type {
   SessionKind,
   SessionRecord,
 } from "../../service/session-system/index.js";
+import { advisorSelectionToView } from "./model-provider-advisor.js";
 import {
   CURRENT_SESSION_DATA_VERSION,
   effectiveSessionMemoryPolicy,
@@ -70,6 +71,7 @@ export function toSessionInfoView(session: SessionRecord): SessionInfoView {
       : {}),
     interactionMode: toSessionInteractionModeView(session.interactionMode),
     memoryPolicy: toSessionMemoryPolicyView(session),
+    ...(session.advisor ? { advisor: advisorSelectionToView(session.advisor) } : {}),
   };
 }
 

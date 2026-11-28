@@ -1,4 +1,5 @@
-import type { IPluginCapabilityProvenance } from '@mavis/protocol';
+import { InstalledPluginSource, type IPluginCapabilityProvenance } from '@mavis/protocol';
+import { parseAppCliToolName } from './app-cli-command.js';
 import type {
   RuntimeTool,
   ToolCallProvenanceResolutionInput,
@@ -12,12 +13,13 @@ export interface PluginCapabilityAttributionIndex {
   readonly deferredTools: ReadonlyMap<string, readonly IPluginCapabilityProvenance[]>;
   /** Canonical Plugin Skill name -> Plugin owner. */
   readonly skills: ReadonlyMap<string, readonly IPluginCapabilityProvenance[]>;
+  /** App owners from the captured Plugin manifest; independent of remote discovery. */
+  readonly appProviders?: ReadonlyMap<string, readonly IPluginCapabilityProvenance[]>;
 }
 
 /**
  * Build the host-independent resolver over a turn-local immutable attribution
- * index. Hosts own the index; this function only understands the two generic
- * access tools (`mcp_invoke` and `skill`).
+ * index. Hosts own the index; this resolves direct tools and supported access tools.
  */
 export function createPluginCapabilityAttributionResolver(
   index: PluginCapabilityAttributionIndex,
@@ -36,7 +38,8 @@ export function attachPluginCapabilityAttribution<TTool extends RuntimeTool>(
     const relevant =
       index.directTools.has(name) ||
       (name === 'mcp_invoke' && index.deferredTools.size > 0) ||
-      (name === 'skill' && index.skills.size > 0);
+      (name === 'skill' && index.skills.size > 0) ||
+      (name === 'bash' && (index.appProviders?.size ?? 0) > 0);
     return relevant ? ({ ...tool, toolCallProvenanceResolver: resolver } as TTool) : tool;
   });
 }
@@ -46,6 +49,29 @@ function resolvePluginCapabilityAttribution(
   input: ToolCallProvenanceResolutionInput,
 ): readonly IPluginCapabilityProvenance[] | undefined {
   if (input.toolName === 'tool_search') return undefined;
+  if (input.toolName === 'bash') {
+    const toolName = parseAppCliToolName(input.args?.command);
+    if (!toolName) return undefined;
+    // The provider must belong to this turn's Plugin snapshot. No remote discovery.
+    const matches = [...(index.appProviders ?? [])].filter(([provider]) => {
+      const prefix = `connector__${provider}__`;
+      const suffix = toolName.slice(prefix.length);
+      return toolName.startsWith(prefix) && /^[A-Za-z0-9_.-]{1,96}$/.test(suffix);
+    });
+    // A local provider that prefixes or extends an official one must not erase the official
+    // attribution by making the match ambiguous.
+    const resolved =
+      matches.length > 1
+        ? matches.filter(([, owners]) =>
+            owners.some((owner) => owner.source === InstalledPluginSource.OFFICIAL),
+          )
+        : matches;
+    if (resolved.length !== 1) return undefined;
+    return resolved[0]?.[1].map((owner) => ({
+      ...owner,
+      capability_name: toolName,
+    }));
+  }
   if (input.toolName === 'mcp_invoke') {
     const target = optionalString(input.args?.tool_name);
     return target ? copy(index.deferredTools.get(target)) : undefined;

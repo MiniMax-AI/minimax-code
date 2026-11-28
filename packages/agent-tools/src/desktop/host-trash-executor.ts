@@ -47,6 +47,8 @@ type TrashLaunch = {
 export async function executeLocalHostTrashIfRequested(input: {
   readonly toolInput: LocalBashToolInput;
   readonly workspaceRoot: string;
+  /** Project folders besides workspaceRoot, frozen for this Turn by the Runtime. */
+  readonly workspaceRoots?: readonly string[];
   readonly runtime?: LocalHostTrashRuntime;
   readonly envPolicy: BashEnvPolicySource;
   readonly timeoutSeconds: number;
@@ -79,11 +81,15 @@ export async function executeLocalHostTrashIfRequested(input: {
       'Windows trash execution rejected an invalid effective input.',
     );
   }
+  // The permission stage approves deletions in every Project folder of the
+  // Turn, so the host boundary must accept the same folders.
+  const projectRoots = [input.workspaceRoot, ...(input.workspaceRoots ?? [])];
   const allowedTargets = await Promise.all(
     execution.targets.map((target) =>
       isWindowsTrashTargetAllowed(
         target,
         input.workspaceRoot,
+        projectRoots,
         execution.allowOutsideWorkspaceFiles === true,
       ),
     ),
@@ -167,19 +173,14 @@ function isAvailableWindowsTrashRuntime(
 async function isWindowsTrashTargetAllowed(
   target: string,
   workspaceRoot: string,
+  projectRoots: readonly string[],
   allowOutsideWorkspaceFiles: boolean,
 ): Promise<boolean> {
-  const workspace = path.win32.resolve(workspaceRoot);
+  // Relative targets keep resolving against the primary folder, which is also
+  // the launcher's cwd.
   const resolved = path.win32.resolve(workspaceRoot, target);
   if (isProtectedWindowsTrashPath(resolved)) return false;
-  const relative = path.win32.relative(workspace, resolved);
-  if (
-    relative === '' ||
-    (relative !== '..' &&
-      !relative.startsWith(`..${path.win32.sep}`) &&
-      !path.win32.isAbsolute(relative))
-  )
-    return true;
+  if (projectRoots.some((root) => isWithinWindowsRoot(resolved, root))) return true;
   // The plan proves non-recursive rm syntax; the host separately proves the
   // external operand is a file. Directories, links and unavailable metadata
   // retain the workspace boundary, even with the trusted opt-in.
@@ -192,6 +193,16 @@ async function isWindowsTrashTargetAllowed(
   } catch {
     return false;
   }
+}
+
+function isWithinWindowsRoot(resolved: string, root: string): boolean {
+  const relative = path.win32.relative(path.win32.resolve(root), resolved);
+  return (
+    relative === '' ||
+    (relative !== '..' &&
+      !relative.startsWith(`..${path.win32.sep}`) &&
+      !path.win32.isAbsolute(relative))
+  );
 }
 
 function isProtectedWindowsTrashPath(target: string): boolean {

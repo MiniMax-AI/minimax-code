@@ -126,6 +126,7 @@ export class TuiChatController {
       writeAutomationResult: this.writeAutomationResult,
       runtime: this.runtime,
       currentAgentName: () => this.state.session?.agentName ?? this.defaultAgentName,
+      refreshActiveDelegatedAgentCount: options.refreshActiveDelegatedAgentCount,
     });
     this.statusMetrics = new TuiStatusMetricsFlow({
       runtime: this.runtime,
@@ -450,6 +451,7 @@ export class TuiChatController {
     this.turnProjection.removePreviousTerminalDuration(turnId);
     this.updateState({
       activeTurnId: turnId,
+      unadmittedTurnId: turnId,
       lastSettledTurn: undefined,
       outputTokensPerSecond: undefined,
       outputTokensPerSecondEstimated: undefined,
@@ -527,6 +529,9 @@ export class TuiChatController {
         },
         onRunAccepted: () => {
           admittedSessionId = resolvedSessionId;
+          if (this.state.unadmittedTurnId === turnId) {
+            this.updateState({ unadmittedTurnId: undefined });
+          }
           if (resolvedSessionId) options.onRuntimeAccepted?.(resolvedSessionId);
           this.onTurnAccepted?.(turnId);
         },
@@ -860,24 +865,33 @@ export class TuiChatController {
     const creationSequence = ++this.sessionCreationSequence;
     const projectionSequence = this.sessionProjectionSequence;
     this.updateState({ status: 'starting', error: undefined });
+    const settle = (session: TuiSession): TuiSession => {
+      this.options.onSessionLifecycle?.(session.sessionId);
+      onResolved?.(session.sessionId);
+      if (
+        creationSequence !== this.sessionCreationSequence ||
+        projectionSequence !== this.sessionProjectionSequence
+      ) {
+        return session;
+      }
+      this.updateState({
+        status: 'idle',
+        session,
+        sessions: upsertSession(this.state.sessions, session),
+      });
+      return session;
+    };
+    const prepare = this.options.prepareCreatedSession;
     const creation = this.runtime
       .createSession({ workspaceDir: this.workspaceDir })
-      .then((session) => {
-        this.options.onSessionLifecycle?.(session.sessionId);
-        onResolved?.(session.sessionId);
-        if (
-          creationSequence !== this.sessionCreationSequence ||
-          projectionSequence !== this.sessionProjectionSequence
-        ) {
-          return session;
-        }
-        this.updateState({
-          status: 'idle',
-          session,
-          sessions: upsertSession(this.state.sessions, session),
-        });
-        return session;
-      })
+      .then((session) =>
+        prepare
+          ? prepare(session).then(
+              () => settle(session),
+              () => settle(session),
+            )
+          : settle(session),
+      )
       .finally(() => {
         if (this.sessionCreation === creation) this.sessionCreation = undefined;
       });

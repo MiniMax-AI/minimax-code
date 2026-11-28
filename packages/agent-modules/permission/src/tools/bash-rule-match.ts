@@ -10,22 +10,18 @@
  *   - `git status`      → exact match
  *   - `npm:*`           → prefix match (literal `command === prefix`
  *                         OR `command.startsWith(prefix + ' ')`)
- *   - `npm run *`       → wildcard match (case-insensitive, `*` → `.*`,
- *                         `\*` literal `*`, `\\` literal `\`)
+ *   - `npm run *`       → wildcard match (case-insensitive, `*` → `.*`
+ *                         across newlines, `\*` literal `*`, `\\` literal `\`)
  */
 
-import { logger, backgroundCtx } from '../host-utils.js';
 import type { ShellPermissionRule } from '../types.js';
 import { parseScriptPlainCommands } from './bash-ast.js';
-
-const ESCAPED_STAR_SENTINEL = '\0STAR\0';
-const ESCAPED_BACKSLASH_SENTINEL = '\0BSLASH\0';
 
 export type CompiledShellPermissionRule =
   | Extract<ShellPermissionRule, { type: 'exact' }>
   | Extract<ShellPermissionRule, { type: 'prefix' }>
   | Extract<ShellPermissionRule, { type: 'argvPrefix' }>
-  | { type: 'wildcard'; pattern: string; regex: RegExp | null };
+  | { type: 'wildcard'; pattern: string; segments: readonly string[] };
 
 /**
  * Encode a tokenised argv into the persisted rule-content string for an
@@ -93,7 +89,7 @@ export function parseShellRule(ruleContent: string): ShellPermissionRule {
 export function compileShellRule(ruleContent: string): CompiledShellPermissionRule {
   const parsed = parseShellRule(ruleContent);
   if (parsed.type !== 'wildcard') return parsed;
-  return { ...parsed, regex: compileWildcardPattern(parsed.pattern) };
+  return { ...parsed, segments: wildcardSegments(parsed.pattern) };
 }
 
 function containsUnescapedWildcard(s: string): boolean {
@@ -108,45 +104,57 @@ function containsUnescapedWildcard(s: string): boolean {
 /**
  * Match a command against a wildcard pattern.
  *
- * - `*` is converted to `.*`
+ * - `*` matches any run of characters, newlines included. Callers match one
+ *   `splitCommand` subcommand at a time, and splitCommand cuts at every
+ *   top-level newline, so a newline here can only sit inside a heredoc body
+ *   or a quoted argument.
  * - `\*` is treated as literal `*`
  * - `\\` is treated as literal `\`
  * - Matching is case-insensitive
  *
- * Uses null-byte sentinels to avoid replacement collisions.
+ * Literal pieces are found left to right with indexOf, so the cost stays
+ * linear in the command length however many `*` a user rule holds (a regex
+ * `.*` chain backtracks polynomially on a long heredoc and blocks the runtime).
  */
 export function matchWildcardPattern(command: string, pattern: string): boolean {
-  const re = compileWildcardPattern(pattern);
-  return re ? re.test(command) : false;
+  return matchWildcardSegments(command, wildcardSegments(pattern));
 }
 
-function compileWildcardPattern(pattern: string): RegExp | null {
-  // Step 1: replace escape sequences with sentinels
-  let escaped = pattern
-    .replace(/\\\\/g, ESCAPED_BACKSLASH_SENTINEL)
-    .replace(/\\\*/g, ESCAPED_STAR_SENTINEL);
-
-  // Step 2: escape regex-special chars (except our sentinels and *)
-  escaped = escaped.replace(/[.+?^${}()|[\]]/g, '\\$&');
-
-  // Step 3: replace unescaped * with .*
-  escaped = escaped.replace(/\*/g, '.*');
-
-  // Step 4: restore sentinels to literal characters
-  escaped = escaped
-    .replace(new RegExp(escapeRegExp(ESCAPED_STAR_SENTINEL), 'g'), '\\*')
-    .replace(new RegExp(escapeRegExp(ESCAPED_BACKSLASH_SENTINEL), 'g'), '\\\\');
-
-  try {
-    return new RegExp(`^${escaped}$`, 'i');
-  } catch {
-    logger.warn(backgroundCtx(), `Invalid wildcard pattern, pattern=${pattern}`);
-    return null;
+/** Lower-cased literal pieces between unescaped `*`; one piece means no wildcard. */
+function wildcardSegments(pattern: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern.charAt(i);
+    const next = pattern[i + 1];
+    if (ch === '\\' && (next === '\\' || next === '*')) {
+      current += next;
+      i++;
+    } else if (ch === '*') {
+      segments.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
   }
+  segments.push(current);
+  return segments.map((segment) => segment.toLowerCase());
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function matchWildcardSegments(command: string, segments: readonly string[]): boolean {
+  const text = command.toLowerCase();
+  const first = segments[0] ?? '';
+  if (segments.length === 1) return text === first;
+  const last = segments[segments.length - 1] ?? '';
+  const end = text.length - last.length;
+  if (end < first.length || !text.startsWith(first) || !text.endsWith(last)) return false;
+  let position = first.length;
+  for (const segment of segments.slice(1, -1)) {
+    const found = text.indexOf(segment, position);
+    if (found < 0 || found + segment.length > end) return false;
+    position = found + segment.length;
+  }
+  return true;
 }
 
 /**
@@ -164,9 +172,7 @@ export function matchShellRule(
     case 'argvPrefix':
       return matchArgvPrefix(command, rule.argv);
     case 'wildcard':
-      if ('regex' in rule) {
-        return rule.regex ? rule.regex.test(command) : false;
-      }
+      if ('segments' in rule) return matchWildcardSegments(command, rule.segments);
       return matchWildcardPattern(command, rule.pattern);
   }
 }

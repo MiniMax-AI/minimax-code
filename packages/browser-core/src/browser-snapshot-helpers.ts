@@ -85,6 +85,7 @@ export function exposeElement(
           value.slice(0, MAX_EXPOSED_ATTRIBUTE_VALUE_LENGTH),
         ]),
     ),
+    ...element.formState,
     ...(element.frameId && frameRef ? { frame: frameRef } : {}),
     ...(element.parentRegionPath
       ? {

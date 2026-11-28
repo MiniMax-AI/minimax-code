@@ -4,7 +4,9 @@ import {
   type CreateDesktopReporterOptions,
   type MetricLabels,
   type MetricsBatchReporter,
+  type MetricsDelivery,
 } from '../metrics-proxy.js';
+import type { AllowedMetricName } from './metric-registry.js';
 
 /**
  * local-runtime metrics facade.
@@ -21,12 +23,23 @@ import {
  * those belong in logger fields).
  *
  * Allowed APIs on the returned client: `counter`, `gauge`, `histogram`.
+ * Metrics added from now on are defined in `metric-registry.ts` and reported
+ * with `incrementMetric()` / `observeMetric()`.
  */
 
 export type LocalMetricLabels = MetricLabels;
 
 const SERVICE_NAME = 'local_runtime';
 const SERVER_APPLIED_PREFIX = 'local_runtime_';
+
+/**
+ * Delivery of the Desktop clients (the local runtime and the Electron main
+ * process): failed sends back off and carry their counts over, and drops are
+ * counted in metrics_client_dropped_points_total. See MetricsDelivery.
+ */
+export const DESKTOP_METRICS_DELIVERY: MetricsDelivery = Object.freeze({
+  mode: 'carry_over' as const,
+});
 
 export interface LocalRuntimeMetricsClientOptions {
   /**
@@ -60,6 +73,11 @@ export interface LocalRuntimeMetricsClientOptions {
    * lets the noop reporter swallow batches when telemetry is not wired up.
    */
   reporter?: MetricsBatchReporter;
+  /**
+   * How undelivered points are handled. Omitted, the client keeps the shipped
+   * retry queue; Desktop clients pass {@link DESKTOP_METRICS_DELIVERY}.
+   */
+  delivery?: MetricsDelivery;
   onError?: (error: unknown) => void;
   /** Override clock for deterministic testing. */
   now?: () => number;
@@ -98,6 +116,7 @@ export function createLocalRuntimeMetricsClient(
     ...(options.histogramBucketsByName
       ? { histogramBucketsByName: options.histogramBucketsByName }
       : {}),
+    ...(options.delivery ? { delivery: options.delivery } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
@@ -146,9 +165,9 @@ export function assertLocalMetricName(name: string): void {
  * assignable to them; the duplication stays inside agent-modules.
  */
 export interface ModuleMetricsReporter {
-  incr(name: string, tags?: Record<string, string>): void;
-  gauge(name: string, value: number, tags?: Record<string, string>): void;
-  latency(name: string, durationMs: number, tags?: Record<string, string>): void;
+  incr(name: AllowedMetricName, tags?: Record<string, string>): void;
+  gauge(name: AllowedMetricName, value: number, tags?: Record<string, string>): void;
+  latency(name: AllowedMetricName, durationMs: number, tags?: Record<string, string>): void;
 }
 
 /**
@@ -158,7 +177,7 @@ export interface ModuleMetricsReporter {
  */
 export async function timeRouteDuration<T>(
   metrics: ModuleMetricsReporter | undefined,
-  name: string,
+  name: AllowedMetricName,
   run: () => Promise<T>,
 ): Promise<T> {
   const startMs = Date.now();
@@ -173,3 +192,18 @@ export async function timeRouteDuration<T>(
 }
 
 export type { MetricsClient, MetricLabels, MetricsBatchReporter };
+
+export {
+  LONG_TAIL_HISTOGRAM_BOUNDS,
+  createBusyTimeAccumulator,
+  incrementMetric,
+  observeMetric,
+  registeredHistogramBucketsByName,
+  type AllowedMetricName,
+  type BusyTimeAccumulator,
+  type LegacyMetricName,
+  type RegisteredCounterName,
+  type RegisteredHistogramName,
+  type RegisteredMetricLabels,
+  type RegisteredMetricName,
+} from './metric-registry.js';

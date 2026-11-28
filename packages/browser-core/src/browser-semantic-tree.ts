@@ -64,6 +64,8 @@ export interface AgentSemanticNode {
   rect?: { x: number; y: number; width: number; height: number };
   actionable?: true;
   children?: AgentSemanticNode[];
+  /** Its children are its whole subtree listed flat: the tree hit its nesting budget. */
+  flattened?: true;
 }
 
 export interface AgentSemanticTreePage {

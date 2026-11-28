@@ -14,12 +14,26 @@ import {
   type ManagedModelParameterSnapshot,
   parseSourceQualifiedModelKey,
   resolveLegacyMinimaxModel,
+  validateAdvisorModel,
+  isAdvisorReleased,
+  type AdvisorModelSelectionInput,
   type ModelProviderModelEntry,
 } from '../../service/model-system/index.js';
 
+import {
+  advisorWriteNeedsValidation,
+  nextAdvisorSelection,
+  readStoredAdvisor,
+  toAdvisorSelectionError,
+  toAdvisorSelectionView,
+  toDefaultAdvisorConfig,
+  toDefaultAdvisorSelectionView,
+} from './model-provider-advisor.js';
 import type {
+  AdvisorSelectionView,
   ModelProviderApplicationDeps,
   ModelProviderSessionView,
+  SelectAdvisorInput,
   SelectRuntimeModelInput,
 } from './model-provider-contracts.js';
 
@@ -28,6 +42,28 @@ export class ModelProviderApplication {
   constructor(private readonly deps: ModelProviderApplicationDeps) {}
 
   async list(input: { readonly sessionId?: string } = {}): Promise<ModelProviderModelEntry[]> {
+    return (await this.readCatalog(input)).models;
+  }
+
+  async listWithAdvisor(input: { readonly sessionId?: string } = {}): Promise<{
+    readonly models: ModelProviderModelEntry[];
+    readonly advisor: AdvisorSelectionView;
+  }> {
+    const { models, session, config } = await this.readCatalog(input);
+    const advisor = input.sessionId
+      ? toAdvisorSelectionView(config, session?.advisor)
+      : toDefaultAdvisorSelectionView(config, config.defaultAdvisor);
+    return { models, advisor };
+  }
+
+  async readAdvisor(input: { readonly sessionId?: string } = {}): Promise<AdvisorSelectionView> {
+    const config = this.deps.config();
+    if (!input.sessionId) return toDefaultAdvisorSelectionView(config, config.defaultAdvisor);
+    const session = await this.deps.sessions.get(input.sessionId);
+    return toAdvisorSelectionView(config, session?.advisor);
+  }
+
+  private async readCatalog(input: { readonly sessionId?: string }) {
     await this.refresh();
     const session = input.sessionId ? await this.deps.sessions.get(input.sessionId) : undefined;
     const config = this.deps.config();
@@ -43,13 +79,101 @@ export class ModelProviderApplication {
           effectiveModelContextWindow: config.defaultModelContextWindow,
           effectiveModelThinking: config.defaultModelThinking,
         };
-    if (
+    const projected =
       input.sessionId &&
       selected &&
       session?.effectiveModel !== `${selected.providerId}/${selected.modelId}`
-    )
-      return catalog;
-    return projectStoredParameters(catalog, stored);
+        ? catalog
+        : projectStoredParameters(catalog, stored);
+    return { models: projected, session, config };
+  }
+
+  async selectAdvisor(input: SelectAdvisorInput): Promise<AdvisorSelectionView> {
+    const session = input.sessionId
+      ? await this.deps.sessions.get(input.sessionId)
+      : undefined;
+    if (input.sessionId && !session) {
+      throw new LocalModelProviderError(404, 'Session not found', 'SESSION_NOT_FOUND');
+    }
+    if (session?.sessionKind === 'channel') {
+      throw new LocalModelProviderError(
+        409,
+        'The advisor is not available for IM channel Sessions.',
+        'ADVISOR_SESSION_UNSUPPORTED',
+      );
+    }
+    const config = this.deps.config();
+    const selection = this.resolveAdvisorWrite(
+      session ? session.advisor : config.defaultAdvisor,
+      input,
+    );
+    if (input.sessionId) {
+      await this.deps.sessions.updateAdvisor(input.sessionId, selection);
+      return toAdvisorSelectionView(this.deps.config(), selection);
+    }
+    try {
+      await this.deps.setDefaultAdvisor(toDefaultAdvisorConfig(selection));
+    } catch (error) {
+      throw new LocalModelProviderError(
+        400,
+        error instanceof Error ? error.message : String(error),
+        'CONFIG_WRITE_FAILED',
+      );
+    }
+    this.publishDefaultModelChanged();
+    return toDefaultAdvisorSelectionView(this.deps.config(), selection);
+  }
+
+  resolveAdvisorWrite(
+    stored: AdvisorModelSelectionInput | null | undefined,
+    input: Omit<SelectAdvisorInput, 'sessionId'>,
+  ): AdvisorModelSelectionInput {
+    const config = this.deps.config();
+    if (!isAdvisorReleased(config)) {
+      throw new LocalModelProviderError(
+        403,
+        'The advisor is turned off (beta.advisor: false in config.yaml).',
+        'ADVISOR_DISABLED',
+      );
+    }
+    const selection = nextAdvisorSelection(readStoredAdvisor(config, stored), input);
+    if (advisorWriteNeedsValidation(selection)) {
+      this.assertAdvisorUsable(selection, input.contextLimit);
+    }
+    return selection;
+  }
+
+  private assertAdvisorUsable(
+    selection: AdvisorModelSelectionInput & { readonly model: string },
+    contextLimit: number | undefined,
+  ): void {
+    const parsed = parseSourceQualifiedModelKey(selection.model);
+    if (!parsed) {
+      throw new LocalModelProviderError(
+        400,
+        `Unknown advisor model ${selection.model}`,
+        'MODEL_NOT_AVAILABLE_FOR_ROUTE',
+      );
+    }
+    const { providerId, modelId } = parsed;
+    this.assertModelAvailable(providerId, modelId);
+    this.deps.providers.assertModelSelectable(providerId, modelId);
+    const config = this.deps.config();
+    if (contextLimit !== undefined) {
+      const catalogEntry = listLocalRuntimeModels(config, undefined, {
+        cache: this.deps.providers.loadCacheData(),
+      }).find((entry) => entry.providerId === providerId && entry.modelId === modelId);
+      validateContextLimit(
+        { contextLimit },
+        catalogEntry,
+        modelConfigForRef(config, providerId, modelId),
+      );
+    }
+    try {
+      validateAdvisorModel(config, selection);
+    } catch (error) {
+      throw toAdvisorSelectionError(error);
+    }
   }
 
   private resolveLegacySelection(
@@ -432,7 +556,7 @@ function modelSelectionFromSession(session: ModelProviderSessionView | undefined
 }
 
 function validateContextLimit(
-  input: SelectRuntimeModelInput,
+  input: Pick<SelectRuntimeModelInput, 'contextLimit'>,
   catalogEntry: ModelProviderModelEntry | undefined,
   modelConfig?: ReturnType<typeof modelConfigForRef>,
 ): void {

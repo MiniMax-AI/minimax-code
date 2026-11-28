@@ -8,7 +8,8 @@ import type {
   AskQuestionnaireRequest,
 } from "@mavis/shared/questionnaire";
 import type { LocalSkillService } from "@mavis/local-runtime";
-import type { LocalMcpPublicFacade } from "../../service/mcp/index.js";
+import type { LocalMcpPublicFacade, McpAuthFacade } from "../../service/mcp/index.js";
+import type { AdvisorSelectionView, SelectAdvisorInput } from "./model-provider-contracts.js";
 import type {
   ListInstalledPluginsInput as ListInstalledPluginsReq,
   ListInstalledPluginsResult as ListInstalledPluginsResp,
@@ -28,6 +29,20 @@ import type {
   CodexOAuthStatus,
   UserModelInputView,
 } from "../../service/model-system/index.js";
+
+export type {
+  McpAuthStartResult,
+  McpAuthState,
+  McpAuthStateView,
+  McpAuthTarget,
+  McpAuthTestResult,
+} from "../../service/mcp/index.js";
+
+export type {
+  LocalRuntimeBackgroundTaskQuery,
+  LocalRuntimeBackgroundTaskStatus,
+  LocalRuntimeBackgroundTaskView,
+};
 
 export type ProcessLocalModelInput = Omit<UserModelInputView, "modalities"> & {
   modalities?: { input?: readonly string[]; output?: readonly string[] };
@@ -99,6 +114,7 @@ interface LocalRuntimeBackgroundTaskQuery {
   readonly statuses?: readonly LocalRuntimeBackgroundTaskStatus[];
   readonly kinds?: readonly LocalRuntimeBackgroundTaskView["kind"][];
   readonly undeliveredOnly?: boolean;
+  readonly excludeDeliveryDeferred?: boolean;
   readonly limit?: number;
   /**
    * Read each terminal Task's root notification receipt and project `notification`. Off by
@@ -159,6 +175,11 @@ export interface LocalRuntimeApplication {
     ): Promise<GlobalThreadGoal>;
     clear(sessionId: string): Promise<boolean>;
   };
+  readonly pluginHookSessions?: {
+    markNextSessionStart(sessionId: string, source: "clear" | "fork"): void;
+    abortSessionTurn(sessionId: string): Promise<void>;
+    endSession(sessionId: string, reason: "clear" | "archive" | "resume_other"): Promise<void>;
+  };
   readonly mcp?: Pick<
     LocalMcpPublicFacade,
     | "listLocalMcpServers"
@@ -167,6 +188,7 @@ export interface LocalRuntimeApplication {
     | "clearSessionServers"
     | "inspectProjectMcp"
   >;
+  readonly mcpAuth?: McpAuthFacade;
   readonly questionnaires?: {
     getPending(input: {
       agentName: string;
@@ -263,6 +285,10 @@ export interface LocalRuntimeApplication {
     getPtcEnabled?(): Promise<boolean>;
     /** Persists `beta.ptc` in config.yaml and returns the effective value. */
     setPtcEnabled?(input: { enabled: boolean }): Promise<boolean>;
+    /** Effective global advisor switch, as this host's config projection sees it. */
+    getAdvisorEnabled?(): Promise<boolean>;
+    /** Persists `advisor.enabled` in config.yaml and returns the effective value. */
+    setAdvisorEnabled?(input: { enabled: boolean }): Promise<boolean>;
   };
   readonly models?: {
     list(input?: { sessionId?: string }): Promise<readonly unknown[]>;
@@ -272,6 +298,8 @@ export interface LocalRuntimeApplication {
       variant?: string;
       sessionId?: string;
     }): Promise<boolean>;
+    getAdvisor(input?: { sessionId?: string }): Promise<AdvisorSelectionView>;
+    selectAdvisor(input: SelectAdvisorInput): Promise<AdvisorSelectionView>;
     /** Adds or removes a model favorite; absent when the host has no preference store. */
     setFavorite?(input: {
       providerId: string;

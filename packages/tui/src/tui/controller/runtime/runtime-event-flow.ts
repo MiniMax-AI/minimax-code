@@ -9,6 +9,7 @@ import type {
 } from '../../../runtime/port.js';
 import type { TuiStreamEvent } from '../../../runtime/stream-events.js';
 import type { ExecResultError } from '../../../application/exec-result.js';
+import { writeTuiAutomationDiagnostic } from '../../../application/automation-diagnostics.js';
 import type {
   TuiQueueUpdatedEvent,
   TuiSessionCatalogEvent,
@@ -27,6 +28,7 @@ import type { TuiRuntimeStateCoordinator } from './runtime-state-coordinator.js'
 import type { TuiSessionFlow } from '../session-flow.js';
 import type { TuiDelegationFlow } from '../delegation-flow.js';
 import type { TuiGoalFlow } from '../product/goal-flow.js';
+import type { TuiFeatureFlow } from '../product/feature-flow.js';
 import { delayWithAbort } from '../support.js';
 import type { TuiPromptSuggestionStore } from '../../features/composer/prompt-suggestion.js';
 import {
@@ -49,8 +51,11 @@ const EVENT_BUS_RECONNECT_MAX_DELAY_MS = 10_000;
 const INCIDENT_RECONNECT_WINDOW_MS = 30_000;
 const INCIDENT_RECONNECT_FAILURE_THRESHOLD = 3;
 const TERMINAL_RECONCILIATION_TIMEOUT_MS = 2_000;
+const EXTENDED_TERMINAL_RECONCILIATION_TIMEOUT_MS = 30_000;
 // A projected run must read as settled on two consecutive checks before the TUI clears it.
 const STALE_RUN_CHECK_INTERVAL_MS = 5_000;
+/** How many recently ended Turn ids are kept to refuse adopting them again. */
+const ENDED_TURN_MEMORY = 32;
 
 type AppendLocalCell = (content: string, kind?: 'final-summary' | 'warning' | 'error') => void;
 
@@ -79,6 +84,8 @@ export interface TuiRuntimeEventFlowOptions {
   readonly onLlmRetryChanged?: (event: TuiLlmRetryEvent | undefined) => void;
   readonly onRetryAvailabilityChanged?: (sessionId: string, retryable: boolean) => void;
   readonly goalFlow?: Pick<TuiGoalFlow, 'project' | 'refresh'>;
+  /** Global MCP auth events; they are not Session projections. */
+  readonly mcpAuth?: Pick<TuiFeatureFlow, 'handleMcpAuthEvent'>;
   /** Next-message suggestions; re-render only when the visible Session's one changes. */
   readonly promptSuggestions?: Pick<TuiPromptSuggestionStore, 'observe'>;
   readonly updateFollowUpPanel: () => void;
@@ -88,7 +95,10 @@ export interface TuiRuntimeEventFlowOptions {
   readonly queueEnabled: boolean;
   readonly observability?: TuiObservability;
   readonly incidentReporter?: TuiIncidentSink;
+  /** Overrides `MCODE_TUI_TERMINAL_RECONCILIATION_TIMEOUT_MS`; mainly for tests. */
   readonly terminalReconciliationTimeoutMs?: number;
+  /** Keeps the Runtime Turn outcome when durable-history confirmation degrades. */
+  readonly keepAutomationOutcomeOnHistoryDegrade?: boolean;
   /** Interval for the stale-run safety net; `0` disables the timer. */
   readonly staleRunCheckIntervalMs?: number;
   readonly notify?: (kind: TuiTerminalNotificationKind, key: string) => void;
@@ -110,6 +120,7 @@ export class TuiRuntimeEventFlow {
       }
     | undefined;
   private readonly llmRetryCalls = new Map<string, TuiLlmRetryEvent>();
+  private readonly endedTurnIds = new Set<string>();
   /** The latest Turn content review stopped; its terminal settles as that stop. */
   private reviewStoppedTurn:
     | { readonly turnId: string; readonly variant: ContentReviewStopVariant }
@@ -523,7 +534,21 @@ export class TuiRuntimeEventFlow {
   }
 
   private async handle(event: TuiRuntimeEvent): Promise<void> {
-    if (event.type === "turn.prompt_suggestion.generated") {
+    if (
+      (event.type === 'session.finish' ||
+        event.type === 'session.error' ||
+        event.type === 'session.abort') &&
+      event.turnId
+    ) {
+      this.rememberEndedTurn(event.turnId);
+    } else if (event.type === 'session.start' && event.turnId) {
+      this.endedTurnIds.delete(event.turnId);
+    }
+    if (event.type === 'mcp.auth_updated' || event.type === 'mcp.auth_required') {
+      this.options.mcpAuth?.handleMcpAuthEvent(event);
+      return;
+    }
+    if (event.type === 'turn.prompt_suggestion.generated') {
       if (
         this.options.promptSuggestions?.observe(event) &&
         event.sessionId === this.options.controller.snapshot().session?.sessionId
@@ -724,7 +749,8 @@ export class TuiRuntimeEventFlow {
     if (
       this.options.isStopped() ||
       this.options.controller.snapshot().session?.sessionId !== sessionId ||
-      this.options.controller.snapshot().activeTurnId === turnId
+      this.options.controller.snapshot().activeTurnId === turnId ||
+      this.endedTurnIds.has(turnId)
     ) {
       return;
     }
@@ -827,8 +853,10 @@ export class TuiRuntimeEventFlow {
           }
           receivedEvent = true;
           if (event.cursor) afterCursor = event.cursor;
-          const failure = this.options.controller.applyRuntimeTurnEvent(liveTurn.turnId, event);
-          if (failure) this.options.append(failure, 'error');
+          // A failure is shown once: the Turn's own error cell here, then the
+          // terminal event's error cell or automation result (handleRuntimeTurnFinished).
+          this.options.controller.applyRuntimeTurnEvent(liveTurn.turnId, event);
+          this.options.controller.runtimeTurnSettlement.observe(liveTurn.turnId, event);
           if (isSessionTurnTerminal(event)) return;
         }
       } catch {
@@ -863,6 +891,14 @@ export class TuiRuntimeEventFlow {
         liveTurn.controller.signal,
       );
     }
+  }
+
+  private rememberEndedTurn(turnId: string): void {
+    this.endedTurnIds.delete(turnId);
+    this.endedTurnIds.add(turnId);
+    if (this.endedTurnIds.size <= ENDED_TURN_MEMORY) return;
+    const oldest = this.endedTurnIds.values().next().value;
+    if (oldest !== undefined) this.endedTurnIds.delete(oldest);
   }
 
   private async settleLiveTurn(event: TuiSessionLifecycleEvent): Promise<number | undefined> {
@@ -1050,20 +1086,32 @@ export class TuiRuntimeEventFlow {
     }
 
     this.options.runProjection.reconcileRuntimeTurn();
+    const keepOutcomeOnHistoryDegrade = this.options.keepAutomationOutcomeOnHistoryDegrade === true;
     const terminalReconciliationTimeoutMs =
-      this.options.terminalReconciliationTimeoutMs ?? TERMINAL_RECONCILIATION_TIMEOUT_MS;
+      this.options.terminalReconciliationTimeoutMs ??
+      resolveTerminalReconciliationTimeoutMs(keepOutcomeOnHistoryDegrade);
     const requiresDurableAutomationAnswer =
       deferredSettlement?.status === 'succeeded' && !continuationPending;
-    let automationHistoryError: ExecResultError | undefined;
+    // Capture answer before refresh when degraded history keeps the outcome.
+    if (requiresDurableAutomationAnswer && keepOutcomeOnHistoryDegrade && event.turnId) {
+      runtimeSettlement.captureTurnAnswer(event.turnId);
+    }
+    let automationHistoryDegraded: ExecResultError | undefined;
     if (requiresDurableAutomationAnswer) {
       const historyOutcome = await settleWithin(
         this.options.controller.reconcileOwnerHistory(false),
         terminalReconciliationTimeoutMs,
       );
-      automationHistoryError = automationHistoryReconciliationError(historyOutcome);
-      if (automationHistoryError) {
+      automationHistoryDegraded = automationHistoryReconciliationError(historyOutcome);
+      if (automationHistoryDegraded && keepOutcomeOnHistoryDegrade) {
+        this.reportDurableHistoryDegraded(
+          automationHistoryDegraded,
+          event,
+          terminalReconciliationTimeoutMs,
+        );
+      } else if (automationHistoryDegraded) {
         this.options.append(
-          `${automationHistoryError.message} Reopen the Session to retry synchronization.`,
+          `${automationHistoryDegraded.message} Reopen the Session to retry synchronization.`,
           'error',
         );
       }
@@ -1101,15 +1149,37 @@ export class TuiRuntimeEventFlow {
         );
         return true;
       }
+      // When configured, a degraded confirmation is reported rather than downgrading a delivered
+      // answer to `failed` made automation drivers discard finished work as a step failure.
+      const historyFailure = keepOutcomeOnHistoryDegrade ? undefined : automationHistoryDegraded;
       await runtimeSettlement.publish(
-        automationHistoryError ? { ...deferredSettlement, status: 'failed' } : deferredSettlement,
+        historyFailure ? { ...deferredSettlement, status: 'failed' } : deferredSettlement,
         liveTurnDurationMs,
-        automationHistoryError ?? automationTerminalError(event),
+        historyFailure ?? automationTerminalError(event),
       );
       return true;
     }
     if (!deferredSettlement || continuationPending) this.appendTerminalError(event);
     return ownsTerminal && !automationResultEnabled;
+  }
+
+  private reportDurableHistoryDegraded(
+    error: ExecResultError,
+    event: TuiSessionLifecycleEvent,
+    timeoutMs: number,
+  ): void {
+    this.options.append(`${error.message} Reopen the Session to retry synchronization.`, 'error');
+    this.breadcrumb('cli.automation.durable_history_degraded', {
+      ...(error.code ? { code: error.code } : {}),
+      timeoutMs,
+      sessionId: event.sessionId,
+      ...(event.turnId ? { turnId: event.turnId } : {}),
+    });
+    const message =
+      '[mcode-tui] automation result: durable history confirmation degraded; ' +
+      `keeping the settled turn outcome (code=${error.code ?? 'unknown'}, timeoutMs=${timeoutMs}, ` +
+      `session=${event.sessionId}, turn=${event.turnId ?? 'none'})`;
+    writeTuiAutomationDiagnostic(message);
   }
 
   /**
@@ -1319,10 +1389,13 @@ function formatQueueFailure(summary: string, reason: string | undefined, nextSte
     : `${summary}. ${nextStep}`;
 }
 
-type ContentReviewStopVariant = 'content' | 'network' | 'auth';
+type ContentReviewStopVariant = 'content' | 'network' | 'auth' | 'reply';
 
 function contentReviewStopNotice(variant: ContentReviewStopVariant): string {
   if (variant === 'auth') return 'Content review authentication expired. Run /login, then retry.';
+  if (variant === 'reply') {
+    return "This reply may involve content we can't help with. Try a different topic.";
+  }
   if (variant === 'network') {
     return 'Content review did not return a usable result, so this response stopped. Unreviewed output was withheld. Retry; if this persists, use /feedback to report the review failure.';
   }
@@ -1330,6 +1403,15 @@ function contentReviewStopNotice(variant: ContentReviewStopVariant): string {
 }
 
 function contentReviewStopError(variant: ContentReviewStopVariant): ExecResultError {
+  if (variant === 'reply') {
+    // Only the final reply was withdrawn; retrying verbatim is unlikely to succeed.
+    return {
+      category: 'runtime',
+      code: 'CONTENT_REPLY_WITHDRAWN',
+      message: contentReviewStopNotice(variant),
+      retryable: false,
+    };
+  }
   return {
     category: 'runtime',
     code:
@@ -1410,6 +1492,14 @@ type TimedSettlement<T> =
   | { readonly status: 'settled'; readonly value: T }
   | { readonly status: 'failed'; readonly error: unknown }
   | { readonly status: 'timeout' };
+
+/** An explicit option wins; otherwise `MCODE_TUI_TERMINAL_RECONCILIATION_TIMEOUT_MS`, else the default. */
+function resolveTerminalReconciliationTimeoutMs(extended: boolean): number {
+  const raw = process.env.MCODE_TUI_TERMINAL_RECONCILIATION_TIMEOUT_MS;
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  return extended ? EXTENDED_TERMINAL_RECONCILIATION_TIMEOUT_MS : TERMINAL_RECONCILIATION_TIMEOUT_MS;
+}
 
 function automationHistoryReconciliationError(
   outcome: TimedSettlement<boolean>,

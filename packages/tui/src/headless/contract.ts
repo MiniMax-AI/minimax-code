@@ -1,6 +1,7 @@
 import { Ajv } from 'ajv';
 
-import type { TuiTurnRunOutcome } from '../application/turn-run-outcome.js';
+import { isExecAdvisorSummary, type ExecAdvisorSummary } from '../application/advisor-calls.js';
+import type { TuiModelReplacement, TuiTurnRunOutcome } from '../application/turn-run-outcome.js';
 
 export type ExecResultStatus = 'succeeded' | 'failed' | 'timeout' | 'cancelled' | 'limit_exceeded';
 
@@ -22,7 +23,7 @@ export interface ExecModelIdentity {
 }
 
 export interface ExecTokenUsage {
-  /** Input plus output; cache buckets are separate and reasoning may overlap output. */
+  /** Sum of input, output, cache read and cache write; reasoning is reported within output. */
   readonly totalTokens?: number;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
@@ -43,10 +44,18 @@ export interface ExecResult {
   readonly status: ExecResultStatus;
   readonly output?: unknown;
   readonly error?: ExecError;
+  /** The model explicitly requested by --model or the Session selection. */
+  readonly requestedModel?: ExecModelIdentity;
+  /** The model that actually served the Turn; this preserves the existing model field meaning. */
   readonly model?: ExecModelIdentity;
+  readonly modelReplacement?: TuiModelReplacement;
   readonly usage?: ExecTokenUsage;
   readonly usageSource?: ExecUsageSource;
   readonly usageIncomplete?: boolean;
+  /** True when usage.totalTokens includes input, output, cache read and cache write tokens. */
+  readonly usageTotalIncludesCacheRead?: boolean;
+  /** Present only when the main model called the advisor in this Run. */
+  readonly advisor?: ExecAdvisorSummary;
   readonly durationMs: number;
 }
 
@@ -90,10 +99,13 @@ export function createExecResult(
   options: {
     readonly runId: string;
     readonly outputSchema?: Readonly<Record<string, unknown>>;
+    readonly requestedModel?: ExecModelIdentity;
     readonly model?: ExecModelIdentity;
+    readonly modelReplacement?: TuiModelReplacement;
     readonly usage?: ExecTokenUsage;
     readonly usageSource?: ExecUsageSource;
     readonly usageIncomplete?: boolean;
+    readonly usageTotalIncludesCacheRead?: boolean;
     readonly validation?: OutputValidation;
   },
 ): ExecResult {
@@ -111,10 +123,16 @@ export function createExecResult(
     status: normalized.status === 'awaiting-user-continuation' ? 'failed' : normalized.status,
     ...(normalized.status === 'succeeded' && validation?.ok ? { output: validation.value } : {}),
     ...(normalized.error ? { error: { ...normalized.error } } : {}),
+    ...(options.requestedModel ? { requestedModel: { ...options.requestedModel } } : {}),
     ...(options.model ? { model: { ...options.model } } : {}),
+    ...(options.modelReplacement ? { modelReplacement: { ...options.modelReplacement } } : {}),
     ...(options.usage ? { usage: { ...options.usage } } : {}),
     ...(options.usageSource !== undefined ? { usageSource: options.usageSource } : {}),
     ...(options.usageIncomplete !== undefined ? { usageIncomplete: options.usageIncomplete } : {}),
+    ...(options.usage && options.usageTotalIncludesCacheRead !== undefined
+      ? { usageTotalIncludesCacheRead: options.usageTotalIncludesCacheRead }
+      : {}),
+    ...(outcome.advisor ? { advisor: outcome.advisor } : {}),
     durationMs: normalized.durationMs,
   };
 }
@@ -130,13 +148,18 @@ export function isExecResult(value: unknown): value is ExecResult {
     typeof value.durationMs === 'number' &&
     Number.isFinite(value.durationMs) &&
     isExecStatus(value.status) &&
+    isModel(value.requestedModel) &&
     isModel(value.model) &&
+    isModelReplacement(value.modelReplacement) &&
     isUsage(value.usage) &&
     (value.usageSource === undefined ||
       value.usageSource === 'completed_responses' ||
       value.usageSource === 'analytics_fallback' ||
       value.usageSource === 'unavailable') &&
     (value.usageIncomplete === undefined || typeof value.usageIncomplete === 'boolean') &&
+    (value.usageTotalIncludesCacheRead === undefined ||
+      typeof value.usageTotalIncludesCacheRead === 'boolean') &&
+    (value.advisor === undefined || isExecAdvisorSummary(value.advisor)) &&
     isError(value.error)
   );
 }
@@ -195,6 +218,20 @@ function isModel(value: unknown): boolean {
     optionalString(value.providerKind) &&
     optionalString(value.protocol) &&
     (value.structuredOutputMode === undefined || value.structuredOutputMode === 'native_strict')
+  );
+}
+
+function isModelReplacement(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return (
+    isModel(value.requestedModel) &&
+    value.requestedModel !== undefined &&
+    isModel(value.actualModel) &&
+    value.actualModel !== undefined &&
+    (value.tier === 'runtime_fallback' || value.tier === 'runtime_selection') &&
+    (value.reason === 'requested_model_not_in_runtime_catalog' ||
+      value.reason === 'runtime_selected_different_effective_model')
   );
 }
 

@@ -1,3 +1,5 @@
+import type { McpAuthRequiredError } from '@mavis/mcp';
+import { LOCAL_PLUGIN_MARKETPLACE } from '@mavis/shared';
 import path from 'node:path';
 
 import type {
@@ -157,9 +159,18 @@ export class PluginSystem implements AgentHostTurnCapabilityProvider {
   private readonly connectorRuntime: ConnectorRuntimePort;
   private readonly packageStorage: PluginPackageStorage;
   private readonly localDirectoryWatcher: LocalPluginDirectoryWatcherPort;
+  readonly forbiddenPluginNames: ReadonlySet<string>;
 
   constructor(private readonly options: PluginSystemOptions) {
-    this.builder = new PluginSnapshotBuilder(options.mcpNames);
+    this.forbiddenPluginNames = new Set(
+      (options.forbiddenPluginNames ?? []).map((name) =>
+        name.trim().normalize('NFKC').toLocaleLowerCase('en-US'),
+      ),
+    );
+    this.builder = new PluginSnapshotBuilder(options.mcpNames, {
+      forbiddenPluginNames: this.forbiddenPluginNames,
+      ...(options.onlyOfficialPlugins ? { onlyOfficialPlugins: true } : {}),
+    });
     this.metrics = new PluginSystemMetrics(options.metrics);
     this.packageStorage = new PluginPackageStorage({
       dataDir: options.dataDir,
@@ -303,6 +314,22 @@ export class PluginSystem implements AgentHostTurnCapabilityProvider {
   markReservationsDirty(): void {
     this.marketplacePreview.invalidate();
     if (this.initializeStarted) this.scheduleCachedRebuild();
+  }
+
+  async probeMcpServer(serverName: string): Promise<'connected' | McpAuthRequiredError | Error> {
+    this.assertUsable();
+    return (
+      (await this.mcpRuntime.probe?.(serverName)) ?? new Error('Plugin MCP probe is unavailable')
+    );
+  }
+
+  async rediscoverMcpServers(serverNames: readonly string[]): Promise<void> {
+    await this.initialization.promise;
+    this.assertUsable();
+    await this.runExclusive(async () => {
+      this.mcpRuntime.forgetInventories?.(serverNames);
+      await this.rebuildForCurrentScope(false);
+    });
   }
 
   async refresh(): Promise<void> {
@@ -503,7 +530,13 @@ export class PluginSystem implements AgentHostTurnCapabilityProvider {
             await staged?.restore();
           }
         },
-        finalize: async () => staged?.discard(),
+        finalize: async () => {
+          await staged?.discard();
+          await this.options.mcpCredentials?.deleteLocalPlugin({
+            name: target.name,
+            marketplace: LOCAL_PLUGIN_MARKETPLACE,
+          });
+        },
       });
       this.localStateRevision += 1;
       this.options.onPluginDeactivated?.(target.name);

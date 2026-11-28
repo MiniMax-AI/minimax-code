@@ -57,7 +57,6 @@ export class SessionArtifactService {
       () => this.owners.files.deleteSession(sessionId),
       ...(options.preserveUsage ? [] : [() => this.owners.usage.deleteSession(sessionId)]),
       () => this.owners.messages.deleteSessionData(sessionId),
-      () => this.deleteLegacyHistory(sessionId),
       () => this.owners.canonicalHistory.delete(sessionId),
       () => this.owners.stream.deleteSession(sessionId),
     ];
@@ -68,6 +67,7 @@ export class SessionArtifactService {
     if (errors.length > 0) {
       throw new AggregateError(errors, `Session-owned artifact deletion failed: ${sessionId}`);
     }
+    await this.deleteLegacyHistory(sessionId);
   }
 
   private async deleteLegacyHistory(sessionId: string): Promise<void> {

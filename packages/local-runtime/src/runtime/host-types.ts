@@ -27,7 +27,7 @@ export interface LocalToolContext {
 export interface LocalTurnRunner {
   runTurn<TCtx extends LocalToolContext = LocalToolContext>(
     input: RunTurnInput<TCtx>,
-  ): Promise<void>;
+  ): Promise<unknown>;
 }
 
 export interface LocalRuntimeHostOptions {

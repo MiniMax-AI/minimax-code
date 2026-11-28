@@ -76,7 +76,7 @@ describe("TuiDelegationFlow", () => {
       ],
     });
     expect(transcript.snapshot()).toEqual([]);
-    expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+    expect(flow.agentCounts()).toEqual({ active: 1, total: 1, waiting: 0 });
     const permissionResolvers = flow.permissionResolvers(() => "root-turn");
     expect(permissionResolvers.permissionOwnerTurnId("root")).toBe("root-turn");
     expect(permissionResolvers.permissionOwnerTurnId("child-1")).toBe("turn-1");
@@ -129,7 +129,7 @@ describe("TuiDelegationFlow", () => {
 
     expect(flow.snapshot().summary).toMatchObject({ failed: 1, running: 1 });
     expect(transcript.snapshot()).toEqual([]);
-    expect(flow.agentCounts()).toEqual({ active: 1, total: 2 });
+    expect(flow.agentCounts()).toEqual({ active: 1, total: 2, waiting: 0 });
     flow.stop();
   });
 
@@ -166,7 +166,7 @@ describe("TuiDelegationFlow", () => {
 
     expect(flow.snapshot().summary).toMatchObject({ done: 1, queued: 0 });
     expect(transcript.snapshot()).toEqual([]);
-    expect(flow.agentCounts()).toEqual({ active: 0, total: 1 });
+    expect(flow.agentCounts()).toEqual({ active: 0, total: 1, waiting: 0 });
     flow.stop();
   });
 
@@ -209,7 +209,7 @@ describe("TuiDelegationFlow", () => {
 
     expect(flow.snapshot().summary).toMatchObject({ done: 1, queued: 0 });
     expect(transcript.snapshot()).toEqual([]);
-    expect(flow.agentCounts()).toEqual({ active: 0, total: 1 });
+    expect(flow.agentCounts()).toEqual({ active: 0, total: 1, waiting: 0 });
     flow.stop();
   });
 
@@ -252,7 +252,7 @@ describe("TuiDelegationFlow", () => {
 
     await flow.refresh();
 
-    expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+    expect(flow.agentCounts()).toEqual({ active: 1, total: 1, waiting: 0 });
     flow.stop();
   });
 
@@ -303,7 +303,7 @@ describe("TuiDelegationFlow", () => {
       expect(listBackgroundTasks).toHaveBeenCalledWith("root", {
         machineStatus: true,
       });
-      expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+      expect(flow.agentCounts()).toEqual({ active: 1, total: 1, waiting: 0 });
 
       // Settled once a parent Turn takes the report, even while that Turn is still running.
       tasks = [
@@ -312,7 +312,7 @@ describe("TuiDelegationFlow", () => {
         }),
       ];
       await flow.refresh();
-      expect(flow.agentCounts()).toEqual({ active: 0, total: 1 });
+      expect(flow.agentCounts()).toEqual({ active: 0, total: 1, waiting: 0 });
       flow.stop();
     });
 
@@ -363,7 +363,7 @@ describe("TuiDelegationFlow", () => {
 
       await flow.refresh();
 
-      expect(flow.agentCounts()).toEqual({ active: 3, total: 2 });
+      expect(flow.agentCounts()).toEqual({ active: 3, total: 2, waiting: 0 });
       flow.stop();
     });
 
@@ -385,7 +385,7 @@ describe("TuiDelegationFlow", () => {
 
       await flow.refresh();
 
-      expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+      expect(flow.agentCounts()).toEqual({ active: 1, total: 1, waiting: 0 });
       flow.stop();
     });
 
@@ -1486,7 +1486,7 @@ describe("TuiDelegationFlow", () => {
     ]);
     expect(runtimePort.getDelegationSnapshot).toHaveBeenCalledWith("root");
     expect(transcript.get("agent-team:root")).toBeUndefined();
-    expect(flow.agentCounts()).toEqual({ active: 0, total: 0 });
+    expect(flow.agentCounts()).toEqual({ active: 0, total: 0, waiting: 0 });
   });
 
   it("marks a child as waiting when its Runtime interaction blocks", async () => {
@@ -1652,7 +1652,7 @@ describe("TuiDelegationFlow", () => {
       });
       await flow.refresh();
 
-      expect(flow.agentCounts()).toEqual({ active: 1, total: 1 });
+      expect(flow.agentCounts()).toEqual({ active: 1, total: 1, waiting: 0 });
       expect(flow.backgroundTaskCount()).toBe(0);
       flow.stop();
     });

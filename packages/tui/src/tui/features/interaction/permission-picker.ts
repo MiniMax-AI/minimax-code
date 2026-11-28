@@ -1,8 +1,10 @@
+import { homedir } from 'node:os';
+import { stripVTControlCharacters } from 'node:util';
 import { Text, matchesKey } from '../../engine/public.js';
 import type { Component, Focusable } from '../../rendering/component.js';
 import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
 import { Input } from '../../widgets/input.js';
-import { SelectList, type SelectListTheme } from '../../widgets/select-list.js';
+import { SelectList } from '../../widgets/select-list.js';
 import { sanitizeTerminalText } from '../../rendering/terminal-text.js';
 import type { TuiPendingPermission, TuiPermissionDecision } from '../../../runtime/port.js';
 import {
@@ -21,6 +23,16 @@ import {
 import { highlightTuiShellCommand, resolveTuiShellCommand } from '../../theme/shell-command.js';
 
 const DEFAULT_PERMISSION_CONTEXT_LINES = 6;
+const DECISION_GUTTER = '  ';
+const DECISION_LABEL_MAX_WIDTH = 34;
+const DECISION_DETAIL_GAP = 2;
+/** More rules than this do not fit beside the decisions, so they get their own review step. */
+const MAX_INLINE_ALWAYS_RULES = 2;
+/**
+ * Scope rows under the decisions cannot scroll, so a longer scope moves to the review step,
+ * where it scrolls, instead of pushing the action preview off a short terminal.
+ */
+const MAX_INLINE_SCOPE_ROWS = 2;
 
 interface PermissionContextPresentation {
   readonly lines: readonly string[];
@@ -54,6 +66,11 @@ interface PermissionFrameModel {
 export class TuiPermissionPicker implements Component, Focusable {
   private readonly list: SelectList;
   private readonly decisions: TuiPermissionDecision[];
+  private readonly alwaysNeedsReview: boolean;
+  /** Plain text of the inline "Always" scope rows built for the latest frame. */
+  private inlineScopeRows: readonly string[] = [];
+  /** Whether the latest frame actually showed every inline scope row. */
+  private inlineScopeVisible = false;
   private _focused = false;
   private confirmAlways = false;
   private denyFeedback = false;
@@ -104,16 +121,10 @@ export class TuiPermissionPicker implements Component, Focusable {
       },
     ];
     this.decisions = decisions.map((item) => item.value);
-    this.list = new SelectList(decisions, decisions.length, permissionSelectTheme(), {
-      minPrimaryColumnWidth: 22,
-      maxPrimaryColumnWidth: 34,
-      truncatePrimary: ({ item, maxWidth }) =>
-        fitPermissionDecisionLabel(
-          item.value as TuiPermissionDecision,
-          this.decisions.indexOf(item.value as TuiPermissionDecision) + 1,
-          maxWidth,
-        ),
-    });
+    this.alwaysNeedsReview = alwaysRuleNeedsReview(request);
+    // The list owns selection and keys only; the rows are drawn by renderDecisionOptions so the
+    // focus marker and the consequences never move the labels.
+    this.list = new SelectList(decisions, decisions.length, baseSelectTheme);
     this.list.onSelect = (item) => this.choose(item.value as TuiPermissionDecision);
     this.list.onCancel = () => this.onSelect('deny');
     this.denyInput.onSubmit = (value) => this.onSelect('deny', value.trim() || undefined);
@@ -177,11 +188,29 @@ export class TuiPermissionPicker implements Component, Focusable {
 
   render(width: number): string[] {
     const safeWidth = Math.max(0, Math.floor(width));
-    if (safeWidth === 0) return [];
-    return renderPermissionFrame(this.buildFrameModel(safeWidth), safeWidth);
+    if (safeWidth === 0) return this.recordInlineScope([]);
+    return this.recordInlineScope(
+      renderPermissionFrame(this.buildFrameModel(safeWidth), safeWidth),
+    );
   }
 
   renderViewport(width: number, rawHeight: number): readonly string[] {
+    return this.recordInlineScope(this.renderViewportLines(width, rawHeight));
+  }
+
+  /**
+   * "Always allow" skips its review step only when the scope it saves was on screen: a short
+   * terminal clips the rows under the decisions, and then the review step shows the scope.
+   */
+  private recordInlineScope<T extends readonly string[]>(lines: T): T {
+    const shown = lines.map((line) => stripVTControlCharacters(line));
+    this.inlineScopeVisible =
+      this.inlineScopeRows.length > 0 &&
+      this.inlineScopeRows.every((row) => shown.some((line) => line.includes(row)));
+    return lines;
+  }
+
+  private renderViewportLines(width: number, rawHeight: number): readonly string[] {
     const safeWidth = Math.max(0, Math.floor(width));
     const height = Math.max(1, Math.floor(rawHeight));
     if (safeWidth === 0) return [];
@@ -255,6 +284,7 @@ export class TuiPermissionPicker implements Component, Focusable {
     const toolLabel = formatPermissionToolLabel(toolName);
     const tone = permissionDecisionTone(toolName);
     this.detailsExpandable = false;
+    this.inlineScopeRows = [];
 
     if (this.submitting) {
       return {
@@ -323,33 +353,75 @@ export class TuiPermissionPicker implements Component, Focusable {
 
     const context = renderPermissionContext(this.request, contentWidth, this.detailsExpanded);
     this.detailsExpandable = context.expandable;
+    const inlineScope = this.renderInlineAlwaysScope(contentWidth);
     return {
       title: '◆ Approval required',
       meta: toolLabel,
       tone,
       leading: [chalk.bold.hex(colors.text)(permissionPromptTitle(toolName)), ''],
       evidence: context.lines,
-      trailing: ['', ...this.renderDecisionOptions(contentWidth)],
+      trailing: [
+        '',
+        ...this.renderDecisionOptions(contentWidth, inlineScope.length === 0),
+        ...inlineScope,
+      ],
       footer: buildPermissionFooter(contentWidth),
       statusLine: createPermissionContextStatusLine(context, contentWidth),
     };
   }
 
-  private renderDecisionOptions(width: number): string[] {
-    const rendered = this.list.render(Math.max(1, width));
+  /**
+   * One row per decision with a fixed two-column gutter, a fixed label column and every
+   * consequence always visible: moving the focus only recolors rows, it never shifts text.
+   */
+  private renderDecisionOptions(width: number, alwaysNeedsReview: boolean): string[] {
     const selected = this.list.getSelectedItem()?.value as TuiPermissionDecision | undefined;
-    const selectedIndex = selected ? this.decisions.indexOf(selected) : -1;
-    if (!selected || selectedIndex < 0) return rendered;
+    const labelBudget = Math.max(
+      1,
+      Math.min(DECISION_LABEL_MAX_WIDTH, width - DECISION_GUTTER.length),
+    );
+    const labels = this.decisions.map((decision, index) =>
+      fitPermissionDecisionLabel(decision, index + 1, labelBudget),
+    );
+    const labelColumn = Math.max(...labels.map((label) => visibleWidth(label)));
+    const details = this.decisions.map((decision) =>
+      permissionDecisionDetail(decision, alwaysNeedsReview),
+    );
+    const detailWidth = width - DECISION_GUTTER.length - labelColumn - DECISION_DETAIL_GAP;
+    // A clipped consequence reads worse than none, so the column shows in full or not at all.
+    const showDetails = details.every((detail) => visibleWidth(detail) <= detailWidth);
 
-    const detailWidth = Math.max(1, width - 4);
-    const detail = new Text(chalk.hex(colors.muted)(permissionDecisionDetail(selected)), 0, 0)
-      .render(detailWidth)
-      .map((line) => fitLine(`    ${line}`, width));
-    return [
-      ...rendered.slice(0, selectedIndex + 1),
-      ...detail,
-      ...rendered.slice(selectedIndex + 1),
-    ];
+    return this.decisions.map((decision, index) => {
+      const label = labels[index] ?? '';
+      const focused = decision === selected;
+      const marker = focused ? `${chalk.bold.hex(colors.signal)('›')} ` : DECISION_GUTTER;
+      const paintedLabel = focused
+        ? chalk.bold.hex(colors.signal)(label)
+        : chalk.hex(colors.text)(label);
+      if (!showDetails) return fitLine(`${marker}${paintedLabel}`, width);
+      const padding = ' '.repeat(labelColumn - visibleWidth(label) + DECISION_DETAIL_GAP);
+      const detail = details[index] ?? '';
+      return fitLine(`${marker}${paintedLabel}${padding}${chalk.hex(colors.muted)(detail)}`, width);
+    });
+  }
+
+  /**
+   * The rule "Always allow" saves, shown up front so choosing it needs no second step. Empty when
+   * the rule needs its review step or would take more than MAX_INLINE_SCOPE_ROWS rows.
+   */
+  private renderInlineAlwaysScope(width: number): string[] {
+    if (!this.decisions.includes('allowAlways') || this.alwaysNeedsReview) return [];
+    const rules = this.request.ruleContents ?? [];
+    const rows = renderPermissionRows(
+      'Always',
+      rules.length === 1 ? rules : rules.map((rule) => `- ${rule}`),
+      width,
+    );
+    if (rows.length > MAX_INLINE_SCOPE_ROWS) return [];
+    this.inlineScopeRows = rows
+      .map((row) => stripVTControlCharacters(row).trimEnd())
+      .filter((row) => row.length > 0);
+    return ['', ...rows];
   }
 
   private resetViewport(): void {
@@ -359,7 +431,7 @@ export class TuiPermissionPicker implements Component, Focusable {
   }
 
   private choose(decision: TuiPermissionDecision): void {
-    if (decision === 'allowAlways') {
+    if (decision === 'allowAlways' && (this.alwaysNeedsReview || !this.inlineScopeVisible)) {
       this.confirmAlways = true;
       this.resetViewport();
       return;
@@ -494,21 +566,76 @@ function formatPendingPermissionDecision(decision: TuiPermissionDecision): strin
   return 'Allowing for this conversation…';
 }
 
-function permissionDecisionDetail(decision: TuiPermissionDecision): string {
-  if (decision === 'allowAlways') return 'Review the exact saved scope next';
-  if (decision === 'deny') return 'Add guidance before denying this action';
-  return 'MCode asks again in a new conversation';
+function permissionDecisionDetail(
+  decision: TuiPermissionDecision,
+  alwaysNeedsReview: boolean,
+): string {
+  if (decision === 'allowAlways') {
+    return alwaysNeedsReview ? 'Review the saved scope next' : 'Stop asking for the scope below';
+  }
+  if (decision === 'deny') return 'Add guidance for MCode';
+  return 'Ask again in a new conversation';
 }
 
-function permissionSelectTheme(): SelectListTheme {
-  return {
-    ...baseSelectTheme,
-    selectedPrefix: (text) => chalk.bold.hex(colors.signal)(text),
-    selectedText: (text) => {
-      const label = text.startsWith('→ ') ? text.slice(2) : text.trimStart();
-      return `${chalk.bold.hex(colors.signal)('›')} ${chalk.bold.hex(colors.signal)(label)}`;
-    },
-  };
+/**
+ * "Always allow" may skip its review step only for at most two rules, none of them broad. The
+ * latest frame must also have shown those rules (see recordInlineScope).
+ */
+function alwaysRuleNeedsReview(request: TuiPendingPermission): boolean {
+  const rules = request.ruleContents ?? [];
+  if (rules.length === 0 || rules.length > MAX_INLINE_ALWAYS_RULES) return true;
+  return rules.some(
+    (rule) => /[\r\n]/u.test(rule) || isBroadPermissionRule(rule, request.toolName),
+  );
+}
+
+function isBroadPermissionRule(rule: string, toolName: string | undefined): boolean {
+  const trimmed = rule.trim();
+  // Wildcards alone, also as an argv list such as ["*"].
+  if (!trimmed || /^[\s*/\\[\]",]+$/u.test(trimmed)) return true;
+  if (toolName !== undefined && trimmed.toLocaleLowerCase() === toolName.toLocaleLowerCase()) {
+    return true;
+  }
+  // A lone program with a wildcard (`python3:*`) allows every invocation of that program, and so
+  // does an argv prefix of only the program (`["make"]`): argv rules match by token prefix.
+  if (/^[^\s"[\]]+:\*$/u.test(trimmed)) return true;
+  const argv = parseArgvRule(trimmed);
+  if (argv && argv.length <= 1) return true;
+  return isBroadPathRule(trimmed);
+}
+
+function parseArgvRule(rule: string): readonly string[] | undefined {
+  if (!rule.startsWith('[')) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(rule);
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')
+      ? (parsed as string[])
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `<dir>/**` covering the home directory or an absolute directory at most two levels deep. */
+function isBroadPathRule(rule: string): boolean {
+  const match = /^(.*)[/\\]\*\*$/u.exec(rule);
+  if (!match) return false;
+  const directory = normalizeRulePath(match[1] ?? '');
+  const home = normalizeRulePath(homedir());
+  if (directory === '' || directory === '~') return true;
+  if (home && directory.toLocaleLowerCase() === home.toLocaleLowerCase()) return true;
+  const absolute = directory.startsWith('/') || /^[a-z]:/iu.test(directory);
+  if (!absolute) return false;
+  return (
+    directory
+      .replace(/^[a-z]:/iu, '')
+      .split('/')
+      .filter(Boolean).length <= 2
+  );
+}
+
+function normalizeRulePath(value: string): string {
+  return value.replaceAll('\\', '/').replace(/\/+$/u, '');
 }
 
 function fitPermissionDecisionLabel(

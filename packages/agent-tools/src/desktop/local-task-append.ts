@@ -61,9 +61,15 @@ export class LocalTaskAppendTool implements ToolImpl<
       tool_name: LocalTaskAppendToolDef.name,
       text,
       content: [{ type: 'text', text }],
-      // Admission only: the child Session and Turn stay runtime-internal, and
-      // the task handle is the single way to read or stop the work.
-      details: { task_id: result.taskId, mode: result.mode, accepted: true },
+      // Runtime evidence lets the UI join the durable lifecycle for this exact
+      // round. The model still uses the task handle to read or stop the work.
+      details: {
+        task_id: result.taskId,
+        mode: result.mode,
+        accepted: true,
+        ...(result.subSessionId ? { sub_session_id: result.subSessionId } : {}),
+        ...(result.subTurnId ? { sub_turn_id: result.subTurnId } : {}),
+      },
     };
   }
 }

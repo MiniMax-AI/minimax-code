@@ -1,6 +1,82 @@
 export { isTelemetryChannelEnabled, type TelemetryChannel } from './telemetry-policy.js';
 export { isLocalSourceProvenanceEnabled } from './source-provenance.js';
 export { isPtcTurnEnabled, type PtcTurnFacts } from './ptc-turn.js';
+export { resolveEffectivePtc, type PtcConfigView } from './effective-ptc.js';
+export {
+  describePtcDefaultFieldIssues,
+  describePtcDefaultRawValue,
+  describePtcDefaultValueType,
+  isPtcDefaultConfigured,
+  isPtcDefaultObject,
+  isPtcRemoteApply,
+  matchPtcDefaultUser,
+  parseExplicitPtc,
+  parsePtcDefaultConfig,
+  PTC_REMOTE_APPLY_VALUES,
+  resolvePtcToolCallMode,
+  type PtcConfigFields,
+  type PtcDefaultConfig,
+  type PtcDefaultFieldIssue,
+  type PtcRemoteApply,
+  type PtcSource,
+  type PtcUserCohort,
+} from './ptc-default-config.js';
+export {
+  isAdvisorContextWindow,
+  isModelKey,
+  parseAdvisorConfigFields,
+  parseDefaultAdvisorConfig,
+  resolveAdvisorDefaultEnabled,
+  resolveAdvisorEnabled,
+  type AdvisorConfig,
+  type AdvisorConfigFields,
+  type AdvisorSwitchConfigView,
+  type DefaultAdvisorConfig,
+} from './advisor-config.js';
+export {
+  isAdvisorReleasedInConfig,
+  resolveAdvisorSwitch,
+  withEffectiveAdvisor,
+  type AdvisorSwitchConfig,
+} from './advisor-switch.js';
+export {
+  readEnvSwitch,
+  resolveBrowserPtcAutoScreenshot,
+  resolveBrowserReadV2,
+} from './browser-beta-flags.js';
+export {
+  configIssuesLostFile,
+  configIssuesLostKinds,
+  describeConfigIssue,
+  describeConfigNotice,
+  type ConfigIssueLanguage,
+} from './config-issue-copy.js';
+export { acknowledgeConfigReset, readProfileConfigNotice } from './config-issue-notice.js';
+export { configIssuesFingerprint, setConfigIssueReporter } from './config-file-state.js';
+export {
+  CARRIED_CONFIG_STATE_FILES,
+  CONFIG_RESET_PENDING_FILE,
+  CONFIG_STATE_FILE,
+  isConfigStateEntry,
+} from './config-state-paths.js';
+export { normalizePluginName, parsePluginsConfig } from './config-section-parsers.js';
+export {
+  isPluginRecommendationPluginName,
+  parsePluginRecommendationConfig,
+  PLUGIN_RECOMMENDATION_DISMISSED_MAX,
+  type PluginRecommendationConfig,
+} from './plugin-recommendation-config.js';
+export {
+  parseStorageRetentionConfig,
+  type StorageRetentionConfig,
+} from './storage-retention-config.js';
+export {
+  DEFAULT_WORKTREE_KEEP_COUNT,
+  isWorktreeKeepCount,
+  parseWorktreeConfig,
+  parseWorktreeKeepCount,
+  type WorktreeConfig,
+} from './worktree-config.js';
 export { writeTuiStatusLineSetting } from './tui-status-line-write.js';
 export { parseRunawayGuardOverride, resolveRunawayGuardConfig } from './runaway-guard-config.js';
 export type { RunawayGuardSettings, RunawayGuardOverride } from './runaway-guard-config.js';
@@ -32,7 +108,9 @@ export {
   allowsManagedMinimaxProviderOverride,
   isBetaFeatureProdReady,
   resolveBetaFeature,
+  betaResolutionContextFor,
   currentBetaResolutionContext,
+  productionBetaResolutionContext,
   isInternalBuild,
   isManagedRuntime,
   getRuntimePresetKey,
@@ -73,9 +151,11 @@ export {
   MANAGED_MINIMAX_PROVIDER_ID,
   MINIMAX_API_PROVIDER_ID,
   isFirstPartyMinimaxMessagesRoute,
+  deliveredDefaultModelId,
   listRouteModelIds,
   resolveModelAvailability,
   resolveModelCallRoute,
+  resolveModelReplacement,
 } from './model-availability.js';
 export type {
   ModelAvailability,
@@ -85,6 +165,9 @@ export type {
   ModelAvailabilityInput,
   ModelAvailabilityProviderView,
   ModelCallRoute,
+  ModelReference,
+  ModelReplacement,
+  ModelReplacementCause,
   ModelSelectionSource,
 } from './model-availability.js';
 export {
@@ -103,9 +186,18 @@ export {
   resolveProviderAuthMode,
 } from './provider-auth-mode.js';
 export {
+  credentialEnvReferenceName,
+  probeProviderCredential,
+  resolveProviderCredential,
+  type ProviderCredentialInput,
+  type ProviderCredentialProbe,
+  type ProviderCredentialSource,
+} from './credential-reference.js';
+export {
   compareAndSetLocalModelContext,
   removeLocalProviderConfig,
   replaceLocalManagedMinimaxProvider,
+  updateLocalAdvisorSelection,
   updateLocalByokConfig,
   updateLocalModelSelection,
 } from './local-model-provider-write.js';
@@ -207,6 +299,9 @@ export type {
 } from './agent-capabilities.js';
 export type {
   Config,
+  ConfigIssue,
+  ConfigIssueKind,
+  PluginsConfig,
   TelemetryConfig,
   EffortLevel,
   ThinkingConfig,
@@ -256,6 +351,7 @@ export {
   ConfigFileError,
   loadConfigFromFile,
   readExplicitBetaFeatureFromFile,
+  resolveTuiTelemetryPolicy,
 } from './file-loader.js';
 export type { ConfigFileErrorCode, LoadConfigFromFileOptions } from './file-loader.js';
 export type {

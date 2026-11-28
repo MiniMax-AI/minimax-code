@@ -16,6 +16,10 @@ export const TUI_COMMAND_DESCRIPTORS = {
     name: 'model',
     description: 'Choose a model',
   },
+  advisor: {
+    name: 'advisor',
+    description: 'Choose an advisor model the agent can consult',
+  },
   status: {
     name: 'status',
     description: 'Show account and model status',

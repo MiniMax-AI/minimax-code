@@ -137,7 +137,14 @@ export {
   endLocalPluginHookSession,
   markNextLocalPluginHookSessionStart,
 } from './agent-host/assembly/local-turn-plugin-hooks.js';
-export { buildLocalTurnPayloadTransform } from './agent-host/index.js';
+export {
+  ADVISOR_TOOL_NAME,
+  buildLocalRequestPayloadTransform,
+  buildLocalTurnPayloadTransform,
+  readAdvisorBinding,
+} from './agent-host/index.js';
+export { readSessionAgentExecutionSnapshot } from './agent-host/preparation/session-agent-execution-snapshot.js';
+export { createFileApiRuntime } from './persistence/file-api-upload.repository.js';
 
 export { normalizeModelSelection, type UserModelSelection } from './agent-host/index.js';
 export {

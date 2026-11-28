@@ -2,6 +2,12 @@ import type { TuiAttachment, TuiTransportAttachment } from '../types/invocation.
 import type { GlobalThreadGoal } from '@mavis/shared/global-events';
 import type {
   TuiCompactionResult,
+  TuiMcpAuthClearResult,
+  TuiMcpAuthOutcome,
+  TuiMcpAuthScope,
+  TuiMcpAuthStartResult,
+  TuiMcpAuthStateView,
+  TuiMcpAuthTarget,
   TuiMcpServer,
   TuiModel,
   TuiPendingPermission,
@@ -25,6 +31,7 @@ import type {
   CliSendMessageOptions,
   ConversationSteerInput,
   ConversationSteerResult,
+  GetSessionActivityResp,
 } from '@mavis/local-runtime-v2/cli-service';
 
 export type { TuiMessage, TuiMessagePart, TuiStreamEvent, TuiToolCall } from './stream-events.js';
@@ -133,6 +140,13 @@ export interface TuiSessionModelSelection {
 
 export interface CreateTuiSessionInput {
   workspaceDir: string;
+  /**
+   * Identity from {@link TuiSessionPort.newSessionId}. Creation fails instead of reusing an
+   * existing Session with the same ID.
+   */
+  sessionId?: string;
+  /** Agent that owns the new Session; defaults to this TUI's Agent. */
+  agentName?: string;
   title?: string;
   mcpServers?: readonly TuiSessionMcpServer[];
   /** Parent Session of a branch child. Required to create a BTW side session. */
@@ -176,6 +190,15 @@ export interface ListTuiSessionsOptions {
 export interface ListTuiSessionPageInput extends ListTuiSessionsOptions {
   agentName?: string;
   allAgents?: boolean;
+  /**
+   * Read across every Agent instead of one Agent's Sessions.
+   *
+   * The Runtime reads a missing Agent name as "no Agent predicate", so this is
+   * how a purpose-scoped read reaches work whose owning Agent the caller does
+   * not know. `getSessionTree` is Agent-scoped by contract, so a cross-Agent
+   * read always uses the flat Session list.
+   */
+  anyAgent?: boolean;
   workspaceDir?: string;
 }
 
@@ -197,6 +220,11 @@ export interface TuiMessagePage {
 }
 
 export interface TuiSessionPort {
+  /**
+   * Reserves a Session identity without writing anything. Pass it as
+   * {@link CreateTuiSessionInput.sessionId} when the Session is actually needed.
+   */
+  newSessionId(): string;
   createSession(input: CreateTuiSessionInput): Promise<TuiSession>;
   configureSessionMcpServers(
     sessionId: string,
@@ -305,6 +333,49 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;
   /** Stars or unstars a model; resolves false when favorites are unavailable. */
   setModelFavorite?(model: TuiModelSelection, favorite: boolean): Promise<boolean>;
+  /**
+   * The Session's advisor with `sessionId`, else the new-conversation default.
+   * Absent when the Runtime has no advisor.
+   */
+  getAdvisor?(sessionId?: string): Promise<TuiAdvisor>;
+  /** Saves the new-conversation default, then with `sessionId` the same choice for that Session. */
+  selectAdvisor?(selection: TuiAdvisorSelection, sessionId?: string): Promise<TuiAdvisor>;
+  /** Writes one Session's advisor without changing the new-conversation default. */
+  selectSessionAdvisor?(selection: TuiAdvisorSelection, sessionId: string): Promise<TuiAdvisor>;
+  /**
+   * Effective global advisor switch (`advisor.enabled`, shared with the Desktop setting); while it
+   * is off no Session uses or lists its advisor. Undefined when the Runtime has none.
+   */
+  getAdvisorEnabled?(): Promise<boolean | undefined>;
+  /**
+   * Persists `advisor.enabled`; resolves the effective value, or undefined when the Runtime
+   * cannot persist it.
+   */
+  setAdvisorEnabled?(enabled: boolean): Promise<boolean | undefined>;
+}
+
+/**
+ * An advisor write. Runtime keeps the stored model, effort and window for whatever the write
+ * omits, so `enabled: false` alone switches the advisor off and a later enable needs no new pick;
+ * enabling with no model ever stored is rejected. A `thinking` without an effort clears the
+ * stored effort, leaving the model's default.
+ */
+export interface TuiAdvisorSelection {
+  readonly enabled: boolean;
+  /** Given together with `modelId`. */
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly thinking?: TuiModelThinkingSelection;
+  readonly contextLimit?: number;
+}
+
+/** The advisor a Session, or the new-conversation default, carries. */
+export interface TuiAdvisor {
+  readonly enabled: boolean;
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly thinking?: { readonly effort: string };
+  readonly contextLimit?: number;
 }
 
 export interface TuiAccountStatusOptions {
@@ -325,11 +396,27 @@ export interface TuiInspectionPort {
     sessionId: string,
     agentName?: string,
     customInstructions?: string,
+    reason?: string,
   ): Promise<TuiCompactionResult>;
   listSkills(agentName?: string, keyword?: string, workspaceDir?: string): Promise<TuiSkillList>;
   listMcpServers(keyword?: string, sessionId?: string): Promise<TuiMcpServer[]>;
   inspectProjectMcp(sessionId: string): Promise<TuiProjectMcpPreview | undefined>;
   getContextSnapshot(sessionId: string): Promise<TuiContextSnapshotResponse>;
+}
+
+/** User-triggered MCP OAuth; the host opens the browser, Runtime owns the attempt. */
+export interface TuiMcpAuthPort {
+  listMcpAuthStates(scope?: TuiMcpAuthScope): Promise<TuiMcpAuthStateView[]>;
+  startMcpAuth(
+    target: TuiMcpAuthTarget,
+    options?: { readonly force?: boolean },
+  ): Promise<TuiMcpAuthStartResult>;
+  cancelMcpAuth(attemptId: string): Promise<boolean>;
+  /** Completes with the redirect URL pasted from a browser that cannot reach this machine. */
+  completeMcpAuth(attemptId: string, callbackUrl: string): Promise<TuiMcpAuthOutcome>;
+  clearMcpAuth(target: TuiMcpAuthTarget): Promise<TuiMcpAuthClearResult>;
+  /** An undefined secret clears it; only user-configured servers accept one. */
+  setMcpUserClientSecret(serverName: string, secret: string | undefined): Promise<boolean>;
 }
 
 export type TuiContextComponentKind =
@@ -460,6 +547,19 @@ export interface TuiSessionTurnPort {
   ): AsyncGenerator<TuiStreamEvent>;
 }
 
+/**
+ * Plugin Hook Session lifecycle of the embedded Runtime around `/clear` and
+ * Session switches. Flat methods so the deferred Runtime proxy can forward them.
+ */
+export interface TuiPluginHookSessionPort {
+  markNextPluginHookSessionStart(sessionId: string, source: 'clear'): void;
+  abortPluginHookSessionTurn(
+    sessionId: string,
+    abortSession?: (executionSessionId: string) => Promise<unknown>,
+  ): Promise<void>;
+  endPluginHookSession(sessionId: string, reason: 'clear' | 'resume_other'): Promise<void>;
+}
+
 export interface TuiConversationPort {
   sendMessage(
     req: CliSendMessageReq,
@@ -497,17 +597,35 @@ export interface TuiWorkspaceTreeCandidate extends TuiWorkspaceFileEntry {
   workspaceDir: string;
 }
 
+/** Overall merge request status, as the Runtime last read it from the git host. */
+export const TUI_REVIEW_STATUSES = [
+  'unknown',
+  'ready_to_merge',
+  'pipeline_failed',
+  'conflict',
+  'changes_requested',
+  'unresolved_discussions',
+  'pipeline_running',
+  'waiting_for_approval',
+  'draft',
+  'blocked',
+  'merged',
+  'closed',
+] as const;
+export type TuiReviewStatus = (typeof TUI_REVIEW_STATUSES)[number];
+
 /**
- * A pull request / merge request the current branch is known to belong to.
+ * A pull request / merge request the current branch belongs to.
  *
- * Recorded by the Runtime when an agent turn ran `gh pr create|view` or
- * `glab mr create|view`; never fetched from a git host, so it is present only
- * for branches whose review passed through this machine.
+ * Comes from what the Runtime already learned: its branch query at the end of
+ * a Turn, or a merge request an agent just created. The status line never asks
+ * the git host itself, so `status` is as fresh as that last answer.
  */
 export interface TuiReviewLink {
   vendor: 'github' | 'gitlab';
   url: string;
   number: number;
+  status?: TuiReviewStatus;
 }
 
 export interface TuiWorkspaceGitMetadata {
@@ -554,10 +672,18 @@ export interface TuiWorkspaceFilePort {
 export type TuiDelegatedAgentStatus =
   | 'queued'
   | 'running'
+  | 'waiting'
   | 'completed'
   | 'failed'
   | 'stopped'
   | 'unknown';
+
+/**
+ * Which user decision a delegated Session is blocked on. A Session waiting for one
+ * is idle at the Runtime - `ask_user` and a tool approval both end the Turn - so the
+ * Session status alone cannot tell a blocked Session apart from a finished one.
+ */
+export type TuiDelegatedWaitingReason = 'questionnaire' | 'permission';
 
 export interface TuiDelegatedAgent {
   sessionId: string;
@@ -565,6 +691,7 @@ export interface TuiDelegatedAgent {
   agentName?: string;
   task?: string;
   status: TuiDelegatedAgentStatus;
+  waitingReason?: TuiDelegatedWaitingReason;
   createdAtMs?: number;
   updatedAtMs?: number;
   errorMessage?: string;
@@ -579,15 +706,33 @@ export interface TuiDelegationSnapshot {
 export interface TuiDelegationStopReceipt {
   schemaVersion: 1;
   rootSessionId: string;
+  /** Present when only this delegated agent and its descendants were stopped. */
+  targetSessionId?: string;
   rootStopped: boolean;
   stoppedSessionIds: string[];
   activeSessionIds: string[];
   failedSessionIds: string[];
 }
 
+export interface TuiDelegationStopOptions {
+  /**
+   * Stop only this member of the root's delegation tree and its descendants; the root
+   * and the other members keep running. Omit to stop the whole tree.
+   */
+  targetSessionId?: string;
+}
+
 export interface TuiDelegationPort {
   getDelegationSnapshot(rootSessionId: string): Promise<TuiDelegationSnapshot>;
-  stopDelegation(rootSessionId: string): Promise<TuiDelegationStopReceipt>;
+  stopDelegation(
+    rootSessionId: string,
+    options?: TuiDelegationStopOptions,
+  ): Promise<TuiDelegationStopReceipt>;
+}
+
+export interface TuiSessionActivityPort {
+  /** Whether the session tree can still advance without user input (evaluation contract). */
+  getSessionActivity(rootSessionId: string): Promise<GetSessionActivityResp>;
 }
 
 export type TuiBackgroundTaskStatus =
@@ -680,6 +825,7 @@ export type TuiRuntime = TuiSessionPort &
   TuiDailyCheckin &
   TuiQueuePort &
   TuiInteractionPort &
+  TuiMcpAuthPort &
   TuiRuntimeEventPort &
   TuiGoalPort &
   TuiSessionTurnPort &
@@ -689,7 +835,8 @@ export type TuiRuntime = TuiSessionPort &
   TuiWorkspaceGitPort &
   McodePluginRuntimeAccess &
   Partial<TuiSessionForkPort> &
-  Partial<TuiWorkspaceFilePort>;
+  Partial<TuiWorkspaceFilePort> &
+  Partial<TuiPluginHookSessionPort>;
 
 export type TuiPermissionDecision = 'allowOnce' | 'allowAlways' | 'deny';
 export interface TuiModelThinkingSelection {
@@ -706,6 +853,15 @@ export interface TuiModelSelection {
 }
 export type {
   TuiCompactionResult,
+  TuiMcpAuthClearResult,
+  TuiMcpAuthAttemptOutcome,
+  TuiMcpAuthConfirmation,
+  TuiMcpAuthOutcome,
+  TuiMcpAuthScope,
+  TuiMcpAuthStartResult,
+  TuiMcpAuthState,
+  TuiMcpAuthStateView,
+  TuiMcpAuthTarget,
   TuiMcpServer,
   TuiModel,
   TuiPendingPermission,

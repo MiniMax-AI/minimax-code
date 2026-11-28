@@ -1,6 +1,8 @@
+import type { LocalRuntimeAuthContext } from '../../infra/config/auth-context.js';
 import type { Api } from '@earendil-works/pi-ai';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import type { LLMModelConfig } from '@mavis/agent-core/pi-turn-runner';
+import type { ModelCallRoute } from '@mavis/config';
 import type {
   AgentCapabilityConfig,
   Config,
@@ -71,6 +73,8 @@ export interface LocalModelConfig extends Omit<
   limit?: LocalModelLimit;
   modalities?: LocalModelModalities;
   compat?: LocalModelCompatOverrides;
+  /** Vendor-reported cost multiplier; absent means unknown, not free. */
+  creditMultiplier?: number;
 }
 
 export interface LocalProviderOptions {
@@ -102,6 +106,11 @@ export interface LocalCustomProviderConfig extends LocalProviderConfig {
   kind?: string;
   npm?: string;
   enabled?: boolean;
+  /**
+   * Runtime projection only, never persisted: an agent model access provider this build or
+   * the server no longer offers (see `LocalModelProviderService.modelCatalogConfig`).
+   */
+  withdrawn?: boolean;
 }
 
 export type LocalCustomProvidersConfig = Record<string, LocalCustomProviderConfig>;
@@ -117,9 +126,25 @@ export interface LocalRuntimeConfig {
   defaultModelVariant?: string;
   defaultModelThinking?: { effort?: string };
   defaultModelContextWindow?: number;
+  /** New-conversation advisor; never copied into Sessions by the runtime. */
+  defaultAdvisor?: LocalDefaultAdvisorConfig;
+  /** Global advisor switch: the user's choice, or the effective one filled at the read boundary. */
+  advisor?: { readonly enabled?: boolean };
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'auto' | 'off';
+  taskSuggestion?: Config['taskSuggestion'];
   dataDir: string;
   beta?: LocalBetaConfig;
+  /** Continue a quota-limited Turn when the account window resets; absent means on. */
+  quotaAutoResume?: { readonly enabled?: boolean };
+}
+
+/** Same shape as a Session's advisor selection, with only the effort of its thinking. */
+export interface LocalDefaultAdvisorConfig {
+  readonly enabled: boolean;
+  /** `providerId/modelId`. */
+  readonly model?: string;
+  readonly thinking?: { readonly effort: string };
+  readonly contextWindow?: number;
 }
 
 /** Conversation-owned read model of the process config. */
@@ -128,10 +153,16 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
   readonly defaultLightModel?: string;
   /** Goal verifier policy consumed by process-local auxiliary model calls. */
   readonly goal?: Config['goal'];
-  readonly memory?: Partial<Config['memory']>;
+  readonly memory?: Partial<NonNullable<Config['memory']>>;
   /** Session title auto-generation flag — see @mavis/config SessionTitleConfig. */
   readonly sessionTitle?: Config['sessionTitle'];
   readonly promptSuggestion?: Config['promptSuggestion'];
+  /** Effective Next Step card opt-in, filled at the host's config read boundary. */
+  readonly nextStepBox?: Config['nextStepBox'];
+  /** Startup plugin policy also gates frozen plugin Agent execution. */
+  readonly plugins?: Config['plugins'];
+  /** Desktop plugin recommendation switch and dismissed list. */
+  readonly pluginRecommendation?: Config['pluginRecommendation'];
   /** Runaway Guard local policy resolved from config.yaml. */
   readonly runawayGuard?: Config['runawayGuard'];
   /** ToolResult compaction values resolved from config.yaml. */
@@ -140,6 +171,10 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
   readonly contextManagement?: Partial<Config['contextManagement']>;
   /** Request media recovery values resolved from config.yaml. */
   readonly requestMedia?: Config['requestMedia'];
+  /** Verification-only diagnostics hooks; absent in product configs. */
+  readonly diagnostics?: Config['diagnostics'];
+  /** `skills.freezeCatalog` (default on): the per-window `<available_skills>` freeze. */
+  readonly skills?: Config['skills'];
   /**
    * Widened past `Config['agents']`: the v2 Agent cutover also threads
    * already-resolved capabilities through this read model, and `default` is
@@ -157,6 +192,12 @@ export interface LocalConversationRuntimeConfig extends LocalRuntimeConfig {
     readonly topKMax?: number;
     readonly systemHint?: boolean;
     readonly maxSchemaTextLen?: number;
+    readonly catalog?: boolean;
+    readonly catalogBudgetTokens?: number;
+    readonly exactSelect?: boolean;
+    readonly directCall?: boolean;
+    readonly deferBudgetTokens?: number;
+    readonly carryAcrossCompaction?: boolean;
   };
 }
 
@@ -168,6 +209,7 @@ export interface ModelSystemConfigPort {
       draft: LocalByokConfigDraft,
       currentConfig: LocalRuntimeConfig,
     ) => void | Promise<void>,
+    beforeCommit?: () => void,
   ) => Promise<unknown>;
   readonly compareAndSetModelContext: (
     input: {
@@ -186,19 +228,8 @@ export interface ModelSystemConfigPort {
       readonly thinking?: { readonly effort?: string };
     },
   ) => Promise<void>;
+  readonly setDefaultAdvisor: (selection: LocalDefaultAdvisorConfig) => Promise<void>;
   readonly removeProvider: (providerId: string) => Promise<unknown>;
-}
-
-/** Live local-runtime identity used by managed model and content-safety requests. */
-export interface LocalRuntimeAuthContext {
-  readonly accessToken?: string;
-  readonly loginEpoch?: string;
-  readonly realUserID?: string;
-  readonly userEmail?: string;
-  readonly userName?: string;
-  readonly subUserName?: string;
-  /** Electron-internal propagation state; omitted by non-Desktop hosts. */
-  readonly authState?: 'pending' | 'authenticated' | 'logged_out';
 }
 
 export interface LocalByokProviderConfig {
@@ -230,6 +261,8 @@ export interface LocalModelResolverOptions {
   ) => Promise<string | undefined> | string | undefined;
   readonly defaultApi?: Api;
   readonly streamFn?: StreamFn;
+  /** In-memory BYOK key rests; defaults to the process-wide pool. */
+  readonly byokKeyPool?: import('./byok-keys/key-pool.js').ByokKeyPool;
   readonly fetchImpl?: LLMModelConfig['fetch'];
   readonly logger?: LocalModelResolverLogger;
   /** Enables metadata-free custom-provider thinking only for the new TUI product. */
@@ -256,6 +289,8 @@ export interface LocalResolvedModelConfig extends LLMModelConfig {
     readonly gatewayHeaders: Readonly<Record<string, string>>;
     readonly callerIdentityHash: string;
   };
+  readonly route?: ModelCallRoute | 'unknown';
+  readonly turnPhaseHeader?: string;
 }
 
 export interface LocalModelResolverLike {
@@ -328,6 +363,8 @@ export interface ModelProviderModelEntry {
   thinking?: { effort?: string };
   contextWindowOptions?: number[];
   contextWindowOptionHints?: Record<string, 'higher_usage'>;
+  /** Usage hint delivered with the model, e.g. "用量翻倍". */
+  hint?: string;
   maxOutputTokens?: number;
   effortOptions?: string[];
   defaultEffort?: string;
@@ -356,7 +393,19 @@ export interface ModelProviderView {
   configRevision?: string;
   models: ModelProviderModelEntry[];
   status?: ModelCacheStatusView;
+  /** Ordinary API-key providers: every key in order, never a key value. */
+  apiKeys?: ApiKeyView[];
 }
+
+export interface ApiKeyView {
+  id: string;
+  name?: string;
+  masked: string;
+  enabled: boolean;
+  rest?: import('./byok-keys/key-pool.js').ApiKeyRestView;
+  lastProbe?: import('./byok-keys/key-pool.js').ApiKeyProbeView;
+}
+
 
 export interface ModelDiscoveryTarget {
   api: ModelProviderApi;
@@ -366,8 +415,14 @@ export interface ModelDiscoveryTarget {
 }
 
 export interface DiscoveredModel {
-  modelId: string;
-  displayName?: string;
+  readonly modelId: string;
+  readonly displayName?: string;
+  readonly contextWindow?: number;
+  readonly maxOutputTokens?: number;
+  readonly input?: readonly ('text' | 'image')[];
+  readonly reasoningEfforts?: readonly string[];
+  /** Source-reported credit multiplier, including zero-cost models. */
+  readonly creditMultiplier?: number;
 }
 
 export type ModelDiscoveryResult =
@@ -387,6 +442,13 @@ export interface ModelConnectionTestTarget {
   effort?: string;
   minimaxM3ThinkingMode?: MiniMaxM3ThinkingMode;
   /**
+   * Conversation identity for providers that route by it (OpenCode Go's
+   * `x-opencode-session`). One connectivity check shares one id across its
+   * Think Effort cases, as a turn keeps its session across effort changes.
+   * Absent, each probe gets its own id.
+   */
+  sessionId?: string;
+  /**
    * Output budget the probe requests, taken from the model's configured output
    * limit. Mirrors what a real turn sends so an output-budget rejection can
    * never be the reason a working model reports as unavailable.
@@ -398,6 +460,25 @@ export interface ModelConnectionTestResult {
   ok: boolean;
   errorCode?: string;
   errorMessage?: string;
+}
+
+/**
+ * The model's provider signs in with OAuth and this Runtime holds no
+ * credentials for it. Model resolution throws it; a dispatch that would create
+ * a child Session on such a model refuses before the Session exists.
+ */
+export class ModelLoginRequiredError extends Error {
+  override name = 'ModelLoginRequiredError';
+  readonly code = 'MODEL_LOGIN_REQUIRED';
+
+  constructor(readonly authProvider: string) {
+    super(`LocalModelResolver: ${authProvider} login required; no OAuth credentials found.`);
+  }
+}
+
+/** The error a refused dispatch returns to the calling model. No other model is picked. */
+export function modelLoginRequiredMessage(modelName: string): string {
+  return `${modelName} 需要登录，请换一个模型或请用户登录`;
 }
 
 export class LocalModelProviderError extends Error {
@@ -415,6 +496,8 @@ export class LocalModelProviderError extends Error {
 export interface UserModelInputView {
   modelId: string;
   displayName?: string;
+  /** Wire protocol; read for a model added by hand to an extension subscription. */
+  api?: string;
   configurationSource?: string;
   enabled?: boolean;
   attachment?: boolean;
@@ -440,6 +523,16 @@ export interface ByokProviderPresetView {
 export interface ModelProviderTestOutcome {
   ok: boolean;
   status: ModelCacheStatusView;
+  /** Which account or key the test used, for display (never a credential). */
+  keyLabel?: string;
+}
+
+/** A key to save: id alone keeps a stored key, key alone adds one, both replace its value. */
+export interface ApiKeyDraftView {
+  readonly id?: string;
+  readonly name?: string;
+  readonly key?: string;
+  readonly enabled: boolean;
 }
 
 export interface UserModelProviderCandidateView {
@@ -452,6 +545,8 @@ export interface UserModelProviderCandidateView {
   models?: UserModelInputView[];
   headers?: Record<string, string>;
   removeHeaders?: string[];
+  /** The whole key list when present; otherwise `apiKey` replaces only the first key. */
+  apiKeys?: ApiKeyDraftView[];
 }
 
 export interface SaveUserModelProviderCandidateOutcome {
@@ -467,12 +562,19 @@ export interface ModelContextUpdateOutcome {
 }
 
 export interface LocalModelProviderServiceDeps {
+  /** Subscription display defaults reuse the host's cached models.dev catalog. */
+  rankModelsByRecency?: (
+    input: import('./catalog/provider-presets/model-recency.js').RankModelsByRecencyInput & {
+      readonly signal?: AbortSignal;
+    },
+  ) => Promise<string[]>;
   configGetter: () => LocalRuntimeConfig;
   updateByokConfig: (
     mutate: (
       draft: LocalByokConfigDraft,
       currentConfig: LocalRuntimeConfig,
     ) => void | Promise<void>,
+    beforeCommit?: () => void,
   ) => Promise<unknown>;
   cache: LocalModelCacheLike;
   tester: {
@@ -489,6 +591,8 @@ export interface LocalModelProviderServiceDeps {
     beforeCommit: (currentConfig: LocalRuntimeConfig) => Promise<boolean>,
   ) => Promise<boolean>;
   removeProviderCredentials?: (providerKey: string) => void | Promise<void>;
+  /** In-memory BYOK key rests and tests; defaults to the process-wide pool. */
+  byokKeyPool?: import('./byok-keys/key-pool.js').ByokKeyPool;
   selectModel: (modelKey: string) => Promise<void>;
   now?: () => number;
   randomHex?: () => string;

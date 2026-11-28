@@ -35,6 +35,7 @@ const MODEL_CONTROL_ROWS = 3;
 type ModelKey = string;
 const CONNECT_CODEX_ITEM_VALUE = '\u0000connect-codex';
 const ADD_PROVIDER_ITEM_VALUE = '\u0000add-provider';
+const LEADING_ITEM_VALUE = '\u0000leading';
 /** Favorite rows repeat a provider row, so they need a distinct list value. */
 const FAVORITE_ROW_PREFIX = '\u0000favorite\u0000';
 const FAVORITE_UPDATE_FAILED = "Couldn't update favorites. Press ctrl+s to retry.";
@@ -58,6 +59,7 @@ export class TuiModelPicker implements Component, Focusable {
   private readonly modelByKey = new Map<ModelKey, TuiModel>();
   /** Starred models in the order they were added; new favorites go last. */
   private favoriteKeys: ModelKey[];
+  private readonly pendingFavorites = new Set<ModelKey>();
   private favoriteStatus: string | undefined;
   private _focused = false;
 
@@ -75,8 +77,23 @@ export class TuiModelPicker implements Component, Focusable {
       };
       onAddProvider?: () => void;
       /** Persists a favorite toggle; `false` or a rejection rolls the row back. */
-      onToggleFavorite?: (model: TuiModel, favorite: boolean) => Promise<boolean | void> | boolean | void;
+      onToggleFavorite?: (
+        model: TuiModel,
+        favorite: boolean,
+      ) => Promise<boolean | void> | boolean | void;
       requestRender?: () => void;
+      /** Panel title; `Models` by default. */
+      title?: string;
+      /** A row above the models, such as the advisor's `Off`; hidden while searching. */
+      leadingOption?: {
+        readonly label: string;
+        readonly description: string;
+        /** Marks the row as the current choice, as `selected` does for a model. */
+        readonly selected: boolean;
+        readonly onSelect: () => void;
+      };
+      /** Drops the add-provider and Codex rows when the picker only chooses among configured models. */
+      hideProviderActions?: boolean;
     } = {},
     /** Think effort already stored for the current Session, when known. */
     private readonly selectedEffort?: string,
@@ -87,7 +104,11 @@ export class TuiModelPicker implements Component, Focusable {
       .sort((a, b) => (a.favoriteOrder ?? Infinity) - (b.favoriteOrder ?? Infinity))
       .map(modelKey);
     const selectedModel = models.find((model) => model.selected);
-    this.selectedModelKey = selectedModel ? modelKey(selectedModel) : undefined;
+    this.selectedModelKey = availability.leadingOption?.selected
+      ? LEADING_ITEM_VALUE
+      : selectedModel
+        ? modelKey(selectedModel)
+        : undefined;
     this.focusBeforeSearchKey = this.selectedModelKey;
     this.searchInput.setValue(initialQuery.trim());
     this.searchInput.moveCursorToEnd();
@@ -128,12 +149,10 @@ export class TuiModelPicker implements Component, Focusable {
       this.list = this.createList();
       return;
     }
-    const query = this.searchInput.getValue();
-    if (
-      model &&
-      query.trim().length === 0 &&
-      (matchesKey(data, 'left') || matchesKey(data, 'right'))
-    ) {
+    // Left/right always drive the focused model's reasoning control, matching
+    // the footer hint even while a search query is active. Models without one
+    // fall through, so the keys still move the search cursor.
+    if (model && (matchesKey(data, 'left') || matchesKey(data, 'right'))) {
       if (supportsTuiEffort(model)) {
         this.moveEffort(model, matchesKey(data, 'left') ? -1 : 1);
         return;
@@ -153,7 +172,7 @@ export class TuiModelPicker implements Component, Focusable {
       return;
     }
 
-    const previousQuery = query;
+    const previousQuery = this.searchInput.getValue();
     this.searchInput.handleInput(data);
     if (this.searchInput.getValue() !== previousQuery) {
       const nextQuery = this.searchInput.getValue();
@@ -202,12 +221,13 @@ export class TuiModelPicker implements Component, Focusable {
       Math.max(0, layout.bodyHeight - header.length - 1),
     );
     return layout.render({
-      title: 'Models',
+      title: this.availability.title ?? 'Models',
       body: [
         ...header,
         ...(this.visibleModels().length === 0 &&
         !this.availability.onAddProvider &&
-        !this.availability.codexOAuth
+        !this.availability.codexOAuth &&
+        !this.leadingOptionVisible()
           ? [chalk.hex(colors.muted)('No matching models')]
           : this.list.renderViewport(
               layout.contentWidth,
@@ -231,6 +251,8 @@ export class TuiModelPicker implements Component, Focusable {
     const onToggle = this.availability.onToggleFavorite;
     if (!onToggle) return;
     const key = modelKey(model);
+    if (this.pendingFavorites.has(key)) return;
+    this.pendingFavorites.add(key);
     const previousIndex = this.favoriteKeys.indexOf(key);
     const favorite = previousIndex < 0;
     this.favoriteKeys = favorite
@@ -243,6 +265,7 @@ export class TuiModelPicker implements Component, Focusable {
     this.availability.requestRender?.();
 
     const rollback = () => {
+      this.pendingFavorites.delete(key);
       const current = this.favoriteKeys.filter((candidate) => candidate !== key);
       if (!favorite) current.splice(Math.min(previousIndex, current.length), 0, key);
       this.favoriteKeys = current;
@@ -257,12 +280,10 @@ export class TuiModelPicker implements Component, Focusable {
       rollback();
       return;
     }
-    void Promise.resolve(result).then(
-      (saved) => {
-        if (saved === false) rollback();
-      },
-      rollback,
-    );
+    void Promise.resolve(result).then((saved) => {
+      this.pendingFavorites.delete(key);
+      if (saved === false) rollback();
+    }, rollback);
   }
 
   private contextChoice(model: TuiModel): number | undefined {
@@ -334,14 +355,19 @@ export class TuiModelPicker implements Component, Focusable {
       const model = visibleKeys.has(key) ? this.modelByKey.get(key) : undefined;
       return model ? [model] : [];
     });
+    const leading = this.leadingOptionVisible() ? this.availability.leadingOption : undefined;
     const items = [
+      ...(leading
+        ? [
+            {
+              value: LEADING_ITEM_VALUE,
+              label: `${leading.selected ? '● ' : ''}${leading.label}`,
+              description: leading.description,
+            },
+          ]
+        : []),
       ...favorites.map((model) =>
-        row(
-          model,
-          favoriteRowValue(modelKey(model)),
-          `★ Favorites · ${favorites.length}`,
-          false,
-        ),
+        row(model, favoriteRowValue(modelKey(model)), `★ Favorites · ${favorites.length}`, false),
       ),
       ...groups.flatMap((group) =>
         group.models.map((model) =>
@@ -354,13 +380,15 @@ export class TuiModelPicker implements Component, Focusable {
         ),
       ),
     ];
-    items.push({
-      value: ADD_PROVIDER_ITEM_VALUE,
-      label: '+ Add 3rd-party provider…',
-      description: 'Configure an API Key provider and add its models',
-      groupLabel: 'Providers',
-    });
-    if (this.availability.codexOAuth) {
+    if (!this.availability.hideProviderActions) {
+      items.push({
+        value: ADD_PROVIDER_ITEM_VALUE,
+        label: '+ Add provider…',
+        description: 'Configure an API Key provider and add its models',
+        groupLabel: 'Providers',
+      });
+    }
+    if (this.availability.codexOAuth && !this.availability.hideProviderActions) {
       items.push({
         value: CONNECT_CODEX_ITEM_VALUE,
         ...codexOAuthAction(this.availability.codexOAuth.state),
@@ -376,6 +404,10 @@ export class TuiModelPicker implements Component, Focusable {
       this.focusedModelKey = item.value;
     };
     list.onSelect = (item) => {
+      if (item.value === LEADING_ITEM_VALUE) {
+        this.availability.leadingOption?.onSelect();
+        return;
+      }
       if (item.value === CONNECT_CODEX_ITEM_VALUE) {
         this.availability.codexOAuth?.onConnect();
         return;
@@ -405,7 +437,10 @@ export class TuiModelPicker implements Component, Focusable {
 
     // Explicit focus is tracked by row value. Otherwise use the model's first
     // row, so the selected favorite opens on its Favorites row at the top.
-    const modelRows = items.filter((item) => this.modelByKey.has(rowModelKey(item.value)));
+    // The leading row, when shown, is the first focusable row.
+    const modelRows = items.filter(
+      (item) => item.value === LEADING_ITEM_VALUE || this.modelByKey.has(rowModelKey(item.value)),
+    );
     const target = this.focusedModelKey ?? this.selectedModelKey;
     let preferredIndex = this.focusedModelKey
       ? modelRows.findIndex((item) => item.value === this.focusedModelKey)
@@ -422,6 +457,10 @@ export class TuiModelPicker implements Component, Focusable {
       this.focusedModelKey = modelRows[0].value;
     }
     return list;
+  }
+
+  private leadingOptionVisible(): boolean {
+    return Boolean(this.availability.leadingOption) && !this.searchInput.getValue().trim();
   }
 
   private visibleModels(): TuiModel[] {

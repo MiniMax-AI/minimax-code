@@ -15,7 +15,6 @@ import {
   modelInWhitelist,
   planMcpDisclosure,
   renderMcpToolSearchHintBlock,
-  withLocalBrowserObserve,
   type McpDisclosureOptions,
   type McpToolEntry,
 } from '@mavis/agent-tools';
@@ -42,6 +41,8 @@ import type {
   LocalAgentConfigurationSelection,
   LocalAgentExecutionProfile,
 } from '../preparation/contracts.js';
+
+export const ADVISOR_TOOL_NAME = 'advisor';
 
 export function prepareBashTurnTools(
   admittedTools: readonly RuntimeTool[],
@@ -159,6 +160,7 @@ export interface BuildLocalTurnToolCatalogInput {
   readonly ptcEnabled?: boolean;
   /** Where run_code saves a return value over 64 KiB (Session tool-output artifacts). */
   readonly writePtcReturnArtifact?: PtcReturnArtifactWriter;
+  readonly advisorBound?: boolean;
 }
 
 /** The already-gated inventory shared by Turn assembly and Task capture. */
@@ -374,7 +376,8 @@ export function buildLocalTurnToolCatalog(
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const inventory = filterLocalTurnCapabilityInventory(input);
   logAgentToolSelectorSummary(input, inventory.selectorSummary);
-  const { nativeTools, mcpEntries, threadGoalTools } = inventory;
+  const { mcpEntries, threadGoalTools } = inventory;
+  const nativeTools = withoutUnboundAdvisor(inventory.nativeTools, input.advisorBound === true);
   const model = input.llmModel;
   const plan = planMcpDisclosure({ entries: mcpEntries, model, options });
   const tools = plan.deferred
@@ -574,7 +577,7 @@ function withPtcBrowserObserve(
     const browser =
       (tool.def.name === 'browser' && trusted.has(tool)) ||
       getBrowserHostBinding(tool) !== undefined;
-    const def = browser ? withLocalBrowserObserve(tool.def) : undefined;
+    const def = undefined;
     if (!def) return tool;
     const variant: RuntimeTool = { ...tool, def };
     variants.set(tool, variant);
@@ -808,7 +811,7 @@ function isReadyTurnToolAllowed(input: {
   if (!isComputerToolAvailable(input.tool, input.cuRuntimeAvailable)) return false;
   if (
     !input.selector.allowsTool(input.tool.def.name, input.options.selectorAlias, {
-      featureOwned: isFeatureOwnedBuiltinTool(input.profile, input.tool.def.name, input.source),
+      featureOwned: isAllowlistExempt(input.profile, input.tool.def.name, input.source),
       pluginTool: input.options.pluginTool === true,
     })
   )
@@ -844,6 +847,25 @@ function isFeatureOwnedBuiltinTool(
   );
 }
 
+function isUserSelectedBuiltinTool(
+  profile: LocalTurnAgentProfileFacts | undefined,
+  name: string,
+  source: RuntimeToolSource,
+): boolean {
+  return name === ADVISOR_TOOL_NAME && source === 'builtin' && profile?.surface !== 'task-child';
+}
+
+function isAllowlistExempt(
+  profile: LocalTurnAgentProfileFacts | undefined,
+  name: string,
+  source: RuntimeToolSource,
+): boolean {
+  return (
+    isFeatureOwnedBuiltinTool(profile, name, source) ||
+    isUserSelectedBuiltinTool(profile, name, source)
+  );
+}
+
 function isComputerToolAvailable(tool: RuntimeTool, cuRuntimeAvailable: boolean): boolean {
   return cuRuntimeAvailable || !tool.def.name.startsWith('computer_');
 }
@@ -865,7 +887,15 @@ function isProfileToolAllowed(
   if (profile.surface === 'task-child' && TASK_CHILD_BLOCKED_TOOL_NAMES.has(tool.def.name)) {
     return false;
   }
+  if (
+    profile.surface === 'task-child' &&
+    TASK_CHILD_EXPLICIT_TOOL_NAMES.has(tool.def.name) &&
+    !selectsToolExplicitly(profile.configSelection, tool.def.name)
+  ) {
+    return false;
+  }
   if (isBuiltinSubagentTaskChild(profile) && tool.def.name === 'mavis') return false;
+  if (isUserSelectedBuiltinTool(profile, tool.def.name, source)) return true;
   return isProfileCapabilityEnabled(profile.capabilityCeiling, tool.def.name, source);
 }
 
@@ -1053,7 +1083,48 @@ function renderUserPromptPrefix(
 const TASK_CONTROL_TOOL_NAMES = new Set(['task_query', 'task_output', 'task_stop']);
 const DELEGATION_TOOL_NAMES = new Set(['task', 'task_append']);
 const TASK_CHILD_BLOCKED_TOOL_NAMES = new Set([...DELEGATION_TOOL_NAMES, 'todowrite', 'ask_user']);
+const TASK_CHILD_EXPLICIT_TOOL_NAMES = new Set<string>([ADVISOR_TOOL_NAME]);
 const BUILTIN_NATIVE_TOOL_NAMES = new Set<string>(AGENT_BUILTIN_TOOL_IDS);
+
+function selectsToolExplicitly(
+  selection: LocalTurnAgentProfileFacts['configSelection'],
+  name: string,
+): boolean {
+  const target = name.trim().toLowerCase();
+  return selection?.tools?.some((entry) => entry.trim().toLowerCase() === target) === true;
+}
+
+function withoutUnboundAdvisor(
+  tools: readonly RuntimeTool[],
+  advisorBound: boolean,
+): readonly RuntimeTool[] {
+  if (advisorBound) return tools;
+  return tools.filter((tool) => tool.def.name !== ADVISOR_TOOL_NAME);
+}
+
+export function isLocalTurnBuiltinToolAllowed(
+  name: string,
+  agentProfile: LocalTurnAgentProfileFacts | undefined,
+): boolean {
+  const probe: RuntimeTool = {
+    def: { name, description: '', schema: {} as RuntimeTool['def']['schema'] },
+    impl: {
+      execute: () => Promise.reject(new Error('Capability probe tools are never executed.')),
+    },
+    source: 'builtin',
+  };
+  return (
+    filterLocalTurnCapabilityInventory({
+      sources: {
+        nativeTools: [probe],
+        mcpEntries: [],
+        threadGoalTools: [],
+        cuRuntimeAvailable: false,
+      },
+      ...(agentProfile ? { agentProfile } : {}),
+    }).nativeTools.length > 0
+  );
+}
 const BUILTIN_MCP_TOOL_NAMES = new Set<string>(AGENT_BUILTIN_MCP_TOOL_IDS);
 
 function isProfileCapabilityEnabled(

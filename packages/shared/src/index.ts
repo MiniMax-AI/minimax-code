@@ -45,9 +45,11 @@ export {
   withOpenRouterAttributionHeaders,
 } from './openrouter-attribution.js';
 export {
+  isRetryableWindowsFileError,
   retryWindowsFileSystemOperation,
   type WindowsFileSystemRetryOptions,
 } from './windows-file-system.js';
+export { isPidAlive } from './process-alive.js';
 
 export { SESSION_LLM_RETRY_EVENT_TYPE } from './llm-retry-event.js';
 export type {
@@ -425,3 +427,17 @@ export type IMDirectoryEntry = import('./channel-plugin.js').ChannelDirectoryEnt
 export type IMChannelPlugin = import('./channel-plugin.js').ChannelPlugin;
 
 export { withOpenCodeGoHeaders } from './opencode-go-headers.js';
+
+export {
+  formatPluginId,
+  isBuiltInPluginMarketplace,
+  isValidPluginMarketplaceName,
+  LOCAL_PLUGIN_MARKETPLACE,
+  OFFICIAL_PLUGIN_MARKETPLACE,
+  parsePluginSelector,
+  pluginIdKey,
+  samePluginId,
+  type PluginId,
+  type PluginSelector,
+} from './plugin-id.js';
+export { MINIMAX_CODE_USER_AGENT, withMiniMaxCodeUserAgent } from './minimax-code-user-agent.js';

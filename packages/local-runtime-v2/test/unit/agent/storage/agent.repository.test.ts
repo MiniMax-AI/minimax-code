@@ -2771,7 +2771,6 @@ describe("DrizzleAgentRepository canonical Custom field boundary", () => {
         disallowedTools: ["Write"],
         mcpServers: ["local-mcp"],
         skills: ["research"],
-        extensionSkills: ["extension-research"],
       });
       expect(live.corePrompt).not.toContain(description);
       expect(live.corePrompt).not.toContain(displayName);

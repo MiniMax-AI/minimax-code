@@ -16,6 +16,7 @@ export class TuiAcpPromptContinuation {
   private readonly questionTurns = new Set<string>();
   private readonly questionTurnByRequestId = new Map<string, string>();
   private readonly questionnaireOutcomes = new Map<string, boolean>();
+  private readonly openQuestionnaires = new Set<string>();
   private readonly nextTurnIds: string[] = [];
   private readonly terminalEvents = new Map<string, TuiRuntimeEvent>();
   private readonly waiters = new Set<() => void>();
@@ -35,6 +36,7 @@ export class TuiAcpPromptContinuation {
     if (eventSessionId !== this.sessionId) return;
 
     if (event.type === 'questionnaire.ask') {
+      this.openQuestionnaires.add(event.request.id);
       this.questionTurns.add(this.observedTurnId);
       this.questionTurnByRequestId.set(event.request.id, this.observedTurnId);
       this.wake();
@@ -65,10 +67,20 @@ export class TuiAcpPromptContinuation {
   }
 
   settleQuestionnaire(requestId: string, continued: boolean): void {
+    this.openQuestionnaires.delete(requestId);
     const turnId = this.questionTurnByRequestId.get(requestId);
-    if (!turnId) return;
-    this.questionnaireOutcomes.set(turnId, continued);
+    if (turnId) this.questionnaireOutcomes.set(turnId, continued);
     this.wake();
+  }
+
+  /**
+   * A questionnaire this session asked is still with the Client, or its answer is still
+   * being admitted. The Runtime records an answer before it admits the continuation Turn,
+   * so between the two the activity snapshot shows neither; the ACP side settles the
+   * questionnaire only after that admission returns.
+   */
+  hasOpenQuestionnaire(): boolean {
+    return this.openQuestionnaires.size > 0;
   }
 
   async waitForTransition(
@@ -82,6 +94,26 @@ export class TuiAcpPromptContinuation {
       await this.waitForChange(signal);
     }
     throw signal.reason ?? new Error('ACP prompt cancelled.');
+  }
+
+  /** Earliest Turn started on this session that is not in `known`, consumed once. */
+  takeStartedTurn(known: ReadonlySet<string>): string | undefined {
+    const index = this.nextTurnIds.findIndex((candidate) => !known.has(candidate));
+    if (index < 0) return undefined;
+    return this.nextTurnIds.splice(index, 1)[0];
+  }
+
+  /** Resolves at the next Turn lifecycle change of this session or after `timeoutMs`. */
+  async waitForEvent(signal: AbortSignal, timeoutMs: number): Promise<void> {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), timeoutMs);
+    try {
+      await this.waitForChange(AbortSignal.any([signal, timeout.signal]));
+    } catch {
+      // Timeout and cancellation both end the wait; the caller checks `signal` itself.
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private resolveTransition(

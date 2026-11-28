@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveConfigFromRaw } from '../src/config.js';
 import {
   parsePromptSuggestionRemotePolicy,
+  resolveNextStepBoxEnabled,
   resolvePromptSuggestionEnabled,
+  resolveTaskSuggestionEnabled,
   withEffectivePromptSuggestion,
 } from '../src/prompt-suggestion-config.js';
 afterEach(() => {
@@ -52,20 +54,28 @@ describe('prompt suggestion effective opt-in', () => {
     expect(withEffectivePromptSuggestion(config, { defaultEnabled: false })).toEqual({
       dataDir: '/tmp/x',
       promptSuggestion: { enabled: false },
+      nextStepBox: { enabled: true },
+      taskSuggestion: { enabled: true },
     });
     expect(withEffectivePromptSuggestion({ dataDir: '/tmp/x' }, undefined)).toEqual({
       dataDir: '/tmp/x',
       promptSuggestion: { enabled: true },
+      nextStepBox: { enabled: true },
+      taskSuggestion: { enabled: true },
     });
   });
 });
 
 describe('prompt suggestion remote policy', () => {
   it('reads the Apollo snake_case fields', () => {
-    expect(parsePromptSuggestionRemotePolicy({ kill_switch: true, sample_rate: 0.25, default_enabled: true })).toEqual({
+    expect(
+      parsePromptSuggestionRemotePolicy({ kill_switch: true, sample_rate: 0.25, default_enabled: true, next_step_default_enabled: false, task_suggestion_default_enabled: false }),
+    ).toEqual({
       killSwitch: true,
       sampleRate: 0.25,
       defaultEnabled: true,
+      nextStepDefaultEnabled: false,
+      taskSuggestionDefaultEnabled: false,
     });
   });
   it.each([
@@ -80,10 +90,74 @@ describe('prompt suggestion remote policy', () => {
     { sample_rate: Number.NaN },
     { default_enabled: 'true' },
     { default_enabled: 1 },
+    { next_step_default_enabled: 'false' },
+    { task_suggestion_default_enabled: 'false' },
   ])('treats %j as no override instead of throwing', (raw) => {
     expect(parsePromptSuggestionRemotePolicy(raw)).toEqual({});
   });
   it('keeps the valid field when the other one is malformed', () => {
     expect(parsePromptSuggestionRemotePolicy({ kill_switch: false, sample_rate: 'all' })).toEqual({ killSwitch: false });
+  });
+});
+
+describe('Next Step card opt-in', () => {
+  it.each([undefined, null, [], { enabled: 'true' }])('keeps %j as unset', (value) => {
+    expect(resolveConfigFromRaw({ nextStepBox: value }, '/tmp/next-step-config').nextStepBox.enabled).toBeUndefined();
+  });
+  it.each([true, false])('keeps the explicit choice %s', (enabled) => {
+    expect(resolveConfigFromRaw({ nextStepBox: { enabled } }, '/tmp/next-step-config').nextStepBox.enabled).toBe(enabled);
+  });
+  it('no longer reads the retired beta flag', () => {
+    const config = resolveConfigFromRaw({ beta: { desktopNextStepBox: false } }, '/tmp/next-step-config');
+    expect(config.nextStepBox.enabled).toBeUndefined();
+    expect(config.beta).not.toHaveProperty('desktopNextStepBox');
+  });
+  it.each([
+    // explicit, remote Next Step default, expected
+    [true, false, true],
+    [false, true, false],
+    [undefined, undefined, true],
+    [undefined, true, true],
+    [undefined, false, false],
+  ] as const)('explicit %s, remote default %s → %s', (explicit, nextStepDefaultEnabled, expected) => {
+    const remote = nextStepDefaultEnabled === undefined ? {} : { nextStepDefaultEnabled };
+    expect(resolveNextStepBoxEnabled(explicit, remote)).toBe(expected);
+  });
+  it('keeps the two defaults independent', () => {
+    // Turning the suggestion default off leaves the card on, and the reverse.
+    const suggestionOff = withEffectivePromptSuggestion({}, { defaultEnabled: false, killSwitch: true });
+    expect(suggestionOff).toEqual({ promptSuggestion: { enabled: false }, nextStepBox: { enabled: true }, taskSuggestion: { enabled: true } });
+    const cardOff = withEffectivePromptSuggestion({}, { nextStepDefaultEnabled: false });
+    expect(cardOff).toEqual({ promptSuggestion: { enabled: true }, nextStepBox: { enabled: false }, taskSuggestion: { enabled: true } });
+    // A user's explicit choice still wins over the remote default.
+    expect(withEffectivePromptSuggestion({ nextStepBox: { enabled: true } }, { nextStepDefaultEnabled: false }).nextStepBox).toEqual({ enabled: true });
+  });
+});
+
+describe('task suggestion opt-in', () => {
+  it.each([undefined, null, [], { enabled: 'true' }])('keeps %j as unset', (value) => {
+    expect(resolveConfigFromRaw({ taskSuggestion: value }, '/tmp/task-suggestion-config').taskSuggestion.enabled).toBeUndefined();
+  });
+  it.each([true, false])('keeps the explicit choice %s', (enabled) => {
+    expect(resolveConfigFromRaw({ taskSuggestion: { enabled } }, '/tmp/task-suggestion-config').taskSuggestion.enabled).toBe(enabled);
+  });
+  it.each([
+    // explicit, remote task suggestion default, expected
+    [true, false, true],
+    [false, true, false],
+    [undefined, undefined, true],
+    [undefined, true, true],
+    [undefined, false, false],
+  ] as const)('explicit %s, remote default %s → %s', (explicit, taskSuggestionDefaultEnabled, expected) => {
+    const remote = taskSuggestionDefaultEnabled === undefined ? {} : { taskSuggestionDefaultEnabled };
+    expect(resolveTaskSuggestionEnabled(explicit, remote)).toBe(expected);
+  });
+  it('keeps the task suggestion default independent of the other two', () => {
+    expect(withEffectivePromptSuggestion({}, { taskSuggestionDefaultEnabled: false })).toEqual({
+      promptSuggestion: { enabled: true },
+      nextStepBox: { enabled: true },
+      taskSuggestion: { enabled: false },
+    });
+    expect(withEffectivePromptSuggestion({ taskSuggestion: { enabled: true } }, { taskSuggestionDefaultEnabled: false }).taskSuggestion).toEqual({ enabled: true });
   });
 });

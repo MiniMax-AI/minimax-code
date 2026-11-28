@@ -1,7 +1,13 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { Agent, AgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
 import { streamSimple, type CacheRetention, type SimpleStreamOptions } from '@earendil-works/pi-ai';
+import { withContentReviewErrorShield } from './content-review.js';
 import { LLM_REQUEST_TIMEOUT_MS } from './defaults.js';
-import { resolveLLMStreamTimeouts, withLLMStreamTimeouts } from './llm-stream-timeout.js';
+import {
+  resolveLLMStreamTimeouts,
+  withLLMStreamTimeouts,
+  type LLMStreamResumeGuard,
+} from './llm-stream-timeout.js';
 import type {
   PiAfterLlmReplacementCommit,
   PiBeforeLlmCallAppendMessage,
@@ -9,17 +15,21 @@ import type {
   PiLlmCallRecovery,
 } from './hooks.js';
 import type { LLMModelConfig } from './types.js';
+import { isBackgroundTaskUserMessage } from '../protocol/user-message-origin.js';
 import type { turnHistory } from './history.js';
 import type { turnState } from './turn.js';
 
-export function composeStreamFn(resolved: LLMModelConfig): StreamFn {
+export function composeStreamFn(resolved: LLMModelConfig, resume?: LLMStreamResumeGuard): StreamFn {
   // Order matters: each wrapper only fills the option it owns, while
   // explicit per-call options from upstream wrappers still win. The host
   // ceiling is the exception and therefore the innermost link: it has to see
   // the fully accumulated options in order to shrink them.
   const callerHeaders =
     resolved.headers && Object.keys(resolved.headers).length > 0 ? resolved.headers : undefined;
-  const hostClamped = withHostMaxOutputTokens(resolved.streamFn, resolved.hostMaxOutputTokens);
+  // 网关 content_error 的引导词只给模型看：紧贴 provider 换成中性文案，外层的重试、
+  // 指标、超时、事件和历史都看不到它。
+  const shielded = withContentReviewErrorShield(resolved.streamFn);
+  const hostClamped = withHostMaxOutputTokens(shielded, resolved);
   const cacheWrapped = withCacheRetention(hostClamped, resolved.cacheRetention);
   const maxTokensWrapped =
     typeof resolved.maxTokens === 'number' && resolved.maxTokens > 0
@@ -38,16 +48,26 @@ export function composeStreamFn(resolved: LLMModelConfig): StreamFn {
       firstEventTimeoutMs: resolved.firstEventTimeoutMs,
       streamIdleTimeoutMs: resolved.streamIdleTimeoutMs,
     }),
+    resume,
   );
 }
 
 export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory): void {
-  if (turn.hooks.beforeLLM.length === 0 && turn.hooks.afterLLM.length === 0) return;
+  if (
+    turn.hooks.beforeLLM.length === 0 &&
+    turn.hooks.afterLLM.length === 0 &&
+    turn.hooks.turnFailure.length === 0 &&
+    !turn.input.llmPreemption
+  ) {
+    return;
+  }
 
   let checkpointCallCount = 0;
   agent.transformContext = async (messages, signal) => {
+    turn.recovery.lastRequestPrepared = false;
     const request = await prepareRequest(messages, signal);
     turn.recovery.lastRequest = [...request];
+    turn.recovery.lastRequestPrepared = true;
     return request;
   };
   const prepareRequest = async (
@@ -66,11 +86,18 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
       for (const message of rejectedMessages) turn.rejectedAssistantMessages.delete(message);
     }
 
-    if (turn.hooks.beforeLLM.length === 0) return messages;
-    const phase = checkpointCallCount === 0 ? 'initial' : 'iteration';
-    checkpointCallCount += 1;
     const recovery = turn.recovery.active;
     delete turn.recovery.active;
+    // A replayed recovery resends the failed request as it was sent: no hook
+    // may change it, and none runs.
+    if (recovery?.replay) {
+      checkpointCallCount += 1;
+      return [...recovery.requestMessages];
+    }
+    if (turn.hooks.beforeLLM.length === 0) return messages;
+    // A call aborted before its request was prepared sent nothing: preparing
+    // it again (a turn-failure recovery) is still the Turn's initial call.
+    const phase = checkpointCallCount === 0 ? 'initial' : 'iteration';
     const checkpoint = await runBeforeLLM(turn, messages, phase, signal, recovery);
     if (checkpoint.type === 'abort') {
       turn.metrics.tryRecordTerminalFailure({
@@ -79,6 +106,7 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
       });
       throw new Error(`before_llm_checkpoint_aborted: ${checkpoint.reason}`);
     }
+    checkpointCallCount += 1;
     if (checkpoint.type === 'respond') {
       turn.syntheticResponse.pending = {
         text: checkpoint.text,
@@ -104,6 +132,10 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
       try {
         await history.replace(replacement.messages, previousMessages, replacement.metadata);
       } catch (err) {
+        // Nothing was replaced durably: the Turn goes on from the transcript
+        // it had, so a later history flush appends only this Turn's records.
+        messages.splice(0, messages.length, ...previousMessages);
+        agent.state.messages = previousMessages;
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(`before_llm_checkpoint_persistence_failed: ${message}`);
       }
@@ -482,16 +514,8 @@ function captureInitialCurrentUser(
 ): AgentMessage | undefined {
   if (phase !== 'initial') return undefined;
   const candidate = messages.at(-1);
-  if (candidate?.role !== 'user' || isInternalUserMessage(candidate)) return undefined;
+  if (candidate?.role !== 'user' || isBackgroundTaskUserMessage(candidate)) return undefined;
   return messages.filter((message) => message === candidate).length === 1 ? candidate : undefined;
-}
-
-function isInternalUserMessage(message: AgentMessage): boolean {
-  const hostMetadata = Reflect.get(message, 'hostMetadata');
-  if (typeof hostMetadata !== 'object' || hostMetadata === null || Array.isArray(hostMetadata)) {
-    return false;
-  }
-  return Object.hasOwn(hostMetadata, 'backgroundTaskOrigin');
 }
 
 function placeBeforeCurrentUser(input: {
@@ -523,7 +547,7 @@ function placeBeforeCurrentUser(input: {
     // A continuation or an explicitly internal user at the tail has no real
     // user to precede. The ordinary tail path keeps the durable replacement
     // (e.g. a finished compaction) while still appending the marker.
-    if (tail?.role !== 'user' || isInternalUserMessage(tail)) return { type: 'tail' };
+    if (tail?.role !== 'user' || isBackgroundTaskUserMessage(tail)) return { type: 'tail' };
     return 'before-current-user could not locate one current real user';
   }
   const sourceIndex = input.initialMessages.length - 1;
@@ -537,29 +561,34 @@ function placeBeforeCurrentUser(input: {
       currentUser,
     );
   }
+  const durable = input.durableReplacement.messages;
   const sourceIndexes = input.durableReplacement.metadata.replacementSourceIndexes;
-  const durableMatches = input.durableReplacement.messages.flatMap((message, index) =>
+  const durableMatches = durable.flatMap((message, index) =>
     message === currentUser || sourceIndexes?.[index] === sourceIndex ? [index] : [],
   );
   if (new Set(durableMatches).size > 1) {
     return 'before-current-user located multiple replacement users';
   }
-  const durableUserIndex = durableMatches[0];
-  const currentMatches = input.currentMessages.flatMap((message, index) =>
-    message === currentUser || index === durableUserIndex ? [index] : [],
-  );
-  if (new Set(currentMatches).size > 1) {
-    return 'before-current-user located multiple request users';
-  }
-  const currentUserIndex = currentMatches[0];
+  const durableUserIndex =
+    durableMatches[0] ?? lastIndexWhere(durable, (message) => isSameUser(message, currentUser));
+  const durableUser = durableUserIndex === undefined ? undefined : durable[durableUserIndex];
+  const currentUserIndex = locateRequestUser(input.currentMessages, {
+    currentUser,
+    durableUser,
+    durableMessages: durable,
+  });
+  if (typeof currentUserIndex === 'string') return currentUserIndex;
   const requestBase = input.currentMessages.filter((_message, index) => index !== currentUserIndex);
-  const durableBase = input.durableReplacement.messages.filter(
-    (_message, index) => index !== durableUserIndex,
-  );
+  const located =
+    currentUserIndex === undefined ? undefined : input.currentMessages[currentUserIndex];
+  // The compactor's copy leaves both views as the exact current user; anything
+  // else a hook put in the request is a request-only rewrite and stays there.
+  const requestUser = located === undefined || located === durableUser ? currentUser : located;
+  const durableBase = durable.filter((_message, index) => index !== durableUserIndex);
   const durableMessages = [...durableBase, input.marker, currentUser];
   return {
     type: 'placed',
-    messages: [...requestBase, input.marker, currentUser],
+    messages: [...requestBase, input.marker, requestUser],
     durableReplacement: {
       messages: durableMessages,
       metadata: withCurrentUserTailMetadata(
@@ -573,12 +602,73 @@ function placeBeforeCurrentUser(input: {
 }
 
 /**
+ * Finds the current user in the request view. Durable positions say nothing
+ * here, because request-only hooks insert, drop and rewrite messages. The exact
+ * object (the initial user or the durable copy) wins. Otherwise only a message
+ * durable history does not hold can be the user: a clone with the same content
+ * and timestamp, or, while durable history still holds the user, a rewrite of
+ * it. A rewrite keeps the user's position, so only the last non-custom request
+ * message after the latest compaction summary qualifies; request-only user
+ * markers placed elsewhere (Tool Search catalog, PTC reminder) never do.
+ * Returns undefined when the request has none.
+ */
+function locateRequestUser(
+  messages: readonly AgentMessage[],
+  known: {
+    readonly currentUser: AgentMessage;
+    readonly durableUser: AgentMessage | undefined;
+    readonly durableMessages: readonly AgentMessage[];
+  },
+): number | string | undefined {
+  const identityMatches = messages.flatMap((message, index) =>
+    message === known.currentUser || message === known.durableUser ? [index] : [],
+  );
+  if (identityMatches.length > 1) return 'before-current-user located multiple request users';
+  if (identityMatches.length === 1) return identityMatches[0];
+  const durable = new Set(known.durableMessages);
+  const clone = lastIndexWhere(
+    messages,
+    (message) => !durable.has(message) && isSameUser(message, known.currentUser),
+  );
+  if (clone !== undefined || !known.durableUser) return clone;
+  const rewriteIndex = lastIndexWhere(messages, (message) => message.role !== 'custom');
+  if (rewriteIndex === undefined) return undefined;
+  const summaryIndex =
+    lastIndexWhere(messages, (message) => message.role === 'compactionSummary') ?? -1;
+  const rewrite = messages[rewriteIndex]!;
+  return rewriteIndex > summaryIndex &&
+    rewrite.role === 'user' &&
+    !durable.has(rewrite) &&
+    !isBackgroundTaskUserMessage(rewrite)
+    ? rewriteIndex
+    : undefined;
+}
+
+function isSameUser(message: AgentMessage, user: AgentMessage): boolean {
+  return (
+    message.role === 'user' &&
+    user.role === 'user' &&
+    message.timestamp === user.timestamp &&
+    isDeepStrictEqual(message.content, user.content)
+  );
+}
+
+function lastIndexWhere(
+  messages: readonly AgentMessage[],
+  predicate: (message: AgentMessage) => boolean,
+): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (predicate(messages[index]!)) return index;
+  }
+  return undefined;
+}
+
+/**
  * Places another marker once an earlier placement already put the exact
  * current user at the durable tail. Markers keep registration order, all
- * before the current user. In the request view the user is matched by
- * identity; if a request-only hook rewrote the user (e.g. a media guard
- * replacing an image block), the first placement's invariant — the current
- * user is the last request message — locates it instead.
+ * before the current user. In the request view `locateRequestUser` finds the
+ * user even if a request-only hook rewrote it since (e.g. a media guard
+ * replacing an image block).
  */
 function placeAfterEarlierPlacement(
   input: {
@@ -604,14 +694,13 @@ function placeAfterEarlierPlacement(
   if (durable.at(-1) !== currentUser || durable.indexOf(currentUser) !== durable.length - 1) {
     return 'before-current-user lost the placed current user';
   }
-  const identityMatches = input.currentMessages.flatMap((message, index) =>
-    message === currentUser ? [index] : [],
-  );
-  if (identityMatches.length > 1) return 'before-current-user located multiple request users';
-  const lastIndex = input.currentMessages.length - 1;
-  const requestUserIndex =
-    identityMatches[0] ?? (input.currentMessages[lastIndex]?.role === 'user' ? lastIndex : -1);
-  if (requestUserIndex < 0) return 'before-current-user lost the placed request user';
+  const requestUserIndex = locateRequestUser(input.currentMessages, {
+    currentUser,
+    durableUser: currentUser,
+    durableMessages: durable,
+  });
+  if (typeof requestUserIndex === 'string') return requestUserIndex;
+  if (requestUserIndex === undefined) return 'before-current-user lost the placed request user';
   const durableMessages = [...durable.slice(0, -1), input.marker, currentUser];
   return {
     type: 'placed',
@@ -717,6 +806,21 @@ function withHeaders(inner: StreamFn | undefined, headers: Record<string, string
   }) as StreamFn;
 }
 
+/**
+ * A request that carries a session identifier carries `resolve()` instead,
+ * read as it is sent; the Providers derive their cache key and affinity
+ * headers from it. A request without one (an isolated side request) keeps none.
+ */
+export function withSessionIdentity(inner: StreamFn | undefined, resolve: () => string): StreamFn {
+  const base = inner ?? streamSimple;
+  return ((model, context, options) =>
+    base(
+      model,
+      context,
+      options?.sessionId === undefined ? options : { ...options, sessionId: resolve() },
+    )) as StreamFn;
+}
+
 function withFetch(inner: StreamFn | undefined, fetch: SimpleStreamOptions['fetch']): StreamFn {
   const base = inner ?? streamSimple;
   return ((model, context, options) => {
@@ -749,25 +853,43 @@ function withMaxTokens(inner: StreamFn | undefined, maxTokens: number): StreamFn
  * cap, so a provider that allows less still wins and nothing downstream can
  * widen a budget the host already clamped.
  *
- * No cap means the caller keeps its stream function untouched. A cap that is
- * present but not a positive integer is rejected here, while the turn is being
- * assembled, rather than silently degrading into "no ceiling".
+ * No cap means the caller keeps its stream function untouched. Static caps
+ * are validated at assembly; dynamic allowance is re-read and validated at
+ * every physical attempt, so retries cannot reuse an exhausted allowance.
  */
+function assertOutputTokenCap(cap: number): void {
+  if (!Number.isInteger(cap) || cap <= 0) {
+    throw new TypeError(`host_max_output_tokens_invalid: ${String(cap)} is not a positive integer`);
+  }
+}
+
+/** Numeric view for request diagnostics and the final provider admission seam. */
+export function resolveHostOutputTokenCap(
+  config: Pick<LLMModelConfig, 'hostMaxOutputTokens' | 'resolveHostMaxOutputTokens'>,
+): number | undefined {
+  const dynamic = config.resolveHostMaxOutputTokens?.();
+  if (dynamic === 0) throw new Error('host_output_budget_exhausted');
+  if (dynamic !== undefined) assertOutputTokenCap(dynamic);
+  if (config.hostMaxOutputTokens !== undefined) assertOutputTokenCap(config.hostMaxOutputTokens);
+  const caps = [dynamic, config.hostMaxOutputTokens].filter(
+    (cap): cap is number => cap !== undefined,
+  );
+  return caps.length ? Math.min(...caps) : undefined;
+}
+
 function withHostMaxOutputTokens(
   inner: StreamFn | undefined,
-  hostMaxOutputTokens: number | undefined,
+  config: Pick<LLMModelConfig, 'hostMaxOutputTokens' | 'resolveHostMaxOutputTokens'>,
 ): StreamFn | undefined {
-  if (hostMaxOutputTokens === undefined) return inner;
-  if (!Number.isInteger(hostMaxOutputTokens) || hostMaxOutputTokens <= 0) {
-    throw new TypeError(
-      `host_max_output_tokens_invalid: ${String(hostMaxOutputTokens)} is not a positive integer`,
-    );
-  }
+  if (config.hostMaxOutputTokens === undefined && !config.resolveHostMaxOutputTokens) return inner;
+  if (config.hostMaxOutputTokens !== undefined) assertOutputTokenCap(config.hostMaxOutputTokens);
   const base = inner ?? streamSimple;
   return ((model, context, options) => {
+    const cap = resolveHostOutputTokenCap(config);
+    if (cap === undefined) return base(model, context, options);
     return base(model, context, {
       ...(options ?? {}),
-      maxTokens: smallestPositive([hostMaxOutputTokens, options?.maxTokens, model?.maxTokens]),
+      maxTokens: smallestPositive([cap, options?.maxTokens, model?.maxTokens]),
     });
   }) as StreamFn;
 }

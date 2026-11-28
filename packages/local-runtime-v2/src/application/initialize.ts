@@ -86,6 +86,35 @@ export const initializeApplications: InitializeApplications = (options) => {
       : {}),
   });
   const deletion = options.sessionSystem.session.deletion.create();
+  const listTaskChildSessionIds = async (sessionId: string): Promise<string[]> =>
+    (await options.sessionSystem.repositories.sessions.listChildren(sessionId))
+      .filter((child) => child.sessionKind === "task" && child.sessionId !== sessionId)
+      .map((child) => child.sessionId);
+  const assertSessionDeletionAllowed = options.assertSessionDeletionAllowed;
+  const assertTaskChildrenDeletable = async (sessionId: string): Promise<void> => {
+    if (!assertSessionDeletionAllowed) return;
+    for (const childId of await listTaskChildSessionIds(sessionId)) {
+      await assertSessionDeletionAllowed(childId);
+      await assertTaskChildrenDeletable(childId);
+    }
+  };
+  const deleteTaskChildren = async (sessionId: string): Promise<void> => {
+    const attempted = new Set<string>();
+    for (;;) {
+      const pending = (await listTaskChildSessionIds(sessionId)).filter((id) => !attempted.has(id));
+      if (pending.length === 0) return;
+      for (const childId of pending) {
+        attempted.add(childId);
+        await assertSessionDeletionAllowed?.(childId);
+        await deleteSingleSession(childId);
+      }
+    }
+  };
+  const deleteSingleSession = (sessionId: string): Promise<void> =>
+    options.turn.sessionDeletion(sessionId, async () => {
+      await deleteTaskChildren(sessionId);
+      await deletion.deleteSession(sessionId);
+    });
   const createSideSession =
     options.conversationMutationWorkflow?.createSideSession;
   const lifecycle = new SessionLifecycleApplication({
@@ -110,10 +139,10 @@ export const initializeApplications: InitializeApplications = (options) => {
       ? { endPluginHookSession: options.endPluginHookSession }
       : {}),
     deletion: {
-      deleteSession: (sessionId) =>
-        options.turn.sessionDeletion(sessionId, async () => {
-          await deletion.deleteSession(sessionId);
-        }),
+      deleteSession: async (sessionId) => {
+        await assertTaskChildrenDeletable(sessionId);
+        await deleteSingleSession(sessionId);
+      },
     },
     ...(options.assertSessionDeletionAllowed
       ? { assertSessionDeletionAllowed: options.assertSessionDeletionAllowed }

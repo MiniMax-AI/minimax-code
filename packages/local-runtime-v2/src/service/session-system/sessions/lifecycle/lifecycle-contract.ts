@@ -30,6 +30,7 @@ export interface SessionMutationFields {
   readonly interactionMode?: SessionInteractionMode;
   readonly effectiveModelContextWindow?: number | null;
   readonly effectiveModelMaxOutputTokens?: number | null;
+  readonly advisor?: SessionRecord['advisor'];
   readonly memoryPolicy?: SessionMemoryPolicyPatch;
 }
 
@@ -62,6 +63,7 @@ export interface SessionMetadataCreateInput {
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   readonly effectiveModelContextWindow?: number;
   readonly effectiveModelMaxOutputTokens?: number;
+  readonly advisor?: NonNullable<SessionRecord['advisor']>;
   readonly memoryPolicy?: SessionRecord['memoryPolicy'];
   readonly agentDefinition?: SessionAgentDefinitionCreate;
   readonly taskAgentBinding?: TaskSessionBindingCreate;

@@ -154,8 +154,8 @@ export class ContextManager {
       input.model.contextWindow > 0
         ? input.model.contextWindow
         : this.settings.contextWindowFallback;
-    // Cloud/legacy retains its existing configured-output trigger policy; local-runtime-v2's
-    // dynamic provider budget is supplied separately by provider-budget.ts.
+    // Cloud/legacy 保持使用 configured output 的既有触发策略；local-runtime-v2
+    // 的动态 Provider 预算由 provider-budget.ts 单独提供。
     const triggerAt = computeCompactionTriggerAt({
       modelId: input.model.id,
       contextWindow,
@@ -186,10 +186,10 @@ export class ContextManager {
     let count: { tokens: number; source: string };
     try {
       count = this.tokenCounter
-        ? // Forward headers and tools unchanged to the counter: headers may carry gateway authentication
-          // (without it, remote count_tokens returns 401), and tool declarations are part of the real LLM payload
-          // (tens of thousands of tokens in MCP-heavy sessions). Omitting them systematically undercounts
-          // and delays compaction triggers.
+        ? // headers 和 tools 必须原样透传给计数器：headers 里可能带网关鉴权
+          // （缺了远程 count_tokens 直接 401），tools 声明是真实 LLM payload
+          // 的一部分（MCP 重的会话可达数万 token），不带则计数系统性偏低、
+          // 压缩迟迟不触发。
           await this.tokenCounter.countContextTokens({
             messages,
             model: input.model,
@@ -214,7 +214,9 @@ export class ContextManager {
       };
     }
 
-    const shouldCompact = count.tokens > triggerAt;
+    // 重发一次被模型拒绝的请求（超窗、图片太多、请求太大）时，拒绝本身说明已经
+    // 超限，不看计数直接压缩，做法对齐 local-runtime-v2。
+    const shouldCompact = input.recovery !== undefined || count.tokens > triggerAt;
     return {
       shouldCompact,
       reason: shouldCompact ? undefined : 'context_manager_below_threshold',

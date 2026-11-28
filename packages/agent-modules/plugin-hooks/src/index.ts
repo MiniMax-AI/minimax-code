@@ -9,6 +9,11 @@ export {
   resolvePluginDataDirectory,
 } from './runner.js';
 export {
+  type PluginHookCommandExecution,
+  type PluginHookCommandExecutor,
+  type PluginHookCommandOutcome,
+} from './command-executor.js';
+export {
   PluginHookCoordinator,
   type PluginHookAdmissionTransaction,
   type PluginHookSessionEndFence,
@@ -16,6 +21,7 @@ export {
 export { cleanupPluginHookSessionArtifacts } from './output-artifacts.js';
 export { pluginHookEffort } from './effort.js';
 export {
+  HOOK_MODULES_INVALID_FIX,
   PLUGIN_HOOK_EVENTS,
   type PluginHookCommandHandler,
   type PluginHookDecision,
@@ -23,7 +29,9 @@ export {
   type PluginHookEventInput,
   type PluginHookEventName,
   type PluginHookEffort,
+  type PluginHookHandlerOrigin,
   type PluginHookLogger,
+  type PluginHookModulesDeclaration,
   type PluginHookObserver,
   type PluginHookPermissionAutoApproval,
   type PluginHookPermissionRuleValue,

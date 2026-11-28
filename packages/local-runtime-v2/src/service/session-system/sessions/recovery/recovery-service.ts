@@ -12,14 +12,17 @@ import type {
 
 export const SESSION_INTERRUPTION_MESSAGE =
   'This session was interrupted because the previous local runtime stopped.';
+const SESSION_CRASH_RECOVERY_SOURCE = 'crash-recovery';
 
 const DEFAULT_RECOVERY_BATCH_SIZE = 1000;
 
 export interface SessionRecoveryServiceOptions {
-  readonly sessions: Pick<SessionRepository, 'listStalePiSessions' | 'update'>;
+  readonly sessions: Pick<SessionRepository, 'listStalePiSessions' | 'update'> &
+    Partial<Pick<SessionRepository, 'get'>>;
   /** Existing display and canonical stores, used only to close interrupted PTC turns. */
   readonly messages?: Pick<MessageRepository, 'list' | 'upsert'>;
-  readonly canonicalHistory?: Pick<SessionSystemCanonicalHistoryProvider, 'readActive' | 'append'>;
+  readonly canonicalHistory?: Pick<SessionSystemCanonicalHistoryProvider, 'readActive' | 'append'> &
+    Partial<Pick<SessionSystemCanonicalHistoryProvider, 'bindBeforeSettledRead'>>;
   readonly batchSize?: number;
 }
 
@@ -31,9 +34,17 @@ export interface SessionRecoveryServiceOptions {
  */
 export class SessionRecoveryService implements SessionProcessRestartRecovery {
   private readonly batchSize: number;
+  private readonly deferredTerminalFacts = new Map<
+    string,
+    readonly PtcCrashRecoveryTerminalFact[]
+  >();
+  private readonly inFlightReadReconciles = new Map<string, Promise<void>>();
 
   constructor(private readonly options: SessionRecoveryServiceOptions) {
     this.batchSize = normalizeBatchSize(options.batchSize);
+    options.canonicalHistory?.bindBeforeSettledRead?.((sessionId) =>
+      this.reconcilePendingPtcBeforeSettledRead(sessionId),
+    );
   }
 
   async recoverPreviousProcess(input: {
@@ -55,52 +66,105 @@ export class SessionRecoveryService implements SessionProcessRestartRecovery {
           : {}),
         limit: this.batchSize,
       });
-      // Do this before changing `started` to `interrupted`. If the process
-      // stops between the two durable stores, the next startup still sees the
-      // Session as stale and retries the PTC closure instead of losing facts.
-      for (const turnId of await this.recoverInterruptedPtcState({
+      const batchPtc = await this.recoverInterruptedPtcState({
         processStartedAtMs: input.processStartedAtMs,
         interruptedSessionIds: candidates.map((candidate) => candidate.sessionId),
         terminalFacts: input.terminalFacts,
-      })) {
-        recoveredPtcTurnIds.add(turnId);
-      }
+      });
+      batchPtc.recoveredTurnIds.forEach((turnId) => recoveredPtcTurnIds.add(turnId));
+      this.rememberDeferredFacts(batchPtc.deferredSessionIds, input.terminalFacts);
       for (const candidate of candidates) {
-        const updated = await this.options.sessions.update(candidate.sessionId, {
-          status: 'interrupted',
-          errorMessage: SESSION_INTERRUPTION_MESSAGE,
-          errorCode: undefined,
-          errorSource: 'crash-recovery',
-          errorDetail: undefined,
-          errorProviderId: undefined,
-        });
-        if (updated?.status === 'interrupted') {
+        if (await this.markSessionInterrupted(candidate.sessionId)) {
           interruptedSessionIds.push(candidate.sessionId);
         }
       }
     } while (candidates.length === this.batchSize);
-    for (const turnId of await this.recoverInterruptedPtcState({
+    const factPass = await this.recoverInterruptedPtcState({
       processStartedAtMs: input.processStartedAtMs,
       interruptedSessionIds: [],
       terminalFacts: input.terminalFacts,
-    })) {
-      recoveredPtcTurnIds.add(turnId);
-    }
+    });
+    factPass.recoveredTurnIds.forEach((turnId) => recoveredPtcTurnIds.add(turnId));
+    this.rememberDeferredFacts(factPass.deferredSessionIds, input.terminalFacts);
     return {
       interruptedSessionIds,
       ...(recoveredPtcTurnIds.size > 0 ? { recoveredPtcTurnIds: [...recoveredPtcTurnIds] } : {}),
     };
   }
 
+  private reconcilePendingPtcBeforeSettledRead(sessionId: string): Promise<void> {
+    const existing = this.inFlightReadReconciles.get(sessionId);
+    if (existing) return existing;
+    const run = this.runTrackedSettledReadReconcile(sessionId);
+    this.inFlightReadReconciles.set(sessionId, run);
+    return run;
+  }
+
+  private async runTrackedSettledReadReconcile(sessionId: string): Promise<void> {
+    try {
+      await this.runSettledReadReconcile(sessionId);
+    } finally {
+      this.inFlightReadReconciles.delete(sessionId);
+    }
+  }
+
+  private async runSettledReadReconcile(sessionId: string): Promise<void> {
+    const { messages, canonicalHistory } = this.options;
+    if (!messages || !canonicalHistory) return;
+    const deferredFacts = this.deferredTerminalFacts.get(sessionId);
+    const session = await this.options.sessions.get?.(sessionId);
+    if (session?.status === 'started' && !deferredFacts) return;
+    await recoverPtcCrashState(
+      { messages, history: canonicalHistory },
+      {
+        processStartedAtMs: Date.now(),
+        interruptedSessionIds: [sessionId],
+        terminalFacts: deferredFacts ?? [],
+        failOnAppendError: true,
+      },
+    );
+    this.deferredTerminalFacts.delete(sessionId);
+  }
+
+  private rememberDeferredFacts(
+    deferredSessionIds: readonly string[],
+    terminalFacts: readonly PtcCrashRecoveryTerminalFact[] | undefined,
+  ): void {
+    for (const sessionId of deferredSessionIds) {
+      const matching = (terminalFacts ?? []).filter((fact) => fact.sessionId === sessionId);
+      if (matching.length > 0 || !this.deferredTerminalFacts.has(sessionId)) {
+        this.deferredTerminalFacts.set(sessionId, matching);
+      }
+    }
+  }
+
+  private async markSessionInterrupted(sessionId: string): Promise<boolean> {
+    const updated = await this.options.sessions.update(sessionId, {
+      status: 'interrupted',
+      errorMessage: SESSION_INTERRUPTION_MESSAGE,
+      errorCode: undefined,
+      errorSource: SESSION_CRASH_RECOVERY_SOURCE,
+      errorDetail: undefined,
+      errorProviderId: undefined,
+    });
+    return updated?.status === 'interrupted';
+  }
+
   private async recoverInterruptedPtcState(input: {
     readonly processStartedAtMs: number;
     readonly interruptedSessionIds: readonly string[];
     readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
-  }): Promise<readonly string[]> {
+  }): Promise<{
+    readonly recoveredTurnIds: readonly string[];
+    readonly deferredSessionIds: readonly string[];
+  }> {
     const { messages, canonicalHistory } = this.options;
-    if (!messages || !canonicalHistory) return [];
-    return (await recoverPtcCrashState({ messages, history: canonicalHistory }, input))
-      .recoveredTurnIds;
+    if (!messages || !canonicalHistory) return { recoveredTurnIds: [], deferredSessionIds: [] };
+    const result = await recoverPtcCrashState({ messages, history: canonicalHistory }, input);
+    return {
+      recoveredTurnIds: result.recoveredTurnIds,
+      deferredSessionIds: result.deferredSessionIds ?? [],
+    };
   }
 }
 

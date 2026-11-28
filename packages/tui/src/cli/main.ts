@@ -8,8 +8,11 @@ import type { MavisRegion } from '@mavis/config';
 import { createTuiProgram, type TuiInteractiveLaunchRequest } from './program.js';
 import type { McodeProviderCliRequest } from './provider-command.js';
 import type { McodePluginCliRequest } from '../plugin/contract.js';
+import type { McodeMcpCliRequest } from './mcp-command.js';
 import { tuiErrorDiagnostic } from '../user-facing-failure.js';
 import { configureTuiNetworkProxy } from './network-proxy.js';
+import { shouldExposeTuiManagedBackendLane } from './environment.js';
+import { isMcodeInternalFeatureReleased } from '../auth/environment.js';
 import { consumeLoginRestartHandoff } from '../tui/login-restart-handoff.js';
 import type { SystemPromptOverrides } from './system-prompt-options.js';
 import type { McodeTelemetryCliAction } from './telemetry-command.js';
@@ -78,6 +81,11 @@ export interface RunTuiCliDependencies {
     version: string,
     environment: NodeJS.ProcessEnv,
   ) => Promise<string> | string;
+  readonly runMcp?: (
+    request: McodeMcpCliRequest,
+    version: string,
+    lane?: string,
+  ) => Promise<string>;
   readonly configureNetworkProxy?: typeof configureTuiNetworkProxy;
   readonly allowStartupEnvironmentSelection?: boolean;
   readonly outputDrainTimeoutMs?: number;
@@ -107,9 +115,12 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
     await createProgram({
       version: MINIMAX_CODE_VERSION,
       allowStartupEnvironmentSelection: dependencies.allowStartupEnvironmentSelection,
+      exposeManagedBackendLane: shouldExposeTuiManagedBackendLane(),
+      exposeAdvisor: isMcodeInternalFeatureReleased('advisor'),
       launchTui: async ({
         initialPrompt,
         model,
+        advisor,
         sessionId,
         showSessionPicker,
         continueLatestSession,
@@ -125,6 +136,7 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
           version: MINIMAX_CODE_VERSION,
           ...(initialPrompt ? { initialPrompt } : {}),
           ...(model ? { model } : {}),
+          ...(advisor ? { advisor } : {}),
           ...(sessionId ? { sessionId } : {}),
           ...(showSessionPicker ? { showSessionPicker: true } : {}),
           ...(continueLatestSession ? { continueLatestSession: true } : {}),
@@ -182,6 +194,11 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
       runTelemetry: async (action) => {
         const runTelemetry = dependencies.runTelemetry ?? defaultRunTelemetry;
         processRef.stdout.write(await runTelemetry(action, MINIMAX_CODE_VERSION, processRef.env));
+        completedCommandExitMode = 'natural';
+      },
+      runMcp: async (request, lane) => {
+        const runMcp = dependencies.runMcp ?? defaultRunMcp;
+        processRef.stdout.write(`${await runMcp(request, MINIMAX_CODE_VERSION, lane)}\n`);
         completedCommandExitMode = 'natural';
       },
     }).parseAsync(processRef.argv, { from: 'node' });
@@ -339,4 +356,13 @@ async function defaultRunTelemetry(
 ): Promise<string> {
   const { runMcodeTelemetryCommand } = await import('./telemetry-command.js');
   return runMcodeTelemetryCommand(action, version, { environment });
+}
+
+async function defaultRunMcp(
+  request: McodeMcpCliRequest,
+  version: string,
+  lane?: string,
+): Promise<string> {
+  const { runMcodeMcpCommand } = await import('./mcp-command.js');
+  return runMcodeMcpCommand({ request, version, lane });
 }

@@ -121,7 +121,6 @@ export class ThreadGoalVerificationDispatcher {
       transcriptWindow,
       evidence: assembleVerificationEvidence({
         mode: threadGoalVerifierEvidenceMode(this.deps.configGetter),
-        objective: context.goal.objective,
         objectiveDigest: context.accounting.boundTurn.binding.objectiveDigest,
         claim: context.signal?.summary?.trim() || context.input.finalAssistantText,
         transcriptWindow,

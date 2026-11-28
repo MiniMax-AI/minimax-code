@@ -1,3 +1,4 @@
+import { isExecAdvisorSummary, type ExecAdvisorSummary } from './advisor-calls.js';
 import type { TuiTurnRunOutcome } from './turn-run-outcome.js';
 
 export type ExecResultStatus =
@@ -31,6 +32,8 @@ export interface ExecResultV1 {
   readonly answer?: string | null;
   readonly model?: ExecResultModel;
   readonly error?: ExecResultError;
+  /** Present only when the main model called the advisor in this Turn. */
+  readonly advisor?: ExecAdvisorSummary;
   readonly durationMs: number;
 }
 
@@ -45,6 +48,7 @@ export function createExecResultV1(outcome: TuiTurnRunOutcome): ExecResultV1 {
     answer: outcome.answer ?? null,
     ...(outcome.model ? { model: { ...outcome.model } } : {}),
     ...(outcome.error ? { error: { ...outcome.error } } : {}),
+    ...(outcome.advisor ? { advisor: outcome.advisor } : {}),
     durationMs: outcome.durationMs,
   };
 }
@@ -66,6 +70,7 @@ export function isExecResultV1(value: unknown): value is ExecResultV1 {
     typeof result.turnId === 'string' &&
     typeof result.durationMs === 'number' &&
     validModel &&
+    (result.advisor === undefined || isExecAdvisorSummary(result.advisor)) &&
     (result.status === 'succeeded' ||
       result.status === 'failed' ||
       result.status === 'blocked' ||

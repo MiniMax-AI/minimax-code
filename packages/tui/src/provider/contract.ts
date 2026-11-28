@@ -45,6 +45,17 @@ export interface McodeRuntimeProviderView {
   readonly configRevision?: string;
   readonly models?: readonly McodeProviderModel[];
   readonly status?: McodeProviderStatus;
+  /** Ordinary API-key providers: their keys, never a value. */
+  readonly apiKeys?: readonly McodeProviderApiKey[];
+}
+
+/** One key of a BYOK provider as the runtime shows it (masked, with its in-memory rest). */
+export interface McodeProviderApiKey {
+  readonly id: string;
+  readonly name?: string;
+  readonly masked: string;
+  readonly enabled: boolean;
+  readonly rest?: { readonly reason: string; readonly until: number };
 }
 
 export interface McodeProviderView {
@@ -59,6 +70,8 @@ export interface McodeProviderView {
   readonly baseUrl?: string;
   readonly hasApiKey: boolean;
   readonly maskedApiKey?: string;
+  /** Present when the provider has more than one key; read-only here (edited in Desktop). */
+  readonly apiKeys?: readonly McodeProviderApiKey[];
   readonly models: readonly McodeProviderModel[];
   readonly status?: McodeProviderStatus;
 }

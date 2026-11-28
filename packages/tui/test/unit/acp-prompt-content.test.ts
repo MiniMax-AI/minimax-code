@@ -10,9 +10,9 @@ describe('ACP prompt content', () => {
   it.each([
     {
       name: 'more images than the count limit',
-      count: 12,
+      count: 21,
       bytesPerImage: 1024,
-      message: 'A prompt can include at most 10 images.',
+      message: 'A prompt can include at most 20 images.',
     },
     {
       name: 'images over the total size limit',
@@ -34,6 +34,17 @@ describe('ACP prompt content', () => {
       ),
     ).toThrow(message);
     expect(decode.mock.calls.filter(([, encoding]) => encoding === 'base64')).toHaveLength(0);
+  });
+
+  it('accepts images exactly at the count limit', () => {
+    const data = Buffer.alloc(1024).toString('base64');
+
+    const prompt = parseTuiAcpPrompt(
+      Array.from({ length: 20 }, () => ({ type: 'image' as const, mimeType: 'image/png', data })),
+    );
+
+    expect(prompt.images).toHaveLength(20);
+    expect(prompt.images.at(-1)?.fileName).toBe('image-20.png');
   });
 
   it('accepts images exactly at the total size limit', () => {

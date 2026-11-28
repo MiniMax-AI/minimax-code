@@ -1,4 +1,11 @@
-import { getRuntimeBuildEnv, type MavisBuildEnv, type MavisRegion } from '@mavis/config';
+import { join } from 'node:path';
+import {
+  getRuntimeBuildEnv,
+  readExplicitBetaFeatureFromFile,
+  resolveBetaFeature,
+  type MavisBuildEnv,
+  type MavisRegion,
+} from '@mavis/config';
 import {
   resolveProductBuildIdentity,
   type ProductBuildIdentity,
@@ -43,6 +50,48 @@ export function resolveMcodeBuildIdentity(
     buildEnv: embeddedBuildEnvironment ?? normalizeRuntimeBuildEnvironment(runtimeBuildEnv),
     internalBuild: embeddedBuildVariant === 'internal',
   });
+}
+
+/**
+ * User-added Plugin marketplaces and the advisor ship in internal and test packages only.
+ * Like Codex OAuth, the package identity decides: the process env does not carry the
+ * internal-package flag, so the config file's resolved value cannot tell them apart.
+ */
+export function isMcodeInternalFeatureReleased(
+  feature: 'pluginMarketplaces' | 'advisor',
+  buildIdentity: Pick<ProductBuildIdentity, 'isInternalBuild'> &
+    Partial<Pick<ProductBuildIdentity, 'buildEnv'>> = resolveMcodeBuildIdentity(),
+): boolean {
+  return resolveBetaFeature(feature, undefined, {
+    ...(buildIdentity.buildEnv ? { buildEnv: buildIdentity.buildEnv } : {}),
+    internalBuild: buildIdentity.isInternalBuild,
+  });
+}
+
+/**
+ * The advisor as this process offers it: the package rollout is the ceiling, and an explicit
+ * `beta.advisor: false` in config.yaml turns it off. The embedded Runtime projection and the TUI
+ * entry share it, so a visible `/advisor` never disagrees with what the action can do.
+ */
+export function isMcodeAdvisorAvailable(
+  configured: boolean | undefined,
+  buildIdentity: Pick<ProductBuildIdentity, 'isInternalBuild'> &
+    Partial<Pick<ProductBuildIdentity, 'buildEnv'>> = resolveMcodeBuildIdentity(),
+): boolean {
+  return isMcodeInternalFeatureReleased('advisor', buildIdentity) && configured !== false;
+}
+
+/**
+ * The explicit `beta.advisor` from config.yaml, read from the raw document so a resolved default
+ * never passes for the user's own choice. An absent, unreadable or shapeless config leaves the
+ * package rollout in charge; only an explicit `false` turns the advisor off.
+ */
+export function readMcodeAdvisorConfigured(dataDir: string): boolean | undefined {
+  try {
+    return readExplicitBetaFeatureFromFile(join(dataDir, 'config.yaml'), 'advisor');
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveMcodeAuthEnvironment(

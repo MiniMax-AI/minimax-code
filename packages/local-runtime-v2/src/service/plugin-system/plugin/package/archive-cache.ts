@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, mkdir, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { parsePluginArchive, PluginArchiveError } from './archive-format.js';
 import {
   computePluginDirectoryDigest,
   PLUGIN_PACKAGE_V1_LIMITS,
+  materializeContentAddressedDirectory,
   pluginDigestCacheKey,
+  type PluginPackageDigestOptions,
 } from './package-contract.js';
 
 export interface MaterializeOfficialPluginArchiveInput {
@@ -40,6 +42,7 @@ export async function materializeOfficialPluginArchive(
       'archive SHA-256 does not match the package reference',
     );
   }
+  // Spec 1.7: the official path applies the same appearance budget the local reader does.
   const parsed = parsePluginArchive(archive);
   if (parsed.digest.contentDigest !== input.expectedContentDigest) {
     throw new PluginArchiveError(
@@ -47,43 +50,54 @@ export async function materializeOfficialPluginArchive(
       'archive content tree does not match the package reference',
     );
   }
+  // The extracted tree is digested again, staged and in an existing cache directory, and has to
+  // pass under the limits the archive itself passed under.
+  const digestOptions: PluginPackageDigestOptions = {};
 
-  const packageRoot = join(input.cacheRoot, cacheKey);
-  if (await isExistingValidCache(packageRoot, input.expectedContentDigest)) {
-    return { cacheKey, packageRoot, reused: true };
-  }
-
-  const stagingRoot = await mkdtemp(join(input.cacheRoot, `.${cacheKey}.tmp-`));
-  let published = false;
-  try {
-    for (const entry of parsed.entries) {
-      assertNotAborted(input.signal);
-      const target = join(stagingRoot, ...entry.path.split('/'));
-      if (entry.kind === 'directory') {
-        await mkdir(target, { recursive: true });
-      } else {
-        await mkdir(dirname(target), { recursive: true });
-        await writeFile(target, entry.content, { flag: 'wx', mode: 0o600 });
-      }
-    }
-    const stagedDigest = await computePluginDirectoryDigest(stagingRoot);
-    if (stagedDigest.contentDigest !== input.expectedContentDigest) {
-      throw new PluginArchiveError(
+  const materialized = await materializeContentAddressedDirectory({
+    parent: input.cacheRoot,
+    stagingPrefix: `.${cacheKey}.tmp-`,
+    expectedDigest: input.expectedContentDigest,
+    digestOptions,
+    populate: (stagingRoot) => writePackageEntries(stagingRoot, parsed.entries, input.signal),
+    mismatchError: () =>
+      new PluginArchiveError(
         'CONTENT_DIGEST_MISMATCH',
         'staged package content changed during extraction',
-      );
+      ),
+    beforePublish: () => assertNotAborted(input.signal),
+    holds: (packageRoot, contentDigest) =>
+      isExistingValidCache(packageRoot, contentDigest, digestOptions),
+  });
+  return { cacheKey, packageRoot: materialized.root, reused: materialized.reused };
+}
+
+export interface PackageEntryToWrite {
+  readonly path: string;
+  readonly kind: 'file' | 'directory';
+  readonly content?: Buffer;
+  /** File mode; official archives carry none and stay private (0600). */
+  readonly mode?: number;
+}
+
+/** Writes verified package entries below an empty staging root without overwriting anything. */
+export async function writePackageEntries(
+  root: string,
+  entries: readonly PackageEntryToWrite[],
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const entry of entries) {
+    assertNotAborted(signal);
+    const target = join(root, ...entry.path.split('/'));
+    if (entry.kind === 'directory') {
+      await mkdir(target, { recursive: true });
+    } else {
+      await mkdir(dirname(target), { recursive: true });
+      const mode = entry.mode ?? 0o600;
+      await writeFile(target, entry.content ?? Buffer.alloc(0), { flag: 'wx', mode });
+      // `writeFile` applies the process umask; restore the exact package mode.
+      if (entry.mode !== undefined) await chmod(target, mode);
     }
-    assertNotAborted(input.signal);
-    try {
-      await rename(stagingRoot, packageRoot);
-      published = true;
-      return { cacheKey, packageRoot, reused: false };
-    } catch (error) {
-      if (!(await isExistingValidCache(packageRoot, input.expectedContentDigest))) throw error;
-      return { cacheKey, packageRoot, reused: true };
-    }
-  } finally {
-    if (!published) await rm(stagingRoot, { recursive: true, force: true });
   }
 }
 
@@ -136,8 +150,10 @@ function assertArchiveSnapshot(
   ) {
     throw new PluginArchiveError('ARCHIVE_CHANGED_DURING_READ', 'archive changed before read');
   }
+  // The manifest is inside the archive, so the read is bounded by the larger budget; the parser
+  // then applies the limits this package gets.
   if (before.size > PLUGIN_PACKAGE_V1_LIMITS.maxArchiveBytes) {
-    throw new PluginArchiveError('ARCHIVE_TOO_LARGE', 'archive exceeds the V1 byte limit');
+    throw new PluginArchiveError('ARCHIVE_TOO_LARGE', 'archive exceeds the archive byte limit');
   }
 }
 
@@ -186,13 +202,14 @@ function assertArchiveUnchanged(
 async function isExistingValidCache(
   packageRoot: string,
   expectedContentDigest: string,
+  digestOptions: PluginPackageDigestOptions,
 ): Promise<boolean> {
   try {
     const stat = await lstat(packageRoot);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new PluginArchiveError('CACHE_CORRUPT', 'digest cache path is not a directory');
     }
-    const digest = await computePluginDirectoryDigest(packageRoot);
+    const digest = await computePluginDirectoryDigest(packageRoot, digestOptions);
     if (digest.contentDigest !== expectedContentDigest) {
       throw new PluginArchiveError('CACHE_CORRUPT', 'existing digest cache content is invalid');
     }

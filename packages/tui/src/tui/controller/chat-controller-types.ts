@@ -28,6 +28,12 @@ export interface TuiChatSnapshot {
   sessionUsage?: TuiSessionUsageSummary;
   contextSnapshot?: TuiContextSnapshotResponse;
   activeTurnId?: string;
+  /**
+   * TUI-generated id of the latest submission that no Runtime frame has
+   * confirmed yet. The Runtime may never adopt it (e.g. a queue fallback gets
+   * a Runtime-generated id), so it is not a Runtime fact.
+   */
+  unadmittedTurnId?: string;
   cancelling?: boolean;
   retiringTurnId?: string;
   outputTokensPerSecond?: number;
@@ -53,6 +59,14 @@ export interface CreateTuiChatControllerOptions {
   onTurnAccepted?: (turnId: string) => void;
   onUserSubmissionProjected?: () => void;
   onSessionLifecycle?: (sessionId?: string) => void;
+  /**
+   * Awaited after this controller creates a Session and before the Session is
+   * returned, so it lands before the first Turn. Its failures never block the
+   * Session; report them inside.
+   */
+  prepareCreatedSession?: (session: TuiSession) => Promise<void>;
+  /** Refresh and count the current root's unsettled delegated Agents and pending reports. */
+  refreshActiveDelegatedAgentCount?: () => number | Promise<number>;
   /** Optional automation result sink. */
   writeAutomationResult?: (result: ExecResultV1) => void | Promise<void>;
   /** Runs only after the optional automation result sink has completed successfully. */

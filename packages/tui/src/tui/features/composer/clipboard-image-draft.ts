@@ -5,6 +5,7 @@ import {
   type TuiClipboardImageLease,
 } from '../../../host/clipboard-image.js';
 import type { TuiTextClipboardReader } from '../../../host/clipboard-text.js';
+import { createTuiPastedTextLease } from '../../../host/pasted-text-attachment.js';
 import { tmpdir } from 'node:os';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
@@ -32,6 +33,7 @@ export class ClipboardImageDraft {
       attachment: TuiAttachment,
     ) => Promise<TuiClipboardImageLease | undefined>,
     private readonly draftRecoveryDataDir?: string,
+    private readonly createPastedTextLease?: (text: string) => Promise<TuiClipboardImageLease>,
   ) {}
 
   async paste(callbacks: ClipboardImagePasteCallbacks): Promise<void> {
@@ -91,6 +93,23 @@ export class ClipboardImageDraft {
     if (!this.activeRead) return false;
     this.activeRead.abort();
     return true;
+  }
+
+  /**
+   * Saves a long paste as a text file attachment. `onPasted` returning false releases the
+   * file. A write failure rejects so the caller can keep the text inline instead.
+   */
+  async attachPastedText(
+    text: string,
+    onPasted: (attachment: TuiAttachment) => boolean,
+  ): Promise<boolean> {
+    const lease = await (this.createPastedTextLease ?? createTuiPastedTextLease)(text);
+    if (onPasted(lease.attachment)) {
+      this.pendingDisposals.set(lease.attachment.filePath, lease.dispose);
+      return true;
+    }
+    await lease.dispose().catch(() => undefined);
+    return false;
   }
 
   transferToQueue(itemId: string, attachments: readonly TuiAttachment[]): void {

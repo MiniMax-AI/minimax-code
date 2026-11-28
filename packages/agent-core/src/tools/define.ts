@@ -30,10 +30,13 @@ export function defineRuntimeTool<
     label,
     description,
     schema,
+    loading,
+    namespace,
     promptGuidelines,
     prepareArguments,
     executionMode,
     operationClassifier,
+    interruptOnSteer,
     source,
     execute,
   } = tool;
@@ -43,12 +46,15 @@ export function defineRuntimeTool<
     ...(label !== undefined ? { label } : {}),
     description,
     schema,
+    ...(loading !== undefined ? { loading } : {}),
+    ...(namespace !== undefined ? { namespace } : {}),
     ...(promptGuidelines !== undefined ? { promptGuidelines } : {}),
     ...(prepareArguments !== undefined
       ? { prepareArguments: prepareArguments as (args: unknown) => Static<S> }
       : {}),
     ...(executionMode !== undefined ? { executionMode } : {}),
     ...(operationClassifier !== undefined ? { operationClassifier } : {}),
+    ...(interruptOnSteer !== undefined ? { interruptOnSteer } : {}),
   };
 
   return {

@@ -1,4 +1,4 @@
-import type { TuiTransportAttachment } from '../../../types/invocation.js';
+import type { TuiPastedTextSummary, TuiTransportAttachment } from '../../../types/invocation.js';
 import { loadTuiImagePreview, type TuiImagePreviewData } from '../../../host/image-preview.js';
 import { getCapabilities, Image } from '../../engine/public.js';
 import type { Component } from '../../rendering/component.js';
@@ -23,6 +23,7 @@ type PreviewAttachment = Pick<
   'type' | 'fileName' | 'mimeType' | 'filePath' | 'sizeBytes'
 > & {
   readonly id?: string;
+  readonly pastedText?: TuiPastedTextSummary;
 };
 
 /** A transient composer view. Loading or decode failure never changes the draft. */
@@ -60,11 +61,13 @@ export class TuiComposerImagePreview implements Component {
 
   render(width: number): string[] {
     const selection = this.options.editor.getAttachmentPreview();
-    const attachment =
-      selection &&
-      this.attachments().find(
-        (item) => (item.id ?? item.filePath) === selection.id && item.type === 'image',
-      );
+    const selected =
+      selection && this.attachments().find((item) => (item.id ?? item.filePath) === selection.id);
+    if (!this.disposed && selection && selected?.pastedText && width >= 12) {
+      this.clear();
+      return renderPastedTextPreview(selection.label, selected, selected.pastedText, width);
+    }
+    const attachment = selected?.type === 'image' ? selected : undefined;
     if (this.disposed || !selection || !attachment || width < 12) {
       this.clear();
       return [];
@@ -141,4 +144,27 @@ export class TuiComposerImagePreview implements Component {
     lines.push(line(chalk.hex(colors.dim)(composerText('imagePreviewHint'))));
     return lines;
   }
+}
+
+/** Long pastes saved as `pasted-text.txt`: label, size, and line count. */
+function renderPastedTextPreview(
+  label: string,
+  attachment: PreviewAttachment,
+  pastedText: TuiPastedTextSummary,
+  width: number,
+): string[] {
+  const line = (text: string): string => truncateToWidth(text, width, '…');
+  const meta = [
+    sanitizeTerminalText(attachment.mimeType),
+    ...(attachment.sizeBytes === undefined ? [] : [formatBytes(attachment.sizeBytes)]),
+    composerText('pastedTextPreviewLines').replace(
+      '{count}',
+      pastedText.lineCount.toLocaleString('en-US'),
+    ),
+  ].join(' · ');
+  return [
+    line(chalk.hex(colors.signal)(sanitizeTerminalText(label))),
+    line(chalk.hex(colors.muted)(meta)),
+    line(chalk.hex(colors.dim)(composerText('pastedTextPreviewHint'))),
+  ];
 }

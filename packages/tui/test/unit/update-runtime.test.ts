@@ -1,10 +1,9 @@
 import {
   chmodSync,
-  copyFileSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -18,6 +17,7 @@ import {
   createMcodeNpmRuntimeEnvironment,
   resolveMcodeNpmPrefixInstall,
 } from '../../src/update/install-source.js';
+import { stableProcessNodeExecutable } from '../../src/update/homebrew-node-path.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -53,7 +53,6 @@ describe('npm-prefix runtime consistency', () => {
   it.each([
     [false, 'npm'],
     [true, 'npm'],
-    [false, 'npm.cmd'],
   ] as const)(
     'runs npm with the launcher Node and gates activation on SQLite (broken=%s, shim=%s)',
     async (broken, shim) => {
@@ -128,7 +127,7 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), ${JSON
         expect(readFileSync(path.join(prefix, 'current'), 'utf8')).toBe('1.2.4\n');
         expect(
           JSON.parse(readFileSync(path.join(prefix, 'install.json'), 'utf8')).nodeExecutable,
-        ).toBe(process.execPath);
+        ).toBe(stableProcessNodeExecutable());
       }
       expect(environment.PATH.startsWith(shadowBin)).toBe(true);
     },
@@ -145,15 +144,14 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), ${JSON
     mkdirSync(path.dirname(npmCli), { recursive: true });
     mkdirSync(brewBin, { recursive: true });
     writeFileSync(npm, '#!/bin/sh\nexit 42\n', { mode: 0o755 });
-    symlinkSync(process.execPath, pinnedNode);
+    writeFileSync(pinnedNode, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
     const packageRoot = path.join(
       prefix,
       'releases',
       '1.2.3',
       'lib',
       'node_modules',
-      '@minimax',
-      'code',
+      '@minimax-ai', 'code',
     );
     mkdirSync(packageRoot, { recursive: true });
     writeFileSync(
@@ -251,14 +249,40 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'modul
     expect(spawnSync(releaseLauncher, ['--version']).stdout.toString()).toBe('1.2.4\n');
   });
 
+  it('heals receipts whose Homebrew keg node and npm were removed by brew upgrade', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'mcode-update-runtime-'));
+    roots.push(root);
+    const brewRoot = path.join(realpathSync(root), 'home', 'linuxbrew', '.linuxbrew');
+    const upgradedKeg = path.join(brewRoot, 'Cellar', 'node@24', '24.21.0_3');
+    placeNodeBinaryAt(path.join(upgradedKeg, 'bin', 'node'));
+    const npmCli = path.join(upgradedKeg, 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    mkdirSync(path.dirname(npmCli), { recursive: true });
+    writeFileSync(npmCli, FAKE_NPM_CLI, { mode: 0o755 });
+    symlinkSync('../lib/node_modules/npm/bin/npm-cli.js', path.join(upgradedKeg, 'bin', 'npm'));
+    const optLink = path.join(brewRoot, 'opt', 'node@24');
+    mkdirSync(path.dirname(optLink), { recursive: true });
+    symlinkSync(path.join('..', 'Cellar', 'node@24', '24.21.0_3'), optLink);
+    // Older installers recorded the keg that brew upgrade has since deleted.
+    const removedKeg = path.join(brewRoot, 'Cellar', 'node@24', '24.21.0_2');
+
+    const result = await runNpmPrefixUpdate(root, path.join(removedKeg, 'bin', 'node'), {
+      npmExecutable: path.join(removedKeg, 'bin', 'npm'),
+    });
+    expect(result.outcome).toMatchObject({ applied: true });
+    expect(result.receiptNode).toBe(path.join(optLink, 'bin', 'node'));
+    expect(result.receiptNpm).toBe(path.join(optLink, 'bin', 'npm'));
+    expect(result.launcher).toContain(`node='${path.join(optLink, 'bin', 'node')}'`);
+    expect(result.launcher).not.toContain('/Cellar/');
+  });
+
   it('falls back to the running Node when the receipt Node is unusable', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'mcode-update-runtime-'));
     roots.push(root);
 
     const result = await runNpmPrefixUpdate(root, path.join(root, 'removed', 'bin', 'node'));
     expect(result.outcome).toMatchObject({ applied: true });
-    expect(result.receiptNode).toBe(process.execPath);
-    expect(result.launcher).toContain(`node='${process.execPath}'`);
+    expect(result.receiptNode).toBe(stableProcessNodeExecutable());
+    expect(result.launcher).toContain(`node='${stableProcessNodeExecutable()}'`);
   });
 
   it('ignores unusable receipt Node executables and legacy receipts', () => {
@@ -274,8 +298,7 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'modul
       '1.0.0',
       'lib',
       'node_modules',
-      '@minimax-ai',
-      'code',
+      '@minimax-ai', 'code',
       'cli.js',
     );
     for (const entry of [legacyEntry, versionedEntry]) {
@@ -346,23 +369,37 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'modul
   });
 });
 
-// Homebrew's Cellar/node/<version>/bin/node is the real binary, so the fixture
-// places the running Node there via hardlink (copy fallback) to make
-// process.execPath resolve inside the fake keg.
+// Receipt healing compares realpaths only; a symlink keg runs the host Node without copying
+// the whole binary (and Homebrew's shared libnode resolves from the real executable).
 function placeNodeBinaryAt(target: string) {
   mkdirSync(path.dirname(target), { recursive: true });
-  try {
-    linkSync(process.execPath, target);
-  } catch {
-    copyFileSync(process.execPath, target);
-  }
-  chmodSync(target, 0o755);
+  symlinkSync(realpathSync(process.execPath), target);
 }
+
+const FAKE_NPM_CLI = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+if (process.argv.includes('view')) { console.log(JSON.stringify('1.2.4')); process.exit(0); }
+const prefix = process.argv[process.argv.indexOf('--prefix') + 1];
+const root = path.join(prefix, 'lib/node_modules/@minimax-ai/code');
+fs.mkdirSync(path.join(root, 'node_modules/better-sqlite3'), { recursive: true });
+fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({name:'@minimax-ai/code',version:'1.2.4',bin:{mcode:'cli.js','mcode-tools':'tools.js'}}));
+fs.writeFileSync(path.join(root, 'cli.js'), 'console.log("1.2.4");');
+fs.writeFileSync(path.join(root, 'tools.js'), 'console.log("mcode-tools 1.2.4");');
+fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'module.exports = class { constructor() {} prepare() { return { get: () => ({ value: 1 }) }; } close() {} };');
+`;
 
 async function runNpmPrefixUpdate(
   root: string,
   nodeExecutable: string | undefined,
-): Promise<{ prefix: string; receiptNode: unknown; launcher: string; outcome: unknown }> {
+  options: { readonly npmExecutable?: string } = {},
+): Promise<{
+  prefix: string;
+  receiptNode: unknown;
+  receiptNpm: unknown;
+  launcher: string;
+  outcome: unknown;
+}> {
   const prefix = path.join(root, 'install');
   const npm = path.join(root, 'npm');
   const npmCli = path.join(root, 'node_modules/npm/bin/npm-cli.js');
@@ -374,8 +411,7 @@ async function runNpmPrefixUpdate(
     '1.2.3',
     'lib',
     'node_modules',
-    '@minimax-ai',
-    'code',
+    '@minimax-ai', 'code',
   );
   mkdirSync(packageRoot, { recursive: true });
   writeFileSync(
@@ -398,7 +434,7 @@ async function runNpmPrefixUpdate(
       packageName: '@minimax-ai/code',
       registry: 'https://registry.npmjs.org/',
       distTag: 'latest',
-      npmExecutable: npm,
+      npmExecutable: options.npmExecutable ?? npm,
       ...(nodeExecutable ? { nodeExecutable } : {}),
       prefix,
       layoutVersion: 2,
@@ -406,22 +442,7 @@ async function runNpmPrefixUpdate(
       currentFile: 'current',
     }),
   );
-  writeFileSync(
-    npmCli,
-    `#!/usr/bin/env node
-const fs = require('node:fs');
-const path = require('node:path');
-if (process.argv.includes('view')) { console.log(JSON.stringify('1.2.4')); process.exit(0); }
-const prefix = process.argv[process.argv.indexOf('--prefix') + 1];
-const root = path.join(prefix, 'lib/node_modules/@minimax-ai/code');
-fs.mkdirSync(path.join(root, 'node_modules/better-sqlite3'), { recursive: true });
-fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({name:'@minimax-ai/code',version:'1.2.4',bin:{mcode:'cli.js','mcode-tools':'tools.js'}}));
-fs.writeFileSync(path.join(root, 'cli.js'), 'console.log("1.2.4");');
-fs.writeFileSync(path.join(root, 'tools.js'), 'console.log("mcode-tools 1.2.4");');
-fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'module.exports = class { constructor() {} prepare() { return { get: () => ({ value: 1 }) }; } close() {} };');
-`,
-    { mode: 0o755 },
-  );
+  writeFileSync(npmCli, FAKE_NPM_CLI, { mode: 0o755 });
 
   const application = new McodeUpdateApplication(
     {
@@ -434,9 +455,13 @@ fs.writeFileSync(path.join(root, 'node_modules/better-sqlite3/index.js'), 'modul
     },
   );
   const outcome = await application.apply(await application.inspect());
-  const receiptNode = JSON.parse(
-    readFileSync(path.join(prefix, 'install.json'), 'utf8'),
-  ).nodeExecutable;
+  const receipt = JSON.parse(readFileSync(path.join(prefix, 'install.json'), 'utf8'));
   const launcher = readFileSync(path.join(prefix, 'releases', '1.2.4', '.mcode-launcher'), 'utf8');
-  return { prefix, receiptNode, launcher, outcome };
+  return {
+    prefix,
+    receiptNode: receipt.nodeExecutable,
+    receiptNpm: receipt.npmExecutable,
+    launcher,
+    outcome,
+  };
 }

@@ -41,6 +41,21 @@ export interface TuiActivityLineState {
    * absorbs the composer header row so the two never explain the same moment on two rows.
    */
   draftLabel?: string;
+  /** Replaces the `Running` label while the run waits on one known step; other phases keep theirs. */
+  label?: string;
+  /**
+   * Start of the step the clock times instead of the run, such as one advisor call. The run's own
+   * start is kept, so the clock returns to the run once the step is gone from the state.
+   */
+  stepStartedAtMs?: number;
+  /** Muted text after the elapsed time, for what only matters once a wait runs long. */
+  note?: TuiActivityNote;
+}
+
+export interface TuiActivityNote {
+  readonly text: string;
+  /** Hidden until the line's own clock has run this long. */
+  readonly afterMs: number;
 }
 
 export interface TuiActivityLineOptions {
@@ -155,13 +170,15 @@ export class TuiActivityLine implements Component {
       glyph,
     )} ${this.chalk.bold.hex(phase.color)(phase.label)}`;
 
-    const elapsedMs = timed ? this.now() - (this.activeStartedAtMs ?? this.now()) : 0;
+    const clockStartedAtMs = this.state.stepStartedAtMs ?? this.activeStartedAtMs;
+    const elapsedMs = timed ? this.now() - (clockStartedAtMs ?? this.now()) : 0;
     // Bound to the phase word rather than separated by a dot: the elapsed time qualifies the
     // phase, and the row needs the width for the draft label and controls that follow.
     const elapsed =
       timed && elapsedMs >= ELAPSED_REVEAL_AFTER_MS
         ? ` ${this.chalk.hex(colors.muted)(formatTuiDuration(elapsedMs / 1_000))}`
         : '';
+    const note = timed ? formatNote(this.state.note, elapsedMs, this.chalk) : '';
     const draftLabel = this.state.draftLabel?.trim()
       ? `${this.chalk.hex(colors.dim)(' · ')}${this.chalk.hex(colors.muted)(
           oneLine(this.state.draftLabel),
@@ -173,7 +190,7 @@ export class TuiActivityLine implements Component {
       this.chalk,
     );
 
-    const rendered = `${primary}${elapsed}${outputRate}${draftLabel}`;
+    const rendered = `${primary}${elapsed}${note}${outputRate}${draftLabel}`;
     return [
       truncateToWidth(
         this.fitControls(rendered, safeWidth),
@@ -239,7 +256,10 @@ function renderPhase(state: TuiActivityLineState): {
       color: colors.signal,
     };
   }
-  if (state.phase === 'running') return { icon: '◇', label: 'Running', color: colors.orbit };
+  if (state.phase === 'running') {
+    const label = state.label?.trim() ? oneLine(state.label) : 'Running';
+    return { icon: '◇', label, color: colors.orbit };
+  }
   if (state.phase === 'retrying') {
     return {
       icon: '◇',
@@ -287,6 +307,15 @@ function formatOutputRate(
   return `${chalk.hex(colors.dim)(' · ')}${chalk.bold.hex(colors.signal)(
     `⚡ ${estimated ? '~' : ''}${formatTokensPerSecond(value)} tok/s`,
   )}`;
+}
+
+function formatNote(
+  note: TuiActivityNote | undefined,
+  elapsedMs: number,
+  chalk: ChalkInstance,
+): string {
+  if (!note?.text.trim() || elapsedMs < note.afterMs) return '';
+  return `${chalk.hex(colors.dim)(' · ')}${chalk.hex(colors.muted)(oneLine(note.text))}`;
 }
 
 function activityKey(state: TuiActivityLineState): string {

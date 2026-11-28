@@ -2,15 +2,22 @@ import type { CliSendMessageReq } from '@mavis/local-runtime-v2/cli-service';
 import { isTurnLifecycleMessageKind } from '@mavis/shared/turn-message-kind';
 
 import type { TuiTransportAttachment } from '../types/invocation.js';
+import {
+  tuiAutomationDiagnosticSinkConfigured,
+  writeTuiAutomationDiagnostic,
+} from './automation-diagnostics.js';
 import { TuiFailure } from '../failure.js';
 import type {
+  TuiConfigurationPort,
   TuiConversationPort,
   TuiClientIntent,
+  TuiInspectionPort,
   TuiSession,
   TuiPausedQueueSendIntent,
   TuiInteractionPort,
 } from '../runtime/port.js';
 import type { TuiStreamEvent } from '../runtime/stream-events.js';
+import { resolveTurnModelFacts } from './turn-execution-facts.js';
 import type {
   TuiTurnRunError,
   TuiTurnRunOutcome,
@@ -27,9 +34,12 @@ import {
   hasQuestionnaireToolResult,
   pendingQuestionnaireForTurn,
 } from './pending-questionnaire.js';
+import { TuiAdvisorCallLedger } from './advisor-calls.js';
 
 export type TuiRunRuntime = TuiConversationPort &
-  Partial<Pick<TuiInteractionPort, 'getPendingQuestionnaire'>>;
+  Partial<Pick<TuiInteractionPort, 'getPendingQuestionnaire'>> &
+  Partial<Pick<TuiInspectionPort, 'getSessionUsage'>> &
+  Partial<Pick<TuiConfigurationPort, 'listModels'>>;
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -205,6 +215,7 @@ export class TuiRunCoordinator {
     let assistantDraft = '';
     let failure: TuiTurnRunError | undefined;
     let completedAssistantSteps = 0;
+    const advisorCalls = new TuiAdvisorCallLedger();
     const usageResponses: TuiTurnResponseUsage[] = [];
     let usageIncomplete = false;
     let questionnaireRequested = false;
@@ -228,12 +239,9 @@ export class TuiRunCoordinator {
       let executionDeadlineAtMs: number | undefined;
       if (request.policy?.timeoutMs !== undefined) {
         executionDeadlineAtMs = this.nowMs() + request.policy.timeoutMs;
-        timeout = scheduleTimeoutChunks(
-          () => {
-            void this.stopActive(activeRun, 'timeout').catch(() => undefined);
-          },
-          request.policy.timeoutMs,
-        );
+        timeout = scheduleTimeoutChunks(() => {
+          void this.stopActive(activeRun, 'timeout').catch(() => undefined);
+        }, request.policy.timeoutMs);
       }
 
       const source = this.sendWithQueueRecovery(
@@ -279,33 +287,70 @@ export class TuiRunCoordinator {
               break;
             }
             completedAssistantSteps += 1;
+            advisorCalls.observe(event);
+            // Automation-only forensics: an EMPTY_RESPONSE verdict is otherwise
+            // indistinguishable from a Turn that genuinely produced no prose, because
+            // the selected answer never leaves this process.
+            if (request.policy?.requireAnswer === true && answerDiagnosticsEnabled()) {
+              reportAnswerCandidate({
+                step: completedAssistantSteps,
+                messageId: event.message.id,
+                eventTurnId: event.message.turnId,
+                requestTurnId: request.turnId,
+                kind: event.message.kind,
+                contentChars: event.message.content?.length ?? 0,
+                draftChars: assistantDraft.length,
+                toolCalls: event.message.toolCalls?.length ?? 0,
+                selectedChars: answer?.length ?? 0,
+              });
+            }
             if (event.message.toolCalls?.length) {
               // Pre-tool prose is not the final answer.
+              answer = null;
               this.reportAnswerSelection({
                 kind: 'answer_excluded',
                 messageId: event.message.id,
                 reason: 'tool_calls',
+                retainedAnswer: answer !== null,
               });
-              answer = null;
               assistantDraft = '';
             } else {
               const completed = event.message.content?.trim()
                 ? event.message.content
                 : assistantDraft;
-              answer = completed.trim() ? completed : null;
-              this.reportAnswerSelection({
-                kind: 'answer_selected',
-                messageId: event.message.id,
-                answerSource: event.message.content?.trim()
-                  ? 'completed_message'
-                  : 'completed_message_draft',
-                answerBytes: Buffer.byteLength(completed),
-                finishReason: event.message.finishReason,
-              });
+              // An empty completion carries no answer of its own, and it must not retract
+              // one an earlier row already delivered. A Turn whose last frame settles with
+              // no prose still answered earlier in the same Turn, and overwriting the
+              // selection with null there turned a delivered reply into EMPTY_RESPONSE.
+              if (completed.trim()) {
+                const replacedAnswer = answer !== null;
+                answer = completed;
+                this.reportAnswerSelection({
+                  kind: 'answer_selected',
+                  messageId: event.message.id,
+                  answerSource: event.message.content?.trim()
+                    ? 'completed_message'
+                    : 'completed_message_draft',
+                  answerBytes: Buffer.byteLength(completed),
+                  finishReason: event.message.finishReason,
+                  replacedAnswer,
+                });
+              } else {
+                answer = null;
+                this.reportAnswerSelection({
+                  kind: 'answer_excluded',
+                  messageId: event.message.id,
+                  reason: 'empty_completion',
+                  retainedAnswer: answer !== null,
+                });
+              }
               assistantDraft = '';
             }
           } else if (isAssistantTextDelta(event)) {
             assistantDraft += event.content;
+          } else if (isSingleReplyRewind(event)) {
+            // Discard text streamed from a withdrawn single reply while the Turn continues.
+            assistantDraft = '';
           }
           const eventFailure = failureFromEvent(event);
           if (eventFailure) {
@@ -345,6 +390,13 @@ export class TuiRunCoordinator {
         failure = questionnaireContinuationError();
       }
       if (request.policy?.requireAnswer === true && status === 'succeeded' && answer === null) {
+        if (answerDiagnosticsEnabled())
+          reportAnswerMissing({
+            steps: completedAssistantSteps,
+            draftChars: assistantDraft.length,
+            sessionId: session.sessionId,
+            turnId: request.turnId,
+          });
         status = 'failed';
         failure = {
           category: 'runtime',
@@ -367,6 +419,7 @@ export class TuiRunCoordinator {
     }
 
     const { usage } = sumResponseUsage(usageResponses);
+    const advisor = advisorCalls.summary();
     let outcome: TuiTurnRunOutcome = {
       sessionId: session?.sessionId ?? '',
       turnId: request.turnId,
@@ -377,8 +430,36 @@ export class TuiRunCoordinator {
       ...(usageResponses.length ? { usageResponses } : {}),
       ...(usageIncomplete ? { usageIncomplete: true } : {}),
       ...(failure ? { error: failure } : {}),
+      ...(advisor ? { advisor } : {}),
       durationMs: Math.max(0, this.nowMs() - startedAtMs),
     };
+    if (session) {
+      const requestedModel = request.model ?? sessionModelReference(session);
+      if (requestedModel && canReadModelFacts(this.runtime)) {
+        // Model facts only: the usage reconciliation history scan does not belong
+        // in the interactive Turn path.
+        const facts = await resolveTurnModelFacts(
+          this.runtime,
+          session.sessionId,
+          request.turnId,
+          outcome,
+          requestedModel,
+        );
+        outcome = {
+          ...outcome,
+          ...(facts.requestedModel ? { requestedModel: facts.requestedModel } : {}),
+          ...(facts.modelReplacement ? { modelReplacement: facts.modelReplacement } : {}),
+        };
+        if (facts.modelReplacement) {
+          await observeEvent({
+            type: 'generic',
+            eventType: 'model_replacement',
+            turnId: request.turnId,
+            data: { ...facts.modelReplacement },
+          });
+        }
+      }
+    }
     if (onOutcome) {
       try {
         await onOutcome(outcome);
@@ -493,6 +574,60 @@ function toSendMessageRequest(
   };
 }
 
+/**
+ * Automation answer forensics on stderr, which reaches the sandbox container log.
+ * Written only under `policy.requireAnswer`, so interactive Turns stay silent.
+ */
+function reportAnswerCandidate(facts: {
+  readonly step: number;
+  readonly messageId: string | undefined;
+  readonly eventTurnId: string | undefined;
+  readonly requestTurnId: string;
+  readonly kind: string | undefined;
+  readonly contentChars: number;
+  readonly draftChars: number;
+  readonly toolCalls: number;
+  readonly selectedChars: number;
+}): void {
+  writeAutomationDiagnostic(
+    `answer candidate step=${facts.step} message=${facts.messageId ?? '-'} ` +
+      `eventTurn=${facts.eventTurnId ?? '-'} requestTurn=${facts.requestTurnId} ` +
+      `kind=${facts.kind ?? '-'} contentChars=${facts.contentChars} ` +
+      `draftChars=${facts.draftChars} toolCalls=${facts.toolCalls} ` +
+      `selectedChars=${facts.selectedChars}`,
+  );
+}
+
+/** Why a Turn that Runtime reported as succeeded produced no selectable answer. */
+function reportAnswerMissing(facts: {
+  readonly steps: number;
+  readonly draftChars: number;
+  readonly sessionId: string;
+  readonly turnId: string;
+}): void {
+  writeAutomationDiagnostic(
+    `no answer selected after ${facts.steps} assistant step(s); ` +
+      `trailingDraftChars=${facts.draftChars} session=${facts.sessionId} turn=${facts.turnId}`,
+  );
+}
+
+function writeAutomationDiagnostic(detail: string): void {
+  writeTuiAutomationDiagnostic(`[mcode-tui] automation result: ${detail}`);
+}
+
+/**
+ * Answer-selection forensics are opt-in.
+ *
+ * `mcode exec` is a machine contract whose stderr must stay empty on success, and its
+ * stderr is a pipe rather than a terminal, so the diagnostic writer's stderr fallback put
+ * one `answer candidate …` line per assistant step into that contract. A harness that wants
+ * these lines names a sink (`MCODE_TUI_DIAGNOSTIC_PATH`, or `MCODE_TUI_RESULT_PATH` to get
+ * them in a sibling `.diagnostics.log`); without one, nothing is written.
+ */
+function answerDiagnosticsEnabled(): boolean {
+  return tuiAutomationDiagnosticSinkConfigured();
+}
+
 function isCompletedAssistantMessage(
   event: TuiStreamEvent,
 ): event is Extract<TuiStreamEvent, { type: 'message' }> {
@@ -527,22 +662,30 @@ function questionnaireContinuationError(): TuiTurnRunError {
   };
 }
 
+/** True when the Runtime withdrew only a single reply (`messagesOnly: true`) and kept the Turn running. */
+function isSingleReplyRewind(event: TuiStreamEvent): boolean {
+  if (event.type !== 'generic' || event.eventType !== 'messages-rewound') return false;
+  const envelope = event.data.data;
+  return (
+    typeof envelope === 'object' &&
+    envelope !== null &&
+    (envelope as Record<string, unknown>).messagesOnly === true
+  );
+}
+
 function failureFromEvent(event: TuiStreamEvent):
   | {
       readonly status: TuiTurnRunStatus;
       readonly error?: TuiTurnRunError;
     }
   | undefined {
-  if (event.type === 'generic' && event.eventType === 'messages-rewound') {
-    return {
-      status: 'failed',
-      error: {
-        category: 'runtime',
-        code: 'CONTENT_REVIEW_BLOCKED',
-        message: 'Content review blocked the request.',
-        retryable: true,
-      },
-    };
+  // Only a full-turn rewind ends the Turn here; a single-reply rewind continues or soft-stops later.
+  if (
+    event.type === 'generic' &&
+    event.eventType === 'messages-rewound' &&
+    !isSingleReplyRewind(event)
+  ) {
+    return { status: 'failed', error: contentReviewRewindError(event.data) };
   }
   if (event.type === 'error') {
     return {
@@ -565,6 +708,33 @@ function failureFromEvent(event: TuiStreamEvent):
     return { status: 'cancelled' };
   }
   return undefined;
+}
+
+/** The rewind frame ({ data: { messageIds, variant } }) says why the Turn was withdrawn. */
+function contentReviewRewindError(data: Record<string, unknown>): TuiTurnRunError {
+  const variant = (data.data as { variant?: unknown } | undefined)?.variant;
+  if (variant === 'network') {
+    return {
+      category: 'runtime',
+      code: 'CONTENT_REVIEW_UNAVAILABLE',
+      message: 'Content review did not return a usable result, so the response was withheld.',
+      retryable: true,
+    };
+  }
+  if (variant === 'auth') {
+    return {
+      category: 'runtime',
+      code: 'CONTENT_REVIEW_AUTH_EXPIRED',
+      message: 'Content review authentication expired. Sign in again, then retry.',
+      retryable: true,
+    };
+  }
+  return {
+    category: 'runtime',
+    code: 'CONTENT_REVIEW_BLOCKED',
+    message: 'Content review blocked the request.',
+    retryable: true,
+  };
 }
 
 function execError(error: unknown): TuiTurnRunError {
@@ -635,6 +805,23 @@ function untilSettledOrAborted(work: Promise<void>, signal: AbortSignal): Promis
     signal.addEventListener('abort', release, { once: true });
     void work.then(release, release);
   });
+}
+
+export function sessionModelReference(session: TuiSession): TuiTurnRunOutcome['model'] | undefined {
+  return session.model?.providerId && session.model.modelId
+    ? {
+        providerId: session.model.providerId,
+        modelId: session.model.modelId,
+        ...(session.model.variant !== undefined ? { variant: session.model.variant } : {}),
+      }
+    : undefined;
+}
+
+function canReadModelFacts(runtime: TuiRunRuntime): runtime is TuiRunRuntime & {
+  getSessionUsage: NonNullable<TuiInspectionPort['getSessionUsage']>;
+  listModels: NonNullable<TuiConfigurationPort['listModels']>;
+} {
+  return typeof runtime.getSessionUsage === 'function' && typeof runtime.listModels === 'function';
 }
 
 function createActiveRun(turnId: string): ActiveRun {

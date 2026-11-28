@@ -1,5 +1,6 @@
 import type * as acp from '@agentclientprotocol/sdk';
 
+import { resolveTuiDefaultEffort } from '../application/model-effort.js';
 import {
   formatTuiPermissionMode,
   MINIMAX_CODE_PERMISSION_MODES,
@@ -20,14 +21,26 @@ export interface TuiAcpSessionControlState {
   readonly configOptions: acp.SessionConfigOption[];
 }
 
+export interface TuiAcpSessionControlStateOptions {
+  /**
+   * False while session/new has only reserved the ID: the Runtime has no such Session yet, so
+   * models come from the global roster and the reserved Session carries any buffered choice.
+   */
+  readonly persisted?: boolean;
+}
+
 export async function getTuiAcpSessionControlState(
   runtime: TuiAcpRuntime,
   session: TuiSession,
+  options: TuiAcpSessionControlStateOptions = {},
 ): Promise<TuiAcpSessionControlState> {
+  const persisted = options.persisted ?? true;
   const [planCapabilities, permissionMode, models] = await Promise.all([
     runtime.getPlanModeCapabilities().catch(() => ({ entryEnabled: false })),
     runtime.getPermissionMode().catch(() => undefined),
-    runtime.listModels(session.sessionId).catch(() => [] as TuiModel[]),
+    (persisted ? runtime.listModels(session.sessionId) : runtime.listModels()).catch(
+      () => [] as TuiModel[],
+    ),
   ]);
   return {
     modes: modeState(session, planCapabilities.entryEnabled),
@@ -199,10 +212,7 @@ function thinkingEffortOption(
   if (efforts.length === 0) return undefined;
   const persistedEffort = session.model?.thinking?.effort;
   if (persistedEffort && !efforts.includes(persistedEffort)) return undefined;
-  const configuredDefault = model?.thinkingConfig?.defaultValue;
-  const current =
-    persistedEffort ??
-    (configuredDefault && efforts.includes(configuredDefault) ? configuredDefault : efforts[0]);
+  const current = persistedEffort ?? resolveTuiDefaultEffort(model);
   if (!current) return undefined;
   return {
     type: 'select',

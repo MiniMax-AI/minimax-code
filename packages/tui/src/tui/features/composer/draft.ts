@@ -7,6 +7,7 @@ import {
 import {
   MINIMAX_CODE_MAX_ATTACHMENT_COUNT,
   MINIMAX_CODE_MAX_TOTAL_ATTACHMENT_BYTES,
+  MINIMAX_CODE_PASTED_TEXT_ATTACHMENT_THRESHOLD,
 } from '../../../application/attachment-policy.js';
 import { tuiAttachmentLabel, type ResolveTuiAttachmentOptions } from './attachments.js';
 import type { TuiClipboardImageLease } from '../../../host/clipboard-image.js';
@@ -23,6 +24,10 @@ export interface TuiComposerAttachmentPlaceholder {
 interface ComposerDraftClipboard {
   paste(callbacks: ClipboardImagePasteCallbacks): Promise<void>;
   abortRead(): boolean;
+  attachPastedText?(
+    text: string,
+    onPasted: (attachment: TuiAttachment) => boolean,
+  ): Promise<boolean>;
   transferToQueue(itemId: string, attachments: readonly TuiAttachment[]): void;
   releaseAttachments(attachments: readonly TuiAttachment[]): Promise<void>;
   releaseQueueItem(itemId: string): Promise<void>;
@@ -56,6 +61,8 @@ export class TuiComposerDraft {
       readClipboardImage?: ClipboardImageReader;
       readClipboardText?: () => Promise<string | null>;
       insertTextAtCursor?(text: string): void;
+      /** False while the draft cannot carry attachments, such as a `!` shell command. */
+      acceptsPastedTextAttachment?(): boolean;
       draftRecoveryDataDir?: string;
       prepareQueueAttachmentLease?(
         attachment: TuiAttachment,
@@ -167,12 +174,46 @@ export class TuiComposerDraft {
         return true;
       },
       onTextPasted: (text) => {
-        this.options.insertTextAtCursor?.(text);
-        this.notifyChanged();
+        const insert = (value: string) => {
+          this.options.insertTextAtCursor?.(value);
+          this.notifyChanged();
+        };
+        if (!this.pasteLongText(text, insert)) insert(text);
       },
       onWarning: (message) => this.options.append(message, 'warning'),
       onRender: () => this.options.onRender?.(),
     });
+  }
+
+  /**
+   * Takes a paste of at least {@link MINIMAX_CODE_PASTED_TEXT_ATTACHMENT_THRESHOLD}
+   * characters as a `pasted-text.txt` attachment, like the Desktop composer, so the
+   * message text and history stay short. Returns false when the caller should insert
+   * the text itself. If the file cannot be written the text goes to `insertInline`
+   * so the paste is never lost.
+   */
+  pasteLongText(text: string, insertInline: (text: string) => void): boolean {
+    if (text.length < MINIMAX_CODE_PASTED_TEXT_ATTACHMENT_THRESHOLD) return false;
+    if (!this.clipboard.attachPastedText) return false;
+    if (this.options.acceptsPastedTextAttachment?.() === false) return false;
+    const draftGeneration = this.draftGeneration;
+    void this.clipboard
+      .attachPastedText(text, (attachment) => {
+        if (draftGeneration !== this.draftGeneration || this.options.isStopped?.()) return false;
+        if (!this.canAddAttachment(attachment)) return false;
+        this.attachments = [...this.attachments, attachment];
+        this.notifyChanged();
+        return true;
+      })
+      .catch(() => {
+        if (draftGeneration !== this.draftGeneration || this.options.isStopped?.()) return;
+        this.options.append(
+          "Couldn't save the long paste as an attachment. It was kept in the message instead.",
+          'warning',
+        );
+        insertInline(text);
+      });
+    return true;
   }
 
   async removeLastAttachment(): Promise<boolean> {
@@ -332,7 +373,7 @@ export class TuiComposerDraft {
     if (current.length >= MINIMAX_CODE_MAX_ATTACHMENT_COUNT) {
       if (warn) {
         this.options.append(
-          'You can attach up to 10 files. Remove one before adding another.',
+          `You can attach up to ${String(MINIMAX_CODE_MAX_ATTACHMENT_COUNT)} files. Remove one before adding another.`,
           'warning',
         );
       }

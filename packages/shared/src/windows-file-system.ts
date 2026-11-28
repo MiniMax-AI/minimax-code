@@ -22,7 +22,7 @@ export function retryWindowsFileSystemOperation<T>(
     try {
       return operation();
     } catch (error) {
-      if (platform !== 'win32' || attempt >= retries || !isRetryableWindowsFileError(error)) {
+      if (attempt >= retries || !isRetryableWindowsFileError(error, platform)) {
         throw error;
       }
       wait(retryDelayMs * (attempt + 1));
@@ -30,8 +30,12 @@ export function retryWindowsFileSystemOperation<T>(
   }
 }
 
-function isRetryableWindowsFileError(error: unknown): boolean {
+export function isRetryableWindowsFileError(
+  error: unknown,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   return (
+    platform === 'win32' &&
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&

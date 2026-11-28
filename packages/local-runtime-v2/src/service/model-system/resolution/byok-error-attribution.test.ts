@@ -1,6 +1,7 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { isRequestMediaRejection } from '@mavis/context-manager';
+import { formatByokErrorAttribution } from '@mavis/shared/byok-error-attribution';
 import {
   isLLMDeterministicRequestRejection,
   LLM_ERROR_CODES,
@@ -53,6 +54,30 @@ function payloadOf(message: AssistantMessage): Record<string, unknown> {
 }
 
 describe('withByokErrorAttribution', () => {
+  it('does not wrap the legacy attribution sentence again', async () => {
+    const legacy = 'BYOK provider custom_provider:inner upstream error: 429 rate limited';
+
+    const message = await attributed(legacy);
+
+    expect(message.errorMessage).toBe(legacy);
+  });
+
+  it('does not wrap an attribution again when it arrives behind an [Error] prefix', async () => {
+    const inner = `[Error] ${formatByokErrorAttribution({
+      errorCode: LLM_ERROR_CODES.LLM_RATE_LIMITED,
+      providerId: 'custom_provider:inner',
+      detail: '429 rate limited',
+    })}`;
+
+    const message = await attributed(inner);
+
+    expect(message.errorMessage).toBe(inner);
+    expect(payloadOf(message)).toMatchObject({
+      errorProviderId: 'custom_provider:inner',
+      errorDetail: '429 rate limited',
+    });
+  });
+
   it('keeps the HTTP status of a JSON error body so a 413 stays a request-size rejection', async () => {
     const message = await attributed(JSON_BODY_413);
 

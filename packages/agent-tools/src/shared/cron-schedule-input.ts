@@ -1,4 +1,4 @@
-/** Stable validation error used when the adapter parses `after`/`at` and `every` inputs. */
+/** 适配器解析 `after`/`at`、`every` 输入时使用的稳定校验错误。 */
 export class LocalMavisCronValidationError extends Error {
   readonly status = 400;
   readonly statusCode = 400;
@@ -10,7 +10,50 @@ export class LocalMavisCronValidationError extends Error {
   }
 }
 
-// Desktop and Cloud share time and interval parsing to keep input semantics consistent.
+/**
+ * `cron_create` 创建入口的保留值：为任务建立专用会话，后续执行持续复用。
+ *
+ * 它只出现在工具创建入参里。运行时把它翻译成「尚未绑定真实 ID」的 pending
+ * 目标，由桌面或云端在首次执行时创建并绑定专用会话；禁止拿它查询会话、
+ * 作为真实目标 ID 持久化，或传入要求真实 ID 的请求。
+ */
+export const CRON_FIXED_SESSION_ID = 'fixed';
+
+/** 大小写、首尾空格与 `me` 保持一致的处理方式，避免同一输入在两端分裂。 */
+export function isCronFixedSessionId(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().toLowerCase() === CRON_FIXED_SESSION_ID;
+}
+
+/**
+ * 创建入口中「任务自己的对话」的唯一判定：显式 `fixed` 或省略 `session_id`。
+ *
+ * 参数校验与 handler 必须共用这一处，否则共享工具定义广告的省略形态会被 schema
+ * 挡掉，而 handler 里为它准备的分支永远不可达。
+ */
+export function isCronDedicatedSessionTarget(
+  session: { mode?: string; session_id?: string } | undefined,
+): boolean {
+  return (
+    session?.mode === 'sessionId' &&
+    (session.session_id === undefined || isCronFixedSessionId(session.session_id))
+  );
+}
+
+export function isMeSessionSentinel(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().toLowerCase() === 'me';
+}
+
+/**
+ * 创建入口的旧别名说明。`fixed` 承担「任务自己的对话」，`me` 只属于
+ * `self_reminder` 代表的当前工作跟进。
+ */
+export const CRON_CREATE_ME_REJECTED_MESSAGE =
+  'session.session_id "me" is not accepted when creating a scheduled task. ' +
+  'Use session_id "fixed" to give the task its own conversation that every run reuses, ' +
+  'or pass a real session ID to bind an existing conversation. ' +
+  'Use self_reminder for follow-up on the current conversation.';
+
+// Desktop 与 Cloud 共用时间和间隔解析，保持输入语义一致。
 
 const DURATION_UNIT_MS: Record<string, number> = {
   ms: 1,
@@ -22,8 +65,8 @@ const DURATION_UNIT_MS: Record<string, number> = {
 };
 
 /**
- * Resolve the absolute run time of `cron once` in Unix milliseconds. Exactly one of relative
- * `after` or absolute `at` is required, and the result must be strictly later than now.
+ * 解析 `cron once` 请求的绝对运行时间，单位为 Unix ms。`after` 相对时长与
+ * `at` 绝对时间必须且只能提供一个，结果必须严格晚于当前时间。
  */
 export function parseOnceRunAtMs(
   req: { after?: string; at?: string | number; timezone?: string },
@@ -189,9 +232,8 @@ function parseDurationMs(input: string): number {
 }
 
 /**
- * Convert the `cron self` interval `every` to a five-field Cron expression. Supports compact
- * durations `30s`, `5m`, `1h30m`, `2d12h`, and `1w`; five- or six-field Cron expressions pass
- * through unchanged.
+ * 把 `cron self` 的 `every` 间隔转换为五段式 Cron 表达式。支持紧凑时长
+ * `30s`、`5m`、`1h30m`、`2d12h`、`1w`，五段或六段 Cron 表达式则原样透传。
  */
 export function everyToCronExpression(every: string): string {
   const raw = every.trim().toLowerCase();
@@ -214,17 +256,40 @@ export function everyToCronExpression(every: string): string {
   return intervalSecondsToCron(seconds, every);
 }
 
+function isAsciiDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
 function parseIntervalSeconds(raw: string, original: string): number {
-  const re = /(\d+(?:\.\d+)?)(s|m|h|d|w)/g;
   let total = 0;
-  let consumed = '';
-  for (const match of raw.matchAll(re)) {
-    const amount = Number(match[1]);
-    const unit = match[2]!;
-    consumed += match[0];
+  let index = 0;
+  let valid = raw.length > 0;
+  while (valid && index < raw.length) {
+    const numStart = index;
+    while (index < raw.length && isAsciiDigit(raw.charCodeAt(index))) index += 1;
+    if (index === numStart) {
+      valid = false;
+      break;
+    }
+    if (raw[index] === '.') {
+      index += 1;
+      const fracStart = index;
+      while (index < raw.length && isAsciiDigit(raw.charCodeAt(index))) index += 1;
+      if (index === fracStart) {
+        valid = false;
+        break;
+      }
+    }
+    const unit = raw[index];
+    if (unit !== 's' && unit !== 'm' && unit !== 'h' && unit !== 'd' && unit !== 'w') {
+      valid = false;
+      break;
+    }
+    const amount = Number(raw.slice(numStart, index));
+    index += 1;
     total += amount * (DURATION_UNIT_MS[unit]! / 1000);
   }
-  if (!total || consumed !== raw) {
+  if (!valid || !total || index !== raw.length) {
     throw new LocalMavisCronValidationError(
       `cannot parse cron self interval ${JSON.stringify(original)}: expected a duration like "5m" or a cron expression`,
     );
@@ -239,10 +304,10 @@ function intervalSecondsToCron(seconds: number, original: string): string {
     );
   }
   const minutes = Math.round(seconds / 60);
-  // Five-field Cron step values `*/N` must fit the field range: minutes 0–59, hours 0–23,
-  // day of month 1–31. Intervals such as 90m, 150m, or 60d cannot be expressed accurately by one step;
-  // `*/90 * * * *` is invalid in croner and does not mean "every 90 minutes".
-  // Reject explicitly and ask callers for a full expression rather than generating invalid patterns.
+  // 五段式 Cron 的步长字段 `*/N` 要求 N 位于字段范围内：分钟 0-59、小时 0-23、
+  // 月内日 1-31。90m、150m、60d 这类间隔无法用单一步长准确表达；
+  // `*/90 * * * *` 在 croner 中属于语法错误，含义也不是“每 90 分钟”。
+  // 此处明确拒绝并提示调用方使用完整表达式，避免生成无效模式。
   if (minutes < 60) return `*/${minutes} * * * *`;
   if (minutes % 60 === 0) {
     const hours = minutes / 60;

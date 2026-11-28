@@ -376,42 +376,34 @@ describe('Runaway Guard domain module', () => {
 });
 
 describe('trusted task_output polling in the shared Guard', () => {
-  it('counts same-task reads across interleaved tasks and pairs reverse-order results by call id', () => {
+  it('reminds after three active reads despite status and output cursor changes', () => {
     const guard = taskOutputGuard();
-    const readBoth = (batch: number) => guard.observe(
+    const reminder = guard.observe(
       ctx,
       taskOutputStep([
-        { id: `a-${batch}`, taskId: 'task-a' },
-        { id: `b-${batch}`, taskId: 'task-b' },
+        { id: 'read-1', taskId: 'task-a', status: 'queued', nextOffset: 0 },
+        { id: 'read-2', taskId: 'task-a', status: 'running', nextOffset: 12 },
+        { id: 'read-3', taskId: 'task-a', status: 'running', nextOffset: 24 },
       ], { reverseResults: true }),
       true,
     );
 
-    expect(readBoth(1)).toBeUndefined();
-    expect(readBoth(2)).toBeUndefined();
-    const reminder = readBoth(3);
-
     expect(reminder?.observation).toMatchObject({ signalKind: 'polling_repeat', occurrences: 3 });
     expect(reminder?.content).toBe(`<system-reminder>
-Three task_output reads for the same task have returned an unchanged status and output cursor. Avoid repeated polling; you will be notified automatically and this conversation will resume when the background task completes.
+Three consecutive reads of the same background task have occurred. Stop polling and wait for the automatic completion notification.
 This reminder applies only to the current Turn. Do not save or generalize it into Memory, Skills, or other persistent instructions.
 </system-reminder>`);
   });
 
-  it('updates one task at a time inside a batch and rebuilds its baseline after changed output facts', () => {
+  it('requires an uninterrupted task id segment', () => {
     const guard = taskOutputGuard();
 
-    expect(guard.observe(ctx, taskOutputStep([
-      { id: 'same-1', taskId: 'task-a' },
-      { id: 'same-2', taskId: 'task-a' },
-      { id: 'same-3', taskId: 'task-a' },
-    ], { reverseResults: true }), true)?.observation.signalKind).toBe('polling_repeat');
-
-    const cursorGuard = taskOutputGuard();
-    expect(cursorGuard.observe(ctx, taskOutputStep([{ id: 'cursor-1', taskId: 'task-a', nextOffset: 10 }]), true)).toBeUndefined();
-    expect(cursorGuard.observe(ctx, taskOutputStep([{ id: 'cursor-2', taskId: 'task-a', nextOffset: 20 }]), true)).toBeUndefined();
-    expect(cursorGuard.observe(ctx, taskOutputStep([{ id: 'cursor-3', taskId: 'task-a', nextOffset: 20 }]), true)).toBeUndefined();
-    expect(cursorGuard.observe(ctx, taskOutputStep([{ id: 'cursor-4', taskId: 'task-a', nextOffset: 20 }]), true)?.observation.signalKind).toBe('polling_repeat');
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'a-1', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'a-2', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'b-1', taskId: 'task-b' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'a-3', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'a-4', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'a-5', taskId: 'task-a' }]), true)?.observation.signalKind).toBe('polling_repeat');
   });
 
   it('keeps a qualified task through a text-only step', () => {
@@ -455,71 +447,28 @@ This reminder applies only to the current Turn. Do not save or generalize it int
     expect(guard.observe(ctx, taskOutputStep([{ id: 'trusted-a-5', taskId: 'task-a' }]), true)?.observation.signalKind).toBe('polling_repeat');
   });
 
-  it('withdraws only the reset task candidate and retains another task candidate', () => {
-    const sameTaskReset = taskOutputGuard();
-    expect(sameTaskReset.observe(ctx, taskOutputStep([{ id: 'reset-a-1', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(sameTaskReset.observe(ctx, taskOutputStep([{ id: 'reset-a-2', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(sameTaskReset.observe(ctx, taskOutputStep([
-      { id: 'reset-a-3', taskId: 'task-a' },
-      { id: 'reset-a-terminal', taskId: 'task-a', status: 'completed' },
-    ]), true)).toBeUndefined();
-    expect(sameTaskReset.observe(ctx, taskOutputStep([{ id: 'reset-a-4', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(sameTaskReset.observe(ctx, taskOutputStep([{ id: 'reset-a-5', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(sameTaskReset.observe(ctx, taskOutputStep([{ id: 'reset-a-6', taskId: 'task-a' }]), true)?.observation.signalKind).toBe('polling_repeat');
-
-    const otherTaskReset = taskOutputGuard();
-    expect(otherTaskReset.observe(ctx, taskOutputStep([{ id: 'other-a-1', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(otherTaskReset.observe(ctx, taskOutputStep([{ id: 'other-a-2', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(otherTaskReset.observe(ctx, taskOutputStep([
-      { id: 'other-a-3', taskId: 'task-a' },
-      { id: 'other-b-stopping', taskId: 'task-b', status: 'stopping' },
-    ]), true)?.observation.signalKind).toBe('polling_repeat');
-  });
-
-  it('withdraws a same-task candidate after new output but keeps it through another task’s output', () => {
-    const sameTaskProgress = taskOutputGuard();
-    expect(sameTaskProgress.observe(ctx, taskOutputStep([{ id: 'progress-a-1', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(sameTaskProgress.observe(ctx, taskOutputStep([{ id: 'progress-a-2', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(sameTaskProgress.observe(ctx, taskOutputStep([
-      { id: 'progress-a-3', taskId: 'task-a' },
-      { id: 'progress-a-4', taskId: 'task-a', nextOffset: 10 },
-    ]), true)).toBeUndefined();
-    expect(sameTaskProgress.observe(ctx, taskOutputStep([{ id: 'progress-a-5', taskId: 'task-a', nextOffset: 10 }]), true)).toBeUndefined();
-    expect(sameTaskProgress.observe(ctx, taskOutputStep([{ id: 'progress-a-6', taskId: 'task-a', nextOffset: 10 }]), true)?.observation.signalKind).toBe('polling_repeat');
-
-    const otherTaskProgress = taskOutputGuard();
-    for (const batch of [1, 2]) {
-      expect(otherTaskProgress.observe(ctx, taskOutputStep([
-        { id: `other-progress-a-${batch}`, taskId: 'task-a' },
-        { id: `other-progress-b-${batch}`, taskId: 'task-b' },
-      ]), true)).toBeUndefined();
-    }
-    expect(otherTaskProgress.observe(ctx, taskOutputStep([
-      { id: 'other-progress-a-3', taskId: 'task-a' },
-      { id: 'other-progress-b-3', taskId: 'task-b', nextOffset: 10 },
-    ]), true)?.observation.signalKind).toBe('polling_repeat');
-  });
-
-  it('lets a known error without a receipt reset only its own task', () => {
+  it('breaks a segment after a terminal receipt', () => {
     const guard = taskOutputGuard();
-    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-a-1', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-a-2', taskId: 'task-a' }]), true)).toBeUndefined();
-
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'terminal-1', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'terminal-2', taskId: 'task-a' }]), true)).toBeUndefined();
     expect(guard.observe(ctx, taskOutputStep([
-      { id: 'error-a-3', taskId: 'task-a' },
-      { id: 'error-b', taskId: 'task-b', isError: true, omitDetails: true },
-    ]), true)?.observation.signalKind).toBe('polling_repeat');
-
-    const conflict = taskOutputGuard();
-    expect(conflict.observe(ctx, taskOutputStep([{ id: 'conflict-a-1', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(conflict.observe(ctx, taskOutputStep([{ id: 'conflict-a-2', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(conflict.observe(ctx, taskOutputStep([
-      { id: 'conflict-a-3', taskId: 'task-a' },
-      { id: 'conflict-b-error', taskId: 'task-b', isError: true, resultTaskId: 'foreign-task' },
+      { id: 'terminal', taskId: 'task-a', status: 'completed' },
     ]), true)).toBeUndefined();
-    expect(conflict.observe(ctx, taskOutputStep([{ id: 'conflict-a-4', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(conflict.observe(ctx, taskOutputStep([{ id: 'conflict-a-5', taskId: 'task-a' }]), true)).toBeUndefined();
-    expect(conflict.observe(ctx, taskOutputStep([{ id: 'conflict-a-6', taskId: 'task-a' }]), true)?.observation.signalKind).toBe('polling_repeat');
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'terminal-3', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'terminal-4', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'terminal-5', taskId: 'task-a' }]), true)?.observation.signalKind).toBe('polling_repeat');
+  });
+
+  it('breaks a segment after an error receipt', () => {
+    const guard = taskOutputGuard();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-1', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-2', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([
+      { id: 'error', taskId: 'task-a', isError: true, omitDetails: true },
+    ]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-3', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-4', taskId: 'task-a' }]), true)).toBeUndefined();
+    expect(guard.observe(ctx, taskOutputStep([{ id: 'error-5', taskId: 'task-a' }]), true)?.observation.signalKind).toBe('polling_repeat');
   });
 
   it('breaks a qualified segment for another tool and resets a permission-blocked native call', () => {

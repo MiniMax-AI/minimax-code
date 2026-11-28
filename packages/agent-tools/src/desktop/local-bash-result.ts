@@ -78,6 +78,7 @@ export function readBashExecutionOutcome(details: unknown): LocalBashExecutionOu
       'unknown',
       'preflight_failed',
       'watchdog_timeout',
+      'output_limit',
     ].includes(value.reason) ||
     !(
       value.exitCode === null ||

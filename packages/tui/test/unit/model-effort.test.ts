@@ -17,7 +17,7 @@ function model(effortOptions?: string[], variant?: string): TuiModel {
 }
 
 describe('normalizeTuiEffortOptions', () => {
-  it('trims, drops blanks and de-duplicates while keeping order', () => {
+  it('trims, drops blanks and de-duplicates while keeping catalog order', () => {
     expect(normalizeTuiEffortOptions([' low ', 'medium', '', 'low', '   ', 'high'])).toEqual([
       'low',
       'medium',

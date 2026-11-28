@@ -37,6 +37,7 @@ export function parseSessionLLMRetryEventPayload(raw: unknown): SessionLLMRetryE
     requestAttempt: raw.requestAttempt,
     ...(raw.delayMs !== undefined ? { delayMs: raw.delayMs } : {}),
     ...(raw.nextRetryAtMs !== undefined ? { nextRetryAtMs: raw.nextRetryAtMs } : {}),
+    ...(raw.waitingFor === 'network' ? { waitingFor: 'network' as const } : {}),
     ...(error ? { error } : {}),
   };
 }

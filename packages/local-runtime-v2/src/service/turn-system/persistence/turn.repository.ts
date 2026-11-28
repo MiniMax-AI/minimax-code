@@ -213,6 +213,10 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
       return result;
     },
     readSessionDeletion: async (sessionId) => readSessionDeletionState(options.db, sessionId),
+    abandonSessionDeletion: async (sessionId) =>
+      options.db.transaction((tx) => abandonSessionDeletionInTransaction(tx, sessionId), {
+        behavior: 'immediate',
+      }),
     isSessionDeleting: async (sessionId) =>
       options.sessionAdmission.rejectionInTransaction(options.db, { sessionId }) ===
         'session-deleting' ||
@@ -952,8 +956,30 @@ function recoverExpiredDeletionTurnInTransaction(
   }
 }
 
+function abandonSessionDeletionInTransaction(
+  tx: Transaction,
+  sessionId: string,
+): Awaited<ReturnType<TurnRepository['readSessionDeletion']>> {
+  const lock = findSessionLock(tx, sessionId);
+  const ownerKind = lock ? fencedOwnerKind(lock.ownerKind) : undefined;
+  if (lock && ownerKind) {
+    tx.update(sessionLocks)
+      .set({ ownerKind })
+      .where(and(eq(sessionLocks.sessionId, sessionId), eq(sessionLocks.ownerId, lock.ownerId)))
+      .run();
+  }
+  return readSessionDeletionState(tx, sessionId);
+}
+
+function fencedOwnerKind(ownerKind: string): string | undefined {
+  if (ownerKind === TURN_DELETING_OWNER_KIND) return 'turn';
+  if (ownerKind === COMPACTION_DELETING_OWNER_KIND) return 'compaction';
+  if (ownerKind === MAINTENANCE_DELETING_OWNER_KIND) return MAINTENANCE_OWNER_KIND;
+  return undefined;
+}
+
 function readSessionDeletionState(
-  db: TurnRepositoryOptions['db'],
+  db: RepositoryDb,
   sessionId: string,
 ): Awaited<ReturnType<TurnRepository['readSessionDeletion']>> {
   const lock = findSessionLock(db, sessionId);

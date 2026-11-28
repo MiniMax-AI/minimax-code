@@ -1,7 +1,7 @@
 {
   "name": "@minimax-ai/code-acp",
   "version": "0.0.0-dev",
-  "description": "Agent Client Protocol (ACP) launcher for MiniMax Code. Runs `mcode` from @minimax-ai/code so `npx @minimax-ai/code-acp acp` works. Version is stamped at release to match @minimax-ai/code.",
+  "description": "Zero-dependency Agent Client Protocol (ACP) launcher for MiniMax Code. Reuses an installed `mcode` or bootstraps `@minimax-ai/code` into an isolated user cache while answering ACP `initialize` immediately.",
   "type": "module",
   "bin": {
     "code-acp": "acp.js"
@@ -10,9 +10,6 @@
     "acp.js",
     "README.md"
   ],
-  "dependencies": {
-    "@minimax-ai/code": "0.0.0-dev"
-  },
   "engines": {
     "node": ">=22.19 <23 || >=24 <27"
   },

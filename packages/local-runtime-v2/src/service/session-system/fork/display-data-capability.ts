@@ -45,7 +45,14 @@ export function createSessionForkDisplayCapability(
           messages: display,
           assistant: boundary.assistant,
           assistantIndex: boundary.assistantIndex,
-          canonicalBoundaryReachable: candidates.length === 0 || canonical.reachable,
+          // A boundary that is itself the latest conversation message needs no
+          // canonical cut point: nothing follows it, so the Fork copies the whole
+          // active history (see canonicalHistoryBoundaryInput's empty fallback).
+          // Without this an interrupted Turn, whose Display anchor can name a
+          // canonical id that the settled history no longer holds, permanently
+          // fails Fork preflight until another Turn completes.
+          canonicalBoundaryReachable:
+            candidates.length === 0 || canonical.reachable || boundary.isLatestConversationMessage,
           isLatestConversationMessage: boundary.isLatestConversationMessage,
           ...(canonical.assistantMessageId
             ? { assistantCanonicalMessageId: canonical.assistantMessageId }

@@ -1,121 +1,138 @@
-import type { TuiDelegatedAgent, TuiDelegatedAgentStatus, TuiSession } from './port.js';
+import type {
+  TuiDelegatedAgent,
+  TuiDelegatedAgentStatus,
+  TuiDelegatedWaitingReason,
+  TuiSession,
+} from './port.js';
 
 const WORKER_PURPOSE_PREFIXES = ['local-task:', 'local-background-task:', 'team-plan:'] as const;
-const BUILTIN_SUBAGENT_NAMES = new Set(['explore', 'worker', 'verifier']);
 
-function hasTuiDelegatedSessionIdentity(session: TuiSession): boolean {
-  return (
-    session.sessionKind === 'task' ||
-    WORKER_PURPOSE_PREFIXES.some((prefix) => session.purpose?.startsWith(prefix))
-  );
+export function hasTuiDelegatedSessionIdentity(session: TuiSession): boolean {
+  const purpose = session.purpose?.trim().toLocaleLowerCase();
+  if (purpose?.startsWith('peek_') || purpose?.startsWith('peek:')) return false;
+  if (purpose && WORKER_PURPOSE_PREFIXES.some((prefix) => purpose.startsWith(prefix))) return true;
+  if (session.sessionKind?.trim().toLocaleLowerCase() === 'task') return true;
+  return isTuiBuiltinSubagentSession(session);
 }
 
 export function isTuiDelegatedSession(
   session: TuiSession,
 ): session is TuiSession & { parentSessionId: string } {
-  if (session.sessionType !== 'branch' || !session.parentSessionId) {
-    return false;
-  }
-  return hasTuiDelegatedSessionIdentity(session);
+  return (
+    session.sessionType === 'branch' &&
+    Boolean(session.parentSessionId) &&
+    hasTuiDelegatedSessionIdentity(session)
+  );
+}
+
+export function tuiDelegatedParentSessionId(session: TuiSession): string | undefined {
+  if (session.sessionType !== 'branch') return undefined;
+  return session.parentSessionId && hasTuiDelegatedSessionIdentity(session)
+    ? session.parentSessionId
+    : undefined;
+}
+
+export function tuiParentSessionId(
+  session: Pick<TuiSession, 'parentSessionId'> | undefined,
+): string | undefined {
+  return session?.parentSessionId;
 }
 
 export function isTuiBuiltinSubagentSession(session: TuiSession): boolean {
   const agentName = session.agentName?.trim().toLocaleLowerCase();
-  return agentName !== undefined && BUILTIN_SUBAGENT_NAMES.has(agentName);
+  return agentName === 'explore' || agentName === 'worker' || agentName === 'verifier';
 }
 
 export function isTuiInternalSubagentSession(session: TuiSession): boolean {
   return hasTuiDelegatedSessionIdentity(session) || isTuiBuiltinSubagentSession(session);
 }
 
+export interface TuiDelegatedSessionMember {
+  readonly session: TuiSession;
+  readonly parentSessionId: string;
+}
+
 export function collectTuiDelegatedSessions(
   sessions: readonly TuiSession[],
   rootSessionId: string,
-): Array<TuiSession & { parentSessionId: string }> {
-  const collected: Array<TuiSession & { parentSessionId: string }> = [];
+): TuiDelegatedSessionMember[] {
+  const collected: TuiDelegatedSessionMember[] = [];
   const collectedIds = new Set<string>();
   const parentIds = new Set([rootSessionId]);
   let changed = true;
+
   while (changed) {
     changed = false;
     for (const session of sessions) {
-      if (
-        collectedIds.has(session.sessionId) ||
-        !isTuiDelegatedSession(session) ||
-        !parentIds.has(session.parentSessionId)
-      ) {
-        continue;
-      }
-      collected.push(session);
+      if (collectedIds.has(session.sessionId)) continue;
+      const parentSessionId = tuiDelegatedParentSessionId(session);
+      if (!parentSessionId || !parentIds.has(parentSessionId)) continue;
+      collected.push({ session, parentSessionId });
       collectedIds.add(session.sessionId);
       parentIds.add(session.sessionId);
       changed = true;
     }
   }
+
   return collected;
 }
 
 export function toTuiDelegatedAgent(
-  session: TuiSession & { parentSessionId: string },
+  member: TuiDelegatedSessionMember,
+  waitingReason?: TuiDelegatedWaitingReason,
 ): TuiDelegatedAgent {
+  const { session, parentSessionId } = member;
+  const status = normalizeDelegatedAgentStatus(session.status);
+  const waiting = waitingReason && isIdleTuiDelegatedAgentStatus(status);
   return {
     sessionId: session.sessionId,
-    parentSessionId: session.parentSessionId,
+    parentSessionId,
     ...(session.agentName ? { agentName: session.agentName } : {}),
     ...(session.title ? { task: session.title } : {}),
-    status: normalizeDelegatedAgentStatus(session.status),
+    status: waiting ? 'waiting' : status,
+    ...(waiting ? { waitingReason } : {}),
     ...timestamp('createdAtMs', session.createdAt),
     ...timestamp('updatedAtMs', session.updatedAt),
     ...(session.errorMessage ? { errorMessage: session.errorMessage } : {}),
   };
 }
 
+export function isIdleTuiDelegatedAgentStatus(status: TuiDelegatedAgentStatus): boolean {
+  return status === 'queued' || status === 'completed' || status === 'unknown';
+}
+
 export function isActiveTuiDelegatedAgent(agent: TuiDelegatedAgent): boolean {
-  return agent.status === 'queued' || agent.status === 'running';
+  return agent.status === 'queued' || agent.status === 'running' || agent.status === 'waiting';
 }
 
 function normalizeDelegatedAgentStatus(status: string | undefined): TuiDelegatedAgentStatus {
-  const normalized = status?.trim().toLocaleLowerCase().replaceAll('-', '_');
-  if (!normalized) return 'unknown';
-  if (normalized === 'queued' || normalized === 'pending' || normalized === 'created') {
-    return 'queued';
+  switch (status?.trim().toLocaleLowerCase()) {
+    case 'queued':
+    case 'pending':
+      return 'queued';
+    case 'running':
+    case 'started':
+      return 'running';
+    case 'completed':
+    case 'finished':
+    case 'idle':
+      return 'completed';
+    case 'failed':
+    case 'error':
+      return 'failed';
+    case 'stopped':
+    case 'aborted':
+    case 'interrupted':
+      return 'stopped';
+    default:
+      return 'unknown';
   }
-  if (
-    normalized === 'running' ||
-    normalized === 'started' ||
-    normalized === 'active' ||
-    normalized === 'busy' ||
-    normalized === 'processing' ||
-    normalized === 'in_progress'
-  ) {
-    return 'running';
-  }
-  if (
-    normalized === 'finished' ||
-    normalized === 'completed' ||
-    normalized === 'succeeded' ||
-    normalized === 'success'
-  ) {
-    return 'completed';
-  }
-  if (normalized === 'idle') return 'completed';
-  if (normalized === 'error' || normalized === 'failed' || normalized === 'lost') return 'failed';
-  if (
-    normalized === 'aborted' ||
-    normalized === 'interrupted' ||
-    normalized === 'cancelled' ||
-    normalized === 'canceled' ||
-    normalized === 'stopped'
-  ) {
-    return 'stopped';
-  }
-  return 'unknown';
 }
 
 function timestamp(
   key: 'createdAtMs' | 'updatedAtMs',
   value: number | string | undefined,
-): { createdAtMs?: number; updatedAtMs?: number } {
+): Partial<Pick<TuiDelegatedAgent, 'createdAtMs' | 'updatedAtMs'>> {
   if (typeof value === 'number' && Number.isFinite(value)) return { [key]: value };
   if (typeof value !== 'string') return {};
   const numeric = Number(value);

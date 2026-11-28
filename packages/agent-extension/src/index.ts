@@ -5,6 +5,8 @@
  * choose a host profile, or provide a default extension list.
  */
 
+export { wrapUpExtension } from './wrap-up.js';
+
 export { sessionReportExtension, type SessionReportExtensionOptions } from './session-report.js';
 
 export {
@@ -27,9 +29,12 @@ export {
 } from './system-reminder.js';
 export {
   toolOutputBudgetExtension,
+  WEB_SEARCH_CONTENT_INLINE_BYTES,
+  webSearchContentBudgetExtension,
   type ToolOutputArtifact,
   type ToolOutputArtifactInput,
   type ToolOutputBudgetExtensionOptions,
+  type WebSearchContentBudgetExtensionOptions,
 } from './tool-output-budget.js';
 export { requestMediaExtension, type RequestMediaExtensionOptions } from './request-media.js';
 export {
@@ -85,6 +90,8 @@ export {
   type MiniAppTargetResult,
   type MiniAppBusyReason,
   type MiniAppInitResult,
+  type MiniAppInspectDiagnostics,
+  type MiniAppInspectResult,
   type MiniAppFailureDiagnostic,
   type MiniAppFailureReasonCode,
   type MiniAppFailureRecovery,
@@ -92,10 +99,12 @@ export {
   type MiniAppLifecycle,
   type MiniAppLifecycleErrorCode,
   type MiniAppListResult,
+  type MiniAppOpenActionContext,
   type MiniAppOpenResult,
   type MiniAppPublishActionContext,
   type MiniAppRunningSummary,
   type MiniAppRuntimeErrorDetail,
   type MiniAppSummary,
   type MiniAppTargetActionContext,
+  MINIAPP_TOOL_DEFINITION,
 } from './miniapp.js';

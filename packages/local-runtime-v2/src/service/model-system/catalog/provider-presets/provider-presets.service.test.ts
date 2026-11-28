@@ -9,6 +9,7 @@ import { ProviderPresetCatalog } from './provider-presets.service.js';
 import { readProviderPresetSnapshotCandidates } from './provider-presets.repository.js';
 import { modelsFromInputs } from '../../management/service-input.js';
 import { buildModelEntry } from '../list-models.js';
+import { waitFor } from '../../../../../test/helpers/time-budget.js';
 
 vi.mock('./provider-presets.repository.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./provider-presets.repository.js')>();
@@ -148,7 +149,7 @@ function commonConfigResponse(value: unknown) {
 
 async function waitForRepositoryRead(index: number): Promise<void> {
   const readCandidates = vi.mocked(readProviderPresetSnapshotCandidates);
-  await vi.waitFor(() => expect(readCandidates).toHaveBeenCalledTimes(index + 1));
+  await waitFor(() => expect(readCandidates).toHaveBeenCalledTimes(index + 1));
   const result = readCandidates.mock.results[index];
   if (!result) throw new Error(`Expected repository read ${index}`);
   await result.value;
@@ -212,12 +213,51 @@ describe('models.dev Provider Presets', () => {
         apiFormat: 'openai-completions',
         models: [{ modelId: 'glm-5.3' }],
       });
-      expect(providerCompletionUrl('openai-completions', preset!.baseUrl)).toBe(
+      expect(providerCompletionUrl('openai-completions', preset!.baseUrl, 'glm-5.3')).toBe(
         `${baseUrl}/chat/completions`,
       );
     }
   });
 
+  it('maps OpenRouter through its dedicated SDK package as OpenAI-compatible', async () => {
+    const presets = await parsePresetsForTest({
+      openrouter: {
+        name: 'OpenRouter',
+        npm: '@openrouter/ai-sdk-provider',
+        api: 'https://openrouter.ai/api/v1',
+        models: { auto: { name: 'Auto Router', tool_call: true } },
+      },
+      'openrouter-proxy-missing-api': {
+        name: 'OpenRouter proxy without API',
+        npm: '@openrouter/ai-sdk-provider',
+        models: { model: { tool_call: true } },
+      },
+    });
+
+    expect(
+      presets.map(({ providerId, baseUrl, apiFormat }) => ({ providerId, baseUrl, apiFormat })),
+    ).toEqual([
+      {
+        providerId: 'openrouter',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        apiFormat: 'openai-completions',
+      },
+    ]);
+
+    const openrouterWithoutApi = await parsePresetsForTest({
+      openrouter: {
+        name: 'OpenRouter',
+        npm: '@openrouter/ai-sdk-provider',
+        models: { auto: { name: 'Auto Router', tool_call: true } },
+      },
+    });
+    expect(
+      openrouterWithoutApi.map(({ providerId, baseUrl }) => ({ providerId, baseUrl })),
+    ).toEqual([{ providerId: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1' }]);
+  });
+});
+
+describe('models.dev Provider Presets metadata', () => {
   it('builds each Provider icon URL from the catalog snapshot prefix', async () => {
     const [preset] = await parsePresetsForTest(
       providerCatalog(['vendor.with.dots']),
@@ -227,7 +267,7 @@ describe('models.dev Provider Presets', () => {
     expect(preset?.iconUrl).toBe('https://cdn.example/catalog/release/logos/vendor.with.dots.svg');
   });
 
-  it('excludes MiniMax providers from the preset catalog', async () => {
+  it('offers MiniMax providers as ordinary BYOK presets', async () => {
     const presets = await parsePresetsForTest(
       providerCatalog([
         'minimax',
@@ -238,7 +278,13 @@ describe('models.dev Provider Presets', () => {
       ]),
     );
 
-    expect(presets.map((preset) => preset.providerId)).toEqual(['compatible']);
+    expect(presets.map((preset) => preset.providerId)).toEqual([
+      'compatible',
+      'minimax',
+      'minimax-cn',
+      'minimax-cn-coding-plan',
+      'minimax-coding-plan',
+    ]);
   });
 
   it('maps the three supported transports and normalizes their request bases', async () => {
@@ -288,7 +334,7 @@ describe('models.dev Provider Presets', () => {
     const messagesApiHost = 'https://api.anthropic.com';
     expect(
       presets.map((preset) => ({
-        completion: providerCompletionUrl(preset.apiFormat, preset.baseUrl),
+        completion: providerCompletionUrl(preset.apiFormat, preset.baseUrl, 'chat'),
         models: providerModelsUrls(preset.apiFormat, preset.baseUrl),
       })),
     ).toEqual([
@@ -374,8 +420,8 @@ describe('models.dev Provider Presets', () => {
       },
       unsupportedNpm: {
         name: 'Unsupported npm',
-        npm: '@ai-sdk/google',
-        api: 'https://google.example',
+        npm: '@ai-sdk/google-vertex',
+        api: 'https://vertex.example',
         models: { model: { tool_call: true } },
       },
       unsafe: {
@@ -413,17 +459,65 @@ describe('models.dev Provider Presets', () => {
       },
     ]);
   });
+});
 
+describe('models.dev Google Gemini presets', () => {
+  it('maps @ai-sdk/google to the Gemini API with the canonical versioned base', async () => {
+    const presets = await parsePresetsForTest({
+      google: {
+        name: 'Google',
+        npm: '@ai-sdk/google',
+        models: {
+          'gemini-3.5-flash': { name: 'Gemini 3.5 Flash', tool_call: true },
+          'gemini-3.1-flash-live-preview': { name: 'Gemini 3.1 Live', tool_call: true },
+        },
+      },
+      'gemini-gateway': {
+        name: 'Gemini Gateway',
+        npm: '@ai-sdk/google',
+        api: 'https://gateway.example',
+        models: { 'gemini-3.5-flash': { name: 'Gemini 3.5 Flash', tool_call: true } },
+      },
+      'gemini-gateway-without-api': {
+        name: 'Gemini Gateway Without API',
+        npm: '@ai-sdk/google',
+        models: { 'gemini-3.5-flash': { name: 'Gemini 3.5 Flash', tool_call: true } },
+      },
+    });
+
+    expect(
+      presets.map(({ providerId, baseUrl, apiFormat }) => ({ providerId, baseUrl, apiFormat })),
+    ).toEqual([
+      {
+        providerId: 'gemini-gateway',
+        baseUrl: 'https://gateway.example/v1beta',
+        apiFormat: 'google-generative-ai',
+      },
+      {
+        providerId: 'google',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        apiFormat: 'google-generative-ai',
+      },
+    ]);
+    const google = presets.find((preset) => preset.providerId === 'google');
+    expect(google?.models.map((m) => m.modelId)).toEqual(['gemini-3.5-flash']);
+    expect(providerCompletionUrl('google-generative-ai', google!.baseUrl, 'gemini-3.5-flash')).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse',
+    );
+    expect(providerModelsUrls('google-generative-ai', google!.baseUrl)).toEqual([
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+    ]);
+  });
+});
+
+describe('models.dev reasoning effort metadata', () => {
   it('parses declared reasoning effort options for Kimi K3 on both Moonshot providers', async () => {
     const k3 = {
       name: 'Kimi K3',
       tool_call: true,
       attachment: true,
       reasoning: true,
-      reasoning_options: [
-        { type: 'toggle' },
-        { type: 'effort', values: ['low', 'high', 'max'] },
-      ],
+      reasoning_options: [{ type: 'toggle' }, { type: 'effort', values: ['low', 'high', 'max'] }],
       temperature: false,
       modalities: { input: ['text', 'image', 'video'], output: ['text'] },
       limit: { context: 1_048_576, output: 131_072 },
@@ -465,16 +559,19 @@ describe('models.dev Provider Presets', () => {
       });
       if (!preset) throw new Error(`Missing preset ${providerId}`);
       const savedModel = modelsFromInputs(preset.models)['kimi-k3'];
+      if (!savedModel) throw new Error(`Missing Kimi K3 model for ${providerId}`);
       expect(savedModel?.thinking).toEqual({ effortOptions: ['low', 'high', 'max'] });
-      expect(buildModelEntry({
-        providerId: `custom_provider:${providerId}`,
-        modelId: 'kimi-k3',
-        model: savedModel,
-        selected: false,
-        providerSource: 'custom_provider',
-        providerKind: 'custom',
-        providerName: preset.name,
-      }).effortOptions).toEqual(['low', 'high', 'max']);
+      expect(
+        buildModelEntry({
+          providerId: `custom_provider:${providerId}`,
+          modelId: 'kimi-k3',
+          model: savedModel,
+          selected: false,
+          providerSource: 'custom_provider',
+          providerKind: 'custom',
+          providerName: preset.name,
+        }).effortOptions,
+      ).toEqual(['low', 'high', 'max']);
     }
     const moonshot = presets.find((candidate) => candidate.providerId === 'moonshotai');
     // A toggle-only or bare reasoning model can think, but declares no
@@ -497,8 +594,12 @@ describe('models.dev Provider Presets', () => {
             name: 'Custom',
             tool_call: true,
             reasoning: true,
-            reasoning_options: [null, {}, { type: 'effort', values: 'high' },
-              { type: 'effort', values: [' light ', 'light', '', ' ', 7, null, 'max'] }],
+            reasoning_options: [
+              null,
+              {},
+              { type: 'effort', values: 'high' },
+              { type: 'effort', values: [' light ', 'light', '', ' ', 7, null, 'max'] },
+            ],
           },
           'empty-effort': {
             name: 'Empty effort',
@@ -523,6 +624,36 @@ describe('models.dev Provider Presets', () => {
     expect(model('custom')).toMatchObject({ effortOptions: ['light', 'max'] });
     expect(model('empty-effort')).not.toHaveProperty('effortOptions');
     expect(model('budget-only')).not.toHaveProperty('effortOptions');
+  });
+
+  it('drops the level below low from Gemini presets only', async () => {
+    const efforts = { type: 'effort', values: ['minimal', 'low', 'medium', 'high'] };
+    const presets = await parsePresetsForTest({
+      google: {
+        name: 'Google',
+        npm: '@ai-sdk/google',
+        models: {
+          flash: { name: 'Flash', tool_call: true, reasoning_options: [efforts] },
+          image: {
+            name: 'Image',
+            tool_call: true,
+            reasoning_options: [{ type: 'effort', values: ['minimal'] }],
+          },
+        },
+      },
+      openai: {
+        name: 'OpenAI',
+        npm: '@ai-sdk/openai',
+        models: { gpt: { name: 'GPT', tool_call: true, reasoning_options: [efforts] } },
+      },
+    });
+    const models = new Map(
+      presets.flatMap((preset) => preset.models.map((model) => [model.modelId, model])),
+    );
+
+    expect(models.get('flash')).toMatchObject({ effortOptions: ['low', 'medium', 'high'] });
+    expect(models.get('image')).not.toHaveProperty('effortOptions');
+    expect(models.get('gpt')).toMatchObject({ effortOptions: efforts.values });
   });
 });
 
@@ -624,7 +755,7 @@ describe('models.dev Provider Preset snapshots', () => {
       await expect(catalog.listProviderPresets()).resolves.toMatchObject([
         { models: [{ modelId: 'local' }] },
       ]);
-      await vi.waitFor(() => expect(modelsDevFetch).toHaveBeenCalled());
+      await waitFor(() => expect(modelsDevFetch).toHaveBeenCalled());
     },
   );
 
@@ -653,7 +784,7 @@ describe('models.dev Provider Preset snapshots', () => {
     await expect(catalog.listProviderPresets()).resolves.toMatchObject([
       { models: [{ modelId: 'bundled' }] },
     ]);
-    await vi.waitFor(() => expect(modelsDevRequestInit).toBeDefined());
+    await waitFor(() => expect(modelsDevRequestInit).toBeDefined());
     expect(new Headers(modelsDevRequestInit?.headers).get('if-none-match')).toBeNull();
 
     finishFetch(
@@ -662,7 +793,7 @@ describe('models.dev Provider Preset snapshots', () => {
         headers: { etag: 'new-etag' },
       }),
     );
-    await vi.waitFor(async () => {
+    await waitFor(async () => {
       expect(JSON.parse(await readFile(paths.localCatalogPath, 'utf8'))).toEqual(
         snapshot(30, 'network-new', 'new-etag', 'https://models.dev/logos/'),
       );
@@ -687,7 +818,7 @@ describe('models.dev Provider Preset snapshots', () => {
       regionGetter: () => 'en',
     });
 
-    await vi.waitFor(() =>
+    await waitFor(() =>
       expect(catalog.listProviderPresets()).resolves.toMatchObject([
         { models: [{ modelId: 'stable' }] },
       ]),
@@ -714,11 +845,117 @@ describe('models.dev Provider Preset snapshots', () => {
       regionGetter: () => 'cn',
     });
 
-    await vi.waitFor(() => expect(requestSignal?.aborted).toBe(true));
+    await waitFor(() => expect(requestSignal?.aborted).toBe(true));
     await expect(catalog.listProviderPresets()).resolves.toMatchObject([
       { models: [{ modelId: 'stable' }] },
     ]);
     await expect(readFile(paths.localCatalogPath, 'utf8')).rejects.toThrow();
+  });
+});
+
+describe('models.dev model recency ranking', () => {
+  function datedSnapshot(updatedAt: number, models: Record<string, string>) {
+    return {
+      version: 1,
+      source: 'https://models.dev/api.json',
+      updatedAt,
+      iconBaseUrl: 'https://models.dev/logos/',
+      catalog: {
+        openai: {
+          name: 'OpenAI',
+          npm: '@ai-sdk/openai',
+          models: Object.fromEntries(
+            Object.entries(models).map(([modelId, date]) => [
+              modelId,
+              { name: modelId, tool_call: true, last_updated: date, release_date: date },
+            ]),
+          ),
+        },
+      },
+    };
+  }
+
+  it('ranks with a fresh snapshot without waiting for the network', async () => {
+    const paths = await catalogPaths();
+    await writeFile(
+      paths.localCatalogPath,
+      JSON.stringify(datedSnapshot(1_000, { older: '2026-01-01', newer: '2026-08-01' })),
+    );
+    const catalog = new ProviderPresetCatalog({
+      ...paths,
+      modelsDevFetch: vi.fn(async () => new Response(null, { status: 304 })) as typeof fetch,
+      commonConfigFetch: unavailableCommonConfig(),
+      regionGetter: () => 'en',
+      now: () => 2_000,
+    });
+
+    await expect(
+      catalog.rankModelsByRecency({ modelIds: ['unknown', 'older', 'newer'] }),
+    ).resolves.toEqual(['newer', 'older', 'unknown']);
+  });
+
+  it('refreshes a stale snapshot before ranking and uses the fetched catalog', async () => {
+    const paths = await catalogPaths();
+    const stale = 1;
+    const now = stale + 7 * 60 * 60_000;
+    await writeFile(
+      paths.localCatalogPath,
+      JSON.stringify(datedSnapshot(stale, { a: '2026-01-01', b: '2026-02-01' })),
+    );
+    const fresh = datedSnapshot(now, { a: '2026-09-01', b: '2026-02-01' }).catalog;
+    const modelsDevFetch = vi.fn(
+      async () => new Response(JSON.stringify(fresh), { status: 200 }),
+    ) as typeof fetch;
+    const catalog = new ProviderPresetCatalog({
+      ...paths,
+      modelsDevFetch,
+      commonConfigFetch: unavailableCommonConfig(),
+      regionGetter: () => 'en',
+      now: () => now,
+    });
+
+    await expect(catalog.rankModelsByRecency({ modelIds: ['b', 'a'] })).resolves.toEqual([
+      'a',
+      'b',
+    ]);
+    expect(modelsDevFetch).toHaveBeenCalled();
+  });
+
+  it('falls back to the cached snapshot when the refresh fails', async () => {
+    const paths = await catalogPaths();
+    await writeFile(
+      paths.bundledCatalogPath,
+      gzipSync(JSON.stringify(datedSnapshot(1, { a: '2026-01-01', b: '2026-02-01' }))),
+    );
+    const catalog = new ProviderPresetCatalog({
+      ...paths,
+      modelsDevFetch: vi.fn(async () => {
+        throw new Error('offline');
+      }) as typeof fetch,
+      commonConfigFetch: unavailableCommonConfig(),
+      regionGetter: () => 'en',
+      now: () => 10 * 60 * 60_000,
+    });
+
+    await expect(catalog.rankModelsByRecency({ modelIds: ['a', 'b'] })).resolves.toEqual([
+      'b',
+      'a',
+    ]);
+  });
+
+  it('stops waiting when the caller aborts', async () => {
+    const paths = await catalogPaths();
+    await writeFile(paths.localCatalogPath, JSON.stringify(datedSnapshot(1, { a: '2026-01-01' })));
+    const catalog = new ProviderPresetCatalog({
+      ...paths,
+      modelsDevFetch: vi.fn(() => new Promise<Response>(() => undefined)) as typeof fetch,
+      commonConfigFetch: unavailableCommonConfig(),
+      regionGetter: () => 'en',
+    });
+    const controller = new AbortController();
+    const ranking = catalog.rankModelsByRecency({ modelIds: ['a'], signal: controller.signal });
+    controller.abort(new Error('closed'));
+    await expect(ranking).rejects.toThrow('closed');
   });
 });
 
@@ -740,9 +977,21 @@ describe('Provider Preset ordering', () => {
       region: 'cn',
       commonConfigFetch: unavailableCommonConfig(),
     });
+    // MiniMax is not locally pinned, so it joins the name-sorted remainder.
     await expect(
       cn.listProviderPresets().then((items) => items.map((item) => item.providerId)),
-    ).resolves.toEqual(cnIds.slice(1));
+    ).resolves.toEqual([
+      'zhipuai-coding-plan',
+      'zhipuai',
+      'deepseek',
+      'moonshotai-cn',
+      'openai',
+      'anthropic',
+      'aaa',
+      'minimax-cn',
+      'tencent-coding-plan',
+      'zzz',
+    ]);
 
     const globalIds = [
       'minimax',
@@ -761,7 +1010,17 @@ describe('Provider Preset ordering', () => {
     });
     await expect(
       global.listProviderPresets().then((items) => items.map((item) => item.providerId)),
-    ).resolves.toEqual(globalIds.slice(1));
+    ).resolves.toEqual([
+      'zai-coding-plan',
+      'zai',
+      'deepseek',
+      'moonshotai',
+      'openai',
+      'anthropic',
+      'aaa',
+      'minimax',
+      'tencent-coding-plan',
+    ]);
   });
 
   it.each([

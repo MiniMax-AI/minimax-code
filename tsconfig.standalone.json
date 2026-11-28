@@ -100,11 +100,26 @@
       "@mavis/agent-extension": [
         "./packages/agent-extension/src/index.ts"
       ],
+      "@mavis/agent-extension/output-limit-recovery": [
+        "./packages/agent-extension/src/output-limit-recovery.ts"
+      ],
+      "@mavis/agent-extension/request-media": [
+        "./packages/agent-extension/src/request-media.ts"
+      ],
+      "@mavis/agent-extension/tool-output-budget": [
+        "./packages/agent-extension/src/tool-output-budget.ts"
+      ],
       "@mavis/agent-runtime": [
         "./packages/agent-runtime/src/index.ts"
       ],
       "@mavis/agent-tools": [
         "./packages/agent-tools/src/index.ts"
+      ],
+      "@mavis/agent-tools/ask-user": [
+        "./packages/agent-tools/src/ask-user/index.ts"
+      ],
+      "@mavis/agent-tools/core-tools": [
+        "./packages/agent-tools/src/core-tools/index.ts"
       ],
       "@mavis/agent-tools/desktop": [
         "./packages/agent-tools/src/desktop/index.ts"
@@ -112,17 +127,44 @@
       "@mavis/agent-tools/desktop/managed-routing": [
         "./packages/agent-tools/src/desktop/managed-routing.ts"
       ],
+      "@mavis/agent-tools/desktop/matrix-client": [
+        "./packages/agent-tools/src/desktop/matrix-client.ts"
+      ],
       "@mavis/agent-tools/desktop/subagent-roles": [
         "./packages/agent-tools/src/desktop/subagent-roles.ts"
       ],
       "@mavis/agent-tools/matrix": [
         "./packages/agent-tools/src/cloud/matrix-tools/index.ts"
       ],
+      "@mavis/agent-tools/mcp-disclosure": [
+        "./packages/agent-tools/src/mcp-disclosure/mcp-disclosure.ts"
+      ],
+      "@mavis/agent-tools/multimodal-attachments": [
+        "./packages/agent-tools/src/shared/multimodal-attachments.ts"
+      ],
       "@mavis/agent-tools/plugin-hooks": [
         "./packages/agent-tools/src/plugin-hooks/index.ts"
       ],
+      "@mavis/agent-tools/plugin-hooks/vendor-tool-response": [
+        "./packages/agent-tools/src/plugin-hooks/vendor-tool-response.ts"
+      ],
+      "@mavis/agent-tools/ptc": [
+        "./packages/agent-tools/src/ptc/index.ts"
+      ],
+      "@mavis/agent-tools/ptc-script": [
+        "./packages/agent-tools/src/ptc-script/index.ts"
+      ],
       "@mavis/agent-tools/read-contract": [
         "./packages/agent-tools/src/shared/read-contract.ts"
+      ],
+      "@mavis/agent-tools/shell-quote": [
+        "./packages/agent-tools/src/shared/shell-quote.ts"
+      ],
+      "@mavis/agent-tools/skill-catalog-window": [
+        "./packages/agent-tools/src/skill-catalog-window/index.ts"
+      ],
+      "@mavis/agent-tools/tool-policy": [
+        "./packages/agent-tools/src/tool-policy/index.ts"
       ],
       "@mavis/background-task": [
         "./packages/agent-modules/background-task/src/index.ts"
@@ -139,8 +181,17 @@
       "@mavis/config/data-dir": [
         "./packages/config/src/data-dir.ts"
       ],
+      "@mavis/config/model-availability": [
+        "./packages/config/src/model-availability.ts"
+      ],
+      "@mavis/config/ptc-default-config": [
+        "./packages/config/src/ptc-default-config.ts"
+      ],
       "@mavis/config/sandbox-settings": [
         "./packages/config/src/sandbox-settings.ts"
+      ],
+      "@mavis/config/worktree-config": [
+        "./packages/config/src/worktree-config.ts"
       ],
       "@mavis/context-manager": [
         "./packages/agent-modules/context-manager/src/index.ts"
@@ -187,6 +238,9 @@
       "@mavis/mcp": [
         "./packages/agent-modules/mcp/src/index.ts"
       ],
+      "@mavis/mcp/oauth": [
+        "./packages/agent-modules/mcp/src/oauth.ts"
+      ],
       "@mavis/mcp/runtime/connection-pool": [
         "./packages/agent-modules/mcp/src/runtime/connection-pool.ts"
       ],
@@ -229,6 +283,9 @@
       "@mavis/shared": [
         "./packages/shared/src/index.ts"
       ],
+      "@mavis/shared/advisor-call": [
+        "./packages/shared/src/advisor-call.ts"
+      ],
       "@mavis/shared/agent-avatar": [
         "./packages/shared/src/agent-avatar.ts"
       ],
@@ -238,8 +295,14 @@
       "@mavis/shared/asset-markup": [
         "./packages/shared/src/asset-markup/index.ts"
       ],
+      "@mavis/shared/base64": [
+        "./packages/shared/src/base64.ts"
+      ],
       "@mavis/shared/bounded-json-stringify": [
         "./packages/shared/src/bounded-json-stringify.ts"
+      ],
+      "@mavis/shared/byok-error-attribution": [
+        "./packages/shared/src/byok-error-attribution.ts"
       ],
       "@mavis/shared/cron-model": [
         "./packages/shared/src/cron-model.ts"
@@ -262,6 +325,9 @@
       "@mavis/shared/global-events": [
         "./packages/shared/src/global-events.ts"
       ],
+      "@mavis/shared/hard-link-support": [
+        "./packages/shared/src/hard-link-support.ts"
+      ],
       "@mavis/shared/image-dimensions": [
         "./packages/shared/src/image-dimensions.ts"
       ],
@@ -273,6 +339,9 @@
       ],
       "@mavis/shared/llm-retry-event": [
         "./packages/shared/src/llm-retry-event.ts"
+      ],
+      "@mavis/shared/local-resource-errors": [
+        "./packages/shared/src/local-resource-errors.ts"
       ],
       "@mavis/shared/local-runtime-diagnostics": [
         "./packages/shared/src/local-runtime-diagnostics/index.ts"
@@ -298,8 +367,14 @@
       "@mavis/shared/local-runtime-logging/logger": [
         "./packages/shared/src/local-runtime-logging/logger.ts"
       ],
+      "@mavis/shared/local-runtime-logging/metric-registry": [
+        "./packages/shared/src/local-runtime-logging/metric-registry.ts"
+      ],
       "@mavis/shared/local-runtime-logging/metrics": [
         "./packages/shared/src/local-runtime-logging/metrics.ts"
+      ],
+      "@mavis/shared/local-runtime-managed-skills": [
+        "./packages/shared/src/local-runtime-managed-skills.ts"
       ],
       "@mavis/shared/local-runtime-paths": [
         "./packages/shared/src/local-runtime-paths.ts"
@@ -316,6 +391,9 @@
       "@mavis/shared/mavis-widget-types": [
         "./packages/shared/src/mavis-widget-types.ts"
       ],
+      "@mavis/shared/mcp-invoke-arguments": [
+        "./packages/shared/src/mcp-invoke-arguments.ts"
+      ],
       "@mavis/shared/media-asset-meta": [
         "./packages/shared/src/media-asset-meta.ts"
       ],
@@ -325,6 +403,9 @@
       "@mavis/shared/metrics-proxy": [
         "./packages/shared/src/metrics-proxy.ts"
       ],
+      "@mavis/shared/miniapp-suggestion": [
+        "./packages/shared/src/miniapp-suggestion.ts"
+      ],
       "@mavis/shared/miniapp-surface": [
         "./packages/shared/src/miniapp-surface.ts"
       ],
@@ -333,6 +414,15 @@
       ],
       "@mavis/shared/navigation-text": [
         "./packages/shared/src/navigation-text.ts"
+      ],
+      "@mavis/shared/nested-runtime-guard": [
+        "./packages/shared/src/nested-runtime-guard.ts"
+      ],
+      "@mavis/shared/next-step": [
+        "./packages/shared/src/next-step.ts"
+      ],
+      "@mavis/shared/platform-error-codes": [
+        "./packages/shared/src/platform-error-codes.ts"
       ],
       "@mavis/shared/plugin-mention": [
         "./packages/shared/src/plugin-mention.ts"
@@ -346,6 +436,9 @@
       "@mavis/shared/questionnaire": [
         "./packages/shared/src/questionnaire.ts"
       ],
+      "@mavis/shared/rollout-bucket": [
+        "./packages/shared/src/rollout-bucket.ts"
+      ],
       "@mavis/shared/runtime-boundary-env": [
         "./packages/shared/src/runtime-boundary-env.ts"
       ],
@@ -358,6 +451,9 @@
       "@mavis/shared/safety-check-v2": [
         "./packages/shared/src/safety-check-v2.ts"
       ],
+      "@mavis/shared/sensitive-paths": [
+        "./packages/shared/src/sensitive-paths.ts"
+      ],
       "@mavis/shared/shell-source-stages": [
         "./packages/shared/src/shell-source-stages.ts"
       ],
@@ -367,8 +463,14 @@
       "@mavis/shared/source-provenance": [
         "./packages/shared/src/source-provenance.ts"
       ],
+      "@mavis/shared/storage-cleanup": [
+        "./packages/shared/src/storage-cleanup.ts"
+      ],
       "@mavis/shared/subagent-roles": [
         "./packages/shared/src/subagent-roles.ts"
+      ],
+      "@mavis/shared/thinking-effort": [
+        "./packages/shared/src/thinking-effort.ts"
       ],
       "@mavis/shared/turn-identity": [
         "./packages/shared/src/turn-identity.ts"

@@ -973,6 +973,37 @@ describe('TranscriptView', () => {
     expect(detailed).toContain('private fetched body');
   });
 
+  it('labels advisor consultations and shows the advice in detailed mode', () => {
+    const advisorCell = (id: string, status: 'running' | 'succeeded' | 'failed', detail?: string) =>
+      createTranscriptCell({
+        id,
+        kind: 'tool',
+        status,
+        title: 'advisor',
+        content: '{}',
+        ...(detail ? { detail } : {}),
+        createdAtMs: 1,
+      });
+    const view = new TranscriptView(() => [
+      advisorCell('advisor-running', 'running'),
+      advisorCell('advisor-advice', 'succeeded', 'Check the callers in src/session.ts first.'),
+      advisorCell('advisor-cancelled', 'failed', 'Cancelled.'),
+    ]);
+
+    const compact = stripVTControlCharacters(view.render(90).join('\n'));
+    expect(compact).toContain('Consulting advisor');
+    expect(compact).toContain('Consulted advisor');
+    expect(compact).toContain('× Advisor failed');
+    // The zero-parameter call must not render an empty summary.
+    expect(compact).not.toContain('advisor ()');
+    expect(compact).not.toContain('Check the callers');
+
+    view.toggleDetailMode();
+    expect(stripVTControlCharacters(view.render(90).join('\n'))).toContain(
+      'Check the callers in src/session.ts first.',
+    );
+  });
+
   it('keeps non-Web MCP identities while hiding their output in compact mode', () => {
     const view = new TranscriptView(() => [
       createTranscriptCell({
@@ -2404,6 +2435,27 @@ describe('TranscriptView PTC programs', () => {
     expect(rendered.indexOf('return files.length;')).toBeLessThan(
       rendered.indexOf('src/file-1.ts'),
     );
+  });
+
+  it('shows the saved script path and args when a run_code call has no code', () => {
+    const view = new TranscriptView(() => [
+      program('succeeded', {
+        content: JSON.stringify({
+          path: '.minimax/ptc/session-stats.mjs',
+          args: { session: 'a' },
+          description: 'Run session stats',
+        }),
+        detail: 'result: 3 sessions',
+      }),
+      child(1, 'succeeded'),
+    ]);
+
+    view.toggleDetailMode();
+    const rendered = plain(view);
+
+    expect(rendered).toContain('Ran code · Run session stats');
+    expect(rendered).toContain('.minimax/ptc/session-stats.mjs {"session":"a"}');
+    expect(rendered).not.toContain('const files = await tools.glob');
   });
 
   it('shows only the heading when the program is explicitly collapsed', () => {

@@ -7,9 +7,19 @@ import type {
 } from '../../../../infra/file/canonical-history.js';
 import type { CanonicalHistoryFileAdapter } from './canonical-history-contract.js';
 
+/**
+ * Decoded history kept across reads, summed over every Session this adapter serves. The budget
+ * counts file bytes; line-by-line decoding keeps the records at about 1.1x that on real histories.
+ */
+const DEFAULT_DECODED_HISTORY_CACHE_BYTES = 256 * 1024 * 1024;
+/** Bounds bookkeeping for Sessions whose history is tiny or was never read. */
+const MAX_CACHED_HISTORY_FILES = 256;
+
 export interface CreateCanonicalHistoryFileAdapterOptions {
   /** Internal provider only: returned records remain private and immutable. */
   readonly reuseDecodedRecords?: boolean;
+  /** Byte budget for reused decoded records; least recently read files are dropped first. */
+  readonly decodedCacheBytes?: number;
   readonly onMalformedLine?: CanonicalHistoryJsonlDataSourceOptions['onMalformedLine'];
 }
 
@@ -20,10 +30,8 @@ export function createCanonicalHistoryFileAdapter(
 }
 
 class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
-  private cachedSource?: {
-    path: string;
-    source: CanonicalHistoryJsonlDataSource;
-  };
+  /** Insertion order is recency order: every access moves the file to the end. */
+  private readonly cachedSources = new Map<string, CanonicalHistoryJsonlDataSource>();
 
   constructor(private readonly options: CreateCanonicalHistoryFileAdapterOptions) {}
 
@@ -36,19 +44,16 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
   }
   async readTargetStrict(path: string) {
     if (!(await exists(path))) return undefined;
-    return this.source(path).readActiveStrict();
+    return this.cachedRead(path, (source) => source.readActiveStrict());
   }
   async readActive(path: string) {
     return this.source(path).readActive();
   }
-  async readActiveWithBytes(path: string) {
-    return this.source(path).readActiveWithBytes();
-  }
   async readActiveStrict(path: string) {
-    return this.source(path).readActiveStrict();
+    return this.cachedRead(path, (source) => source.readActiveStrict());
   }
   async readEnvelopesStrict(path: string) {
-    return this.source(path).readEnvelopesStrict();
+    return this.cachedRead(path, (source) => source.readEnvelopesStrict());
   }
   async readStrict(path: string) {
     return this.source(path).readStrict();
@@ -70,19 +75,52 @@ class JsonlCanonicalHistoryFileAdapter implements CanonicalHistoryFileAdapter {
     await this.source(path).replaceActive(records);
   }
   async publishSnapshot(snapshotPath: string, records: readonly CanonicalHistoryEnvelope[]) {
-    return this.source(snapshotPath).publishSnapshot(snapshotPath, records);
+    // Snapshots are written once and never read through the cache.
+    return this.createSource(snapshotPath).publishSnapshot(snapshotPath, records);
   }
-  private source(path: string) {
-    if (this.options.reuseDecodedRecords && this.cachedSource?.path === path) {
-      return this.cachedSource.source;
+
+  forget(path: string) {
+    this.cachedSources.delete(path);
+  }
+
+  private async cachedRead(
+    path: string,
+    read: (source: CanonicalHistoryJsonlDataSource) => Promise<CanonicalHistoryEnvelope[]>,
+  ): Promise<CanonicalHistoryEnvelope[]> {
+    try {
+      return await read(this.source(path));
+    } finally {
+      this.trimCachedSources(path);
     }
-    const source = new CanonicalHistoryJsonlDataSource({
+  }
+
+  private source(path: string): CanonicalHistoryJsonlDataSource {
+    if (!this.options.reuseDecodedRecords) return this.createSource(path);
+    const cached = this.cachedSources.get(path) ?? this.createSource(path);
+    this.cachedSources.delete(path);
+    this.cachedSources.set(path, cached);
+    return cached;
+  }
+
+  private createSource(path: string): CanonicalHistoryJsonlDataSource {
+    return new CanonicalHistoryJsonlDataSource({
       activePath: path,
       reuseDecodedRecords: this.options.reuseDecodedRecords,
       ...(this.options.onMalformedLine ? { onMalformedLine: this.options.onMalformedLine } : {}),
     });
-    if (this.options.reuseDecodedRecords) this.cachedSource = { path, source };
-    return source;
+  }
+
+  /** Drops least recently read files until the decoded records fit the budget. */
+  private trimCachedSources(keepPath: string): void {
+    const budget = this.options.decodedCacheBytes ?? DEFAULT_DECODED_HISTORY_CACHE_BYTES;
+    let total = 0;
+    for (const source of this.cachedSources.values()) total += source.cachedBytes();
+    for (const [path, source] of this.cachedSources) {
+      if (total <= budget && this.cachedSources.size <= MAX_CACHED_HISTORY_FILES) return;
+      if (path === keepPath) continue;
+      total -= source.cachedBytes();
+      this.cachedSources.delete(path);
+    }
   }
 }
 async function exists(path: string) {

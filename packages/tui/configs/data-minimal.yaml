@@ -36,7 +36,6 @@ beta:
   filePanelBrowser: false
   filePanelBrowserMultiTab: false
   browserUseTooling: false
-  browserUseAutoOpenPanel: false
   browserAgentCursor: false
   desktopPlanMode: false
   peek: false
@@ -48,3 +47,12 @@ beta:
   threadGoal: false
   mcodeTools: false
   codexOAuth: false
+  # PTC now defaults on outside the public production build; this baseline keeps native tools.
+  ptc: false
+  # Saved run_code script files follow the same rollout as ptc; this baseline keeps them off too.
+  ptcScripts: false
+  # The run_code session store follows the same rollout as ptc; this baseline keeps it off too.
+  ptcStore: false
+  pluginMarketplaces: false
+  advisor: false
+  reviewStatus: false

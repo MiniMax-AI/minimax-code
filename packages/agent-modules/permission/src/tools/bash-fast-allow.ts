@@ -19,6 +19,50 @@
 
 import { shellTokenize } from './shell-tokenize.js';
 import { consumeShellWrapperPrefix } from './bash-wrapper-unwrap.js';
+import type { BashCheckContext } from './bash-context.js';
+
+/** Shell facts that decide how Windows executable names resolve. */
+type FirstWordShell = Pick<BashCheckContext, 'platform' | 'shellFamily'>;
+
+/**
+ * Shells keep their `.exe` suffix: `bash.exe -c …` must not inherit the
+ * `bash` first-word allowance, whose script-relaxation logic expects the
+ * POSIX spelling.
+ */
+const WINDOWS_EXE_SUFFIX_KEPT: ReadonlySet<string> = new Set(['bash', 'sh', 'zsh', 'dash']);
+
+/** PowerShell resolves bare `where` to Where-Object, which runs script blocks. */
+function resolvesWhereToWhereObject(shell: FirstWordShell | undefined): boolean {
+  if (shell?.shellFamily === 'powershell') return true;
+  return (
+    shell?.platform === 'win32' && shell.shellFamily !== 'cmd' && shell.shellFamily !== 'posix'
+  );
+}
+
+/**
+ * Windows command-name normalisation for PowerShell and Git Bash on win32.
+ * Both resolve a bare name through PATH only, so `git.exe` names the same
+ * program as `git`. CMD is excluded because it searches the current
+ * directory first (a workspace `ls.exe` would impersonate `ls`). Any path
+ * spelling (`.\\ls.exe`, `C:\\x\\date.exe`) names one specific file whose name
+ * says nothing about its behaviour, so only bare names are normalised.
+ */
+function normalizeWindowsCommandName(name: string, shell: FirstWordShell | undefined): string {
+  if (name === 'where' && resolvesWhereToWhereObject(shell)) return 'where-object';
+  if (shell?.platform !== 'win32') return name;
+  if (shell.shellFamily !== 'powershell' && shell.shellFamily !== 'posix') return name;
+  if (/[\\/]/.test(name) || !name.endsWith('.exe')) return name;
+  const bare = name.slice(0, -4);
+  return bare && !WINDOWS_EXE_SUFFIX_KEPT.has(bare) ? bare : name;
+}
+
+/**
+ * On Windows a POSIX-shaped drive path (`/c/x/date`) or `.exe` path is a chosen
+ * binary, not the PATH command of that name, so it keeps its full spelling.
+ */
+function keepsWindowsAbsolutePath(first: string, shell: FirstWordShell | undefined): boolean {
+  return shell?.platform === 'win32' && (/^\/[a-z]\//i.test(first) || /\.exe$/i.test(first));
+}
 
 /**
  * Extract the first whitespace token of a command. Used by the pure-read
@@ -46,7 +90,29 @@ import { consumeShellWrapperPrefix } from './bash-wrapper-unwrap.js';
  * SUBCOMMAND_DANGEROUS; `exec` is not stripped either because it
  * replaces the shell process.
  */
-export function pureReadFirstWord(command: string): string | undefined {
+export function pureReadFirstWord(command: string, shell?: FirstWordShell): string | undefined {
+  return locateFirstWord(command, shell)?.word;
+}
+
+/**
+ * Rebuild a subcommand with the command word the fast-allow gate recognised
+ * (`git.exe push` → `git push`, `/usr/bin/git push` → `git push`) so
+ * name-anchored danger patterns can be re-checked against it. Returns
+ * undefined when the recognised word is the literal first token.
+ */
+export function normalizedNameCommand(
+  command: string,
+  shell: FirstWordShell | undefined,
+): string | undefined {
+  const located = locateFirstWord(command, shell);
+  if (!located || located.word === located.tokens[located.index]) return undefined;
+  return [located.word, ...located.tokens.slice(located.index + 1)].join(' ');
+}
+
+function locateFirstWord(
+  command: string,
+  shell: FirstWordShell | undefined,
+): { word: string; tokens: string[]; index: number } | undefined {
   // POSIX shell line-continuation: `\` followed by a newline is the same as
   // a single whitespace. Without this fold the tokenizer keeps the literal
   // backslash, mis-identifying `MAVIS_SESSION=x \↵ git push` as starting
@@ -103,8 +169,15 @@ export function pureReadFirstWord(command: string): string | undefined {
   // Strip leading absolute-path component so an absolute-path invocation
   // is recognised as the bare command name (POSIX shell text — not an OS
   // file path). Relative names (`./foo.sh`) are left untouched.
-  const exe = first[0] === '/' ? (first.split('/').pop() ?? first) : first;
-  return exe.toLowerCase();
+  const exe =
+    first[0] === '/' && !keepsWindowsAbsolutePath(first, shell)
+      ? (first.split('/').pop() ?? first)
+      : first;
+  return {
+    word: normalizeWindowsCommandName(exe.toLowerCase(), shell),
+    tokens,
+    index: i,
+  };
 }
 
 /**

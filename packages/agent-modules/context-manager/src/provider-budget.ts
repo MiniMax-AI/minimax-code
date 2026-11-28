@@ -59,7 +59,9 @@ export function resolveCompactionTokenBudget(input: {
   return {
     providerInputLimit,
     automaticTriggerAt:
-      configuredTrigger === undefined ? builtInTrigger : Math.min(builtInTrigger, configuredTrigger),
+      configuredTrigger === undefined
+        ? builtInTrigger
+        : Math.min(builtInTrigger, configuredTrigger),
   };
 }
 
@@ -89,4 +91,71 @@ function outputFloor(configuredMaxTokens: number): number {
 
 function positive(value: number): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Segment rebuild budget split: parts of the rebuild budget B, in percent. */
+const SEGMENT_REBUILD_SHARE_PERCENT = {
+  summary: 30,
+  recentTurns: 22,
+  userWords: 20,
+  ledger: 10,
+  spaces: 10,
+  status: 8,
+} as const;
+
+export type SegmentRebuildShares = {
+  readonly [K in keyof typeof SEGMENT_REBUILD_SHARE_PERCENT]: number;
+};
+
+/**
+ * E, S, B and G of the segment compaction profile. One formula computes them for the runtime
+ * and the Desktop settings hint (`@mavis/shared/segment-context-budget`); the runtime passes its
+ * result in here.
+ */
+export interface SegmentForegroundBudget {
+  readonly effectiveWindow: number;
+  readonly softLine: number;
+  readonly rebuildBudget: number;
+  readonly segmentGrowth: number;
+}
+
+export interface SegmentCompactionTokenBudget extends SegmentForegroundBudget {
+  /** Per-part hard caps inside B. */
+  readonly shares: SegmentRebuildShares;
+  /** The existing synchronous trigger (about 0.95 E), without the user setting. */
+  readonly hardLine: number;
+  /** The existing conservative Provider input limit. */
+  readonly providerInputLimit: number;
+}
+
+/**
+ * Segment compaction profile budget: the foreground lines plus the B split, and the default
+ * profile's own hard line and input limit; the global `compactionTriggerAt` setting never
+ * applies here.
+ */
+export function resolveSegmentCompactionBudget(input: {
+  readonly contextWindow: number;
+  readonly configuredMaxOutputTokens: number;
+  readonly foreground: SegmentForegroundBudget;
+}): SegmentCompactionTokenBudget {
+  const rebuildBudget = Math.max(0, input.foreground.rebuildBudget);
+  const shares = Object.fromEntries(
+    Object.entries(SEGMENT_REBUILD_SHARE_PERCENT).map(([part, percent]) => [
+      part,
+      Math.floor((rebuildBudget * percent) / 100),
+    ]),
+  ) as unknown as SegmentRebuildShares;
+  const { providerInputLimit, automaticTriggerAt } = resolveCompactionTokenBudget({
+    contextWindow: input.contextWindow,
+    configuredMaxOutputTokens: input.configuredMaxOutputTokens,
+  });
+  return {
+    effectiveWindow: input.foreground.effectiveWindow,
+    softLine: Math.max(1, input.foreground.softLine),
+    rebuildBudget,
+    segmentGrowth: input.foreground.segmentGrowth,
+    shares,
+    hardLine: automaticTriggerAt,
+    providerInputLimit,
+  };
 }

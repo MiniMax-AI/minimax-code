@@ -11,11 +11,27 @@ import {
   telemetryErrorCode,
 } from '../../agent/index.js';
 import type { ModuleMetricsReporter } from '../../../infra/logging/metrics.js';
+import type { LocalTaskRunnerHost } from '../task-host-contracts.js';
 
 export interface LocalTaskAgentResolverHost {
   agentResolver: AgentReferenceResolver;
+  agentRoutes?: Pick<LocalTaskRunnerHost['agentRoutes'], 'getLocalAgent'>;
   metrics?: ModuleMetricsReporter;
   emitBusEvent?: (type: string, payload: Record<string, unknown>) => void;
+}
+
+/**
+ * The resolved Task target exists but its canonical `agent.md` sets
+ * `x-mavis.dispatchable: false`. Task-tool only: every other session-creating
+ * flow (assignment_create, Goal, cron, team) never resolves a target here.
+ */
+export class TaskDispatchNotAllowedError extends Error {
+  readonly code = 'AGENT_NOT_DISPATCHABLE';
+
+  constructor(readonly agentName: string) {
+    super(`Agent ${agentName} cannot be dispatched as a task`);
+    this.name = 'TaskDispatchNotAllowedError';
+  }
 }
 
 /**
@@ -40,22 +56,55 @@ export async function resolveLocalTaskAgentTarget(
   let source = inferNameResolutionSource(requested);
   try {
     const resolved = await resolveTaskTarget(host.agentResolver, requested);
+    await assertTaskTargetDispatchable(host, resolved);
     source = inferNameResolutionSource(requested, resolved.resolvedAgentName);
     emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, { source, success: true });
-    return resolved;
+    return snapshotAgentDisplayName(host, resolved);
   } catch (error) {
     if (isUnknownAgentError(error) && !explicitAgent) {
       const bare = uniqueBarePluginAgent(pluginAgents, requested);
       if (bare) return resolvePluginTarget(host, requested, bare);
     }
+    const errorCode = telemetryErrorCode(error);
     emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, {
       source,
       success: false,
-      ...(telemetryErrorCode(error) ? { error_code: telemetryErrorCode(error)! } : {}),
+      ...(errorCode ? { error_code: errorCode } : {}),
     });
     if (isUnknownAgentError(error)) return undefined;
     throw error;
   }
+}
+
+async function snapshotAgentDisplayName(
+  host: LocalTaskAgentResolverHost,
+  target: LocalTaskTargetFacts,
+): Promise<LocalTaskTargetFacts> {
+  try {
+    // The explicit prefix keeps this lookup on the resolved owner if a display
+    // name happens to equal a different Agent's stable key.
+    const record = await host.agentRoutes?.getLocalAgent?.(`agent:${target.exactOwnerName}`, {
+      includeContent: false,
+    });
+    const agentDisplayName = record?.displayName?.trim();
+    return agentDisplayName ? { ...target, agentDisplayName } : target;
+  } catch {
+    // Missing presentation metadata must never block Task execution.
+    return target;
+  }
+}
+
+/**
+ * Rejects a Task target whose current `agent.md` disables dispatch. Read through
+ * the resolver on every call, so a user edit takes effect without a restart.
+ * An absent or `undefined` answer keeps the contract default (dispatchable).
+ */
+async function assertTaskTargetDispatchable(
+  host: LocalTaskAgentResolverHost,
+  target: LocalTaskTargetFacts,
+): Promise<void> {
+  const dispatchable = await host.agentResolver.resolveAgentDispatchable?.(target.exactOwnerName);
+  if (dispatchable === false) throw new TaskDispatchNotAllowedError(target.resolvedAgentName);
 }
 
 /** Session creation fields for a resolved Task target. */
@@ -79,10 +128,12 @@ function resolvePluginTarget(
     ...(agent ? {} : { error_code: 'UNKNOWN_AGENT_NAME' }),
   });
   if (!agent) return undefined;
+  const agentDisplayName = agent.displayName?.trim();
   return {
     requestedName: requested,
     exactOwnerName: agent.scopedName,
     resolvedAgentName: agent.scopedName,
+    ...(agentDisplayName ? { agentDisplayName } : {}),
     canonicalViewName: agent.scopedName,
     trustedBuiltin: false,
     source: 'plugin',

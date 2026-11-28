@@ -15,11 +15,34 @@ import type {
 import { redactSecretText } from '@mavis/shared/logging/redact-log-secret';
 import { sanitizeObservabilityText } from '@mavis/shared/local-runtime-diagnostics/redaction';
 
+/**
+ * Bounds of a retained Todo snapshot. The tool asks for brief items and a real
+ * plan stays far below 100 entries, so both caps only stop an abnormal
+ * argument from inflating the durable PTC envelope that every reminder reads
+ * back (compaction/algorithm/todo-cadence.ts). Text is capped per field rather
+ * than dropping the call, because a lost snapshot silently stops the Todo
+ * cadence instead of just shortening one line.
+ */
+const TODO_EVIDENCE_MAX_ITEMS = 100;
+const TODO_EVIDENCE_MAX_TEXT_LENGTH = 500;
+
 /** Only final admitted builtin arguments may become durable model evidence. */
 export function projectDesktopPtcEvidenceInput(
   input: PtcToolResultProjectionInput,
 ): Readonly<Record<string, unknown>> | undefined {
   if (input.source !== 'builtin' || !isRecord(input.args)) return undefined;
+  const projected: Record<string, unknown> = {};
+  const redactedFields: string[] = [];
+  // TodoWrite exists only inside run_code on a PTC Turn, so its snapshot is the
+  // one argument set that must survive: it is what the Todo cadence reads back
+  // from durable history, and safety reconciliation keeps it like a file path.
+  if (input.toolName === 'todowrite') {
+    const todos = projectTodoEvidence(input.args.todos);
+    if (todos) {
+      projected.todos = todos.items;
+      if (todos.changed) redactedFields.push('todos');
+    }
+  }
   const fields = ['read', 'write', 'edit'].includes(input.toolName)
     ? ['path', 'file_path', 'filePath']
     : input.toolName === 'bash'
@@ -27,8 +50,6 @@ export function projectDesktopPtcEvidenceInput(
       : ['task_query', 'task_output', 'task_stop'].includes(input.toolName)
         ? ['task_id']
         : [];
-  const projected: Record<string, unknown> = {};
-  const redactedFields: string[] = [];
   for (const field of fields) {
     const value = input.args[field];
     if (typeof value !== 'string' || !value.trim()) continue;
@@ -40,6 +61,47 @@ export function projectDesktopPtcEvidenceInput(
   // These shared rules mask known patterns, not every possible secret.
   if (redactedFields.length > 0) projected.redacted_fields = redactedFields;
   return projected;
+}
+
+/**
+ * One todowrite child call as durable evidence: content, status and priority
+ * of each item, through the same mask as every other retained argument. An
+ * item without content or status cannot become Todo state (compaction
+ * normalizeTodoItems), so it is left out rather than stored half way.
+ * `changed` reports that the stored snapshot is not what the call carried,
+ * whether a value was masked, capped or dropped, which is what
+ * `redacted_fields` already means. An empty list is the tool's own "clear
+ * the list" call and is retained.
+ */
+function projectTodoEvidence(
+  value: unknown,
+): { readonly items: readonly Record<string, string>[]; readonly changed: boolean } | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items: Record<string, string>[] = [];
+  let changed = value.length > TODO_EVIDENCE_MAX_ITEMS;
+  for (const entry of value.slice(0, TODO_EVIDENCE_MAX_ITEMS)) {
+    if (!isRecord(entry)) {
+      changed = true;
+      continue;
+    }
+    const item: Record<string, string> = {};
+    for (const field of ['content', 'status', 'priority']) {
+      const text = entry[field];
+      if (typeof text !== 'string' || !text.trim()) {
+        if (text !== undefined) changed = true;
+        continue;
+      }
+      const safe = safeEvidenceText(text).slice(0, TODO_EVIDENCE_MAX_TEXT_LENGTH);
+      item[field] = safe;
+      if (safe !== text) changed = true;
+    }
+    if (!item.content || !item.status) {
+      changed = true;
+      continue;
+    }
+    items.push(item);
+  }
+  return { items, changed };
 }
 
 /** Drops guest/free text rather than moving rejected content into metadata. */
@@ -64,6 +126,7 @@ export function sanitizePtcChildExecutionDetailsForSafety(
 }
 
 function safeEvidenceRecord(record: PtcToolCallRecord): PtcToolCallRecord {
+  // A stored record already passed the projection; applying it again only narrows it.
   const input = projectDesktopPtcEvidenceInput({
     childToolCallId: record.child_tool_call_id,
     parentToolCallId: record.parent_tool_call_id,
@@ -288,6 +351,57 @@ type MarkerState = 'set' | 'clear' | 'absent' | 'malformed';
 const TRUNCATED: DesktopPtcTruncationVerdict = { state: 'truncated' };
 const COMPLETE: DesktopPtcTruncationVerdict = { state: 'complete' };
 
+/**
+ * Namespaced desktop tools whose results come from `desktopToolOk`
+ * (desktop/desktop-tool-result.ts). Keep in step with that helper's callers:
+ * an unregistered name keeps `r.status` at `unverified` inside run_code.
+ */
+const NAMESPACED_DESKTOP_TOOLS = [
+  'project_list',
+  'project_archive_sessions',
+  'project_create',
+  'project_rename',
+  'project_remove',
+  'sidebar_read',
+  'sidebar_pin',
+  'section_list',
+  'section_create',
+  'section_rename',
+  'section_delete',
+  'section_move_session',
+  'section_move_project',
+  'section_reorder',
+  'agent_list',
+  'agent_get',
+  'agent_create',
+  'agent_update',
+  'agent_delete',
+  'session_list',
+  'session_get',
+  'session_update',
+  'session_messages',
+  'session_send',
+  'session_interrupt',
+  'mcp_server_list',
+  'mcp_server_get',
+  'mcp_server_create',
+  'mcp_server_update',
+  'mcp_server_delete',
+  'pinned_reorder',
+  'session_mark_read',
+  'sidebar_preferences_update',
+  'session_open',
+  'session_fork',
+  'session_wait',
+  'usage_get',
+  'app_update_check',
+  'plugin_list',
+  'plugin_set_enabled',
+  'plugin_uninstall',
+  'panel_open_file',
+  'panel_open_review',
+] as const;
+
 /** Native Computer Use tools, registered by local-runtime-v2 service/computer-use/tools.ts. */
 const COMPUTER_USE_TOOLS = [
   'computer_app_list',
@@ -307,6 +421,7 @@ const COMPUTER_USE_TOOLS = [
   'computer_scroll',
   'computer_secondary_action',
   'computer_verify_state',
+  'computer_zoom',
 ] as const;
 
 /**
@@ -342,6 +457,10 @@ const VERIFIED_TOOL_MARKERS: ReadonlyMap<string, MarkerRule> = new Map<string, M
   ],
   // glob (desktop/local-glob.ts): page beyond `limit` or ripgrep byte cap -> details.truncated.
   ['glob', (details) => [booleanMarker(details, 'truncated')]],
+  // save_run_code_script (desktop/ptc-script-save.ts): the result is one fixed
+  // sentence plus the saved path, written whole on every success path, so it
+  // has no truncation marker of its own and the generic ones still apply.
+  ['save_run_code_script', () => []],
   // web_fetch (desktop/local-webfetch.ts): adapter cut or 16k-token clip ->
   // details.truncated (plus token_truncated for the clip).
   [
@@ -376,6 +495,12 @@ const VERIFIED_TOOL_MARKERS: ReadonlyMap<string, MarkerRule> = new Map<string, M
   // their text except by omitting a large application menu from
   // computer_app_state, which the tool reports itself as truncated.
   ...COMPUTER_USE_TOOLS.map((name) => [name, () => []] as const),
+  // Namespaced desktop tools (desktop/local-sidebar-tools.ts and the tools that
+  // follow it) build every result with desktopToolOk, which writes no
+  // tool-specific cut marker: a paged list reports the next page through
+  // `programmatic.completeness.hasMore`, and any real cut comes from the shared
+  // Desktop output limit, which writes the generic marker.
+  ...NAMESPACED_DESKTOP_TOOLS.map((name) => [name, () => []] as const),
 ]);
 
 /**

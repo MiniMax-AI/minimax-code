@@ -1,6 +1,20 @@
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import path from 'node:path';
 import spawn from 'cross-spawn';
+import {
+  stableHomebrewNodeToolchainPath,
+  stableProcessNodeExecutable,
+} from './homebrew-node-path.js';
 import { parseMcodeVersion } from './release.js';
 import type { McodeUpdateOperationOptions } from './progress.js';
 
@@ -14,7 +28,21 @@ const MCODE_PUBLIC_SCOPE = '@minimax-ai';
 // Public packaging rewrites this marker together with the bundled package identity.
 const MCODE_EMBEDDED_PACKAGE_NAME = '@minimax-ai/code' as McodeNpmPackageName;
 
-export type McodeNpmDistTag = 'latest' | 'test' | 'preview';
+/** An internal test build published from one branch; it keeps the test backend. */
+export type McodeNpmBranchDistTag = `branch-${string}`;
+export type McodeNpmDistTag = 'latest' | 'test' | 'preview' | McodeNpmBranchDistTag;
+// Same shape the publish step accepts, so an installed tag can always be resolved again.
+const MCODE_NPM_BRANCH_DIST_TAG_PATTERN = /^branch-[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+
+export function isMcodeNpmBranchDistTag(value: unknown): value is McodeNpmBranchDistTag {
+  return typeof value === 'string' && MCODE_NPM_BRANCH_DIST_TAG_PATTERN.test(value);
+}
+
+export function isMcodeNpmDistTag(value: unknown): value is McodeNpmDistTag {
+  return (
+    value === 'latest' || value === 'test' || value === 'preview' || isMcodeNpmBranchDistTag(value)
+  );
+}
 export type McodeNpmPackageName = '@minimax/code' | '@minimax-ai/code';
 type TuiBuildEnvironment = 'test' | 'staging' | 'prod';
 
@@ -39,9 +67,8 @@ export interface McodeNpmPrefixInstall {
   readonly prefix: string;
   readonly registry: string;
   /**
-   * Node executable pinned by the install receipt. `process.execPath` resolves
-   * Homebrew's stable bin/node symlink into a versioned Cellar path that
-   * `brew upgrade` removes, so updates reuse the recorded path when present.
+   * Node executable pinned by the install receipt, mapped to the stable
+   * Homebrew opt path when it was recorded inside a versioned Cellar keg.
    */
   readonly nodeExecutable?: string;
 }
@@ -201,9 +228,7 @@ export function buildMcodePackageManagerCommand(
   distribution: McodeNpmDistribution = resolveMcodeNpmDistribution(),
   prefixInstall?: McodeNpmPrefixInstall,
 ): McodePackageManagerCommand {
-  const targetVersion = ['latest', 'preview', 'test'].includes(version)
-    ? version
-    : parseMcodeVersion(version);
+  const targetVersion = isMcodeNpmDistTag(version) ? version : parseMcodeVersion(version);
   const target = `${distribution.packageName}@${targetVersion}`;
   const registryArgs = ['--registry', distribution.registry] as const;
   const registryDisplay = `--registry ${distribution.registry}`;
@@ -338,10 +363,32 @@ export function bindMcodeNpmCommandToRuntime(
   ];
   const npmCli =
     candidates.find((file) => existsSync(file) && statSync(file).isFile()) ??
-    resolvePnpmNpmShim(npmExecutable);
+    resolvePnpmNpmShim(npmExecutable) ??
+    resolveRuntimeNpmForNativeShim(npmExecutable, runtimeExecutable);
   if (!npmCli)
     throw new Error(`Cannot locate npm-cli.js for the owned npm executable: ${command.executable}`);
   return { ...command, executable: runtimeExecutable, args: [npmCli, ...command.args] };
+}
+
+function resolveRuntimeNpmForNativeShim(
+  npmExecutable: string,
+  runtimeExecutable: string,
+): string | undefined {
+  // An npm that resolves to a native binary (e.g. vite-plus `vp`) has no npm-cli.js
+  // to bind; use the npm bundled with the selected Node. Script shims keep failing closed.
+  const fd = openSync(npmExecutable, 'r');
+  const head = Buffer.alloc(2);
+  try {
+    readSync(fd, head, 0, 2, 0);
+  } finally {
+    closeSync(fd);
+  }
+  if (head.toString('latin1') === '#!') return undefined;
+  const runtimeDirectory = path.dirname(runtimeExecutable);
+  return [
+    path.join(runtimeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(runtimeDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].find((file) => existsSync(file) && statSync(file).isFile());
 }
 
 function resolvePnpmNpmShim(npmExecutable: string): string | undefined {
@@ -469,7 +516,7 @@ export function resolveInstalledMcodePackageVersion(
 export function resolveMcodeNpmPrefixInstall(
   entryFile = process.argv[1],
   platform: NodeJS.Platform = process.platform,
-  nodeExecutable = process.execPath,
+  nodeExecutable = stableProcessNodeExecutable(),
 ): McodeNpmPrefixInstall | undefined {
   const identity = resolveMcodePackageIdentity(entryFile);
   if (!identity) return undefined;
@@ -616,10 +663,15 @@ function readNpmPrefixReceipt(
       return undefined;
     }
     const distribution = resolveMcodeNpmDistribution(packageName, value.registry);
+    // Installers resolved keg-only formulas (opt/node@<major>/bin/npm) into their
+    // Cellar keg; heal that path before `brew upgrade` makes the receipt unusable.
+    const npmExecutable = platformPath.isAbsolute(value.npmExecutable)
+      ? stableHomebrewNodeToolchainPath(value.npmExecutable)
+      : value.npmExecutable;
     if (
       normalizeResolvedPath(value.prefix, platform) !== normalizeResolvedPath(prefix, platform) ||
       new URL(value.registry).href !== distribution.registry ||
-      !existsSync(value.npmExecutable)
+      !existsSync(npmExecutable)
     ) {
       return undefined;
     }
@@ -648,7 +700,7 @@ function readNpmPrefixReceipt(
         ? canonicalReceiptNodeExecutable(value.nodeExecutable)
         : undefined;
     return {
-      executable: value.npmExecutable,
+      executable: npmExecutable,
       packageName,
       prefix,
       registry: distribution.registry,
@@ -659,36 +711,22 @@ function readNpmPrefixReceipt(
   }
 }
 
-// Homebrew deletes versioned Cellar kegs on `brew upgrade` while the
-// formula-managed opt/<formula> symlink keeps tracking the installed version,
-// and keeps the update PATH prefix scoped to the Node formula instead of all
-// of <brew>/bin. Receipts that recorded a Cellar keg (or the linked bin/node)
-// therefore heal to the stable opt path when both resolve to the same
-// executable; everything else keeps the recorded path unchanged.
-const HOMEBREW_CELLAR_NODE_PATH =
-  /^(?<prefix>.+)\/Cellar\/(?<formula>node(?:@\d+(?:\.\d+)*)?)\/[^/]+\/bin\/node$/u;
-const HOMEBREW_MANAGED_NODE_PATH =
-  /^(?<prefix>\/(?:opt\/homebrew|usr\/local|home\/linuxbrew\/\.linuxbrew))\/(?:opt\/(?<formula>node(?:@\d+(?:\.\d+)*)?)\/bin\/node|bin\/node)$/u;
-
-function canonicalReceiptNodeExecutable(nodeExecutable: string): string | undefined {
-  const canonical = canonicalHomebrewNodeExecutable(nodeExecutable);
-  return usableNodeExecutable(canonical) ?? usableNodeExecutable(nodeExecutable);
+function isSupportedPrefixReceiptTag(
+  packageName: McodeNpmPackageName,
+  distTag: unknown,
+  versionedLayout: boolean,
+): distTag is McodeNpmDistTag {
+  return (
+    distTag === 'latest' ||
+    (versionedLayout && isInternalMcodePackageName(packageName) && isMcodeNpmDistTag(distTag))
+  );
 }
 
-function canonicalHomebrewNodeExecutable(nodeExecutable: string): string {
-  const cellar = HOMEBREW_CELLAR_NODE_PATH.exec(nodeExecutable);
-  const managed = HOMEBREW_MANAGED_NODE_PATH.exec(nodeExecutable);
-  const prefix = cellar?.groups?.prefix ?? managed?.groups?.prefix;
-  if (!prefix) return nodeExecutable;
-  const formula = cellar?.groups?.formula ?? managed?.groups?.formula ?? 'node';
-  const candidate = `${prefix}/opt/${formula}/bin/node`;
-  if (candidate === nodeExecutable) return nodeExecutable;
-  try {
-    if (realpathSync(candidate) === realpathSync(nodeExecutable)) return candidate;
-  } catch {
-    // Keep the recorded path when either side does not resolve.
-  }
-  return nodeExecutable;
+function canonicalReceiptNodeExecutable(nodeExecutable: string): string | undefined {
+  return (
+    usableNodeExecutable(stableHomebrewNodeToolchainPath(nodeExecutable)) ??
+    usableNodeExecutable(nodeExecutable)
+  );
 }
 
 function usableNodeExecutable(nodeExecutable: string): string | undefined {

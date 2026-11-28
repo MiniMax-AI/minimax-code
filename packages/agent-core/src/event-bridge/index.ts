@@ -32,6 +32,11 @@ export {
 } from './plugin-capability-attribution.js';
 export type { RespDataTransform, RespDataTransformContext } from './resp-data.js';
 export {
+  TurnToolCallContent,
+  type ToolCallContentAccessor,
+  type ToolCallModelOutput,
+} from './tool-call-content.js';
+export {
   buildRuntimeWarningEvent,
   RUNTIME_WARNING_EVENT_TYPE,
   type RuntimeWarningEventInput,

@@ -3,6 +3,8 @@ export const COMPOSER_COPY = {
   imagePreviewUnavailable: 'Preview unavailable · attachment is still ready to send',
   imagePreviewTextOnly: 'Image preview is not supported by this terminal',
   imagePreviewHint: 'Esc dismiss · Enter send',
+  pastedTextPreviewLines: '{count} lines',
+  pastedTextPreviewHint: 'Sent as a text file · Backspace remove · Esc dismiss',
   placeholder: 'Ask Mcode to do anything',
   draftSaveFailed: "Couldn't save draft recovery.",
   draftCleanupFailed: "Couldn't clean up draft recovery.",

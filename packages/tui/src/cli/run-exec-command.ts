@@ -1,3 +1,5 @@
+import type { ConfigIssue } from '@mavis/config';
+
 import { loadTuiRuntimeConfig } from '../headless/config.js';
 import { exitCodeForExecError, TuiExecError } from '../headless/exit-policy.js';
 import { formatTuiExecFailure } from '../headless/error-presentation.js';
@@ -5,6 +7,7 @@ import { resolveTuiExecInvocation, type RawTuiExecOptions } from '../headless/in
 import { runTuiExec } from '../headless/runner.js';
 import { prepareTuiDataDir } from '../runtime/data-dir.js';
 import { createTuiRuntime, shutdownTuiRuntime } from '../runtime/lifecycle.js';
+import { formatConfigIssueNotice } from '../tui/features/config-issues/notice.js';
 
 type TuiTerminationSignal = 'SIGINT' | 'SIGTERM' | 'SIGHUP';
 
@@ -24,6 +27,15 @@ export interface RunTuiExecCommandDependencies {
   readonly shutdownRuntime?: typeof shutdownTuiRuntime;
   readonly runExec?: typeof runTuiExec;
   readonly readStdin?: (signal: AbortSignal) => Promise<string>;
+  /**
+   * Problems in the profile config.yaml, printed on stderr when no --config is
+   * given. Never acknowledged here: stderr may go unread, so a lost-settings
+   * notice stays for the Desktop window or the TUI.
+   */
+  readonly readConfigIssues?: () => Promise<{
+    issues: readonly ConfigIssue[];
+    configPath?: string;
+  }>;
 }
 
 export async function runTuiExecCommand(
@@ -41,6 +53,7 @@ export async function runTuiExecCommand(
   const shutdownRuntime = dependencies.shutdownRuntime ?? shutdownTuiRuntime;
   const runExec = dependencies.runExec ?? runTuiExec;
   const readStdin = dependencies.readStdin ?? readTuiStdinToEnd;
+  const readConfigIssues = dependencies.readConfigIssues ?? readProfileConfigIssues;
   const invocationController = new AbortController();
   const cancelInvocation = () => invocationController.abort();
   const assertNotCancelled = () => {
@@ -64,6 +77,7 @@ export async function runTuiExecCommand(
     const explicitConfig = invocation.configPath
       ? await loadConfig(invocation.configPath, { dataDir })
       : undefined;
+    if (!explicitConfig) await noticeProfileConfigIssues(readConfigIssues, writeError);
     assertNotCancelled();
     const runtime = await createRuntime(
       {
@@ -97,6 +111,7 @@ export async function runTuiExecCommand(
         format: invocation.format,
         ...(invocation.model ? { model: invocation.model } : {}),
         ...(invocation.effort ? { effort: invocation.effort } : {}),
+        ...(invocation.advisor ? { advisor: invocation.advisor } : {}),
         ...(invocation.sessionId ? { sessionId: invocation.sessionId } : {}),
         continueSession: invocation.continueSession,
         permission: invocation.permission,
@@ -190,4 +205,31 @@ function readNextStdinChunk(
       },
     );
   });
+}
+
+/**
+ * Headless runs have no window or transcript; stderr is the only place to say
+ * that the profile config.yaml was partly or wholly replaced by defaults.
+ * Advisory: failing to read or print it never fails the run.
+ */
+async function noticeProfileConfigIssues(
+  readConfigIssues: NonNullable<RunTuiExecCommandDependencies['readConfigIssues']>,
+  writeError: (value: string) => void,
+): Promise<void> {
+  try {
+    const loaded = await readConfigIssues();
+    const notice = formatConfigIssueNotice(loaded.issues, loaded.configPath);
+    if (!notice) return;
+    writeError(`${notice}\n`);
+  } catch {
+    // Advisory only.
+  }
+}
+
+async function readProfileConfigIssues(): Promise<{
+  issues: readonly ConfigIssue[];
+  configPath: string;
+}> {
+  const { issues, configPath } = (await import('@mavis/config')).readProfileConfigNotice();
+  return { issues, configPath };
 }

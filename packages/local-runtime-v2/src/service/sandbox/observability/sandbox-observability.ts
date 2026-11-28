@@ -48,7 +48,6 @@ export type { SanitizedSandboxViolation } from './contracts.js';
 
 export interface SandboxMetricsClient {
   counter(name: string, delta?: number, labels?: Readonly<Record<string, string>>): void;
-  gauge(name: string, value: number): void;
   histogram(name: string, value: number, labels?: Readonly<Record<string, string>>): void;
 }
 
@@ -285,10 +284,6 @@ export class SandboxObservability {
     this.safeMetric(() =>
       this.#metrics?.histogram('local_sandbox_operation_duration_ms', durationMs, { kind }),
     );
-  }
-
-  activeInvocations(value: number): void {
-    this.safeMetric(() => this.#metrics?.gauge('local_sandbox_active_invocations', value));
   }
 
   #recordViolation(raw: SandboxBackendViolation): void {

@@ -1,5 +1,12 @@
 import type { TuiPendingPermission, TuiQuestionnaireRequest } from './runtime-models.js';
-import type { CompactionTokenUsage, GlobalThreadGoal } from '@mavis/shared/global-events';
+import type {
+  CompactionTokenUsage,
+  GlobalEventPayloadMap,
+  GlobalMcpAuthAttemptOutcome,
+  GlobalMcpAuthState,
+  GlobalMcpAuthTarget,
+  GlobalThreadGoal,
+} from '@mavis/shared/global-events';
 import type {
   SessionLLMRetryReason,
   SessionLLMRetryScope,
@@ -101,7 +108,8 @@ export type TuiContentLifecycleEvent =
   | (TuiRuntimeEventBase & {
       type: 'content.retry.exceeded';
       turnId?: string;
-      variant: 'content' | 'network' | 'auth';
+      /** `reply`：只删了被拦的最后一条回复，用户输入和之前的步骤都保留。 */
+      variant: 'content' | 'network' | 'auth' | 'reply';
       lastUserMsgId?: string;
     })
   | (TuiRuntimeEventBase & {
@@ -129,6 +137,7 @@ export type TuiLlmRetryEvent = TuiRuntimeEventBase & {
   requestAttempt: number;
   delayMs?: number;
   nextRetryAtMs?: number;
+  waitingFor?: 'network';
   error?: {
     reason: SessionLLMRetryReason;
     code?: number;
@@ -157,6 +166,24 @@ export type TuiPromptSuggestionEvent = TuiRuntimeEventBase & {
   elapsedMs?: number;
 };
 
+/** MCP authorization state committed or required for one source-scoped server. */
+export type TuiMcpAuthEvent =
+  | (TuiRuntimeEventBase & {
+      type: 'mcp.auth_updated';
+      target: GlobalMcpAuthTarget;
+      authState: GlobalMcpAuthState;
+      reason?: string;
+      attemptId?: string;
+      attemptOutcome?: GlobalMcpAuthAttemptOutcome;
+      errorCode?: string;
+    })
+  | (TuiRuntimeEventBase & {
+      type: 'mcp.auth_required';
+      target: GlobalMcpAuthTarget;
+      reason: GlobalEventPayloadMap['mcp.auth_required']['reason'];
+      turnId?: string;
+    });
+
 export type TuiUnknownRuntimeEvent = TuiRuntimeEventBase & {
   type: 'unknown';
   originalType: string;
@@ -174,4 +201,5 @@ export type TuiRuntimeEvent =
   | TuiLlmRetryEvent
   | TuiThreadGoalEvent
   | TuiPromptSuggestionEvent
+  | TuiMcpAuthEvent
   | TuiUnknownRuntimeEvent;

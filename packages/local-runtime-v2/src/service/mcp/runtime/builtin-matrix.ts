@@ -98,6 +98,7 @@ export function isRetiredLegacyMatrixMcpServerConfig(
   );
 }
 
+/** @public exercised directly by the colocated unit suite. */
 export function buildBuiltinMatrixTokenOverrides(
   context?: LocalMcpRuntimeContext,
 ): McpConnectionTokenOverrides {
@@ -221,4 +222,25 @@ function readProcessStringEnv(): Record<string, string> {
     if (typeof value === 'string') env[key] = value;
   }
   return env;
+}
+
+/** Matrix stdio identity layered over host-provided overrides. */
+export function matrixTokenOverrides(
+  dataDir: string,
+  base: McpConnectionTokenOverrides | undefined,
+  context?: LocalMcpRuntimeContext,
+): McpConnectionTokenOverrides {
+  const matrixOverrides = buildBuiltinMatrixTokenOverrides({
+    ...(context ?? {}),
+    dataDir,
+  });
+  return {
+    ...(base ?? {}),
+    connectionKey: matrixOverrides.connectionKey,
+    env: {
+      ...(base?.env ?? {}),
+      ...matrixOverrides.env,
+    },
+    ...(base?.headers ? { headers: base.headers } : {}),
+  };
 }

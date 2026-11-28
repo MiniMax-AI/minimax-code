@@ -19,30 +19,31 @@ import {
   mergeModelsFromInputs,
   modelsFromInputs,
   normalizeApiFormat,
-  normalizeApiKeyUpdate,
-  normalizeHeaderNames,
+  normalizeProviderCredentialUpdate,
   normalizeHeaders,
   removeHeaderCaseInsensitive,
 } from './service-input.js';
+import { readApiKeys, replaceFirstApiKey, writeApiKeys } from '../byok-keys/key-list.js';
+import { byokKeyPoolOf, forgetDroppedApiKeys } from '../byok-keys/operations.js';
 
 interface UserProviderUpdateInput {
   providerId: string;
   name?: string;
-  baseUrl?: string;
+  enabled?: boolean;
   apiKey?: string;
+  baseUrl?: string;
   apiFormat?: string;
   headers?: Record<string, string>;
   removeHeaders?: string[];
-  enabled?: boolean;
   models?: UserModelInputView[];
   saveAndUse?: boolean;
 }
 
 interface PreparedUserProviderUpdate {
-  apiKeyUpdate: ReturnType<typeof normalizeApiKeyUpdate>;
-  baseUrl?: string;
-  apiFormat?: ReturnType<typeof normalizeApiFormat>;
-  headers?: Record<string, string>;
+  apiKeyUpdate: ReturnType<typeof normalizeProviderCredentialUpdate>;
+  baseUrl: string | undefined;
+  apiFormat: ReturnType<typeof normalizeApiFormat> | undefined;
+  headers: Record<string, string> | undefined;
   removeHeaders: string[];
   implicitCustomProviderThinking: boolean;
 }
@@ -82,7 +83,7 @@ export async function createUserProvider(
       existingKeys: Object.keys(tree),
       ...(context.deps.randomHex ? { randomHex: context.deps.randomHex } : {}),
     });
-    tree[providerKey] = {
+    const provider: LocalCustomProviderConfig = {
       ...(name ? { name } : {}),
       kind: 'custom',
       enabled: true,
@@ -103,6 +104,7 @@ export async function createUserProvider(
           }
         : {}),
     };
+    tree[providerKey] = provider;
     draft.custom_provider = tree as Record<string, unknown>;
   });
   return context.requireCustomProviderView(providerKey);
@@ -113,28 +115,28 @@ export async function updateUserProvider(
   input: UserProviderUpdateInput,
 ): Promise<ModelProviderView> {
   const providerKey = context.requireExistingProviderKey(input.providerId);
-  // Tri-state api_key: absent keeps the stored key, empty string clears it,
-  // masked placeholders are rejected so a sanitized read can't be written back.
-  const apiKeyUpdate = normalizeApiKeyUpdate(input.apiKey);
-  const baseUrl = input.baseUrl?.trim();
+  const apiKeyUpdate = normalizeProviderCredentialUpdate({ apiKey: input.apiKey });
+  const baseUrl = input.baseUrl === undefined ? undefined : input.baseUrl.trim();
   if (input.baseUrl !== undefined && !baseUrl) {
     throw new LocalModelProviderError(400, 'base_url must not be empty', 'VALIDATION_ERROR');
   }
-  const apiFormat = input.apiFormat !== undefined ? normalizeApiFormat(input.apiFormat) : undefined;
-  const headers = input.headers !== undefined ? normalizeHeaders(input.headers) : undefined;
-  const removeHeaders = normalizeHeaderNames(input.removeHeaders);
+  const apiFormat = input.apiFormat === undefined ? undefined : normalizeApiFormat(input.apiFormat);
+  const headers = normalizeHeaders(input.headers);
+  const removeHeaders = (input.removeHeaders ?? []).map((item) => item.trim()).filter(Boolean);
   const prepared: PreparedUserProviderUpdate = {
     apiKeyUpdate,
-    ...(baseUrl ? { baseUrl } : {}),
-    ...(apiFormat ? { apiFormat } : {}),
-    ...(headers ? { headers } : {}),
+    baseUrl,
+    apiFormat,
+    headers,
     removeHeaders,
     implicitCustomProviderThinking: context.deps.implicitCustomProviderThinking === true,
   };
-  await context.deps.updateByokConfig((draft) => {
+  const keysBefore = readApiKeys(context.deps.configGetter().custom_provider?.[providerKey]);
+  await context.deps.updateByokConfig((draft, currentConfig) => {
     applyUserProviderUpdate(draft, providerKey, input, prepared);
-    resetUnavailableCustomDefaultModel(draft);
+    resetUnavailableCustomDefaultModel(draft, currentConfig);
   });
+  forgetDroppedApiKeys(context, providerKey, keysBefore);
   await activateUpdatedProvider(context, providerKey, input.saveAndUse === true);
   return context.requireCustomProviderView(providerKey);
 }
@@ -174,7 +176,6 @@ function applyProviderFields(
   apiFormat: PreparedUserProviderUpdate['apiFormat'],
   implicitCustomProviderThinking: boolean,
 ): void {
-  // provider_key is immutable: renames only change the display name.
   if (input.name !== undefined) provider.name = input.name.trim();
   if (input.enabled !== undefined) provider.enabled = input.enabled;
   if (apiFormat !== undefined) provider.api = apiFormat;
@@ -194,8 +195,9 @@ function updatedProviderOptions(
 ): NonNullable<LocalCustomProviderConfig['options']> {
   const options = { ...(provider.options ?? {}) };
   if (prepared.baseUrl !== undefined) options.baseURL = prepared.baseUrl;
-  if (prepared.apiKeyUpdate.kind === 'set') options.apiKey = prepared.apiKeyUpdate.apiKey;
-  if (prepared.apiKeyUpdate.kind === 'clear') delete options.apiKey;
+  if (prepared.apiKeyUpdate.kind === 'set')
+    writeApiKeys(options, replaceFirstApiKey(readApiKeys(provider), prepared.apiKeyUpdate.apiKey));
+  if (prepared.apiKeyUpdate.kind === 'clear') writeApiKeys(options, []);
   applyProviderHeaderUpdate(options, input, prepared);
   return options;
 }
@@ -252,7 +254,7 @@ export async function deleteUserProvider(
   input: { providerId: string },
 ): Promise<void> {
   const providerKey = context.requireExistingProviderKey(input.providerId);
-  await context.deps.updateByokConfig(async (draft) => {
+  await context.deps.updateByokConfig(async (draft, currentConfig) => {
     const tree = (draft.custom_provider ?? {}) as LocalCustomProvidersConfig;
     const provider = tree[providerKey];
     if (provider?.kind === 'oauth') {
@@ -277,7 +279,8 @@ export async function deleteUserProvider(
     delete tree[providerKey];
     draft.custom_provider =
       Object.keys(tree).length > 0 ? (tree as Record<string, unknown>) : undefined;
-    resetUnavailableCustomDefaultModel(draft);
+    resetUnavailableCustomDefaultModel(draft, currentConfig);
   });
   await context.deps.cache.removeProvider(`${CUSTOM_PROVIDER_ID_PREFIX}${providerKey}`);
+  byokKeyPoolOf(context).clearProvider(providerKey);
 }

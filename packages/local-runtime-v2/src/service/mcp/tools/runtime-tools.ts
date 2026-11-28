@@ -23,6 +23,7 @@ import type { ManagedBackendRoutingContext as LocalRuntimeRoutingContext } from 
 export async function listMcpRuntimeToolEntriesForTurn(input: {
   sessionId: string;
   workspaceRoot: string;
+  turnId?: string;
   authContext?: LocalRuntimeAuthContext;
   routingContextGetter?: () => LocalRuntimeRoutingContext | undefined;
   mcpService: {
@@ -38,6 +39,7 @@ export async function listMcpRuntimeToolEntriesForTurn(input: {
     const ctx: LocalMcpRuntimeContext = {
       sessionId: input.sessionId,
       workspaceRoot: input.workspaceRoot,
+      ...(input.turnId ? { turnId: input.turnId } : {}),
       ...(input.authContext ? { authContext: input.authContext } : {}),
       ...(input.routingContextGetter ? { routingContext: input.routingContextGetter() } : {}),
     };

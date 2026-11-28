@@ -3,6 +3,7 @@ import { PluginPackageContractError } from '../package/package-contract.js';
 import { PluginReaderError } from '../package/reader-errors.js';
 import { PluginSystemError } from '../../errors.js';
 import type { ReadPluginPackage } from '../package/types.js';
+import { readPluginReadmePreview, type PluginReadmePreview } from '../package/miniapp/readme.js';
 import {
   downloadGithubPlugin,
   cloneGitRepositoryPlugin,
@@ -21,6 +22,7 @@ export interface GithubPluginPreview {
   readonly plugin: ReadPluginPackage;
   readonly packageSizeBytes: number;
   readonly canImport: boolean;
+  readonly readme?: PluginReadmePreview;
 }
 
 export interface PreparedGithubPluginImport extends GithubPluginPreview {
@@ -31,7 +33,11 @@ export interface PreparedGithubPluginImport extends GithubPluginPreview {
 export class GithubPluginImporter {
   constructor(private readonly options: { dataDir: string; fetchImpl: typeof fetch }) {}
 
-  async preview(url: string, signal?: AbortSignal): Promise<GithubPluginPreview> {
+  async preview(
+    url: string,
+    signal?: AbortSignal,
+    readmeLocale?: string,
+  ): Promise<GithubPluginPreview> {
     try {
       const source = await resolveGitRepositorySource(url, {
         fetchImpl: this.options.fetchImpl,
@@ -39,7 +45,11 @@ export class GithubPluginImporter {
       });
       const extracted = await this.download(source, signal);
       try {
-        return await this.readPreview(source, extracted);
+        const preview = await this.readPreview(source, extracted);
+        const readme = preview.plugin.miniapp
+          ? await readPluginReadmePreview(preview.plugin.rootPath, readmeLocale)
+          : undefined;
+        return { ...preview, ...(readme ? { readme } : {}) };
       } finally {
         await extracted.discard();
       }

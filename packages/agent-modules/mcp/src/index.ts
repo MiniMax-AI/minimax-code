@@ -1,9 +1,20 @@
 export {
   McpConnectionPool,
+  McpToolCallNotDispatchedError,
+  McpToolCallTimeoutError,
   type McpConnectionPoolOptions,
   type McpServerLookup,
 } from './runtime/connection-pool.js';
 export { describeMcpCallError, type McpCallErrorRaw } from './runtime/call-error.js';
+export {
+  McpAuthRequiredError,
+  findMcpAuthRequiredError,
+  type McpAuthChallenge,
+  type McpAuthRequiredListener,
+  type McpAuthRequiredReason,
+  type McpChallengeInput,
+  type McpRequestAuthorizer,
+} from './runtime/auth.js';
 export {
   MCP_DEFAULTS,
   NOOP_MCP_RUNTIME_LOGGER,
@@ -25,7 +36,7 @@ export {
 } from './runtime/types.js';
 export { createTransport, type McpTransportFactoryOptions } from './runtime/transport/factory.js';
 export { createHttpTransport } from './runtime/transport/http.js';
-export { createStdioTransport } from './runtime/transport/stdio.js';
+export { buildProcessEnv, createStdioTransport } from './runtime/transport/stdio.js';
 export {
   MCP_RUNTIME_TOOL_NAME_MAX_LENGTH,
   buildMcpServerRuntimeName,

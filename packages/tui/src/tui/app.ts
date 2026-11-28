@@ -29,6 +29,7 @@ import { FeedbackFlow as Feedback } from './controller/product/feedback-flow.js'
 import { TranscriptStore } from './transcript/store.js';
 import { TranscriptVisibilityProjection } from './transcript/presentation/visibility.js';
 import { createLocalTranscriptAppender } from './transcript/local-appender.js';
+import { formatConfigIssueNotice } from './features/config-issues/notice.js';
 import { TuiBashFlow } from './controller/product/bash-flow.js';
 import { TranscriptPresentationController } from './transcript/presentation/state.js';
 import { TuiActiveRunFlow } from './controller/run/active-run-flow.js';
@@ -119,6 +120,19 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     isStopped: () => stopped,
     onChanged: () => tui.requestRender(),
   });
+  const noticeConfigIssues = (): void => {
+    try {
+      const loaded = options.readConfigIssues?.();
+      const notice = loaded && formatConfigIssueNotice(loaded.issues, loaded.configPath);
+      if (notice) {
+        appendLocalCell(notice, 'warning');
+        loaded?.acknowledge?.();
+      }
+    } catch {
+      // Advisory only: reading the notice must never block the TUI.
+    }
+  };
+  const commandContributions = [...(options.commandContributions ?? [])];
   const bashFlow = new TuiBashFlow({
     transcript,
     onChanged: () => {
@@ -135,6 +149,10 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     workspaceDir: options.workspaceDir,
     version: options.version,
     defaultAgentName,
+    refreshActiveDelegatedAgentCount: async () => {
+      await delegationFlow.refresh();
+      return delegationFlow.agentCounts().active;
+    },
     ...automationResultDelivery,
     onTodoChange: (items) => tasks.setItems(items),
     onUserSubmissionProjected: () => {
@@ -145,6 +163,9 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       if (!sessionId) bashFlow.clearUnboundContext();
       sessionLifecycle.onSessionLifecycle(sessionId);
     },
+    // Runtime never copies the default advisor into a Session it creates.
+    prepareCreatedSession: (session): Promise<void> =>
+      featureFlow.applyDefaultAdvisor(session.sessionId),
     onChange: (snapshot) => {
       if (stopped) return;
       const sessionId = snapshot.session?.sessionId;
@@ -321,7 +342,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
   });
   const businessEventTracker = createTuiBusinessEventTracker({
     telemetry: options.businessTelemetry,
-    workspaceDir: options.workspaceDir,
     controller,
     featureFlow,
     stateStore,
@@ -406,6 +426,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     // the same function. Esc and the Runtime must decide from one file, or Esc
     // could stop subagents whose cancellation notices the Runtime does not silence.
     readStopPolicy: () => readConversationStopConfig(),
+    // Abort hints must remain synchronous and use the currently rendered snapshot.
     activeDelegatedAgentCount: () => delegationFlow.agentCounts().active,
     observability: options.observability,
     onLiveTurnAborted: ({ turnId }) => {
@@ -439,9 +460,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       // (complete attachment set, transport content, client intent, editor
       // state) instead of reconstructing a lossy copy from the display cell.
       const retained = commandFlow.getRetainedSubmission(turnId);
-      const retainedFiltered = retained
-        ? filterRetainedSubmissionForRestore(retained)
-        : undefined;
+      const retainedFiltered = retained ? filterRetainedSubmissionForRestore(retained) : undefined;
       if (retained && retainedFiltered) {
         commandFlow.restoreSubmission(retainedFiltered);
         commandFlow.markAbortSubmissionRestored(retained.submissionId);
@@ -621,7 +640,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     abortSessionRun: (sessionId) =>
       options.runtime.abortSession({ id: sessionId, reason: 'user_stop' }),
     currentRunId: liveRunId,
-    onSideSessionOpened: (input) => businessEventTracker?.trackBtwSessionOpened(input),
+    onSideSessionOpened: (input) =>
+      businessEventTracker?.trackBtwSessionOpened(input),
     onSideSessionClosed: (input) => businessEventTracker?.trackBtwSessionClosed(input),
     onSideConversationChanged: () => {
       updateChrome(controller.snapshot());
@@ -647,7 +667,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
   commandFlow = new TuiCommandFlow({
     bashFlow,
     workspaceDir: options.workspaceDir,
-    ...(options.commandContributions ? { contributions: options.commandContributions } : {}),
+    ...(commandContributions.length > 0 ? { contributions: commandContributions } : {}),
     controller,
     activeRunFlow,
     featureFlow,
@@ -701,6 +721,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     saveTuiKeybindingOverrides: options.saveTuiKeybindingOverrides,
     reloadTui: options.reloadTui,
     queueEnabled: productFeatures.queue,
+    advisorAvailable: productFeatures.advisor,
     liveRunId,
     runtimeStopping: () => Boolean(runProjection.snapshot().stoppingRuntimeTurnId),
     isLlmRetrying: () => chromeFlow?.isLlmRetrying() ?? false,
@@ -751,6 +772,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onRetryAvailabilityChanged: (sessionId, retryable) =>
       commandFlow.setSessionRetryable(sessionId, retryable),
     goalFlow,
+    mcpAuth: featureFlow,
     promptSuggestions,
     updateFollowUpPanel: () => queueFlow.updatePanel(),
     onChanged: updateChromeAndRequestRender,
@@ -904,6 +926,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     inputCommands: () => [...commandFlow.catalog.inputCommands, ...featureFlow.skillCommands()],
     selectedModel: () => featureFlow.selectedModel(),
     selectedEffort: () => featureFlow.selectedEffort(),
+    selectedAdvisor: () => featureFlow.selectedAdvisor(),
     permissionMode: () => permissionModeFlow.snapshot(),
     planMode: () => planModeFlow.snapshot(),
     sideConversation: () => sessionFlow.sideConversationSnapshot(),
@@ -1038,6 +1061,8 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       void activeRunFlow.refresh().catch(() => undefined);
       void goalFlow?.refresh().catch(() => undefined);
       checkTuiApplicationUpdate(options, updateNotice, () => stopped, tui);
+      void ready.then(() => featureFlow.noticeMcpAuthAttention()).catch(() => undefined);
+      noticeConfigIssues();
     },
     suspend,
     resume,
@@ -1073,9 +1098,7 @@ function fileExists(filePath: string): boolean {
 function filterRetainedSubmissionForRestore(
   snapshot: TuiSubmissionSnapshot,
 ): TuiSubmissionSnapshot | undefined {
-  const attachments = snapshot.attachments.filter((attachment) =>
-    fileExists(attachment.filePath),
-  );
+  const attachments = snapshot.attachments.filter((attachment) => fileExists(attachment.filePath));
   const transportAttachments = (snapshot.transportAttachments ?? []).filter((attachment) =>
     attachment.assetId ? true : attachment.filePath ? fileExists(attachment.filePath) : false,
   );

@@ -23,6 +23,7 @@ import { TuiHistorySearchPanel } from '../../features/history/search-panel.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
 import type { RecentCodexSession } from '../../../host/recent-codex-session.js';
 import { parseTuiBashInput } from '../../commands/bash-input.js';
+import { isTuiAudioFile } from '../../../application/audio-pdf-mime.js';
 
 const DOUBLE_ESCAPE_WINDOW_MS = 500;
 
@@ -85,6 +86,22 @@ export interface TuiInputFlowOptions {
   readonly acceptPromptSuggestion?: () => boolean;
 }
 
+/**
+ * A bare LF is Enter on legacy terminals and Ctrl+J everywhere else, so the default Enter guidance
+ * binding cannot tell the two apart. The guidance binding only loses that byte to the focused
+ * Editor while both readings are live: Enter still claims the guidance action and the newline
+ * binding still claims Ctrl+J. An explicit Ctrl+J guidance binding, or a newline binding moved off
+ * Ctrl+J, is unambiguous and must keep submitting guidance.
+ */
+function hasAmbiguousBareLineFeedGuidance(registry: TuiKeybindingRegistry): boolean {
+  const guidanceKeys = registry.keys('run.submit-guidance');
+  return (
+    guidanceKeys.includes('enter') &&
+    !guidanceKeys.includes('ctrl+j') &&
+    registry.keys('tui.input.newLine').includes('ctrl+j')
+  );
+}
+
 export class TuiInputFlow {
   private readonly externalEditorFlow: TuiExternalEditorFlow;
   private clearedEditorDraft: EditorDraftSnapshot | undefined;
@@ -129,7 +146,11 @@ export class TuiInputFlow {
     };
     this.options.editor.onAutocompleteSelect = onAutocompleteSelect;
     this.options.editor.onPaste = (value) => {
-      if (!isTuiTerminalImagePaste(value)) return false;
+      if (!isTuiTerminalImagePaste(value)) {
+        return this.options.composerDraft.pasteLongText(value, (text) =>
+          this.options.editor.pasteInline(text),
+        );
+      }
       void this.options.composerDraft
         .queueAttachment(value, { source: 'terminal-paste' })
         .catch((error: unknown) =>
@@ -247,12 +268,22 @@ export class TuiInputFlow {
       return { consume: true };
     }
     const keybindingRegistry = this.options.keybindings ?? getDefaultTuiKeybindingRegistry();
-    const keyAction = keybindingRegistry.resolve(data, {
+    const resolvedKeyAction = keybindingRegistry.resolve(data, {
       interactionActive,
       hasLiveRun: Boolean(this.options.liveRunId()),
       hasWaitingMessage: this.options.hasWaitingMessage(),
       hasRestorableDraft: Boolean(this.clearedEditorDraft),
     });
+    // Legacy terminals encode Ctrl+J as the same bare LF accepted by the Enter matcher, and both
+    // chat modes advertise Ctrl+J as the newline key when Shift+Enter is unavailable. Only that
+    // ambiguous match belongs to the focused Editor; a user-configured Ctrl+J guidance binding, or a
+    // newline binding moved off Ctrl+J, still submits guidance.
+    const keyAction =
+      data === '\n' &&
+      resolvedKeyAction === 'submit-guidance' &&
+      hasAmbiguousBareLineFeedGuidance(keybindingRegistry)
+        ? undefined
+        : resolvedKeyAction;
     if (keyAction !== 'resume-codex') this.options.dismissRecentCodexSession?.();
     if (keyAction !== 'clear') this.ctrlCExitArmed = false;
     if (keyAction !== 'interrupt') this.lastEscapeAtMs = 0;
@@ -292,13 +323,17 @@ export class TuiInputFlow {
       return { consume: true };
     }
     const preview = this.options.editor.getAttachmentPreview();
-    const previewIsImage =
+    const previewIsDismissible =
       preview &&
       (this.options.isEditImageAttachment?.(preview.id) ||
         this.options.composerDraft
           .snapshot()
-          .attachments.some((item) => item.filePath === preview.id && item.type === 'image'));
-    if (previewIsImage && matchesKey(data, 'escape')) {
+          .attachments.some(
+            (item) =>
+              item.filePath === preview.id &&
+              (item.type === 'image' || item.pastedText !== undefined),
+          ));
+    if (previewIsDismissible && matchesKey(data, 'escape')) {
       this.options.editor.dismissAttachmentPreview();
       this.lastEscapeAtMs = 0;
       return { consume: true };
@@ -580,6 +615,11 @@ export class TuiInputFlow {
 
 const IMAGE_MENTION_EXTENSION = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/iu;
 
+/** `@` attaches images and audio; other files, PDF included, stay text references. */
+function isAttachableMention(reference: string): boolean {
+  return IMAGE_MENTION_EXTENSION.test(reference) || isTuiAudioFile(reference);
+}
+
 function selectedImageMentionReference(value: string, prefix: string): string | undefined {
   if (!prefix.startsWith('@') || !value.startsWith('@')) return undefined;
   const reference = value.slice(1);
@@ -587,6 +627,6 @@ function selectedImageMentionReference(value: string, prefix: string): string | 
     reference.length >= 2 && reference.startsWith('"') && reference.endsWith('"')
       ? reference.slice(1, -1)
       : reference;
-  if (!IMAGE_MENTION_EXTENSION.test(unquoted)) return undefined;
+  if (!isAttachableMention(unquoted)) return undefined;
   return reference;
 }

@@ -1,19 +1,24 @@
 import {
-  getModels,
-  getProviders,
-  type Api,
-  type Model,
-  type ThinkingLevelMap,
-} from '@earendil-works/pi-ai';
+  DEFAULT_LOCAL_PI_API,
+  lookupLocalModelLimits,
+  lookupLocalCatalogModel,
+  positive,
+} from '../../../infra/config/model-catalog.js';
+import { type Api, type Model, type ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { StreamFn, ThinkingLevel as PiThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   knownMaxImagesPerRequestForBaseUrl,
   normalizeMaxImagesPerRequest,
+  type ModelAudioInput,
   type ModelRequestImageLimit,
+  type ModelRequestMediaSupport,
+  type ModelThinkingPrefixBinding,
 } from '@mavis/agent-core/pi-turn-runner';
 import {
   isFirstPartyMinimaxMessagesRoute,
+  resolveModelCallRoute,
   resolveProviderAuthMode,
+  resolveProviderCredential,
   type ProviderAuthMode,
   type ProviderAuthModeSource,
 } from '@mavis/config';
@@ -21,21 +26,22 @@ import { ThinkingLevel, type IAgentConfig, type IModelRef } from '@mavis/protoco
 import type { ManagedBackendRoutingContext } from '@mavis/agent-tools/desktop';
 import { withOpenCodeGoHeaders, withOpenRouterAttributionHeaders } from '@mavis/shared';
 
-import type {
-  LocalModelCompatOverrides,
-  LocalModelResolveInput,
-  LocalModelResolverLike,
-  LocalModelResolverLogger,
-  LocalModelResolverOptions,
-  LocalResolvedModelConfig,
-  LocalModelsConfig,
-  LocalProviderOptions,
-  LocalRuntimeAuthContext,
+import {
+  ModelLoginRequiredError,
+  type LocalModelCompatOverrides,
+  type LocalModelResolveInput,
+  type LocalModelResolverLike,
+  type LocalModelResolverOptions,
+  type LocalResolvedModelConfig,
+  type LocalModelsConfig,
+  type LocalProviderOptions,
 } from '../contracts.js';
+import type { LocalRuntimeAuthContext } from '../../../infra/config/auth-context.js';
 import { normalizeProviderBaseUrl } from '../connectivity/provider-request.js';
 import {
   isModelProviderApi,
   MANAGED_MINIMAX_PROVIDER_ID,
+  MINIMAX_API_PROVIDER_ID,
   OPENAI_CODEX_PROVIDER_ID,
 } from '../identity.js';
 import { parseProviderId } from './model-key.js';
@@ -44,13 +50,13 @@ import {
   isMiniMaxM3ThinkingMode,
   type ByokThinkingProtocol,
   isThinkingEffortDisabled,
-  modelRefForModel,
+  type LocalModelRefCapabilities,
+  modelLimitsFromConfig,
   readSelectedThinkingEffort,
   resolveByokThinkingProtocol,
   supportsJsonObjectOutput,
 } from './model-ref.js';
 import {
-  firstBuiltinModel,
   planCustomProviderResolution,
   planMinimaxApiResolution,
   readStringRecord,
@@ -58,22 +64,24 @@ import {
 import {
   buildLocalProviderHeaders,
   createManagedAuthRetryFetch,
+  modelCallRouteView,
   readAgentHeaderId,
   stripUrlCredentials,
+  turnPhaseHeaderFor,
 } from './model-resolver-helpers.js';
 import { hasOpenPlatformThinkingVariants } from './openplatform-thinking.js';
 import { withByokErrorAttribution } from './byok-error-attribution.js';
 import { withLocalDynamicMaxTokens } from './dynamic-max-tokens.js';
+import { createByokKeyLifecycle } from '../byok-keys/key-lifecycle.js';
+import { sharedByokKeyPool } from '../byok-keys/key-pool.js';
 import { resolveLocalRequestBodyBytes } from './file-api-capabilities.js';
 import { resolveLocalFileApiGatewayAuth } from './file-api-gateway-auth.js';
-
 /** Strips trailing `char` repeats in linear time (no backtracking regex). */
 function trimTrailingChar(value: string, char: string): string {
   let end = value.length;
   while (end > 0 && value[end - 1] === char) end -= 1;
   return value.slice(0, end);
 }
-
 
 /**
  * Images per request for a model that declares none. The Messages API accepts
@@ -83,14 +91,7 @@ function trimTrailingChar(value: string, char: string): string {
 const LOCAL_DEFAULT_MAX_IMAGES_PER_REQUEST = 100;
 const MINIMAX_M3_MAX_IMAGES_PER_REQUEST = 20;
 const MINIMAX_M3_FAMILY = /^minimax-m3(?:[.-]|$)/iu;
-
-const FALLBACK_MODEL_LIMITS = {
-  contextWindow: 200_000,
-  maxTokens: 128_000,
-} as const;
-
-const DEFAULT_LOCAL_PI_API: Api = 'anthropic-messages';
-const MANAGED_PROVIDER_API_KEY_PLACEHOLDER = 'sk-xxx';
+export const MANAGED_PROVIDER_API_KEY_PLACEHOLDER = 'sk-xxx';
 
 const THINKING_LEVEL_TO_PI: Record<ThinkingLevel, PiThinkingLevel> = {
   [ThinkingLevel.OFF]: 'off',
@@ -117,6 +118,7 @@ interface SelectedModel {
 
 interface FinishResolveInput extends ModelIdentity {
   readonly sessionId: string;
+  readonly turnId: string;
   readonly agentConfig: IAgentConfig;
   readonly api: Api;
   readonly apiKey: string;
@@ -129,6 +131,7 @@ interface FinishResolveInput extends ModelIdentity {
   readonly runtimeProvider?: string;
   readonly configHeaders?: Record<string, string>;
   readonly modelCompat?: LocalModelCompatOverrides;
+  readonly thinkingCapable?: true;
   readonly catalogModel?: Model<Api>;
   readonly authContext?: LocalRuntimeAuthContext;
   readonly routingContext?: ManagedBackendRoutingContext;
@@ -142,13 +145,28 @@ export class LocalModelResolver implements LocalModelResolverLike {
   }
 
   async resolveModel(input: LocalModelResolveInput): Promise<LocalResolvedModelConfig> {
+    const identity = requireModelIdentity(input.agentConfig);
     const providerConfig = this.options.providerConfigGetter?.() ?? this.options.providerConfig;
+    const resolved = await this.resolveConfiguredModel(input, providerConfig);
+    // A metric label only, so dashboards tell managed Token Plan calls from the user's keys.
+    const route = resolveModelCallRoute(
+      modelCallRouteView(providerConfig, this.options.byokConfigGetter?.()),
+      identity.provider,
+    );
+    return { ...resolved, route, ...turnPhaseHeaderFor(route) };
+  }
+
+  private async resolveConfiguredModel(
+    input: LocalModelResolveInput,
+    providerConfig: LocalModelsConfig | undefined,
+  ): Promise<LocalResolvedModelConfig> {
     const selected = selectModel(input.agentConfig, providerConfig, this.options);
     if (selected.byokPlan) return this.finishByok(input, selected);
     const switched = selectMinimaxByok(selected.identity, providerConfig, this.options);
     if (switched.byokPlan) return this.finishByok(input, switched);
     return this.resolveManagedModel(input, switched.identity, providerConfig);
   }
+
 
   private async finishByok(
     input: LocalModelResolveInput,
@@ -158,10 +176,11 @@ export class LocalModelResolver implements LocalModelResolverLike {
     if (!plan || !selected.route) {
       throw new Error('LocalModelResolver: incomplete BYOK resolution plan');
     }
-    const resolvedPlan = await resolveByokResolutionPlan(plan, this.options);
+    const { apiKeys, ...resolvedPlan } = await resolveByokResolutionPlan(plan, this.options);
     this.logRoute(selected.identity.provider, selected.identity.modelId, selected.route);
-    return this.finishResolve({
+    const resolved = this.finishResolve({
       sessionId: input.sessionId,
+      turnId: input.turnId,
       agentConfig: input.agentConfig,
       ...selected.identity,
       managedProvider: false,
@@ -174,6 +193,30 @@ export class LocalModelResolver implements LocalModelResolverLike {
         : {}),
       ...resolvedPlan,
     });
+    return apiKeys ? this.withApiKeys(resolved, apiKeys, selected.identity.provider) : resolved;
+  }
+
+  /**
+   * Several enabled keys: the call picks one per request. The first key not resting stands in
+   * for hooks that read `apiKey` outside the call.
+   */
+  private withApiKeys(
+    resolved: LocalResolvedModelConfig,
+    apiKeys: NonNullable<ByokResolutionPlan['apiKeys']>,
+    providerName: string,
+  ): LocalResolvedModelConfig {
+    const pool = this.options.byokKeyPool ?? sharedByokKeyPool();
+    const first = pool.pick(apiKeys.providerKey, apiKeys.keys);
+    return {
+      ...resolved,
+      ...(first ? { apiKey: first.value } : {}),
+      callLifecycle: createByokKeyLifecycle({
+        pool,
+        providerKey: apiKeys.providerKey,
+        providerName,
+        keys: apiKeys.keys,
+      }),
+    };
   }
 
   private async resolveManagedModel(
@@ -191,7 +234,7 @@ export class LocalModelResolver implements LocalModelResolverLike {
       providerConfig,
       authContext,
     );
-    const limits = lookupLocalModelLimits(provider, modelId);
+    const limits = managedModelLimits(provider, modelId, providerConfig);
     const openAiCodex = provider === OPENAI_CODEX_PROVIDER_ID;
     const apiKey = await resolveProviderApiKey(provider, credentials.apiKey, this.options);
     const baseUrl = credentials.baseUrl ?? (openAiCodex ? limits.baseUrl : undefined);
@@ -199,6 +242,7 @@ export class LocalModelResolver implements LocalModelResolverLike {
     this.logRoute(provider, modelId, providerRouteForAuthMode(credentials.authMode));
     return this.finishResolve({
       sessionId: input.sessionId,
+      turnId: input.turnId,
       agentConfig: input.agentConfig,
       ...identity,
       api: limits.api ?? this.defaultApi,
@@ -261,6 +305,7 @@ export class LocalModelResolver implements LocalModelResolverLike {
         managedProvider: input.managedProvider,
         routingContext: input.routingContext,
         sessionId: input.sessionId,
+        turnId: input.turnId,
         agentId: readAgentHeaderId(input.agentConfig),
       }),
       ...(fileApiGatewayAuth ? { fileApiGatewayAuth } : {}),
@@ -298,9 +343,15 @@ function selectModel(
   if (!parsed || parsed.source === 'provider') return { identity };
   const byokPlan = selectExternalByokPlan(identity, parsed, providerConfig, options);
   if (byokPlan) return { identity, byokPlan, route: parsed.source };
-  return {
-    identity: fallbackBuiltinIdentity(identity, providerConfig, options.logger),
-  };
+  // byok-v2 §8: a deleted provider, a disabled or removed model, or a missing
+  // connection is a configuration error; never switch to another provider.
+  throw unavailableByokModelError(identity.provider, identity.modelId);
+}
+
+function unavailableByokModelError(provider: string, modelId: string): Error {
+  return new Error(
+    `LocalModelResolver: BYOK model configuration "${provider}/${modelId}" is unavailable or disabled.`,
+  );
 }
 
 function requireModelIdentity(agentConfig: IAgentConfig): ModelIdentity {
@@ -335,33 +386,24 @@ function selectExternalByokPlan(
   });
 }
 
-function fallbackBuiltinIdentity(
-  original: ModelIdentity,
+/**
+ * Default limits of a managed model: the configured `limit` first, the built-in
+ * catalog as fallback. Ordinary turns already carry the selected window on the
+ * ModelRef; callers that pass only a model identity (Memory V2) get the window
+ * the user configured instead of the catalog fallback, the same source the
+ * BYOK path reads.
+ */
+function managedModelLimits(
+  provider: string,
+  modelId: string,
   providerConfig: LocalModelsConfig | undefined,
-  logger: LocalModelResolverLogger | undefined,
-): ModelIdentity {
-  const fallback = firstBuiltinModel(providerConfig);
-  if (!fallback) {
-    throw new Error(
-      `LocalModelResolver: provider "${original.provider}" not found and no builtin fallback model is configured.`,
-    );
-  }
-  logger?.warn(
-    {
-      provider: original.provider,
-      fallbackProvider: fallback.provider,
-      fallbackModelId: fallback.modelId,
-    },
-    'LocalModelResolver: provider not found; falling back to builtin managed model',
-  );
+): ReturnType<typeof lookupLocalModelLimits> {
+  const catalog = lookupLocalModelLimits(provider, modelId);
+  const configured = modelLimitsFromConfig(providerConfig?.[provider]?.models?.[modelId]);
   return {
-    provider: fallback.provider,
-    modelId: fallback.modelId,
-    modelRef: modelRefForModel(
-      fallback.provider,
-      fallback.modelId,
-      providerConfig?.[fallback.provider]?.models?.[fallback.modelId],
-    ),
+    ...catalog,
+    contextWindow: positive(configured.context_window) || catalog.contextWindow,
+    maxTokens: positive(configured.max_tokens) || catalog.maxTokens,
   };
 }
 
@@ -383,7 +425,9 @@ function selectMinimaxByok(
     modelId: identity.modelId,
     catalog: lookupLocalModelLimits(MANAGED_MINIMAX_PROVIDER_ID, identity.modelId),
   });
-  return byokPlan ? { identity, byokPlan, route: 'minimax_api_key' } : { identity };
+  // The user chose their own MiniMax API key; managed login is not a fallback.
+  if (!byokPlan) throw unavailableByokModelError(MINIMAX_API_PROVIDER_ID, identity.modelId);
+  return { identity, byokPlan, route: 'minimax_api_key' };
 }
 
 async function resolveProviderApiKey(
@@ -392,7 +436,9 @@ async function resolveProviderApiKey(
   options: LocalModelResolverOptions,
 ): Promise<string | undefined> {
   if (provider !== OPENAI_CODEX_PROVIDER_ID) return configuredApiKey;
-  return (await options.providerAuthGetter?.(provider))?.trim();
+  const apiKey = (await options.providerAuthGetter?.(provider))?.trim();
+  if (!apiKey) throw new ModelLoginRequiredError(provider);
+  return apiKey;
 }
 
 type ResolvedByokResolutionPlan = Omit<ByokResolutionPlan, 'apiKey' | 'authProvider'> & {
@@ -408,17 +454,20 @@ async function resolveByokResolutionPlan(
     authProvider ? await options.providerAuthGetter?.(authProvider) : configuredApiKey
   )?.trim();
   if (!apiKey) {
-    throw new Error(
-      authProvider
-        ? `LocalModelResolver: ${authProvider} login required; no OAuth credentials found.`
-        : `LocalModelResolver: api_key not configured for provider "${plan.provider}".`,
-    );
+    if (authProvider) throw new ModelLoginRequiredError(authProvider);
+    throw new Error(`LocalModelResolver: api_key not configured for provider "${plan.provider}".`);
   }
   return { ...resolved, apiKey };
 }
 
 interface ResolvedThinking {
   readonly enabled: boolean;
+  /**
+   * Thinking is off for a thinking-capable model on a protocol whose Pi
+   * transport sends the disabled thinking config itself (Gemini). Pi only does
+   * that for a reasoning model; other protocols disable through `requestPatch`.
+   */
+  readonly transportDisablesThinking?: true;
   readonly openPlatform: boolean;
   readonly exposedLevel?: PiThinkingLevel;
   readonly maxLevel?: string;
@@ -448,12 +497,21 @@ function resolveThinking(
   return {
     enabled: context.enabled,
     openPlatform: context.openPlatform,
+    ...(transportDisablesThinking(input, context) ? { transportDisablesThinking: true } : {}),
     ...exposedThinkingLevel(context),
     ...thinkingLevelMapFields(context),
     ...thinkingRequestPatchFields(context),
     ...maxThinkingLevelFields(context),
     ...thinkingCompatibilityFields(context),
   };
+}
+
+function transportDisablesThinking(
+  input: FinishResolveInput,
+  context: ThinkingResolutionContext,
+): boolean {
+  if (input.api !== 'google-generative-ai' || context.enabled) return false;
+  return context.protocolThinking?.enabled === false || input.thinkingCapable === true;
 }
 
 function resolveThinkingContext(
@@ -598,7 +656,8 @@ function exposedThinkingLevel(
 function thinkingLevelMapFields(
   context: ThinkingResolutionContext,
 ): Pick<ResolvedThinking, 'thinkingLevelMap'> {
-  return context.enabled && context.protocolThinking
+  return (context.enabled || context.protocolThinking?.enabled === false) &&
+    context.protocolThinking
     ? { thinkingLevelMap: context.protocolThinking.thinkingLevelMap }
     : {};
 }
@@ -647,19 +706,24 @@ function buildResolvedModel(scope: {
   const { input, contextWindow, maxTokens, baseUrl, thinking } = scope;
   const thinkingLevelMap = resolvedThinkingLevelMap(thinking);
   const compat = resolvedModelCompatibility(input, thinking);
+  const capabilities = input.modelRef.capabilities as LocalModelRefCapabilities | undefined;
   const maxImagesPerRequest =
-    normalizeMaxImagesPerRequest(input.modelRef.capabilities?.max_images_per_request) ??
+    normalizeMaxImagesPerRequest(capabilities?.max_images_per_request) ??
     knownMaxImagesPerRequestForBaseUrl(baseUrl) ??
     (MINIMAX_M3_FAMILY.test(input.modelId.trim())
       ? MINIMAX_M3_MAX_IMAGES_PER_REQUEST
       : LOCAL_DEFAULT_MAX_IMAGES_PER_REQUEST);
-  const model: Model<Api> & ModelRequestImageLimit = {
+  const model: Model<Api> &
+    ModelRequestImageLimit &
+    ModelRequestMediaSupport &
+    ModelThinkingPrefixBinding &
+    ModelAudioInput = {
     id: input.modelId,
     name: input.modelId,
     api: input.api,
     provider: input.runtimeProvider ?? input.provider,
     baseUrl,
-    reasoning: thinking.enabled,
+    reasoning: thinking.enabled || thinking.transportDisablesThinking === true,
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     input: deriveModelInput(input.modelRef),
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -669,8 +733,28 @@ function buildResolvedModel(scope: {
     // Request builders read this from the model so agent turns, compaction
     // checkpoints and footprint estimates share one image ceiling (#425).
     ...(maxImagesPerRequest === undefined ? {} : { maxImagesPerRequest }),
+    ...modelMediaFlags(capabilities),
   };
   return model;
+}
+
+function modelMediaFlags(
+  capabilities: LocalModelRefCapabilities | undefined,
+): ModelRequestMediaSupport & ModelThinkingPrefixBinding & ModelAudioInput {
+  const thinkingPrefixBinding = capabilities?.thinking_prefix_binding;
+  return {
+    // A model that cannot hear gets videos without their audio track.
+    ...(capabilities?.support_audio === true ? { audioInput: true } : {}),
+    // `input` folds video into `image` (see deriveModelInput); these flags keep
+    // the two apart so request projection drops history media this model
+    // cannot accept — videos for an image-only model, still images for a
+    // video-only model — on the request copy, never in history.
+    supportsImageInput: capabilities?.support_image === true,
+    supportsVideoInput: capabilities?.support_video === true,
+    // A declared value overrides the model-id inference in
+    // `hasThinkingPrefixBinding`, which every prefix-protecting step reads.
+    ...(typeof thinkingPrefixBinding === 'boolean' ? { thinkingPrefixBinding } : {}),
+  };
 }
 
 function resolvedThinkingLevelMap(thinking: ResolvedThinking): ThinkingLevelMap | undefined {
@@ -712,27 +796,6 @@ function resolveModelStream(
   });
 }
 
-export function lookupLocalModelLimits(
-  provider: string,
-  modelId: string,
-): {
-  readonly contextWindow: number;
-  readonly maxTokens: number;
-  readonly fromCatalog: boolean;
-  readonly api?: Api;
-  readonly baseUrl?: string;
-} {
-  const entry = lookupLocalCatalogModel(provider, modelId);
-  if (!entry) return { ...FALLBACK_MODEL_LIMITS, fromCatalog: false };
-  return {
-    contextWindow: positive(entry.contextWindow) || FALLBACK_MODEL_LIMITS.contextWindow,
-    maxTokens: positive(entry.maxTokens) || FALLBACK_MODEL_LIMITS.maxTokens,
-    fromCatalog: true,
-    ...(entry.api ? { api: entry.api } : {}),
-    ...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),
-  };
-}
-
 export function resolveLocalProviderCredentials(
   provider: string,
   modelRef: IModelRef,
@@ -761,7 +824,7 @@ export function resolveLocalProviderCredentials(
   const token = authContext?.accessToken?.trim();
   const headers = resolveCredentialHeaders(optionHeaders, modelHeaders, token, auth.authMode);
   return {
-    apiKey: resolveCredentialApiKey(modelRef, options, auth.authMode),
+    apiKey: resolveCredentialApiKey(provider, modelRef, options, auth.authMode),
     baseUrl: resolveCredentialBaseUrl(configuredBaseUrl, auth.managedBaseURL),
     ...(headers ? { headers } : {}),
     ...(options ? { rawProviderOptions: options } : {}),
@@ -773,11 +836,22 @@ export function resolveLocalProviderCredentials(
 }
 
 function resolveCredentialApiKey(
+  provider: string,
   modelRef: IModelRef,
   options: LocalProviderOptions | undefined,
   authMode: ProviderAuthMode,
 ): string | undefined {
-  const configured = modelRef.api_key?.trim() || options?.apiKey?.trim();
+  const configured =
+    resolveProviderCredential({
+      field: 'api_key',
+      provider,
+      value: modelRef.api_key,
+    }) ??
+    resolveProviderCredential({
+      field: 'options.apiKey',
+      provider,
+      value: options?.apiKey,
+    });
   if (configured) return configured;
   return authMode === 'managed-login' ? MANAGED_PROVIDER_API_KEY_PLACEHOLDER : undefined;
 }
@@ -844,18 +918,22 @@ function requireUsableCredentials(
   return { apiKey, baseUrl };
 }
 
+/**
+ * Pi has one binary input flag, `image`: its transports keep or drop every
+ * inline media block (image, video, audio, PDF) on it, so a model that accepts
+ * any of them needs `'image'` here. Videos travel as `image` blocks with a
+ * `video/*` mimeType; a video-only model therefore still needs `'image'` or its
+ * supported videos would be dropped before the payload patcher turns them into
+ * video blocks. Still images or videos such a model cannot accept are dropped
+ * earlier, by agent-core's request projection, from `supportsImageInput` /
+ * `supportsVideoInput` on the resolved model.
+ */
 function deriveModelInput(modelRef: IModelRef): Model<Api>['input'] {
-  return modelRef.capabilities?.support_image || modelRef.capabilities?.support_video
+  const capabilities = modelRef.capabilities as LocalModelRefCapabilities | undefined;
+  return capabilities?.support_image ||
+    capabilities?.support_video ||
+    capabilities?.support_audio ||
+    capabilities?.support_pdf
     ? ['text', 'image']
     : ['text'];
-}
-
-function lookupLocalCatalogModel(provider: string, modelId: string): Model<Api> | undefined {
-  const knownProvider = getProviders().find((candidate) => candidate === provider);
-  if (!knownProvider) return undefined;
-  return getModels(knownProvider).find((model) => model.id === modelId);
-}
-
-function positive(value: unknown): number {
-  return typeof value === 'number' && value > 0 ? value : 0;
 }

@@ -5,6 +5,7 @@ import {
   setLegacyByokProviderMigrationEnabled,
   setManagedPresetBaseUrlSyncEnabled,
 } from '@mavis/config';
+import { resolveManagedBackendLaneFromEnv } from '@mavis/agent-tools/desktop/managed-routing';
 
 import {
   resolveMcodeAuthEnvironment,
@@ -23,6 +24,7 @@ const ROOT_OPTIONS_WITH_REQUIRED_VALUES = new Set([
   '--tui-mode',
   '-m',
   '--model',
+  '--advisor',
   '--system-prompt',
   '--system-prompt-file',
   '--append-system-prompt',
@@ -125,7 +127,7 @@ export function resolveTuiManagedBackendLane(
   value: string | undefined,
   buildEnv: McodeAuthEnvironment['buildEnv'] = resolveMcodeAuthEnvironment().buildEnv,
 ): string | undefined {
-  if (value === undefined) return undefined;
+  if (value === undefined) return resolveManagedBackendLaneFromEnv(process.env, buildEnv);
   if (buildEnv !== 'test' && buildEnv !== 'staging') {
     throw new Error('--lane is only supported in test or staging builds.');
   }
@@ -134,6 +136,12 @@ export function resolveTuiManagedBackendLane(
     throw new Error('--lane only accepts letters, numbers, dot, underscore, and hyphen.');
   }
   return lane;
+}
+
+export function shouldExposeTuiManagedBackendLane(
+  buildEnv: McodeAuthEnvironment['buildEnv'] = resolveMcodeAuthEnvironment().buildEnv,
+): boolean {
+  return buildEnv === 'test' || buildEnv === 'staging';
 }
 
 function readSharedAuthScope(

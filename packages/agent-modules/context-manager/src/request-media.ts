@@ -11,6 +11,7 @@ import {
   resizeImage,
 } from '@earendil-works/pi-coding-agent/image-resize';
 import {
+  isLLMContextOverflowMessage,
   isLLMImageLimitMessage,
   isLLMRequestTooLargeMessage,
   listRequestImages,
@@ -19,6 +20,12 @@ import {
   type RequestImage,
 } from '@mavis/agent-core/pi-turn-runner';
 import { type ProgrammaticImageEncoding, recordImageEncodedContent } from '@mavis/agent-core/tools';
+
+import {
+  acquireImageDecode,
+  type ImageDecodeDeferral,
+  isImageDecodeDeferral,
+} from './image-decode-gate.js';
 
 /** Strictest known per-image provider limit, in base64 bytes. */
 export const PROVIDER_IMAGE_MAX_BASE64_BYTES = 5 * 1024 * 1024;
@@ -113,24 +120,25 @@ export function boundRequestMedia<T extends AgentMessage>(
 /**
  * A provider rejection that compacting the history can fix: a context overflow
  * by tokens or request bytes, or an image count or size limit. The retry layer
- * reads the same classifier, so such a rejection is not resent unchanged first.
+ * reads the same classifier, so such a rejection is not resent unchanged first;
+ * the classifier's own overflow wording covers providers Pi's patterns miss.
  */
 export function isRequestMediaRejection(message: AssistantMessage): boolean {
   return (
     message.stopReason === 'error' &&
     (isContextOverflow(message) ||
+      isLLMContextOverflowMessage(message.errorMessage) ||
       isLLMImageLimitMessage(message.errorMessage) ||
       isLLMRequestTooLargeMessage(message.errorMessage))
   );
 }
 
 /**
- * Thinking signatures of prefix-cached models are bound to the exact system
- * prompt, tools and history they were produced on. A compaction changes them
- * (its summary request has its own system prompt and no tools; an archive
- * rewrites earlier messages), so every thinking block (redacted ones included)
- * is removed while the other blocks of each turn stay. Messages without
- * thinking keep their identity.
+ * Thinking signatures of prefix-bound models are tied to the exact system
+ * prompt, tools and history they were produced on. The isolated summary request
+ * has its own system prompt and no tools, so every thinking block (redacted
+ * ones included) is removed from that request copy while the other blocks of
+ * each turn stay. Messages without thinking keep their identity.
  */
 export function withoutThinking<T extends AgentMessage>(messages: readonly T[]): T[] {
   return messages.map((message) => {
@@ -146,13 +154,6 @@ export function omittedRequestImageText(path: string | undefined): string {
   return path
     ? `[Earlier image omitted ${scope}. Original file: ${path}]`
     : `[Earlier image omitted ${scope}. Capture it again if the current visual state is needed.]`;
-}
-
-/** Receipt for an image compaction moved out of history. */
-export function archivedImageText(path: string | undefined): string {
-  return path
-    ? `[Earlier image removed by context compaction. File: ${path}]`
-    : '[Earlier image removed by context compaction. Capture it again if the current visual state is needed.]';
 }
 
 /** Stands in for an image a checkpoint summary request does not carry. */
@@ -193,15 +194,17 @@ export const DEFAULT_REQUEST_IMAGE_ENCODING: Readonly<RequestImageEncoding> = {
  * already fits, is not an image, or the image processor cannot load. Returns
  * `'undecodable'` when the image processor cannot decode the data: the caller
  * must not send it, because history replays it into every later request and
- * the provider rejects each one.
+ * the provider rejects each one. Returns an `ImageDecodeDeferral` when the
+ * process-wide decode limits (`configureImageDecoding`) keep the image from
+ * being decoded now; it was not checked, so the caller must not send it either.
  */
 export async function encodeRequestImage(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding = DEFAULT_REQUEST_IMAGE_ENCODING,
-): Promise<EncodedRequestImage | 'undecodable' | undefined> {
+): Promise<EncodedRequestImage | 'undecodable' | ImageDecodeDeferral | undefined> {
   const encoded = await encodeImage(bytes, mimeType, encoding);
-  return encoded === 'undecodable' ? encoded : encoded?.image;
+  return encoded === 'undecodable' || isImageDecodeDeferral(encoded) ? encoded : encoded?.image;
 }
 
 export interface EncodedRequestImageDetails {
@@ -217,7 +220,7 @@ export async function encodeRequestImageDetails(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding = DEFAULT_REQUEST_IMAGE_ENCODING,
-): Promise<EncodedRequestImageDetails | 'undecodable' | undefined> {
+): Promise<EncodedRequestImageDetails | 'undecodable' | ImageDecodeDeferral | undefined> {
   return encodeImage(bytes, mimeType, encoding);
 }
 
@@ -232,11 +235,14 @@ const IMAGE_PROCESSOR_UNAVAILABLE_NOTE =
  * image over the limits is replaced with `IMAGE_PROCESSOR_UNAVAILABLE_NOTE`
  * when the image processor cannot load, as the Read tool did, and an image it
  * cannot decode is replaced with a note, so its bytes never enter history.
+ * An image the decode limits defer is replaced with a note too, naming a
+ * smaller copy to read instead.
  *
  * The returned array is marked with what happened to each changed image
  * (recordImageEncodedContent), so PTC can report a native read's image as
  * resized or omitted instead of as rewritten by an unknown hook. Output with
- * an undecodable image is not marked: there is no image state to report.
+ * an undecodable or deferred image is not marked: there is no image state to
+ * report.
  */
 export async function encodeRequestImageBlocks<T extends { readonly type: string }>(
   blocks: readonly T[],
@@ -246,7 +252,7 @@ export async function encodeRequestImageBlocks<T extends { readonly type: string
   if (!encoded.some(({ fact }) => fact !== undefined)) return undefined;
   const output = encoded.flatMap(({ blocks: next }) => next);
   const facts = encoded.flatMap(({ fact }) => (fact ? [fact] : []));
-  if (!facts.includes('undecodable')) {
+  if (!facts.some((fact) => typeof fact === 'string')) {
     recordImageEncodedContent(blocks, output, facts as ProgrammaticImageEncoding[]);
   }
   return output;
@@ -256,7 +262,10 @@ export async function encodeRequestImageBlocks<T extends { readonly type: string
 async function encodeImageBlock<T extends { readonly type: string }>(
   block: T,
   encoding: RequestImageEncoding,
-): Promise<{ readonly blocks: T[]; readonly fact?: ProgrammaticImageEncoding | 'undecodable' }> {
+): Promise<{
+  readonly blocks: T[];
+  readonly fact?: ProgrammaticImageEncoding | 'undecodable' | 'deferred';
+}> {
   const { data, mimeType } = block as { data?: unknown; mimeType?: unknown };
   if (block.type !== 'image' || typeof data !== 'string' || typeof mimeType !== 'string') {
     return { blocks: [block] };
@@ -273,6 +282,10 @@ async function encodeImageBlock<T extends { readonly type: string }>(
     const text = `[Image omitted: the ${mimeType} data (${bytes.length} bytes) could not be decoded; it may be corrupt, truncated, or in an unsupported format.]`;
     return { blocks: [{ type: 'text', text } as unknown as T], fact: 'undecodable' };
   }
+  if (isImageDecodeDeferral(encodedImage)) {
+    const text = deferredImageNote(mimeType, bytes.length, encodedImage, encoding);
+    return { blocks: [{ type: 'text', text } as unknown as T], fact: 'deferred' };
+  }
   if (!encodedImage) return { blocks: [block] };
   const image = { ...block, ...encodedImage.image };
   const fact = {
@@ -287,6 +300,24 @@ async function encodeImageBlock<T extends { readonly type: string }>(
     : { blocks: [image], fact };
 }
 
+/** Points the agent at a copy small enough to decode, or at a later read. */
+function deferredImageNote(
+  mimeType: string,
+  byteLength: number,
+  deferral: ImageDecodeDeferral,
+  encoding: RequestImageEncoding,
+): string {
+  const smaller = `save a copy scaled down to at most ${encoding.maxWidth}x${encoding.maxHeight} px inside the workspace and read that copy`;
+  if (deferral.deferred === 'image_too_large_to_decode') {
+    const size =
+      deferral.width !== undefined && deferral.height !== undefined
+        ? `${deferral.width}x${deferral.height} px`
+        : `${byteLength} bytes`;
+    return `[Image omitted: the ${mimeType} image (${size}) is too large for the server to decode. To view it, ${smaller}.]`;
+  }
+  return `[Image omitted: the server is too busy to decode this ${mimeType} image right now. Read it again later, or ${smaller}.]`;
+}
+
 /** The encoder's result with the original size, which only the block encoder reports. */
 interface EncodedImage extends EncodedRequestImageDetails {
   readonly originalWidth: number;
@@ -297,10 +328,10 @@ async function encodeImage(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding,
-): Promise<EncodedRequestImageDetails | 'undecodable' | undefined> {
+): Promise<EncodedRequestImageDetails | 'undecodable' | ImageDecodeDeferral | undefined> {
   const encoded = await encodeImageOrUnavailable(bytes, mimeType, encoding);
   if (encoded === PROCESSOR_UNAVAILABLE || encoded === undefined) return undefined;
-  if (encoded === 'undecodable') return encoded;
+  if (encoded === 'undecodable' || isImageDecodeDeferral(encoded)) return encoded;
   const { image, width, height, dimensionNote } = encoded;
   return { image, width, height, ...(dimensionNote ? { dimensionNote } : {}) };
 }
@@ -311,8 +342,12 @@ async function encodeImageOrUnavailable(
   bytes: Uint8Array,
   mimeType: string,
   encoding: RequestImageEncoding,
-): Promise<EncodedImage | 'undecodable' | typeof PROCESSOR_UNAVAILABLE | undefined> {
+): Promise<
+  EncodedImage | 'undecodable' | ImageDecodeDeferral | typeof PROCESSOR_UNAVAILABLE | undefined
+> {
   if (!mimeType.toLowerCase().startsWith('image/')) return undefined;
+  const lease = await acquireImageDecode(bytes);
+  if (isImageDecodeDeferral(lease)) return lease;
   try {
     const resized = await resizeImage(bytes, mimeType, {
       maxWidth: encoding.maxWidth,
@@ -336,6 +371,8 @@ async function encodeImageOrUnavailable(
     return dimensionNote ? { ...encoded, dimensionNote } : encoded;
   } catch (error) {
     return error instanceof ImageProcessorUnavailableError ? PROCESSOR_UNAVAILABLE : undefined;
+  } finally {
+    lease.release();
   }
 }
 

@@ -40,10 +40,16 @@ export const BTW_REJECT_NESTED =
   'A side conversation is already open. Press Ctrl+C to return before starting another.';
 
 /**
- * Runtime has no committed boundary to snapshot yet. The requirement is
- * explicit that this must fail instead of creating a blank pseudo branch.
+ * Runtime reports no boundary to snapshot. The requirement is explicit that this
+ * must fail instead of creating a blank pseudo branch. The state is not
+ * transient: it clears only once another Turn settles a reply to branch from, so
+ * the copy must not invite a retry.
  */
-export const BTW_REJECT_NO_BOUNDARY = 'This Session is not ready yet; try again in a moment.';
+export const BTW_REJECT_NO_BOUNDARY = 'This Session has no settled reply to branch from yet.';
+
+/** The boundary probe failed, so availability is unknown rather than absent. */
+export const BTW_REJECT_PROBE_FAILED =
+  "Couldn't check this Session for a side conversation. Try again.";
 
 /**
  * Decides whether `/btw` may open a side Session.
@@ -54,12 +60,22 @@ export const BTW_REJECT_NO_BOUNDARY = 'This Session is not ready yet; try again 
  */
 export function resolveBtwStartDecision(input: {
   readonly current: Pick<TuiSession, 'sessionId' | 'sessionKind' | 'purpose'> | undefined;
-  readonly forkOptions: Pick<TuiSessionForkOptions, 'canFork'> | undefined;
+  readonly forkOptions: Pick<TuiSessionForkOptions, 'canFork' | 'unavailableReason'> | undefined;
 }): BtwStartDecision {
   const { current, forkOptions } = input;
   if (!current?.sessionId) return { kind: 'reject', reason: BTW_REJECT_NO_SESSION };
   if (isSideSession(current)) return { kind: 'reject', reason: BTW_REJECT_NESTED };
-  if (!forkOptions?.canFork) return { kind: 'reject', reason: BTW_REJECT_NO_BOUNDARY };
+  // A failed probe is unknown availability, not a missing boundary. Collapsing
+  // the two told users to retry a state that only a new Turn can clear.
+  if (!forkOptions) return { kind: 'reject', reason: BTW_REJECT_PROBE_FAILED };
+  if (!forkOptions.canFork) {
+    return {
+      kind: 'reject',
+      reason: forkOptions.unavailableReason
+        ? `${BTW_REJECT_NO_BOUNDARY} (${forkOptions.unavailableReason})`
+        : BTW_REJECT_NO_BOUNDARY,
+    };
+  }
   return { kind: 'start', parentSessionId: current.sessionId };
 }
 

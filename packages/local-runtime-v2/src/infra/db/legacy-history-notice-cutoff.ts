@@ -10,10 +10,16 @@ const LEGACY_HISTORY_NOTICE_MIGRATION_VERSION = 29;
 /**
  * Normal profiles retain the original m0029 boundary. Collision repair
  * profiles persist the actual later freeze time in their optional metadata.
+ *
+ * A repair table without a usable row only comes from the safe-mode snapshot
+ * backfill, which creates the table but never writes its row. The repair
+ * migration always inserts the row in the same transaction that creates the
+ * table, so those profiles never ran the repair and keep the original
+ * boundary instead of degrading every legacy history read to `pending`.
  */
 export function readLegacyHistoryNoticeCutoff(db: AppDb): number | undefined {
-  if (repairCutoffTableExists(db)) return readRepairCutoff(db);
-  return readOriginalMigrationCutoff(db);
+  const repairCutoff = repairCutoffTableExists(db) ? readRepairCutoff(db) : undefined;
+  return repairCutoff ?? readOriginalMigrationCutoff(db);
 }
 
 function repairCutoffTableExists(db: AppDb): boolean {

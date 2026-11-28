@@ -25,6 +25,11 @@ export interface TuiBackgroundWorkPanelOptions {
   readonly backgroundTasks: () => readonly TuiBackgroundTask[];
   readonly activeSessionId: () => string | undefined;
   readonly onOpenAgent: (sessionId: string) => void | Promise<void>;
+  /**
+   * Switch the TUI into the Agent's own Session so its questions can be answered there.
+   * Absent when the host cannot open Sessions, which also hides the key hint.
+   */
+  readonly onEnterSession?: (sessionId: string) => void | Promise<void>;
   readonly onCancel: () => void;
   readonly requestRender: () => void;
 }
@@ -104,9 +109,15 @@ export class TuiBackgroundWorkPanel implements TuiFeatureScreen {
       this.select(entries, (this.selectedIndex + 1) % entries.length);
       return;
     }
-    if (!matchesKey(data, 'enter')) return;
     const selected = entries[this.selectedIndex];
     if (!selected) return;
+    // Enter stays the read-only transcript so the existing habit keeps working; `o` is
+    // the one that hands the Session over to the chat surface.
+    if (selected.kind === 'agent' && (printable === 'o' || printable === 'O')) {
+      void this.options.onEnterSession?.(selected.member.sessionId);
+      return;
+    }
+    if (!matchesKey(data, 'enter')) return;
     if (selected.kind === 'agent') {
       void this.options.onOpenAgent(selected.member.sessionId);
       return;
@@ -115,6 +126,7 @@ export class TuiBackgroundWorkPanel implements TuiFeatureScreen {
     this.bodyViewport.setActiveRow(0, true);
     this.options.requestRender();
   }
+
 
   render(width: number): string[] {
     const view = this.view();
@@ -130,10 +142,15 @@ export class TuiBackgroundWorkPanel implements TuiFeatureScreen {
     if (width === 0) return [];
     const { entries } = view;
     const active = entries.filter(isActiveEntry).length;
+    const waiting = entries.filter(isWaitingEntry).length;
     const failed = entries.filter(isFailedEntry).length;
+    // `N waiting` is counted apart from `active` on purpose: a member blocked on the user
+    // is not making progress, and burying it in the active count is how a stalled task
+    // goes unnoticed.
     const counts = [
       `${String(entries.length)} total`,
       active > 0 ? `${String(active)} active` : undefined,
+      waiting > 0 ? `${String(waiting)} waiting` : undefined,
       failed > 0 ? `${String(failed)} failed` : undefined,
     ].filter((value): value is string => Boolean(value));
     return [renderPanelHeader('Tasks', counts.join(' · '), width)].map((line) =>
@@ -198,6 +215,7 @@ export class TuiBackgroundWorkPanel implements TuiFeatureScreen {
     ];
   }
 
+
   private renderFooter(rawWidth: number, view = this.view()): string[] {
     const width = normalizeWidth(rawWidth);
     if (width === 0) return [];
@@ -207,13 +225,14 @@ export class TuiBackgroundWorkPanel implements TuiFeatureScreen {
     } else {
       this.syncSelection(view.entries);
       const selected = view.entries[this.selectedIndex];
-      const action =
-        selected?.kind === 'agent'
-          ? 'Enter open transcript'
-          : selected?.kind === 'runtime-task'
-            ? 'Enter inspect'
-            : undefined;
-      hint = ['↑↓ select', 'PgUp/PgDn scroll', action, 'Esc return'].filter(Boolean).join(' · ');
+      const actions: string[] = [];
+      if (selected?.kind === 'agent') {
+        actions.push('Enter open transcript');
+        if (this.options.onEnterSession) actions.push('o open session');
+      } else if (selected?.kind === 'runtime-task') {
+        actions.push('Enter inspect');
+      }
+      hint = ['↑↓ select', 'PgUp/PgDn scroll', ...actions, 'Esc return'].join(' · ');
     }
     return [
       renderPanelDivider(width),
@@ -296,6 +315,7 @@ function renderDetailField(
   ];
 }
 
+
 function renderEntry(
   entry: BackgroundWorkEntry,
   selected: boolean,
@@ -330,6 +350,10 @@ function isActiveEntry(entry: BackgroundWorkEntry): boolean {
     );
   }
   return isActiveTask(entry.task.status);
+}
+
+function isWaitingEntry(entry: BackgroundWorkEntry): boolean {
+  return entry.kind === 'agent' && entry.member.status === 'waiting';
 }
 
 function isFailedEntry(entry: BackgroundWorkEntry): boolean {

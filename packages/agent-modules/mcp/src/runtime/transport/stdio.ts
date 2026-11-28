@@ -15,6 +15,7 @@
  *     child stderr pipe because Node does not forward source stream errors
  *     through `.pipe()`.
  *   * `env` constructed as `{ ...process.env, ...config.env, ...injected.env }`
+ *     (names compared case-insensitively on Windows, see `buildProcessEnv`)
  *     — injected env wins so host-provided identity or policy data can
  *     override any stale value baked into config or leaking from the parent
  *     process env.
@@ -62,21 +63,37 @@ class SafeStdioClientTransport extends StdioClientTransport {
   }
 }
 
-function buildProcessEnv(
-  configEnv?: Record<string, string>,
-  injectedEnv?: Record<string, string>,
+/**
+ * Environment of a stdio MCP child: `base` (the Host process env), then the server's config env,
+ * then the injected env; later layers win. Windows names are case-insensitive, so there a layer's
+ * `PATH` replaces the Host's `Path` instead of sitting next to it.
+ */
+export function buildProcessEnv(
+  configEnv?: Readonly<Record<string, string>>,
+  injectedEnv?: Readonly<Record<string, string>>,
+  base: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
-  return {
-    ...getProcessEnv(),
-    ...(configEnv ?? {}),
-    ...(injectedEnv ?? {}),
-  };
-}
-
-function getProcessEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  let env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
     if (typeof value === 'string') env[key] = value;
   }
+  for (const layer of [configEnv, injectedEnv]) {
+    if (layer) env = overlayEnv(env, layer, platform);
+  }
   return env;
+}
+
+function overlayEnv(
+  base: Record<string, string>,
+  overrides: Readonly<Record<string, string>>,
+  platform: NodeJS.Platform,
+): Record<string, string> {
+  if (platform !== 'win32') return { ...base, ...overrides };
+  const replaced = new Set(Object.keys(overrides).map((key) => key.toUpperCase()));
+  const merged: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (!replaced.has(key.toUpperCase())) merged[key] = value;
+  }
+  return { ...merged, ...overrides };
 }

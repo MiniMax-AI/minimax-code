@@ -69,13 +69,22 @@ export function resolveSkillContentVariables(content: string): string {
   return content.split('{{DATA_DIR}}').join(normalizedDir);
 }
 
+// Source tier is compared before `priority`, so a tier difference can never be
+// flipped by a priority number. MCode's own global skills directory
+// (`<dataDir>/skills`, kind `global`) must win over every externally-discovered
+// user directory (kind `user` — the per-tool compatibility directories that
+// `readExternalUserSkillRoots` discovers under the home directory), whose
+// priorities come from the user-editable `skills.external.sources` config.
+// Ranking `global` above `user` keeps that guarantee for any configured
+// priority, while project > workspace > agent > global and builtin-last stay
+// unchanged.
 const SOURCE_RANK: Record<SkillSourceKind, number> = {
   project: 0,
   workspace: 1,
   agent: 2,
   global: 3,
-  user: 3,
-  builtin: 4,
+  user: 4,
+  builtin: 5,
 };
 
 const DEFAULT_RENDER_BUDGET_CHARS = 20_000;

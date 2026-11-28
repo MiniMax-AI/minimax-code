@@ -1,7 +1,6 @@
 import type {
   TuiAccountStatus,
   TuiContextSnapshotResponse,
-  TuiMcpServer,
   TuiPendingPermission,
   TuiRuntimeDiagnostics,
   TuiModel,
@@ -757,41 +756,32 @@ export function formatTuiSkills(result: TuiSkillList): string {
   return lines.join('\n');
 }
 
-export function formatTuiMcpServers(servers: readonly TuiMcpServer[]): string {
-  const ownershipNote =
-    'Built-in and plugin-owned MCP servers are Runtime-managed and are not included in this list.';
-  if (servers.length === 0) {
-    return [
-      'No user-configured MCP servers matched the current configuration.',
-      ownershipNote,
-    ].join('\n');
-  }
-  return [
-    `User-configured MCP servers · ${servers.length}`,
-    ...servers.map((server) => {
-      const publicStatus = readTuiMcpPublicStatus(server.configJson);
-      const description = server.description ? `\n  ${safe(server.description)}` : '';
-      const status =
-        publicStatus.status && publicStatus.status !== 'disabled'
-          ? ` · ${publicStatus.status}`
-          : '';
-      const error = publicStatus.error ? `\n  ${publicStatus.error}` : '';
-      return `${safe(server.name)} · ${server.enabled ? 'enabled' : 'disabled'} · ${safe(
-        server.transport ?? 'unknown transport',
-      )}${status}${description}${error}`;
-    }),
-    '',
-    ownershipNote,
-    'Configuration payloads and credential references are hidden. Retry the MCP operation, then run /mcp again.',
-  ].join('\n');
-}
-
 const PUBLIC_MCP_ERRORS = new Set([
   'MCP server transport is incomplete. Configure a command or URL and retry.',
   'MCP connection support is unavailable in this Runtime.',
   'MCP server connection failed. Retry or check its configuration.',
   'MCP server connection timed out. Retry or check its configuration.',
+  'MCP server requires authorization.',
+  'MCP server authorization expired or is insufficient. Reauthorize to continue.',
+  'MCP oauth must be an object.',
+  'MCP oauth.clientId must be a non-empty string.',
+  'MCP oauth.scopes must be an array of scope tokens.',
+  'MCP oauth.callbackPort must be an integer from 1024 to 65535.',
+  'MCP oauth.callbackHost must be localhost or 127.0.0.1.',
+  'MCP oauth.authServerMetadataUrl must be an HTTPS URL.',
+  'MCP oauth cannot be combined with a static Authorization header.',
 ]);
+
+/**
+ * The field names come from the user's config keys; only identifier-like names pass, so an
+ * arbitrary key can't smuggle other text into the panel.
+ */
+const UNSUPPORTED_MCP_OAUTH_FIELDS =
+  /^Unsupported MCP oauth fields: [A-Za-z_$][\w$-]{0,63}(?:, [A-Za-z_$][\w$-]{0,63}){0,9}\. Client secrets are stored through the settings secret field\.$/u;
+
+function isPublicMcpError(message: string): boolean {
+  return PUBLIC_MCP_ERRORS.has(message) || UNSUPPORTED_MCP_OAUTH_FIELDS.test(message);
+}
 
 export function readTuiMcpPublicStatus(configJson: string | undefined): {
   status?: 'available' | 'configured' | 'disabled' | 'error' | 'unavailable';
@@ -811,7 +801,7 @@ export function readTuiMcpPublicStatus(configJson: string | undefined): {
     const rawError = typeof value['error'] === 'string' ? value['error'] : undefined;
     return {
       ...(status ? { status } : {}),
-      ...(rawError && PUBLIC_MCP_ERRORS.has(rawError)
+      ...(rawError && isPublicMcpError(rawError)
         ? { error: rawError }
         : status === 'error' || status === 'unavailable'
           ? { error: 'MCP server is unavailable. Retry or check its configuration.' }

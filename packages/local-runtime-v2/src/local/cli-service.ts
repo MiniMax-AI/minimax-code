@@ -33,6 +33,8 @@ import type {
   GetPeekContextResult as GetPeekContextResp,
   GetQueueItemInput as GetQueueItemReq,
   GetQueueItemResult as GetQueueItemResp,
+  GetSessionActivityInput as GetSessionActivityReq,
+  GetSessionActivityResult as GetSessionActivityResp,
   GetSessionForkOptionsInput as GetSessionForkOptionsReq,
   GetSessionForkOptionsResult as GetSessionForkOptionsResp,
   GetSessionUsageInput as GetSessionUsageReq,
@@ -92,12 +94,21 @@ import type {
   ConversationSendOptions,
 } from "../application/conversation/conversation-application.js";
 import type { RuntimeApplications } from "../application/initialize.js";
-import type { LocalRuntimeApplication } from "../application/session/process-local-application-contract.js";
+import type { SessionActivityApplication } from "../application/session/activity-application.js";
+import type { SessionCreateOptions } from "../application/session/lifecycle-application.js";
+import type {
+  LocalRuntimeApplication,
+  McpAuthStartResult,
+  McpAuthStateView,
+  McpAuthTarget,
+  McpAuthTestResult,
+} from "../application/session/process-local-application-contract.js";
 
 export interface CliServiceOptions {
   readonly applications: RuntimeApplications;
   readonly application: LocalRuntimeApplication;
   readonly conversation: ConversationApplication;
+  readonly sessionActivity?: SessionActivityApplication;
 }
 
 export type CliSendMessageReq = ConversationSendMessageRequest;
@@ -106,6 +117,10 @@ export type CliSendMessageOptions = ConversationSendOptions;
 /** In-process CLI entry point: call local Application directly, without HTTP or RPC envelopes. */
 export class CliService {
   constructor(private readonly options: CliServiceOptions) {}
+
+  get pluginHookSessions(): LocalRuntimeApplication["pluginHookSessions"] {
+    return this.options.application.pluginHookSessions;
+  }
 
   listSessions(
     req: ListSessionsReq,
@@ -117,14 +132,20 @@ export class CliService {
   createSession(
     req: CreateSessionReq,
     ctx: ProcessLocalContext = {},
+    options: SessionCreateOptions = {},
   ): Promise<CreateSessionResp> {
     if (req.workspaceDir?.trim()) {
       return this.options.applications.session.lifecycle.createExplicitWorkspaceSession(
         ctx,
         req,
+        options,
       );
     }
-    return this.options.applications.session.lifecycle.createSession(ctx, req);
+    return this.options.applications.session.lifecycle.createSession(ctx, req, options);
+  }
+
+  newSessionId(): string {
+    return this.options.applications.session.lifecycle.newSessionId();
   }
 
   configureSessionMcpServers(
@@ -147,6 +168,45 @@ export class CliService {
     if (!workspaceRoot)
       throw new Error("Session has no workspace for project MCP.");
     return { sessionId, workspaceRoot };
+  }
+
+  async listMcpAuthStates(input: {
+    sessionId?: string;
+    workspaceRoot?: string;
+  }): Promise<{ states: McpAuthStateView[] }> {
+    const mcpAuth = this.requireCapability("mcpAuth", "MCP Auth");
+    const context =
+      input.sessionId && !input.workspaceRoot
+        ? await this.projectMcpContext(input.sessionId)
+        : input;
+    return { states: await mcpAuth.listStates(context) };
+  }
+
+  testMcpAuthTarget(target: McpAuthTarget): Promise<McpAuthTestResult> {
+    return this.requireCapability("mcpAuth", "MCP Auth").test(target);
+  }
+
+  startMcpAuth(target: McpAuthTarget, options?: { force?: boolean }): Promise<McpAuthStartResult> {
+    return this.requireCapability("mcpAuth", "MCP Auth").start(target, options);
+  }
+
+  cancelMcpAuth(attemptId: string): Promise<boolean> {
+    return this.requireCapability("mcpAuth", "MCP Auth").cancel(attemptId);
+  }
+
+  completeMcpAuth(
+    attemptId: string,
+    callbackUrl: string,
+  ): Promise<{ state: McpAuthStateView; errorCode?: string }> {
+    return this.requireCapability("mcpAuth", "MCP Auth").complete(attemptId, callbackUrl);
+  }
+
+  clearMcpAuth(target: McpAuthTarget): Promise<{ state: McpAuthStateView; revoked: boolean }> {
+    return this.requireCapability("mcpAuth", "MCP Auth").clear(target);
+  }
+
+  setMcpUserClientSecret(serverName: string, secret: string | undefined): Promise<boolean> {
+    return this.requireCapability("mcpAuth", "MCP Auth").setUserClientSecret(serverName, secret);
   }
 
   clearSessionMcpServers(sessionId: string): Promise<void> {
@@ -661,6 +721,14 @@ export class CliService {
     return this.options.application.configuration?.setPtcEnabled?.({ enabled });
   }
 
+  getAdvisorEnabled(): Promise<boolean> | undefined {
+    return this.options.application.configuration?.getAdvisorEnabled?.();
+  }
+
+  setAdvisorEnabled(enabled: boolean): Promise<boolean> | undefined {
+    return this.options.application.configuration?.setAdvisorEnabled?.({ enabled });
+  }
+
   listModels(input?: Parameters<NonNullable<LocalRuntimeApplication['models']>['list']>[0]) {
     return this.requireCapability('models', 'Model').list(input);
   }
@@ -671,6 +739,16 @@ export class CliService {
     >[0],
   ) {
     return this.requireCapability("models", "Model").select(input);
+  }
+
+  getAdvisor(input?: Parameters<NonNullable<LocalRuntimeApplication["models"]>["getAdvisor"]>[0]) {
+    return this.requireCapability("models", "Model").getAdvisor(input);
+  }
+
+  selectAdvisor(
+    input: Parameters<NonNullable<LocalRuntimeApplication["models"]>["selectAdvisor"]>[0],
+  ) {
+    return this.requireCapability("models", "Model").selectAdvisor(input);
   }
 
   /** Resolves false when the host has no model-favorite store. */
@@ -853,6 +931,15 @@ export class CliService {
     >[0],
   ) {
     return this.options.application.skills.listRuntimeSkills(input);
+  }
+
+  getSessionActivity(
+    req: GetSessionActivityReq,
+    ctx: ProcessLocalContext = {},
+  ): Promise<GetSessionActivityResp> {
+    const activity = this.options.sessionActivity;
+    if (!activity) throw new Error("Runtime does not expose Session Activity.");
+    return activity.getSessionActivity(ctx, req);
   }
 
   listBackgroundTasks(

@@ -23,7 +23,7 @@ import {
 } from '../classifier/dangerous-patterns.js';
 import { SAFE_BASH_FIRST_WORDS, isDestructiveKillCommand } from './bash-safe-first-words.js';
 import { shellTokenize, shellTokenizeWithMetadata } from './shell-tokenize.js';
-import { isTempDirectory, pathInAllowedWorkingPath, pathInWorkingPath } from './fs-permission.js';
+import { isTempDirectory, pathInAnyWorkingRoot } from './fs-permission.js';
 import { hasWritten } from '../written-files-registry.js';
 import type { BashCheckContext } from './bash-context.js';
 import {
@@ -40,7 +40,11 @@ import {
   getShellPermissionCheckSurface,
 } from './bash-safety-scan.js';
 import { commandHasIoRedirect, evaluateWriteTarget } from './bash-write-target.js';
-import { pureReadFirstWord, formatHardBlockedBashReason } from './bash-fast-allow.js';
+import {
+  pureReadFirstWord,
+  formatHardBlockedBashReason,
+  normalizedNameCommand,
+} from './bash-fast-allow.js';
 import { detectSlowCommand } from './slow-command-scan.js';
 import { parseWindowsNativeDelete } from './windows-native-delete.js';
 import { resolvePermissionPath, type PermissionPathResolutionContext } from '../path-resolver.js';
@@ -58,7 +62,7 @@ import type { PathValue, ShellFamily } from '../permission-core.js';
 // `bash-split.ts` directly to make the dependency explicit.
 // ---------------------------------------------------------------------------
 
-import { splitCommand } from './bash-split.js';
+import { splitCommand, findHeredocBodies } from './bash-split.js';
 import {
   consumeShellWrapperPrefix,
   stripTransparentWrappersForRuleMatch,
@@ -131,6 +135,8 @@ const HELP_FLAG_TOKENS: ReadonlySet<string> = new Set([
   '--help',
   '-h',
   '--version',
+  // Single-dash long form used by java / ffmpeg / go-style CLIs.
+  '-version',
   '-V',
   '-v',
   '-?',
@@ -288,8 +294,9 @@ function tokenStopsRmTargetScan(token: string): boolean {
 export function parseRmTargets(
   command: string,
   platform: NodeJS.Platform = process.platform,
+  shellFamily: ShellFamily = 'unknown',
 ): string[] {
-  return parseRmTargetsWithMetadata(command, platform).map((t) => t.value);
+  return parseRmTargetsWithMetadata(command, platform, shellFamily).map((t) => t.value);
 }
 
 /**
@@ -315,24 +322,26 @@ export function parseRmTargets(
 export function parseRmTargetsWithMetadata(
   command: string,
   platform: NodeJS.Platform = process.platform,
-): Array<{ value: string; quoted: boolean }> {
-  return parseRmCommand(command, platform).targets;
+  shellFamily: ShellFamily = 'unknown',
+): Array<{ value: string; quoted: boolean; expandHome?: boolean }> {
+  return parseRmCommand(command, platform, shellFamily).targets;
 }
 
 /** Preserve force and literal FD redirects without evaluating shell expressions. */
 export function parseRmCommand(
   command: string,
   platform: NodeJS.Platform = process.platform,
+  shellFamily: ShellFamily = 'unknown',
 ): {
-  targets: Array<{ value: string; quoted: boolean }>;
+  targets: Array<{ value: string; quoted: boolean; expandHome?: boolean }>;
   force: boolean;
   redirects: string[];
 } {
-  const shellTokens = shellTokenizeWithMetadata(command);
+  const shellTokens = shellTokenizeWithMetadata(command, shellFamily === 'posix');
   const tokens = shellTokens.map((token) => token.value);
   const rmIdx = findRmTokenIndex(tokens);
   if (rmIdx === -1) return { targets: [], force: false, redirects: [] };
-  const targets: Array<{ value: string; quoted: boolean }> = [];
+  const targets: Array<{ value: string; quoted: boolean; expandHome?: boolean }> = [];
   let pastDoubleDash = false;
   let force = false;
   const redirects: string[] = [];
@@ -378,14 +387,23 @@ export function parseRmCommand(
       // `C:\Users\me` into `C:Usersme`. Windows PowerShell/CMD treat those
       // backslashes as path separators, so preserve the raw token for a
       // drive/UNC-shaped target before building the mavis-trash rewrite.
+      // A known POSIX shell (including Git Bash on Windows) must instead
+      // keep the decoded token, even for a drive-shaped path with escapes.
       if (
-        /^(?:[A-Za-z]:[\\/]|\\\\(?:\?\\)?)/.test(rawToken) ||
-        (platform === 'win32' && rawToken.includes('\\'))
+        shellFamily !== 'posix' &&
+        (/^(?:[A-Za-z]:[\\/]|\\\\(?:\?\\)?)/.test(rawToken) ||
+          (platform === 'win32' && rawToken.includes('\\')))
       ) {
         value = rawToken;
       }
     }
-    targets.push({ value, quoted });
+    targets.push({
+      value,
+      quoted,
+      ...(tokenMeta?.pathSyntax && (value === '~' || value.startsWith('~/'))
+        ? { expandHome: tokenMeta.pathSyntax.expandHome }
+        : {}),
+    });
   }
 
   // Dynamic operands still use the existing literal-quoting rewrite. Passing
@@ -397,7 +415,6 @@ export function parseRmCommand(
     );
   return { targets, force: force && staticTargets, redirects };
 }
-
 
 /**
  * Resolve a shell-level HOME reference in an rm target to the runtime's
@@ -462,25 +479,27 @@ export function resolveRmCommandPaths(
     parseRmTargetsWithMetadata(
       command,
       shell === 'cmd' || shell === 'powershell' ? 'win32' : undefined,
+      shell,
     );
   return targets.map((target) => resolveRmTargetPath(target, context, shell));
 }
 
 /** Resolve an rm operand without losing the parser's quote/escape contract. */
 export function resolveRmTargetPath(
-  target: { value: string; quoted: boolean },
+  target: { value: string; quoted: boolean; expandHome?: boolean },
   context: PermissionPathResolutionContext = {},
   shell: ShellFamily = 'unknown',
 ): PathValue {
+  const expandHome = target.expandHome ?? !target.quoted;
   const expanded =
-    !target.quoted && context.homeDir
+    expandHome && context.homeDir
       ? resolveHomeInTarget(target.value, context.homeDir)
       : target.value;
   // Prefix a shell-protected tilde with ./ so the generic path resolver sees
   // a literal cwd-relative name. Quoted $HOME retains its conservative dynamic
   // classification; do not evaluate it or reinterpret the parser's metadata.
   const literal =
-    target.quoted && (expanded === '~' || expanded.startsWith('~/')) ? `./${expanded}` : expanded;
+    !expandHome && (expanded === '~' || expanded.startsWith('~/')) ? `./${expanded}` : expanded;
   return {
     ...resolvePermissionPath(literal, context, shell),
     raw: target.value,
@@ -496,7 +515,8 @@ export function resolveRmTargetPath(
  * preserves the pre-quote-aware behavior for existing callers) OR the
  * richer `Array<{ value, quoted }>` from
  * {@link parseRmTargetsWithMetadata}, where the `quoted` flag prevents
- * HOME expansion for shell-protected literals.
+ * HOME expansion for shell-protected literals. Known POSIX shells also retain
+ * whether the leading tilde itself is unquoted, so `~/'file'` still expands.
  *
  * The quote-aware overload is the one production code should reach for
  * — it fixes the codex-flagged bug where `rm '~/foo'` would wrongly
@@ -505,17 +525,17 @@ export function resolveRmTargetPath(
  */
 export function buildTrashCommand(
   trashBinPath: string,
-  targets: string[] | Array<{ value: string; quoted: boolean }>,
+  targets: string[] | Array<{ value: string; quoted: boolean; expandHome?: boolean }>,
   force = false,
 ): string {
   if (targets.length === 0) return trashBinPath;
   // Normalise: string[] input is treated as all-unquoted (preserves the
   // pre-metadata call behaviour of always attempting HOME expansion).
-  const normalised: Array<{ value: string; quoted: boolean }> = targets.map((t) =>
-    typeof t === 'string' ? { value: t, quoted: false } : t,
+  const normalised: Array<{ value: string; quoted: boolean; expandHome?: boolean }> = targets.map(
+    (t) => (typeof t === 'string' ? { value: t, quoted: false } : t),
   );
-  const resolved = normalised.map(({ value, quoted }) =>
-    quoted ? value : resolveHomeInTarget(value),
+  const resolved = normalised.map(({ value, quoted, expandHome }) =>
+    (expandHome ?? !quoted) ? resolveHomeInTarget(value) : value,
   );
   const shellQuoted = resolved.map((t) => shellQuote(t));
   // Always insert `--` so filenames starting with `-` are not mistaken for flags.
@@ -655,14 +675,7 @@ function isAllowableLocalScript(
   if (!bashCtx.isFile?.(resolved)) return false;
 
   if (isTempDirectory(resolved)) return true;
-  if (bashCtx.workingDirectory && pathInWorkingPath(resolved, bashCtx.workingDirectory)) {
-    return true;
-  }
-  if (
-    bashCtx.allowedWorkingPaths &&
-    bashCtx.allowedWorkingPaths.length > 0 &&
-    pathInAllowedWorkingPath(resolved, bashCtx.allowedWorkingPaths)
-  ) {
+  if (pathInAnyWorkingRoot(resolved, bashCtx.workingDirectory, bashCtx.allowedWorkingPaths)) {
     return true;
   }
   if (hasWritten(bashCtx.sessionId, resolved)) return true;
@@ -990,8 +1003,9 @@ export function evaluateBashStatic(
       // match is `... | <interp> -c '<literal>'` (or `"..."` containing no
       // `$`/backtick), stdin is data and the program is a fixed argv
       // string. This is the safe shape for `glab api ... | python3 -c ...`
-      // and `... | jq` style pipelines. Raw `... | bash` / `... | python`
-      // still ASK (stdin IS the program).
+      // and `... | jq` style pipelines; `| python3 -m json.tool` is treated
+      // the same. Raw `... | bash` /
+      // `... | python` still ASK (stdin IS the program).
       if (pipeMatch && allPipeToShellAreInlineLiteralC(permissionSurface)) {
         logger.info(
           {
@@ -1190,6 +1204,7 @@ function evaluateSingleSubcommand(
             : undefined,
         permReasonType: result.reason.type,
         cmdPreview,
+        sessionId: bashCtx?.sessionId,
         ...extras,
       },
       `[permission] subcommand layer=${layer} mode=${mode} verdict=${result.verdict}`,
@@ -1348,7 +1363,15 @@ function evaluateSingleSubcommand(
     if (
       !bashCtx?.nativeDelete &&
       !recoverableWindowsDelete &&
-      bypassSniffTargets.some((s) => BYPASS_DELETE_VERB_SNIFF.test(s))
+      bypassSniffTargets.some((s) => {
+        // Keep interpreter-fed bodies and expanding heredocs under the guard.
+        // Only a quoted body consumed as data is provably non-executed text.
+        const surface = findHeredocBodies(s)
+          .filter((body) => body.quoted && !commandHasExecutedHeredocBody(body.header))
+          .reverse()
+          .reduce((text, range) => `${text.slice(0, range.start)}\n${text.slice(range.end)}`, s);
+        return BYPASS_DELETE_VERB_SNIFF.test(surface);
+      })
     ) {
       return logLayer('bypass-delete-sniff-deny', {
         verdict: 'deny',
@@ -1534,8 +1557,11 @@ function evaluateSingleSubcommand(
   }
 
   // Step 9: fast-allow first-word
-  const firstWord = pureReadFirstWord(command);
-  const safe = firstWord && SAFE_BASH_FIRST_WORDS.has(firstWord);
+  const firstWord = pureReadFirstWord(command, bashCtx);
+  const safe =
+    firstWord &&
+    SAFE_BASH_FIRST_WORDS.has(firstWord) &&
+    !normalizedCommandNameHidesDanger(command, bashCtx);
   const sigkill = isDestructiveKillCommand(command, firstWord);
   if (safe && !commandHasIoRedirect(command, bashCtx) && !sigkill) {
     return logLayer(
@@ -1561,6 +1587,24 @@ function evaluateSingleSubcommand(
       category: 'noMatchingPermissionRule',
     },
   });
+}
+
+/**
+ * Earlier layers match danger patterns against the literal text, which
+ * spells the command as `git.exe` or `/usr/bin/git`. When Step 9 recognises
+ * that word as `git`, re-run those name-anchored checks on the normalised
+ * text so `git.exe push` / `/usr/bin/git push --force` cannot ride the
+ * `git` first-word allowance.
+ */
+function normalizedCommandNameHidesDanger(command: string, bashCtx?: BashCheckContext): boolean {
+  const normalized = normalizedNameCommand(command, bashCtx);
+  if (normalized === undefined) return false;
+  return (
+    SUBCOMMAND_DANGEROUS_PATTERNS.some(({ pattern }) => pattern.test(normalized)) ||
+    Boolean(matchHardBlockedBash(normalized, { nativeDelete: bashCtx?.nativeDelete })) ||
+    Boolean(bashCommandIsSafe(normalized)) ||
+    Boolean(checkDangerousPatterns(normalized, bashCtx))
+  );
 }
 
 /**

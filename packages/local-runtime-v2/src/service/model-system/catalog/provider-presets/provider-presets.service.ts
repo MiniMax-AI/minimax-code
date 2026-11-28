@@ -3,6 +3,7 @@ import { getRuntimeRegion } from '@mavis/config';
 import type { ByokProviderPresetView, UserModelInputView } from '../../contracts.js';
 import { normalizeProviderBaseUrl } from '../../connectivity/provider-request.js';
 import type { ModelProviderApi } from '../../identity.js';
+import { isGeminiRejectedEffort } from '../../resolution/model-ref.js';
 import {
   fetchModelsDevCatalog,
   fetchPinnedProviderIdsConfig,
@@ -14,15 +15,22 @@ import {
   type ProviderPresetRepositoryOptions,
   writeProviderPresetSnapshot,
 } from './provider-presets.repository.js';
+import {
+  buildModelRecencyIndex,
+  rankModelIdsByRecency,
+  type ModelRecencyIndex,
+  type RankModelsByRecencyInput,
+} from './model-recency.js';
 
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const MESSAGES_API_BASE_URL = 'https://api.anthropic.com';
-const DISABLED_PROVIDER_IDS = new Set([
-  'minimax',
-  'minimax-cn',
-  'minimax-coding-plan',
-  'minimax-cn-coding-plan',
-]);
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+// No provider id is filtered out of the catalog: MiniMax presets are offered
+// through BYOK like any other vendor, alongside the built-in managed provider
+// and the first-party `minimax_api` key entry. Display order (including whether
+// MiniMax is pinned) is owned by Apollo `agent_byok_pinned_provider_ids`, with
+// REGION_PINNED_PROVIDER_IDS as the local fallback.
 const REGION_PINNED_PROVIDER_IDS = {
   cn: ['zhipuai-coding-plan', 'zhipuai', 'deepseek', 'moonshotai-cn', 'openai', 'anthropic'],
   en: ['zai-coding-plan', 'zai', 'deepseek', 'moonshotai', 'openai', 'anthropic'],
@@ -36,6 +44,12 @@ const PROVIDER_PLAN_NAMES = new Map([
   ['zhipuai-coding-plan', 'Zhipu AI Coding Plan'],
 ]);
 const refreshInFlight = new Map<string, Promise<void>>();
+const refreshAttemptedAt = new Map<string, number>();
+/** Longest a model ranking waits for a catalog refresh before using the current snapshot. */
+const MODEL_RECENCY_REFRESH_WAIT_MS = 3_000;
+/** A snapshot older than this is refreshed before ranking; failures retry after the throttle. */
+const MODEL_RECENCY_STALE_MS = 6 * 60 * 60_000;
+const MODEL_RECENCY_RETRY_MS = 10 * 60_000;
 
 export interface ProviderPresetCatalogOptions extends ProviderPresetRepositoryOptions {
   readonly modelsDevFetch?: typeof fetch;
@@ -64,13 +78,55 @@ interface ParsedModelsDevCatalogSnapshot {
 }
 
 export class ProviderPresetCatalog {
+  private readonly refreshKey: string;
+  private recency?: { readonly updatedAt: number; readonly index: ModelRecencyIndex };
+
   constructor(private readonly options: ProviderPresetCatalogOptions = {}) {
-    const refreshKey =
+    this.refreshKey =
       resolveProviderPresetLocalCatalogPath(options) ?? options.bundledCatalogPath ?? 'default';
-    if (!refreshInFlight.has(refreshKey)) {
-      const refresh = refreshModelsDevSnapshotInBackground(options, refreshKey);
-      refreshInFlight.set(refreshKey, refresh);
+    this.startRefresh();
+  }
+
+  private startRefresh(): void {
+    if (refreshInFlight.has(this.refreshKey)) return;
+    refreshAttemptedAt.set(this.refreshKey, (this.options.now ?? Date.now)());
+    refreshInFlight.set(
+      this.refreshKey,
+      refreshModelsDevSnapshotInBackground(this.options, this.refreshKey),
+    );
+  }
+
+  /**
+   * Orders model ids newest first by models.dev `last_updated`. Refreshes a
+   * stale snapshot first, waiting at most a few seconds; offline or failed
+   * refreshes fall back to the cached or bundled snapshot.
+   */
+  async rankModelsByRecency(
+    input: RankModelsByRecencyInput & { readonly signal?: AbortSignal },
+  ): Promise<string[]> {
+    const now = (this.options.now ?? Date.now)();
+    let latest = await latestCatalogSnapshot(this.options);
+    const lastAttempt = refreshAttemptedAt.get(this.refreshKey) ?? 0;
+    if (
+      (!latest || now - latest.snapshot.updatedAt > MODEL_RECENCY_STALE_MS) &&
+      now - lastAttempt > MODEL_RECENCY_RETRY_MS
+    ) {
+      this.startRefresh();
     }
+    const pending = refreshInFlight.get(this.refreshKey);
+    if (pending) {
+      await waitBounded(pending, MODEL_RECENCY_REFRESH_WAIT_MS, input.signal);
+      latest = await latestCatalogSnapshot(this.options);
+    }
+    input.signal?.throwIfAborted();
+    if (!latest) return [...new Set(input.modelIds)];
+    if (this.recency?.updatedAt !== latest.snapshot.updatedAt) {
+      this.recency = {
+        updatedAt: latest.snapshot.updatedAt,
+        index: buildModelRecencyIndex(latest.snapshot.catalog),
+      };
+    }
+    return rankModelIdsByRecency(this.recency.index, input);
   }
 
   async listProviderPresets(): Promise<ByokProviderPresetView[]> {
@@ -116,18 +172,13 @@ function parseProvider(
   value: unknown,
   iconBaseUrl?: string,
 ): ByokProviderPresetView | undefined {
-  if (
-    DISABLED_PROVIDER_IDS.has(providerId) ||
-    !providerId.trim() ||
-    !isRecord(value) ||
-    !isRecord(value.models)
-  ) {
+  if (!providerId.trim() || !isRecord(value) || !isRecord(value.models)) {
     return undefined;
   }
   const transport = resolveTransport(providerId, value);
   if (!transport) return undefined;
   const models = Object.entries(value.models)
-    .map(([modelId, model]) => parseModel(modelId, model))
+    .map(([modelId, model]) => parseModel(modelId, model, transport.apiFormat))
     .filter((model): model is UserModelInputView => model !== undefined)
     .sort((left, right) =>
       (left.displayName ?? left.modelId).localeCompare(right.displayName ?? right.modelId),
@@ -142,42 +193,86 @@ function parseProvider(
   };
 }
 
+interface TransportContract {
+  readonly apiFormat: ModelProviderApi;
+  // Only the canonical Provider ID for this npm package may omit `api` and use
+  // the official base URL; every other provider must declare a valid `api`.
+  readonly canonical?: { readonly providerId: string; readonly baseUrl: string };
+}
+
+// OpenRouter ships its own SDK package in models.dev, but its wire protocol is
+// the OpenAI chat-completions API.
+const TRANSPORTS_BY_NPM = new Map<string, TransportContract>([
+  [
+    '@ai-sdk/openai',
+    {
+      apiFormat: 'openai-responses',
+      canonical: { providerId: 'openai', baseUrl: OPENAI_BASE_URL },
+    },
+  ],
+  ['@ai-sdk/openai-compatible', { apiFormat: 'openai-completions' }],
+  [
+    '@ai-sdk/anthropic',
+    {
+      apiFormat: 'anthropic-messages',
+      canonical: { providerId: 'anthropic', baseUrl: MESSAGES_API_BASE_URL },
+    },
+  ],
+  [
+    '@openrouter/ai-sdk-provider',
+    {
+      apiFormat: 'openai-completions',
+      canonical: { providerId: 'openrouter', baseUrl: OPENROUTER_BASE_URL },
+    },
+  ],
+  // `@ai-sdk/google-vertex` stays unmapped: Vertex uses project/location and
+  // Google Cloud credentials, not a base URL plus API key.
+  [
+    '@ai-sdk/google',
+    {
+      apiFormat: 'google-generative-ai',
+      canonical: { providerId: 'google', baseUrl: GEMINI_BASE_URL },
+    },
+  ],
+]);
+
 function resolveTransport(
   providerId: string,
   provider: Record<string, unknown>,
 ): { baseUrl: string; apiFormat: ModelProviderApi } | undefined {
-  const npm = stringValue(provider.npm);
-  let apiFormat: ModelProviderApi;
-  let baseUrl: string | undefined;
-  if (npm === '@ai-sdk/openai') {
-    apiFormat = 'openai-responses';
-    baseUrl =
-      providerId === 'openai' && provider.api === undefined
-        ? OPENAI_BASE_URL
-        : stringValue(provider.api);
-  } else if (npm === '@ai-sdk/openai-compatible') {
-    apiFormat = 'openai-completions';
-    baseUrl = stringValue(provider.api);
-  } else if (npm === '@ai-sdk/anthropic') {
-    apiFormat = 'anthropic-messages';
-    baseUrl =
-      providerId === 'anthropic' && provider.api === undefined
-        ? MESSAGES_API_BASE_URL
-        : stringValue(provider.api);
-  } else {
-    return undefined;
-  }
+  const transport = TRANSPORTS_BY_NPM.get(stringValue(provider.npm) ?? '');
+  if (!transport) return undefined;
+  const { apiFormat, canonical } = transport;
+  const baseUrl =
+    canonical?.providerId === providerId && provider.api === undefined
+      ? canonical.baseUrl
+      : stringValue(provider.api);
   if (!baseUrl || !isHttpUrl(baseUrl)) return undefined;
   return { baseUrl: normalizeProviderBaseUrl(apiFormat, baseUrl), apiFormat };
 }
 
-function parseModel(modelId: string, value: unknown): UserModelInputView | undefined {
-  if (!modelId.trim() || !isRecord(value) || value.tool_call !== true) return undefined;
+function isUnsupportedGeminiRealtimeModel(modelId: string, apiFormat: ModelProviderApi): boolean {
+  return apiFormat === 'google-generative-ai' && /-(?:live|tts)(?:-|$)/iu.test(modelId.trim());
+}
+
+function parseModel(
+  modelId: string,
+  value: unknown,
+  apiFormat: ModelProviderApi,
+): UserModelInputView | undefined {
+  if (
+    !modelId.trim() ||
+    !isRecord(value) ||
+    value.tool_call !== true ||
+    isUnsupportedGeminiRealtimeModel(modelId, apiFormat)
+  ) {
+    return undefined;
+  }
   return {
     modelId,
     displayName: stringValue(value.name) ?? modelId,
     ...parseModelCapabilities(value),
-    ...parseModelEffortOptions(value),
+    ...parseModelEffortOptions(value, apiFormat),
     ...parseModelModalities(value),
     ...parseModelLimit(value),
   };
@@ -199,21 +294,24 @@ function parseModelCapabilities(value: Record<string, unknown>): Partial<UserMod
  * selection. A bare `reasoning: true` or a `toggle` entry only means the model
  * can think, so neither one produces `effortOptions` here. Declared strings
  * are preserved as-is (trimmed, de-duplicated, in catalog order) so levels the
- * CLI does not know about still reach validation and the wire unchanged.
+ * CLI does not know about still reach validation and the wire unchanged, except
+ * levels the protocol rejects (Gemini has nothing below `low`).
  */
-function parseModelEffortOptions(value: Record<string, unknown>): Partial<UserModelInputView> {
+function parseModelEffortOptions(
+  value: Record<string, unknown>,
+  apiFormat: ModelProviderApi,
+): Partial<UserModelInputView> {
   if (!Array.isArray(value.reasoning_options)) return {};
   for (const option of value.reasoning_options) {
     if (!isRecord(option) || option.type !== 'effort' || !Array.isArray(option.values)) continue;
-    const effortOptions: string[] = [];
-    const seen = new Set<string>();
-    for (const candidate of option.values) {
-      if (typeof candidate !== 'string') continue;
-      const effort = candidate.trim();
-      if (!effort || seen.has(effort)) continue;
-      seen.add(effort);
-      effortOptions.push(effort);
-    }
+    const effortOptions = [
+      ...new Set(
+        option.values
+          .filter((candidate): candidate is string => typeof candidate === 'string')
+          .map((candidate) => candidate.trim())
+          .filter((candidate) => candidate && !isGeminiRejectedEffort(apiFormat, candidate)),
+      ),
+    ];
     if (effortOptions.length > 0) return { effortOptions };
   }
   return {};
@@ -375,6 +473,36 @@ function isHttpUrl(value: string): boolean {
 function resolveProviderIconUrl(iconBaseUrl: string, providerId: string): string {
   const prefix = iconBaseUrl.endsWith('/') ? iconBaseUrl : `${iconBaseUrl}/`;
   return `${prefix}${encodeURIComponent(providerId)}.svg`;
+}
+
+async function settled(task: Promise<void>): Promise<void> {
+  try {
+    await task;
+  } catch {
+    // A failed refresh leaves the current snapshot in place.
+  }
+}
+
+/** Resolves when `task` settles or `ms` elapses; rejects only when `signal` aborts. */
+async function waitBounded(task: Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      settled(task),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal?.reason);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

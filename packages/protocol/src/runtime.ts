@@ -244,6 +244,11 @@ export interface ISkillRef {
   global?: boolean;
 }
 
+export interface ISkillUsage {
+  use_count: number | string;
+  last_used_at_ms: number | string;
+}
+
 export interface IHookRef {
   name: string;
   event: HookEvent;
@@ -338,6 +343,10 @@ export interface IAgentConfig {
   plugins?: Array<IPluginRef>;
   tool_list_authoritative?: boolean;
   agent_role?: number;
+  project_name?: string;
+  ptc_enabled?: boolean;
+  skill_usage?: Record<string, ISkillUsage>;
+  ask_user_policy?: string;
 }
 
 export interface IRuntimeUsage {

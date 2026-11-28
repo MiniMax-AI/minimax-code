@@ -11,7 +11,8 @@
  *      system secrets, credentials, and private keys flow through the LLM gate
  *      in auto/bypass modes and fall back to user ask when not allowed.
  *   2. Workspace boundary asks delegate to the mode router: auto may use the
- *      LLM gate, while default mode surfaces user confirmation.
+ *      LLM gate, while default mode surfaces user confirmation. Writes under
+ *      the system temp directory are allowed, as for bash and apply_patch.
  *   3. Otherwise `isPathAllowed` decides; soft sensitive paths return
  *      normal ASK so auto mode can route them through the classifier gate
  *      (handled by PermissionService, not here).
@@ -19,12 +20,10 @@
 
 import type { ToolPermissionChecker, ToolCheckResult } from '../engine.js';
 import type { ToolPermissionContext } from '../context.js';
-import { logger, backgroundCtx } from '../host-utils.js';
 import { recordWrite } from '../written-files-registry.js';
 import { validateGlobPattern } from './fs-permission.js';
 import { evaluatePathCapability, generateSuggestionRules } from './path-capability.js';
-
-const WRITE_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'append']);
+import { extractFilePath, toolActionForFsTool, WRITE_TOOLS } from './fs-input.js';
 
 export class FsToolPermissionChecker implements ToolPermissionChecker {
   checkPermissions(
@@ -33,11 +32,6 @@ export class FsToolPermissionChecker implements ToolPermissionChecker {
     input: Record<string, any>,
     context: ToolPermissionContext,
   ): ToolCheckResult | undefined {
-    logger.info(
-      backgroundCtx(),
-      `FsToolPermissionChecker checkPermissions called, toolName=${toolName}, input=${JSON.stringify(input)}, context=${JSON.stringify(context)}`,
-    );
-
     // Glob tool: validate pattern first
     if (toolName === 'glob') {
       const pattern = typeof input.pattern === 'string' ? input.pattern : undefined;
@@ -54,7 +48,7 @@ export class FsToolPermissionChecker implements ToolPermissionChecker {
 
     // Extract file path from input
     const filePath =
-      extractFilePath(input) ??
+      extractFilePath(toolName, input) ??
       (toolName === 'grep' || toolName === 'glob' || toolName === 'list'
         ? context.workingDirectory
         : undefined);
@@ -62,6 +56,11 @@ export class FsToolPermissionChecker implements ToolPermissionChecker {
 
     const decision = evaluatePathCapability(filePath, toolActionForFsTool(toolName), context, {
       toolName,
+      // Same temp-directory write allowance as bash and apply_patch: a scratch
+      // file under the system temp directory needs no approval. Deny rules and
+      // sensitive names are checked before this fallback, so `<tmp>/.env` or a
+      // user-denied temp path still stops.
+      allowTempWrite: WRITE_TOOLS.has(toolName),
     });
 
     if (decision.behavior === 'allow') {
@@ -105,17 +104,4 @@ export class FsToolPermissionChecker implements ToolPermissionChecker {
     if (!sessionId) return;
     recordWrite(sessionId, filePath);
   }
-}
-
-function toolActionForFsTool(toolName: string): 'read' | 'write' {
-  return WRITE_TOOLS.has(toolName) ? 'write' : 'read';
-}
-
-/** Extract the primary file path from a tool's input object. */
-function extractFilePath(input: Record<string, unknown>): string | undefined {
-  if (typeof input.file_path === 'string' && input.file_path) return input.file_path;
-  if (typeof input.filePath === 'string' && input.filePath) return input.filePath;
-  if (typeof input.path === 'string' && input.path) return input.path;
-  // A search pattern is not a filesystem path. Directory tools default to cwd.
-  return undefined;
 }

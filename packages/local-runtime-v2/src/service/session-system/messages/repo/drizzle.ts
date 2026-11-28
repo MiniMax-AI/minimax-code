@@ -723,8 +723,8 @@ function unconsumedSteeringTransfer(
   input: Pick<UserMessageCommitInput, 'unconsumedFromTurnIds' | 'unstartedFromTurnIds'>,
 ): NormalizedDisplayMessage | undefined {
   if (stored.role !== 'user') return undefined;
+  if (!canTransferUnconsumedDisplay(stored, input)) return undefined;
   const oldData = parseJsonRecord(stored.dataJson);
-  if (!canTransferUnconsumedDisplay(stored, oldData, input)) return undefined;
   const newData = parseJsonRecord(intended.dataJson);
   const samePayload = { ...newData };
   for (const field of ['kind', 'query_key', 'turnId']) {
@@ -752,13 +752,12 @@ function unconsumedSteeringTransfer(
 
 function canTransferUnconsumedDisplay(
   stored: NormalizedDisplayMessage,
-  data: Record<string, unknown>,
   input: Pick<UserMessageCommitInput, 'unconsumedFromTurnIds' | 'unstartedFromTurnIds'>,
 ): boolean {
   const turnId = stored.turnId ?? '';
   return (
     input.unstartedFromTurnIds?.includes(turnId) === true ||
-    (data.kind === 'steered_user' && input.unconsumedFromTurnIds?.includes(turnId) === true)
+    input.unconsumedFromTurnIds?.includes(turnId) === true
   );
 }
 

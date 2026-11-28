@@ -90,3 +90,13 @@ NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPO
 NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
 OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Mediabunny
+
+Used unmodified to strip audio tracks from video attachments before sending them to models that do
+not accept audio input.
+
+Mediabunny is distributed under the Mozilla Public License, version 2.0. The Source Code Form of
+Mediabunny 1.64.0 is available at https://github.com/Vanilagy/mediabunny and in the `mediabunny`
+package on npm (https://www.npmjs.com/package/mediabunny/v/1.64.0). A copy of the license is
+available at https://mozilla.org/MPL/2.0/.

@@ -165,9 +165,119 @@ describe('resolveAgentModelSelection', () => {
   registerAgentModelInputValidationTests();
   registerExplicitParentSelectionTest();
   registerMiniMaxM3SelectionTests();
+  registerExplicitEffortTests();
   registerBuiltinAgentGroupTests();
   registerResolverBoundaryCoverageTest();
 });
+
+// 要求显式强度的一级（换了模型的 task）：模型有可选强度却没给就报错，不替它选默认值。
+function registerExplicitEffortTests(): void {
+  const select = (selection: AgentModelSelectionInput, runtimeConfig = config) =>
+    resolveAgentModelSelection({
+      config: runtimeConfig,
+      sources: [
+        {
+          source: 'task-model-override',
+          selection,
+          requireCatalog: true,
+          requireExplicitEffort: true,
+        },
+      ],
+    });
+
+  it('requires an explicit effort when the model offers effort levels', () => {
+    expect(thrownBy(() => select({ model: 'target/replacement' }))).toMatchObject({
+      code: 'MODEL_EFFORT_REQUIRED',
+      message: expect.stringContaining(
+        'target/replacement from task-model-override requires an explicit thinking effort: minimal, medium.',
+      ),
+    });
+  });
+
+  it('requires the on/off switch when the model is a switchable MiniMax M3', () => {
+    expect(thrownBy(() => select({ model: 'runtime/MiniMax-M3' }, m3Config()))).toMatchObject({
+      code: 'MODEL_EFFORT_REQUIRED',
+      message: expect.stringContaining('on, off'),
+    });
+    expect(select({ model: 'runtime/MiniMax-M3', effort: 'off' }, m3Config())).toMatchObject({
+      effort: 'off',
+    });
+  });
+
+  it('requires the on/off switch only for a managed model whose thinking is switchable', () => {
+    const switchable = {
+      limit: { context: 128_000, output: 8_192 },
+      thinking_config: { mode: 'switchable' as const, default_value: 'true' },
+    };
+    const runtimeConfig: LocalConversationRuntimeConfig = {
+      ...config,
+      provider: {
+        ...config.provider,
+        minimax: { models: { 'MiniMax-Lite': switchable } },
+        plain: { models: { toggle: switchable } },
+      },
+    };
+    expect(thrownBy(() => select({ model: 'minimax/MiniMax-Lite' }, runtimeConfig))).toMatchObject({
+      code: 'MODEL_EFFORT_REQUIRED',
+      message: expect.stringContaining('on, off'),
+    });
+    expect(select({ model: 'minimax/MiniMax-Lite', effort: 'on' }, runtimeConfig)).toMatchObject({
+      reasoning: true,
+    });
+    // 非托管模型没有档位时不接受任何强度，也就不要求写。
+    expect(select({ model: 'plain/toggle' }, runtimeConfig)).not.toHaveProperty('effort');
+  });
+
+  it('keeps an explicit effort and still rejects an unsupported one', () => {
+    expect(select({ model: 'target/replacement', effort: 'medium' })).toMatchObject({
+      providerId: 'target',
+      modelId: 'replacement',
+      effort: 'medium',
+    });
+    expect(thrownBy(() => select({ model: 'target/replacement', effort: 'high' }))).toMatchObject({
+      code: 'MODEL_EFFORT_UNSUPPORTED',
+    });
+  });
+
+  it('lets a model without selectable efforts run without an effort', () => {
+    const runtimeConfig: LocalConversationRuntimeConfig = {
+      ...config,
+      provider: {
+        ...config.provider,
+        plain: {
+          models: {
+            chat: { limit: { context: 8_000, output: 1_000 } },
+            quiet: {
+              limit: { context: 8_000, output: 1_000 },
+              thinking_config: { mode: 'forced_off' },
+              thinking: { effortOptions: ['low', 'high'] },
+            },
+          },
+        },
+      },
+    };
+    expect(select({ model: 'plain/chat' }, runtimeConfig)).not.toHaveProperty('effort');
+    expect(select({ model: 'plain/quiet' }, runtimeConfig)).toMatchObject({ effort: 'off' });
+  });
+
+  it('leaves sources without the requirement on their existing defaults', () => {
+    expect(
+      resolveAgentModelSelection({
+        config,
+        sources: [{ source: 'agent-config', selection: { model: 'target/replacement' } }],
+      }),
+    ).toMatchObject({ effort: 'medium' });
+  });
+}
+
+function thrownBy(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
 
 function registerContextTierSelectionTests(): void {
   it.each(['minimax', 'minimax_api'])(
@@ -547,7 +657,7 @@ function registerCustomProviderPrefixFallbackTests(): void {
     const byokConfig: LocalConversationRuntimeConfig = {
       ...config,
       custom_provider: {
-        mafia: {
+        gateway: {
           models: {
             model: { limit: { context: 48_000, output: 6_000 } },
           },
@@ -567,24 +677,24 @@ function registerCustomProviderPrefixFallbackTests(): void {
         ],
       });
 
-    expect(selectFromAgentProfile('mafia/model')).toMatchObject({
-      providerId: 'custom_provider:mafia',
+    expect(selectFromAgentProfile('gateway/model')).toMatchObject({
+      providerId: 'custom_provider:gateway',
       modelId: 'model',
       contextWindow: 48_000,
       maxOutputTokens: 6_000,
     });
-    expect(() => selectFromAgentProfile('Mafia/model')).toThrow('Model Mafia/model');
-    expect(() => selectFromAgentProfile('mafia/MODEL')).toThrow('Model mafia/MODEL');
-    expect(() => selectFromAgentProfile('custom_provider:mafia/MISSING')).toThrow(
-      'Model custom_provider:mafia/MISSING',
+    expect(() => selectFromAgentProfile('Gateway/model')).toThrow('Model Gateway/model');
+    expect(() => selectFromAgentProfile('gateway/MODEL')).toThrow('Model gateway/MODEL');
+    expect(() => selectFromAgentProfile('custom_provider:gateway/MISSING')).toThrow(
+      'Model custom_provider:gateway/MISSING',
     );
 
     expect(() =>
-      selectFromAgentProfile('mafia/model', {
+      selectFromAgentProfile('gateway/model', {
         ...byokConfig,
-        provider: { ...byokConfig.provider, mafia: { models: {} } },
+        provider: { ...byokConfig.provider, gateway: { models: {} } },
       }),
-    ).toThrow('Model mafia/model');
+    ).toThrow('Model gateway/model');
     expect(() =>
       selectFromAgentProfile('minimax/model', {
         ...byokConfig,
@@ -601,18 +711,18 @@ function registerCustomProviderPrefixFallbackTests(): void {
         sources: [
           {
             source: 'explicit-selection',
-            selection: { model: 'mafia/model' },
+            selection: { model: 'gateway/model' },
             requireCatalog: true,
           },
         ],
       }),
-    ).toThrow('Model mafia/model');
+    ).toThrow('Model gateway/model');
     expect(
       resolveAgentModelSelection({
-        config: { ...byokConfig, defaultModel: 'mafia/model' },
+        config: { ...byokConfig, defaultModel: 'gateway/model' },
         sources: [],
       }),
-    ).toMatchObject({ providerId: 'mafia', modelId: 'model' });
+    ).toMatchObject({ providerId: 'gateway', modelId: 'model' });
   });
 
   it('resolves an Agent save whose catalog model id contains a slash', () => {
@@ -746,7 +856,7 @@ function registerMiniMaxM3SelectionTests(): void {
   it('uses Custom BYOK M3 effort options instead of its model name or reasoning flag', () => {
     const customM3 = (model: Record<string, unknown>): LocalConversationRuntimeConfig => ({
       ...config,
-      custom_provider: { mafia: { models: { 'MiniMax-M3': model } } },
+      custom_provider: { gateway: { models: { 'MiniMax-M3': model } } },
     });
     const select = (runtimeConfig: LocalConversationRuntimeConfig, effort: string) =>
       resolveAgentModelSelection({
@@ -754,7 +864,7 @@ function registerMiniMaxM3SelectionTests(): void {
         sources: [
           {
             source: 'agent-config',
-            selection: { model: 'custom_provider:mafia/MiniMax-M3', effort },
+            selection: { model: 'custom_provider:gateway/MiniMax-M3', effort },
             requireCatalog: true,
           },
         ],

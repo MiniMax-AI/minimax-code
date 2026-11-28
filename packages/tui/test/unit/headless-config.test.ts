@@ -29,15 +29,8 @@ describe('explicit headless config', () => {
         'runawayGuard:',
         '  enabled: false',
         'toolResultCompaction:',
-        '  enabled: false',
         '  maxInlineKiB: 48',
         '  mcpDetailsMaxInlineKiB: 40',
-        '  watermarkKiB: 384',
-        '  minSavingsKiB: 192',
-        '  minCandidateKiB: 3',
-        '  keepRecentRounds: 2',
-        'telemetry:',
-        '  enabled: true',
       ].join('\n'),
     );
 
@@ -50,15 +43,9 @@ describe('explicit headless config', () => {
       provider: { provider: { options: { apiKey: 'sk-test' } } },
       runawayGuard: { enabled: false },
       toolResultCompaction: {
-        enabled: false,
         maxInlineKiB: 48,
         mcpDetailsMaxInlineKiB: 40,
-        watermarkKiB: 384,
-        minSavingsKiB: 192,
-        minCandidateKiB: 3,
-        keepRecentRounds: 2,
       },
-      telemetry: { enabled: true, metrics: false, diagnostics: false },
     });
   });
 
@@ -74,20 +61,20 @@ describe('explicit headless config', () => {
     await expect(loadTuiRuntimeConfig(malformed, base)).rejects.toMatchObject({
       kind: 'config',
     });
+    const invalidSandbox = join(root, 'sandbox.yaml');
+    await writeFile(invalidSandbox, 'sandbox:\n  filesystem:\n    policy:\n      mode: danger_full_access\n');
+    await expect(loadTuiRuntimeConfig(invalidSandbox, base)).rejects.toMatchObject({
+      kind: 'config',
+      message: expect.stringContaining('sandbox: Invalid sandbox.filesystem.policy.mode'),
+    });
     await expect(loadTuiRuntimeConfig(invalidMode, base)).resolves.toMatchObject({
       dataDir: '/desktop/data',
       permissionMode: 'auto',
       runawayGuard: { enabled: true },
       toolResultCompaction: {
-        enabled: true,
         maxInlineKiB: 64,
         mcpDetailsMaxInlineKiB: 32,
-        watermarkKiB: 256,
-        minSavingsKiB: 256,
-        minCandidateKiB: 2,
-        keepRecentRounds: 5,
       },
-      telemetry: { enabled: false, metrics: false, diagnostics: false },
     });
   });
 });

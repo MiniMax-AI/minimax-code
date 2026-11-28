@@ -1,6 +1,9 @@
+import { dirname } from 'node:path';
 import { readFile } from 'node:fs/promises';
 
+import { prepareAuthDirectory } from './fs/owned-directory.js';
 import { atomicWritePrivateFile } from './fs/atomic-write.js';
+import { toPosixPermissionError } from './fs/permission-error.js';
 import type { AuthBuildEnv, AuthRegion } from './contracts.js';
 import type { PersistedCredentialStoreKind } from './credential-store/types.js';
 import type { RefreshOwner } from './refresh-owner.js';
@@ -136,15 +139,22 @@ function isOptionalString(value: unknown): boolean {
 }
 
 export class AuthStateStore {
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly root?: string,
+  ) {}
 
   async read(): Promise<AuthState | null> {
     let raw: string;
     try {
+      if (this.root && !(await prepareAuthDirectory(dirname(this.path), { root: this.root })))
+        return null;
       raw = await readFile(this.path, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw error;
+      // auth-state.json is read before auth.json, so a file left unreadable (for
+      // example by `sudo mcode`) must offer the same local reset.
+      throw toPosixPermissionError(error);
     }
     try {
       return parseState(JSON.parse(raw));
@@ -156,6 +166,6 @@ export class AuthStateStore {
 
   async write(state: AuthState): Promise<void> {
     const validated = parseState(state);
-    await atomicWritePrivateFile(this.path, `${JSON.stringify(validated, null, 2)}\n`);
+    await atomicWritePrivateFile(this.path, `${JSON.stringify(validated, null, 2)}\n`, this.root);
   }
 }

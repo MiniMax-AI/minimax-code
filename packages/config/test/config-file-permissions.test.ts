@@ -106,7 +106,10 @@ describe.skipIf(process.platform === "win32")(
         expect(temporaryMode).toBe(0o600);
         expect(fs.statSync(configPath).mode & 0o777).toBe(0o600);
         expect(fs.readFileSync(configPath, "utf8")).toBe(document);
-        expect(fs.readdirSync(dataDir)).toEqual(["config.yaml"]);
+        // No temporary credential file may remain; the config state marker is not one.
+        expect(fs.readdirSync(dataDir).filter((name) => name !== ".config-state.json")).toEqual([
+          "config.yaml",
+        ]);
       },
     );
 

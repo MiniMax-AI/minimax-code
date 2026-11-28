@@ -13,9 +13,17 @@ export interface LocalBashTiming {
   commandDeadlineAt?: number;
 }
 
+/**
+ * `maxManagedSeconds`: default and cap of a managed foreground command, for a
+ * host whose limit is lower than the desktop one. `maxForegroundSeconds`: most
+ * seconds a host runs one foreground command; a direct foreground command takes
+ * the lower of it and the ordinary 300s.
+ */
 export function resolveLocalBashTiming(
   timeout: number | undefined,
   mode: 'direct_foreground' | 'managed_foreground' | 'explicit_background',
+  maxManagedSeconds: number = MAX_MANAGED_BASH_TIMEOUT_SECONDS,
+  maxForegroundSeconds: number = MAX_FOREGROUND_BASH_TIMEOUT_SECONDS,
 ): LocalBashTiming {
   const normalizedTimeout =
     mode === 'managed_foreground' &&
@@ -37,13 +45,11 @@ export function resolveLocalBashTiming(
     mode === 'explicit_background'
       ? normalizedTimeout
       : mode === 'managed_foreground'
-        ? Math.min(
-            normalizedTimeout ?? MAX_MANAGED_BASH_TIMEOUT_SECONDS,
-            MAX_MANAGED_BASH_TIMEOUT_SECONDS,
-          )
+        ? Math.min(normalizedTimeout ?? maxManagedSeconds, maxManagedSeconds)
         : Math.min(
             normalizedTimeout ?? DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS,
             MAX_FOREGROUND_BASH_TIMEOUT_SECONDS,
+            maxForegroundSeconds,
           );
   return {
     commandTimeoutSeconds,

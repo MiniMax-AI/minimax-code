@@ -6,7 +6,8 @@ import { prepareConfigFileForRead, resolveConfigFromRaw, type Config } from './c
 export type ConfigFileErrorCode =
   | 'CONFIG_READ_FAILED'
   | 'CONFIG_PARSE_FAILED'
-  | 'CONFIG_ROOT_INVALID';
+  | 'CONFIG_ROOT_INVALID'
+  | 'CONFIG_SECTION_INVALID';
 
 export class ConfigFileError extends Error {
   readonly code: ConfigFileErrorCode;
@@ -27,6 +28,13 @@ export class ConfigFileError extends Error {
 
 export interface LoadConfigFromFileOptions {
   dataDir: string;
+  /**
+   * `fallback` (default) matches getConfig(): an invalid section uses its
+   * default and is listed in `configIssues`, so readers of the profile's own
+   * config.yaml keep working. `reject` throws CONFIG_SECTION_INVALID and is for
+   * files the user chose explicitly, such as `mcode exec --config`.
+   */
+  invalidSections?: 'reject' | 'fallback';
 }
 
 function readConfigDocument(configPath: string): Record<string, unknown> {
@@ -64,10 +72,26 @@ function readConfigDocument(configPath: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * Loads a config file by path. Unreadable, malformed or non-mapping files always
+ * throw. An invalid section falls back like getConfig() unless the caller asks
+ * for `invalidSections: 'reject'`.
+ */
 export function loadConfigFromFile(configPath: string, options: LoadConfigFromFileOptions): Config {
   if (fs.existsSync(configPath)) prepareConfigFileForRead(configPath);
 
-  return resolveConfigFromRaw(readConfigDocument(configPath), options.dataDir);
+  const config = resolveConfigFromRaw(readConfigDocument(configPath), options.dataDir);
+  const invalid = config.configIssues.filter((issue) => issue.kind === 'invalid_section');
+  if (invalid.length > 0 && options.invalidSections === 'reject') {
+    throw new ConfigFileError(
+      'CONFIG_SECTION_INVALID',
+      configPath,
+      `Config has invalid settings: ${configPath} (${invalid
+        .map((issue) => `${issue.section ?? 'config'}: ${issue.message}`)
+        .join('; ')})`,
+    );
+  }
+  return config;
 }
 
 export function readExplicitBetaFeatureFromFile(
@@ -80,4 +104,29 @@ export function readExplicitBetaFeatureFromFile(
   }
   const configured = (raw.beta as Record<string, unknown>)[feature];
   return typeof configured === 'boolean' ? configured : undefined;
+}
+
+/** The environment opt-out applies to all three interactive TUI upload channels. */
+export function resolveTuiTelemetryPolicy(
+  configPath: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): { usageEnabled: boolean; diagnosticUploadsEnabled: boolean } {
+  for (const name of ['MCODE_DISABLE_TELEMETRY', 'DO_NOT_TRACK']) {
+    if (/^(?:1|true|yes|on)$/iu.test(environment[name]?.trim() ?? '')) {
+      return { usageEnabled: false, diagnosticUploadsEnabled: false };
+    }
+  }
+
+  let usageEnabled = false;
+  try {
+    const { telemetry } = readConfigDocument(configPath);
+    usageEnabled =
+      telemetry != null &&
+      typeof telemetry === 'object' &&
+      Object.hasOwn(telemetry, 'enabled') &&
+      (telemetry as Record<string, unknown>).enabled === true;
+  } catch {
+    // Missing or malformed config isn't consent to collect usage events.
+  }
+  return { usageEnabled, diagnosticUploadsEnabled: true };
 }

@@ -15,7 +15,8 @@
     "@earendil-works/pi-ai": "workspace:*",
     "@earendil-works/pi-coding-agent": "workspace:*",
     "@mavis/agent-core": "workspace:^",
-    "gpt-tokenizer": "^3.4.0"
+    "gpt-tokenizer": "^3.4.0",
+    "@mavis/shared": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^20",

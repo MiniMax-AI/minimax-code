@@ -33,6 +33,32 @@ const MODEL_CONTEXT_ROLES = new Set([
   'description',
 ]);
 
+/**
+ * Nesting levels the serialized tree keeps; level 0 is a root. The desktop
+ * Browser broker rejects a result nested deeper than 32 levels (Electron
+ * `isStrictStructuredCloneValue`, depth 0 = the action result). In an
+ * inspect or query result a node at level k sits at depth 3 + 2k (result >
+ * semanticTree > roots[] > node, and children[] > node per level), and its
+ * deepest value (a `rect` or `state` field) at 5 + 2k. With 10 levels the
+ * deepest value is at 23, leaving 9 levels for any outer wrapper. A node on
+ * the next-to-last level lists its whole retained subtree as flat children
+ * (in tree order, nesting dropped) and is marked `flattened: true`, so no
+ * ref, role or name is lost.
+ */
+export const SEMANTIC_TREE_MAX_LEVELS = 10;
+
+function flattenSubtree(nodes: readonly AgentSemanticNode[], into: AgentSemanticNode[]): boolean {
+  let flattened = false;
+  for (const { children, ...node } of nodes) {
+    into.push(node);
+    if (children && children.length > 0) {
+      flattened = true;
+      flattenSubtree(children, into);
+    }
+  }
+  return flattened;
+}
+
 function subtreeCounts(
   node: SemanticNode,
   refs: ReadonlyMap<string, SemanticTargetRef>,
@@ -76,7 +102,11 @@ export function serializeSemanticTreePage(
       })
       .map(({ node }) => node);
 
-  const serialize = (node: SemanticNode, contextual = false): AgentSemanticNode | null => {
+  const serialize = (
+    node: SemanticNode,
+    contextual = false,
+    level = 0,
+  ): AgentSemanticNode | null => {
     const count = counts.get(node.id) ?? { anyActionable: 0, allowedActionable: 0 };
     const targetRef = node.targetKey ? refs.get(node.targetKey) : undefined;
     if (targetRef && !allowedRefs.has(targetRef.ref)) return null;
@@ -114,9 +144,14 @@ export function serializeSemanticTreePage(
     retainedNodes += 1;
     retainedBytes += estimatedBytes;
     const children = actionableFirst(node.children)
-      .map((child) => serialize(child, count.allowedActionable > 0 || contextual))
+      .map((child) => serialize(child, count.allowedActionable > 0 || contextual, level + 1))
       .filter((child): child is AgentSemanticNode => child !== null);
-    return children.length > 0 ? { ...base, children } : base;
+    if (children.length === 0) return base;
+    // Deeper levels stay nested here; the last kept level flattens them all.
+    if (level !== SEMANTIC_TREE_MAX_LEVELS - 2) return { ...base, children };
+    const flat: AgentSemanticNode[] = [];
+    const flattened = flattenSubtree(children, flat);
+    return { ...base, children: flat, ...(flattened ? { flattened: true as const } : {}) };
   };
 
   const roots = actionableFirst(tree.roots)

@@ -1,3 +1,4 @@
+import type { AllowedMetricName } from '@mavis/shared/local-runtime-logging/metrics';
 import type { PluginSystemOptions } from '../../contracts.js';
 import { PluginSystemError } from '../../errors.js';
 import type { PluginRepositoryScope } from './repository.js';
@@ -38,8 +39,8 @@ interface OfficialPluginAuthBarrierOptions {
   readonly isReady: () => boolean;
   readonly isLoggedOut?: () => boolean;
   readonly metrics?: {
-    incr(name: string, tags?: Record<string, string>): void;
-    latency(name: string, durationMs: number, tags?: Record<string, string>): void;
+    incr(name: AllowedMetricName, tags?: Record<string, string>): void;
+    latency(name: AllowedMetricName, durationMs: number, tags?: Record<string, string>): void;
   };
   readonly timeoutMs?: number;
 }

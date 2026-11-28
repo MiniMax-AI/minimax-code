@@ -16,7 +16,36 @@ import {
 } from './deliver-assets.js';
 import { isDataUrl } from './data-url.js';
 
-const DELIVER_ASSETS_WRAPPER_RE = /<(deliver-assets|deliver_assets)>([\s\S]*?)<\/\1>/g;
+function findDeliverAssetsWrapperRanges(
+  content: string,
+): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let pos = 0;
+  let hyphenExhausted = false;
+  let underscoreExhausted = false;
+  while (pos < content.length) {
+    const hyphenIdx = hyphenExhausted ? -1 : content.indexOf('<deliver-assets>', pos);
+    if (hyphenIdx === -1) hyphenExhausted = true;
+    const underscoreIdx = underscoreExhausted ? -1 : content.indexOf('<deliver_assets>', pos);
+    if (underscoreIdx === -1) underscoreExhausted = true;
+    if (hyphenIdx === -1 && underscoreIdx === -1) break;
+    const useHyphen =
+      hyphenIdx !== -1 && (underscoreIdx === -1 || hyphenIdx < underscoreIdx);
+    const openIdx = useHyphen ? hyphenIdx : underscoreIdx;
+    const closeTag = useHyphen ? '</deliver-assets>' : '</deliver_assets>';
+    const closeIdx = content.indexOf(closeTag, openIdx + 16);
+    if (closeIdx === -1) {
+      if (useHyphen) hyphenExhausted = true;
+      else underscoreExhausted = true;
+      pos = openIdx + 16;
+      continue;
+    }
+    const end = closeIdx + 17;
+    ranges.push({ start: openIdx, end });
+    pos = end;
+  }
+  return ranges;
+}
 
 export interface CollectMessageAssetItemsOptions extends ParseDeliverAssetsOptions {
   /**
@@ -33,20 +62,21 @@ function stripLineNumber(p: string): string {
 }
 
 export function extractDeliverAssetsWrappers(content: string): string {
-  const wrappers: string[] = [];
-  DELIVER_ASSETS_WRAPPER_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = DELIVER_ASSETS_WRAPPER_RE.exec(content)) !== null) {
-    wrappers.push(match[0]);
-  }
-
-  return wrappers.join('\n');
+  return findDeliverAssetsWrapperRanges(content)
+    .map(({ start, end }) => content.slice(start, end))
+    .join('\n');
 }
 
 export function stripDeliverAssetsWrappers(content: string): string {
-  DELIVER_ASSETS_WRAPPER_RE.lastIndex = 0;
-  return content.replace(DELIVER_ASSETS_WRAPPER_RE, '');
+  const ranges = findDeliverAssetsWrapperRanges(content);
+  if (ranges.length === 0) return content;
+  let out = '';
+  let cursor = 0;
+  for (const { start, end } of ranges) {
+    out += content.slice(cursor, start);
+    cursor = end;
+  }
+  return out + content.slice(cursor);
 }
 
 /**
@@ -54,9 +84,15 @@ export function stripDeliverAssetsWrappers(content: string): string {
  * asset index: strip `:line`, unify separators, drop trailing slashes, and
  * lowercase Windows drive letters.
  */
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 export function normalizeAssetPathKey(path: string): string {
   const trimmed = stripLineNumber(path.trim()).replace(/\\/g, '/');
-  const withoutTrailingSlash = trimmed.length > 1 ? trimmed.replace(/\/+$/u, '') : trimmed;
+  const withoutTrailingSlash = trimmed.length > 1 ? trimTrailingSlashes(trimmed) : trimmed;
   return /^[A-Z]:\//u.test(withoutTrailingSlash)
     ? withoutTrailingSlash[0]!.toLowerCase() + withoutTrailingSlash.slice(1)
     : withoutTrailingSlash;

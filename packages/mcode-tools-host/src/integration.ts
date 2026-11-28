@@ -16,6 +16,14 @@ export interface StartMcodeToolsHostIntegrationOptions {
   platform: NodeJS.Platform;
   region: McodeToolsRegion;
   bedrockLane?: string;
+  /** App-owned launcher directory; see `resolveMcodeToolsHostBinDir`. */
+  hostBinDir?: string;
+  /**
+   * Allocate a private broker directory instead of the fixed `<dataDir>/run` socket. Required
+   * whenever another host may share the dataDir, otherwise the later broker replaces the socket
+   * and capability the earlier App's launcher points at.
+   */
+  isolateBrokerInstance?: boolean;
   session: McodeToolsHostAuthSession;
   logger?: McodeToolsHostLogger;
 }
@@ -52,6 +60,7 @@ export async function startMcodeToolsHostIntegration(
   });
   const broker = await dependencies.startBroker({
     dataDir: options.dataDir,
+    ...(options.isolateBrokerInstance ? { isolateInstance: true } : {}),
     session: options.session,
     ...(options.logger ? { logger: options.logger } : {}),
   });
@@ -64,6 +73,7 @@ export async function startMcodeToolsHostIntegration(
       platform: options.platform,
       region: options.region,
       ...(options.bedrockLane ? { bedrockLane: options.bedrockLane } : {}),
+      ...(options.hostBinDir ? { hostBinDir: options.hostBinDir } : {}),
       brokerEndpoint: broker.endpoint,
       brokerCapabilityFile: broker.capabilityFile,
     });
@@ -71,7 +81,7 @@ export async function startMcodeToolsHostIntegration(
   } catch (error) {
     let cleanupError: unknown;
     try {
-      dependencies.removeLaunchers(options.dataDir, options.region);
+      dependencies.removeLaunchers(launcherOwnership(options));
     } catch (cause) {
       cleanupError = cause;
     }
@@ -87,6 +97,18 @@ export async function startMcodeToolsHostIntegration(
     }
     throw error;
   }
+}
+
+function launcherOwnership(
+  options: StartMcodeToolsHostIntegrationOptions,
+): Parameters<typeof removeMcodeToolsLaunchers>[0] {
+  return {
+    dataDir: options.dataDir,
+    executable: options.executable,
+    region: options.region,
+    platform: options.platform,
+    ...(options.hostBinDir ? { hostBinDir: options.hostBinDir } : {}),
+  };
 }
 
 function activeIntegration(
@@ -107,7 +129,7 @@ function activeIntegration(
       disposed = true;
       let launcherError: unknown;
       try {
-        dependencies.removeLaunchers(options.dataDir, options.region);
+        dependencies.removeLaunchers(launcherOwnership(options));
       } catch (error) {
         launcherError = error;
       }

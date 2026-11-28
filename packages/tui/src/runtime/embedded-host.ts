@@ -4,9 +4,15 @@ import type {
   CreatedLocalRuntimeHost,
 } from '@mavis/local-runtime-v2/process-local';
 import type { CliService } from '@mavis/local-runtime-v2/cli-service';
+import { guardTuiRuntimeOwner } from './owner-guard.js';
 import { resolveTuiReviewPromptDir } from './review-assets.js';
 import type { ProductBuildIdentity } from '@mavis/shared/product-build-identity';
-import { resolveMcodeBuildIdentity } from '../auth/environment.js';
+import {
+  isMcodeAdvisorAvailable,
+  resolveMcodeBuildIdentity,
+} from '../auth/environment.js';
+
+export { getTuiRuntimeOwnerConflict, type TuiRuntimeOwnerConflict } from './owner-guard.js';
 
 export type EmbeddedRuntimeHostOptions = Omit<
   CreateLocalRuntimeHostOptions,
@@ -50,6 +56,7 @@ export function projectEmbeddedRuntimeConfig(
       ...config.beta,
       codexOAuth: buildIdentity.isInternalBuild,
       mcodeTools: mcodeToolsEnabled && config.beta?.mcodeTools === true,
+      advisor: isMcodeAdvisorAvailable(config.beta?.advisor, buildIdentity),
     },
     memory: {
       ...config.memory,
@@ -64,6 +71,7 @@ export function projectEmbeddedRuntimeConfig(
   };
 }
 
+
 export async function createEmbeddedRuntimeHost(
   options: EmbeddedRuntimeHostOptions,
   factory: EmbeddedRuntimeHostFactory = createLocalRuntimeHostV2,
@@ -73,14 +81,15 @@ export async function createEmbeddedRuntimeHost(
       'Minimax Code embedded Runtime requires the local-runtime-v2 front door; legacy fallback is disabled.',
     );
   }
+  // Runs before `factory(...)` so this process has not written its own Runtime owner lease
+  // yet and the scan only sees leases belonging to other processes. It reports a live foreign
+  // owner only with explicit `MCODE_TUI_RUNTIME_OWNER_GUARD=warn|strict`; default startup skips it.
+  await guardTuiRuntimeOwner({ dataDir: options.dataDir });
   const { productCapabilities, ...runtimeOptions } = options;
   const configGetter = runtimeOptions.configGetter ?? getDefaultLocalRuntimeConfig;
   const host = await factory({
     ...runtimeOptions,
     reviewPromptDir: runtimeOptions.reviewPromptDir ?? resolveTuiReviewPromptDir(),
-    // Product ceilings belong to the embedded host rather than user config:
-    // TUI owns Matrix tooling and does not expose the Desktop relationship
-    // Memory experience.
     configGetter: () =>
       projectEmbeddedRuntimeConfig(
         configGetter(),

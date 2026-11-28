@@ -3,8 +3,12 @@ import { MANAGED_MINIMAX_PROVIDER_ID } from '../identity.js';
 import type { DiscoveredModel } from '../connectivity/discover-models.js';
 import { customProviderKind } from '../catalog/list-models.js';
 import { ModelProviderServiceContext } from './service-context.js';
-import { LocalModelProviderError, type ModelProviderTestOutcome } from '../contracts.js';
+import {
+  LocalModelProviderError,
+  type ModelProviderTestOutcome,
+} from '../contracts.js';
 import { enqueueProviderMutation, requireCacheStatusView } from './service-helpers.js';
+import { savedProviderKeyLabel } from '../byok-keys/operations.js';
 
 export async function testProvider(
   context: ModelProviderServiceContext,
@@ -30,7 +34,12 @@ async function testProviderNow(
   const result = await context.testResolvedTarget(target);
   const entry = context.toCacheEntry(result, target.fingerprint);
   await context.deps.cache.setProviderStatus(target.cacheKey, entry);
-  return { ok: result.ok, status: requireCacheStatusView(entry) };
+  const keyLabel = opts?.apiKeyOverride ? undefined : savedProviderKeyLabel(context, providerId);
+  return {
+    ok: result.ok,
+    status: requireCacheStatusView(entry),
+    ...(keyLabel ? { keyLabel } : {}),
+  };
 }
 
 export async function testModel(
@@ -55,7 +64,12 @@ async function testModelNow(
   const result = await context.testResolvedTarget(target);
   const entry = context.toCacheEntry(result, target.fingerprint);
   await context.deps.cache.setModelStatus(target.cacheKey, entry);
-  return { ok: result.ok, status: requireCacheStatusView(entry) };
+  const keyLabel = savedProviderKeyLabel(context, providerId);
+  return {
+    ok: result.ok,
+    status: requireCacheStatusView(entry),
+    ...(keyLabel ? { keyLabel } : {}),
+  };
 }
 
 export async function discoverModels(

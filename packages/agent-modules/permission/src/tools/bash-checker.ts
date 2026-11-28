@@ -39,16 +39,21 @@ import {
   buildTrashCommand,
   resolveHomeInTarget,
   resolveRmCommandPaths,
+  shellQuote,
 } from './bash-permission.js';
 import type { BashCheckContext } from './bash-context.js';
 import { findHeredocBodyRanges, type HeredocBodyRange } from './bash-split.js';
 import {
+  commandChangesDirectory,
   evaluatePathCapability,
   extractBashPathIntents,
+  isRelativeTraversalOperand,
   READ_PATH_COMMANDS,
   SEARCH_PATH_COMMANDS,
 } from './path-capability.js';
 import { pureReadFirstWord } from './bash-fast-allow.js';
+import { powerShellReadsAreAllowed } from './powershell-read-only.js';
+import { powerShellCopyMoveIsAllowed } from './powershell-copy-move.js';
 
 import {
   rewritePosixRm,
@@ -619,11 +624,6 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     const command = typeof input.command === 'string' ? input.command : undefined;
     if (!command) return undefined;
 
-    logger.info(
-      backgroundCtx(),
-      `BashToolPermissionChecker checkPermissions called, _toolName=${_toolName}, input=${JSON.stringify(input)}, context=${JSON.stringify(context)}`,
-    );
-
     const effectiveRules =
       context.sandboxEnabled && context.autoAllowBashIfSandboxed
         ? context.rules.filter(
@@ -660,7 +660,10 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
       writeAllowRules,
     };
 
-    const pathIntents = extractBashPathIntents(command);
+    const pathIntents = extractBashPathIntents(
+      command,
+      context.platform === 'win32' && context.shellFamily === 'posix',
+    );
 
     // Compute the bash static decision FIRST. A hard deny anywhere in the
     // command (e.g. a trailing `shred` / HARD-blocked subcommand) must take
@@ -729,35 +732,60 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
       // only surfaced when no intent denies.
       let pendingAsk: ToolCheckResult | undefined;
       let pendingAskImmune = false;
+      const changesDirectory = commandChangesDirectory(command);
       for (const intent of pathIntents) {
-        const pathDecision = evaluatePathCapability(intent.path, intent.action, context, {
-          // Grade each intent under the capability namespace that may authorize
-          // it: read → `read`, write/delete → `write`, and execute → its OWN
-          // `execute` namespace. Executing a script is read-and-run code, so it
-          // must NOT be authorizable by a generic `write(dir/**)` rule (a rule
-          // granted only to drop output files would otherwise let
-          // `source /downloads/x.sh` run) NOR by a broad `read` capability
-          // (external non-sensitive reads are allowed by default, which would
-          // wave through ANY external script). The dedicated `execute` namespace
-          // matches no user content rule, so an external script keeps ASKing;
-          // legitimate temp/workspace runs stay allowed via `allowTempWrite`
-          // below, and a previously-approved `bash`-namespace path rule is still
-          // honored via `originToolName`.
-          toolName:
-            intent.action === 'read' ? 'read' : intent.action === 'execute' ? 'execute' : 'write',
-          // `execute` shares the write temp/workspace fallback: executing a
-          // generated temp/workspace script (`bash /tmp/build.sh`) is a common
-          // flow that must stay allowed. Without this an execute intent is graded
-          // as a workspace-external write ASK and preempts the local-script
-          // allow below. A non-temp external script (`source ~/secret.sh`) still
-          // ASKs because it is neither temp nor workspace.
-          allowTempWrite:
-            intent.action === 'write' || intent.action === 'delete' || intent.action === 'execute',
-          // Approvals of bash path asks persist under the `bash` namespace
-          // (permission-flow applyDecision) — let the resolver honor them so the
-          // user is not re-prompted for an already-approved path.
-          originToolName: _toolName,
-        });
+        // Only shell operands use MSYS mounts; native filesystem tool paths do not.
+        const capabilityPath =
+          context.platform === 'win32' && context.shellFamily === 'posix'
+            ? (resolvePermissionPath(intent.path, context, 'posix').resolved ?? intent.path)
+            : intent.path;
+        // After `cd` / `pushd` a relative `..` operand no longer resolves against
+        // the session working directory, so its target cannot be judged here.
+        // Ask (auto mode routes this to the classifier) instead of guessing.
+        const pathDecision: ToolCheckResult =
+          changesDirectory && isRelativeTraversalOperand(intent.path)
+            ? {
+                behavior: 'ask',
+                reason: {
+                  type: 'safetyCheck',
+                  description: `The command changes directory before using the relative path ${intent.path}, so its target cannot be checked in advance.`,
+                  classifierApprovable: true,
+                },
+              }
+            : evaluatePathCapability(capabilityPath, intent.action, context, {
+                // Grade each intent under the capability namespace that may authorize
+                // it: read → `read`, write/delete → `write`, and execute → its OWN
+                // `execute` namespace. Executing a script is read-and-run code, so it
+                // must NOT be authorizable by a generic `write(dir/**)` rule (a rule
+                // granted only to drop output files would otherwise let
+                // `source /downloads/x.sh` run) NOR by a broad `read` capability
+                // (external non-sensitive reads are allowed by default, which would
+                // wave through ANY external script). The dedicated `execute` namespace
+                // matches no user content rule, so an external script keeps ASKing;
+                // legitimate temp/workspace runs stay allowed via `allowTempWrite`
+                // below, and a previously-approved `bash`-namespace path rule is still
+                // honored via `originToolName`.
+                toolName:
+                  intent.action === 'read'
+                    ? 'read'
+                    : intent.action === 'execute'
+                      ? 'execute'
+                      : 'write',
+                // `execute` shares the write temp/workspace fallback: executing a
+                // generated temp/workspace script (`bash /tmp/build.sh`) is a common
+                // flow that must stay allowed. Without this an execute intent is graded
+                // as a workspace-external write ASK and preempts the local-script
+                // allow below. A non-temp external script (`source ~/secret.sh`) still
+                // ASKs because it is neither temp nor workspace.
+                allowTempWrite:
+                  intent.action === 'write' ||
+                  intent.action === 'delete' ||
+                  intent.action === 'execute',
+                // Approvals of bash path asks persist under the `bash` namespace
+                // (permission-flow applyDecision) — let the resolver honor them so the
+                // user is not re-prompted for an already-approved path.
+                originToolName: _toolName,
+              });
         if (pathDecision.behavior === 'allow') continue;
         if (pathDecision.behavior === 'deny') {
           // Deny wins outright. Do NOT attach the rm→mavis-trash rewrite — a
@@ -843,7 +871,7 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
     if (
       decision.behavior === 'ask' &&
       pathIntents.length > 0 &&
-      isSimpleAuthorizedWriteRedirect(command, pathIntents, decision)
+      isSimpleAuthorizedWriteRedirect(command, pathIntents, decision, context)
     ) {
       decision = {
         behavior: 'allow',
@@ -880,6 +908,11 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         bypassImmune: false,
       };
     }
+
+    const powerShellAllow =
+      powerShellReadOnlyAllow(decision, command, context, _toolName) ??
+      powerShellCopyMoveAllow(decision, command, context, _toolName);
+    if (powerShellAllow) return powerShellAllow;
 
     // HARD_BLOCKED matches produce `deny`
     // directly from `checkBashPermission`. The bash-checker propagates the
@@ -1034,6 +1067,7 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
           originalCommand,
           rewrittenCommand,
           executionKind,
+          sessionId: context.sessionId,
           ...backgroundCtx(),
         },
         '[permission] Recoverable delete rewritten to host-owned mavis-trash argv',
@@ -1081,9 +1115,13 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         // command level (.cmd extension auto-resolved by Windows shell).
         const trashBin =
           context.platform === 'win32'
-            ? path.win32.join(dataDir, 'bin', 'mavis-trash.cmd')
+            ? path.win32.join(
+                dataDir,
+                'bin',
+                context.shellFamily === 'posix' ? 'mavis-trash' : 'mavis-trash.cmd',
+              )
             : path.join(dataDir, 'bin', 'mavis-trash');
-        const parsedRm = parseRmCommand(subcmd, context.platform);
+        const parsedRm = parseRmCommand(subcmd, context.platform, context.shellFamily);
         const rawTargetsWithMeta = parsedRm.targets;
         // Only HOME-expand unquoted targets; single/double-quoted or
         // backslash-escaped targets stay literal (matches bash semantics —
@@ -1092,10 +1130,13 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         // for the conservative rule around double-quoted `$HOME`.
         const rawTargets = rawTargetsWithMeta.map((t) => t.value);
         const resolvedTargets = rawTargetsWithMeta.map((t) =>
-          t.quoted ? t.value : resolveHomeInTarget(t.value),
+          (t.expandHome ?? !t.quoted) ? resolveHomeInTarget(t.value) : t.value,
         );
+        // Git Bash uses its own verified launcher, avoiding CMD re-expansion of
+        // filenames. Keep the executable path one literal Bash word as well.
+        const executable = context.shellFamily === 'posix' ? shellQuote(trashBin) : trashBin;
         const rewrittenSubcmd = [
-          buildTrashCommand(trashBin, rawTargetsWithMeta, parsedRm.force),
+          buildTrashCommand(executable, rawTargetsWithMeta, parsedRm.force),
           ...parsedRm.redirects,
         ].join(' ');
         rewrittenParts.set(subcmd, rewrittenSubcmd);
@@ -1170,6 +1211,7 @@ export class BashToolPermissionChecker implements ToolPermissionChecker {
         replacementCount: replacements.length,
         originalCommand,
         rewrittenCommand,
+        sessionId: context.sessionId,
         ...backgroundCtx(),
       },
       `[permission] rm-rewrite applied: ${replacements.length} subcommand(s) rewritten to mavis-trash`,
@@ -1231,6 +1273,62 @@ function decisionFromUserRule(decision: PermissionDecision): boolean {
   return false;
 }
 
+/**
+ * Windows PowerShell counterpart of the knownSafeCommand downgrade: a
+ * heuristic ASK on a provably read-only PowerShell command becomes ALLOW once
+ * every operand passes the read path capability. User rule asks, HARD-flagged
+ * asks and Full mode keep their existing handling.
+ */
+function powerShellReadOnlyAllow(
+  decision: PermissionDecision,
+  command: string,
+  context: ToolPermissionContext,
+  toolName: string,
+): ToolCheckResult | undefined {
+  if (decision.behavior !== 'ask') return undefined;
+  if (context.platform !== 'win32' || context.shellFamily !== 'powershell') return undefined;
+  if (context.mode === 'bypassPermissions') return undefined;
+  if (decisionFromUserRule(decision) || decisionContainsHardBlocked(decision)) return undefined;
+  if (!powerShellReadsAreAllowed(command, context, toolName)) return undefined;
+  return {
+    behavior: 'allow',
+    reason: {
+      type: 'safetyCheck',
+      description: 'Known read-only PowerShell command with allowed read paths.',
+      category: 'knownSafePowerShellCommand',
+    },
+    bypassImmune: false,
+  };
+}
+
+/**
+ * PowerShell counterpart of the `cp` / `mv` write-target gate: a heuristic
+ * ASK on a static Copy-Item / Move-Item becomes ALLOW once its sources pass
+ * the read (and, for a move, delete) capability and its destination passes
+ * the write capability. Guards match {@link powerShellReadOnlyAllow}.
+ */
+function powerShellCopyMoveAllow(
+  decision: PermissionDecision,
+  command: string,
+  context: ToolPermissionContext,
+  toolName: string,
+): ToolCheckResult | undefined {
+  if (decision.behavior !== 'ask') return undefined;
+  if (context.platform !== 'win32' || context.shellFamily !== 'powershell') return undefined;
+  if (context.mode === 'bypassPermissions') return undefined;
+  if (decisionFromUserRule(decision) || decisionContainsHardBlocked(decision)) return undefined;
+  if (!powerShellCopyMoveIsAllowed(command, context, toolName)) return undefined;
+  return {
+    behavior: 'allow',
+    reason: {
+      type: 'safetyCheck',
+      description: 'PowerShell copy or move with allowed source and destination paths.',
+      category: 'authorizedPowerShellCopyMove',
+    },
+    bypassImmune: false,
+  };
+}
+
 function isAuthorizedLocalScriptCommand(
   command: string,
   intents: ReturnType<typeof extractBashPathIntents>,
@@ -1261,6 +1359,7 @@ function isSimpleAuthorizedWriteRedirect(
   command: string,
   intents: ReturnType<typeof extractBashPathIntents>,
   decision: PermissionDecision,
+  shell: Pick<BashCheckContext, 'platform' | 'shellFamily'>,
 ): boolean {
   // Reached only after the path-capability loop allowed EVERY intent, so the
   // remaining question is purely whether the OLD classifier's ASK was a
@@ -1277,7 +1376,9 @@ function isSimpleAuthorizedWriteRedirect(
   // (`echo 'a|b' > /tmp/out`, `printf 'x;y' > /tmp/out`), wrongly forcing a safe
   // single /tmp/workspace write back to ASK/LLM.
   if (splitCommand(command).length !== 1) return false;
-  const firstWord = pureReadFirstWord(command);
+  // Same shell facts as the Step 9 fast allow, so a path-spelled binary
+  // (`/c/tools/cat`) never inherits a read-only name here either.
+  const firstWord = pureReadFirstWord(command, shell);
   if (!firstWord) return false;
   // A dynamic operand (`$VAR`, `${VAR}`, `$(…)`, backticks) OR a shell
   // glob / brace (`*`, `?`, `[…]`, `{…}`) is invisible to the static

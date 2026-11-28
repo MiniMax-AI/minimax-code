@@ -42,8 +42,17 @@ interface TuiAcpRuntimeInteraction {
 class RuntimeInteractionTerminated extends Error {}
 
 export interface RunTuiAcpInteractionsOptions {
+  /**
+   * The one Runtime whose event stream this loop consumes. Replies go back to this Runtime, the
+   * one that asked, even after another Runtime has replaced it.
+   */
   readonly runtime: TuiAcpRuntime;
   readonly connection: acp.AgentConnection;
+  /**
+   * Ends this loop without closing the connection, for example when a region switch replaced
+   * the Runtime. The loop then cancels its own pending interactions and projections.
+   */
+  readonly signal?: AbortSignal;
   readonly resolveSession: (runtimeSessionId: string) => ResolvedInteractionSession | undefined;
   readonly clientCapabilities: () => acp.ClientCapabilities;
   readonly onRuntimeEvent?: (event: TuiRuntimeEvent) => void;
@@ -71,9 +80,12 @@ export async function runTuiAcpInteractions(options: RunTuiAcpInteractionsOption
     options.projectionTimeoutMs ?? 5_000,
   );
   const interactions = createInteractionScheduler(options.connection);
+  const signal = options.signal
+    ? AbortSignal.any([options.connection.signal, options.signal])
+    : options.connection.signal;
   try {
-    for await (const event of options.runtime.watchEvents(options.connection.signal)) {
-      if (options.connection.signal.aborted) return;
+    for await (const event of options.runtime.watchEvents(signal)) {
+      if (signal.aborted) return;
       try {
         options.onRuntimeEvent?.(event);
       } catch {

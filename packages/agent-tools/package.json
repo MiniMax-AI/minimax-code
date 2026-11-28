@@ -32,6 +32,50 @@
     "./matrix": {
       "types": "./dist/cloud/matrix-tools/index.d.ts",
       "import": "./dist/cloud/matrix-tools/index.js"
+    },
+    "./core-tools": {
+      "types": "./src/core-tools/index.ts",
+      "import": "./dist/core-tools/index.js"
+    },
+    "./desktop/matrix-client": {
+      "types": "./src/desktop/matrix-client.ts",
+      "import": "./dist/desktop/matrix-client.js"
+    },
+    "./ask-user": {
+      "types": "./src/ask-user/index.ts",
+      "import": "./dist/ask-user/index.js"
+    },
+    "./mcp-disclosure": {
+      "types": "./src/mcp-disclosure/mcp-disclosure.ts",
+      "import": "./dist/mcp-disclosure/mcp-disclosure.js"
+    },
+    "./skill-catalog-window": {
+      "types": "./src/skill-catalog-window/index.ts",
+      "import": "./dist/skill-catalog-window/index.js"
+    },
+    "./multimodal-attachments": {
+      "types": "./src/shared/multimodal-attachments.ts",
+      "import": "./dist/shared/multimodal-attachments.js"
+    },
+    "./ptc": {
+      "types": "./src/ptc/index.ts",
+      "import": "./dist/ptc/index.js"
+    },
+    "./tool-policy": {
+      "types": "./src/tool-policy/index.ts",
+      "import": "./dist/tool-policy/index.js"
+    },
+    "./shell-quote": {
+      "types": "./src/shared/shell-quote.ts",
+      "import": "./dist/shared/shell-quote.js"
+    },
+    "./plugin-hooks/vendor-tool-response": {
+      "types": "./src/plugin-hooks/vendor-tool-response.ts",
+      "import": "./dist/plugin-hooks/vendor-tool-response.js"
+    },
+    "./ptc-script": {
+      "types": "./src/ptc-script/index.ts",
+      "import": "./dist/ptc-script/index.js"
     }
   },
   "dependencies": {
@@ -55,7 +99,8 @@
     "tar": "^7.5.22",
     "undici": "^8.10.2",
     "unpdf": "^1.6.2",
-    "zod": "^3"
+    "zod": "^3",
+    "@earendil-works/pi-ai": "workspace:*"
   },
   "devDependencies": {
     "@types/js-yaml": "^4",

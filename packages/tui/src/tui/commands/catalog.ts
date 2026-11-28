@@ -28,6 +28,8 @@ export interface TuiCommandContext {
   readonly canRetry: boolean;
   /** True when the paired temporary BTW side projection is visible. */
   readonly sideMode?: boolean;
+  /** False in a package that does not ship the advisor (`beta.advisor`). */
+  readonly advisorAvailable?: boolean;
 }
 
 /**
@@ -422,6 +424,17 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
     argumentHint: '[filter]',
   },
   {
+    ...TUI_COMMAND_DESCRIPTORS.advisor,
+    category: 'Runtime',
+    argumentHint: '[on | off]',
+    visibleWhen: (context) => context.advisorAvailable !== false,
+    unavailableReason: 'The advisor is turned off (beta.advisor: false in config.yaml).',
+    getArgumentCompletions: argumentCompleter([
+      ['on', 'Turn the advisor on for all sessions'],
+      ['off', 'Turn the advisor off for all sessions; their choices are kept'],
+    ]),
+  },
+  {
     name: 'provider',
     description: 'View providers and edit MiniMax credentials',
     category: 'Runtime',
@@ -446,7 +459,7 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
   },
   {
     name: 'add-dir',
-    description: 'Add a readable and writable workspace directory',
+    description: 'Add a directory to @ path completion',
     category: 'Input',
     argumentHint: '<path>',
     discoverability: 'search-only',

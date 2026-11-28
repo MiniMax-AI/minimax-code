@@ -4,6 +4,7 @@ import {
   type RuntimeEvent,
 } from '@mavis/agent-core/protocol';
 
+import { parseByokErrorStatus } from '../../service/model-system/index.js';
 import type { SessionRepository } from '../../service/session-system/index.js';
 import type {
   AgentEventBestEffortObserver,
@@ -148,7 +149,6 @@ export class SessionTurnLifecycleEventObserver implements AgentEventBestEffortOb
       });
       return;
     }
-    const error = event.payload.error;
     const message = terminalErrorMessage(event);
     this.options.publish({
       type: 'session.error',
@@ -156,9 +156,7 @@ export class SessionTurnLifecycleEventObserver implements AgentEventBestEffortOb
         ...common,
         status: 'error',
         ...(message ? { error: message } : {}),
-        ...(typeof error?.code === 'number' ? { errorCode: error.code } : {}),
-        ...(error ? { errorSource: 'agent-runtime' } : {}),
-        ...(error?.details ? { errorDetail: error.details } : {}),
+        ...terminalErrorFields(event.payload.error, message),
       },
     });
   }
@@ -170,6 +168,32 @@ function terminalMemoryStatus(
   if (status === 'completed') return 'finished';
   if (status === 'failed') return 'error';
   return 'aborted';
+}
+
+function terminalErrorFields(
+  error: RuntimeEvent['payload']['error'],
+  message: string | undefined,
+): {
+  errorCode?: number;
+  errorSource?: string;
+  errorDetail?: string;
+  errorProviderId?: string;
+} {
+  const errorCode = typeof error?.code === 'number' ? error.code : undefined;
+  const byok = parseByokErrorStatus(message, errorCode);
+  if (byok) {
+    return {
+      errorCode: byok.errorCode,
+      errorSource: byok.errorSource,
+      errorDetail: byok.errorDetail,
+      errorProviderId: byok.errorProviderId,
+    };
+  }
+  return {
+    ...(errorCode !== undefined ? { errorCode } : {}),
+    ...(error ? { errorSource: 'agent-runtime' } : {}),
+    ...(error?.details ? { errorDetail: error.details } : {}),
+  };
 }
 
 function terminalErrorMessage(event: RuntimeEvent): string | undefined {

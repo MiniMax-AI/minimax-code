@@ -5,8 +5,8 @@ import path from 'node:path';
 import { isPathAllowed } from '../../../../src/tools/fs-permission.js';
 import type { PathCheckContext } from '../../../../src/types.js';
 
-const dataDir = '/home/user/.minimax';
-const homeDir = '/home/user';
+const dataDir = '/Users/user/.minimax';
+const homeDir = '/Users/user';
 
 function sessionDir(sessionId: string): string {
   const encoded = `session_${Buffer.from(sessionId, 'utf8').toString('base64url')}`;
@@ -18,7 +18,7 @@ const otherSessionId = 'mvs_other_session_00002';
 
 function makeContext(overrides: Partial<PathCheckContext> = {}): PathCheckContext {
   return {
-    workingDirectory: '/home/user/project',
+    workingDirectory: '/Users/user/project',
     dataDir,
     homeDir,
     ...overrides,
@@ -277,7 +277,7 @@ describe('Session-owned readable path boundaries', () => {
  * Session's default workspace (its cwd), the user's attachments copied into
  * the asset store, and the Plan document it must keep up to date. Each is
  * readable only through a host-issued grant; everything next to it stays
- * private. Incident MCT-202610-A2VA9DM3: a Windows Session could not read its
+ * private. Incident a Windows Session could not read its
  * attachment, the ask could not be auto-approved, and the turn waited hours.
  */
 describe('runtime-handed paths under the private data directory', () => {

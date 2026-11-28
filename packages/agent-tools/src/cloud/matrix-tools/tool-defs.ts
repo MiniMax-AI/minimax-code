@@ -1,24 +1,26 @@
 /**
- * matrix-tools definitions: Inputs and outputs use cloud-runtime local workspace paths
- * (`*_file_path` / `*_dir_path` / `*_path_list`), mirroring early thrift IDL request fields while
- * hiding the remote service's sandbox concept.
+ * matrix-tools 工具 def 集合 —— 出入参全部改成 cloud-runtime 本地 workspace
+ * 路径(`*_file_path` / `*_dir_path` / `*_path_list`),mirror 早期 thrift IDL
+ * 的请求字段但屏蔽掉远端服务自己的 sandbox 概念。
  *
- * Design principles:
- * 1. Input media (image/audio/video) accepts only `*_file_path`. Implementations upload to OSS,
- *   generate a one-hour signed URL, and send `url` / `image_url` to mcp-server. The LLM sees no url
- *   / data / mime_type schema noise.
- * 2. Output files require `*_file_path`. Implementations fetch response CDN URLs into local paths;
- *   ToolResult contains those paths, requiring no second download.
- * 3. Integer fields (count / duration / pitch / sample_rate) use `Type.Integer()`; floating-point
- *   fields (speed / volume) use `Type.Number()`; enums use `Type.String({ description: 'a | b | c'
- *   })`. Thrift comments anticipate new values; unions would block LLM exploration at the schema
- *   boundary.
- * 4. Nested structs (image_info / audio_info / video_info / batch items) use `Type.Object({...})`,
- *   staying close to IDL but retaining only cloud-runtime-relevant fields.
- * 5. Put maximum-count constraints in descriptions, not typebox `maxItems`: the server validates
- *   them, and duplicate client validation can mislead the LLM on small batches.
- * 6. Tool names omit `matrix_` (capabilities provide the namespace); TS identifiers retain
- *   `Matrix*` to avoid collisions with daemon classes.
+ * 设计原则:
+ *   1. 输入文件(图/音/视频)只接受 `*_file_path` —— 工具实现内部把它上传到
+ *      OSS、生成 1 小时签名 URL,再以远端服务能消费的 `url` / `image_url` 形
+ *      态喂进 mcp-server。LLM 看不到 url / data / mime_type 等 schema 噪声。
+ *   2. 输出文件强制要求 `*_file_path` —— 工具实现内部拿到 mcp-server 响应里
+ *      的 CDN URL 后,主动 fetch 写回本地路径,LLM 拿到的 ToolResult 直接含
+ *      本地路径,不需要再二次 download
+ *   3. 整型字段(count / duration / pitch / sample_rate)用 `Type.Integer()`,
+ *      浮点字段(speed / volume)用 `Type.Number()`,枚举字段用
+ *      `Type.String({ description: 'a | b | c' })`(thrift 注释里"未来还会加",
+ *      用 union 会让 LLM 一旦试错就被 schema 卡死)
+ *   4. 嵌套复合 struct(image_info / audio_info / video_info / 各 batch 子项)
+ *      还是用 `Type.Object({...})`,字段尽量贴近 IDL 但只保留 cloud-runtime
+ *      关心的字段
+ *   5. max 数量约束写 description,不用 typebox `maxItems`(服务端会再校验
+ *      一次,客户端重复校验会让 LLM 在小批量场景误判)
+ *   6. tool name 不带 `matrix_` 前缀(命名空间靠 capability 而非前缀);TS
+ *      identifier 仍保留 `Matrix*` 前缀避免跟 daemon 同名 class 冲突
  */
 
 import { Type, type Static } from '@sinclair/typebox';
@@ -27,7 +29,7 @@ import type { ToolDefinition } from '@mavis/agent-core/tools';
 import { WebSearchToolDef } from '../../shared/web-search.js';
 
 // ────────────────────────────────────────────────────────────────────────────
-// Shared composite types: input media accepts only local workspace paths.
+// 公共复合类型 —— 输入媒体只接受 workspace 本地路径
 // ────────────────────────────────────────────────────────────────────────────
 
 const ImageInfoSchema = Type.Object({
@@ -58,11 +60,19 @@ const VideoInfoSchema = Type.Object({
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Web search — no file I/O.
+// Web search — 无文件 I/O
 // ────────────────────────────────────────────────────────────────────────────
 
 export const MatrixWebSearchToolDef = WebSearchToolDef;
 export type MatrixWebSearchInput = Static<typeof MatrixWebSearchToolDef.schema>;
+
+/**
+ * `web_fetch` has no cloud-runtime Matrix tool: it is a local-runtime tool whose
+ * router may delegate a single read to the server. It still needs a name in the
+ * shared path/timeout tables, and deliberately stays out of `MATRIX_TOOL_NAMES`
+ * so cloud-runtime never registers a model-visible tool for it.
+ */
+export const MATRIX_WEB_FETCH_TOOL_NAME = 'web_fetch';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Image understanding / synthesize / search / reverse-search
@@ -570,6 +580,7 @@ export type MatrixTranscribeAudioInput = Static<typeof MatrixTranscribeAudioTool
 
 export const MATRIX_TOOL_PATHS = {
   [MatrixWebSearchToolDef.name]: '/matrix/api/v1/mcp/web_search',
+  [MATRIX_WEB_FETCH_TOOL_NAME]: '/matrix/api/v1/mcp/web_fetch',
   [MatrixImagesUnderstandToolDef.name]: '/matrix/api/v1/mcp/images_understand',
   [MatrixImageSynthesizeToolDef.name]: '/matrix/api/v1/mcp/image_synthesize',
   [MatrixImagesSearchAndDownloadToolDef.name]: '/matrix/api/v1/mcp/images_search_and_download',
@@ -593,19 +604,27 @@ export const MATRIX_TOOL_PATHS = {
 // Per-tool HTTP timeout (ms) — overrides RemoteArchonServerAdapter's default
 // 15s. archon-server's `/matrix/api/v1/mcp/*` proxy forwards to mcp-server
 // which actually runs the work: text generation, diffusion, TTS, transcription.
-//   - Generation (image_synthesize / submit_video_generation / batch TTS / music, etc.):
-//     Server-side work can take minutes; extend to 10 minutes.
-//   - Non-generation (web_search / *_understand / transcribe_audio / get_voice_list):
-//     Extend to 2 minutes to cover vision/ASR LLM calls without leaving hung turns waiting too long.
-// Internal OSS uploads/downloads are excluded: they use ossMediaClient's own timeouts,
-// not archon-server `postJson`.
+//   - 生成类(image_synthesize / submit_video_generation / batch TTS / 音乐…):
+//     服务端可能跑数分钟,拉到 10 min。
+//   - 非生成类(web_search / *_understand / transcribe_audio / get_voice_list):
+//     拉到 2 min,够覆盖 vision/asr LLM 调用,又不会让 hang 住的 turn 等太久。
+// 工具内部多次调用 OSS 的 upload/download 不计在内 —— 它们走 ossMediaClient
+// 自己的 timeout,不经 archon-server `postJson`。
 // ────────────────────────────────────────────────────────────────────────────
 
 const MATRIX_GEN_TIMEOUT_MS = 600_000;
 const MATRIX_DEFAULT_TIMEOUT_MS = 120_000;
+/**
+ * Server-side page reading is a single bounded upstream call (provider read plus
+ * optional fallback), not an open-ended generation, so it gets its own budget
+ * well below the 2 min default. The local router falls back to a direct fetch
+ * once this elapses.
+ */
+export const MATRIX_WEB_FETCH_TIMEOUT_MS = 25_000;
 
 export const MATRIX_TOOL_TIMEOUTS = {
   [MatrixWebSearchToolDef.name]: MATRIX_DEFAULT_TIMEOUT_MS,
+  [MATRIX_WEB_FETCH_TOOL_NAME]: MATRIX_WEB_FETCH_TIMEOUT_MS,
   [MatrixImagesUnderstandToolDef.name]: MATRIX_DEFAULT_TIMEOUT_MS,
   [MatrixImageSynthesizeToolDef.name]: MATRIX_GEN_TIMEOUT_MS,
   [MatrixImagesSearchAndDownloadToolDef.name]: MATRIX_GEN_TIMEOUT_MS,

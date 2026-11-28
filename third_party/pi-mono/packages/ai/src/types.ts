@@ -293,6 +293,11 @@ export interface Usage {
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
+	/**
+	 * Single-turn context window footprint when `totalTokens` sums billed
+	 * tokens across multiple internal continuation requests.
+	 */
+	contextTokens?: number;
 	cost: {
 		input: number;
 		output: number;

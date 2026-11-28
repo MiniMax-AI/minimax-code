@@ -1,3 +1,5 @@
+import type { ExecAdvisorSummary } from './advisor-calls.js';
+
 export type TuiTurnRunStatus =
   | 'succeeded'
   | 'failed'
@@ -24,6 +26,18 @@ export interface TuiTurnRunModel {
   readonly thinking?: { readonly effort?: string };
 }
 
+export type TuiModelReplacementTier = 'runtime_fallback' | 'runtime_selection';
+export type TuiModelReplacementReason =
+  | 'requested_model_not_in_runtime_catalog'
+  | 'runtime_selected_different_effective_model';
+
+export interface TuiModelReplacement {
+  readonly requestedModel: TuiTurnRunModel;
+  readonly actualModel: TuiTurnRunModel;
+  readonly tier: TuiModelReplacementTier;
+  readonly reason: TuiModelReplacementReason;
+}
+
 export interface TuiTurnRunUsage {
   readonly totalTokens?: number;
   readonly inputTokens?: number;
@@ -47,10 +61,15 @@ export interface TuiTurnRunOutcome {
   readonly status: TuiTurnRunStatus;
   readonly answer?: string | null;
   readonly model?: TuiTurnRunModel;
+  /** The explicit --model or Session model used as the caller's request. */
+  readonly requestedModel?: TuiTurnRunModel;
+  readonly modelReplacement?: TuiModelReplacement;
   readonly usage?: TuiTurnRunUsage;
   readonly usageResponses?: readonly TuiTurnResponseUsage[];
   /** Other observed Turn activity has usage outside the completed-response projection. */
   readonly usageIncomplete?: boolean;
   readonly error?: TuiTurnRunError;
+  /** Present only when the main model called the advisor in this Turn. */
+  readonly advisor?: ExecAdvisorSummary;
   readonly durationMs: number;
 }

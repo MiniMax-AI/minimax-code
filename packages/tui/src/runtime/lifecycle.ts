@@ -5,6 +5,7 @@ import type {
 } from '@mavis/local-runtime-v2/process-local';
 import { getDefaultLocalRuntimeConfig } from '@mavis/local-runtime-v2';
 import {
+  ConfigFileError,
   currentBetaResolutionContext,
   getRuntimeBuildEnv,
   getRuntimeRegion,
@@ -21,9 +22,11 @@ import {
   type MCodeOAuthCore,
 } from '@mavis/oauth-core';
 import type { McodeToolsHostAuthSession } from '@mavis/mcode-tools-host';
+import { assertNestedRuntimeAllowed } from '@mavis/shared/nested-runtime-guard';
 import {
   createEmbeddedRuntimeHost,
   type EmbeddedRuntimeHost,
+  type EmbeddedRuntimeHostOptions,
   type EmbeddedRuntimeHostFactory,
 } from './embedded-host.js';
 import { createTuiRuntimeLogging, type TuiRuntimeLogging } from './logging.js';
@@ -63,6 +66,7 @@ import {
   type TuiBrowserProvider,
 } from './browser-provider.js';
 import { TuiDailyCheckinApplication } from '../checkin/application.js';
+import type { TuiPermissionMode } from '../application/permission-mode.js';
 import { TuiDailyCheckinHttpGateway } from '../checkin/http-gateway.js';
 import { createMcodeSharedAuthSession } from './auth-session.js';
 import type { McodeContextMode } from '@mavis/protocol/local';
@@ -84,13 +88,23 @@ export interface CreateTuiRuntimeOptions {
   promptMode?: CreateLocalRuntimeHostOptions['promptMode'];
   systemPromptOverrides?: CreateLocalRuntimeHostOptions['systemPromptOverrides'];
   surface?: TuiObservabilitySurface;
+  /** Product default for new Sessions; does not change the embedded Runtime identity. */
+  defaultAgentName?: string;
   /**
    * `--ptc`: new Sessions in this process use PTC regardless of `beta.ptc`.
    * Held in memory only; config.yaml is never rewritten by the flag.
    */
   ptcLaunchOverride?: boolean;
   observability?: TuiObservability;
+  diagnosticUploadsEnabled?: boolean;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
+  /**
+   * Where a permission mode change applies. `profile` (default) persists it to
+   * the config.yaml shared with Desktop and other Runtimes on the profile;
+   * `process` keeps it in this process's memory, like the `permissionMode` launch
+   * override, and never rewrites config.yaml.
+   */
+  permissionModeScope?: 'profile' | 'process';
   contextMode?: McodeContextMode;
   lane?: string;
 }
@@ -149,9 +163,10 @@ export async function createTuiRuntime(
   options: CreateTuiRuntimeOptions,
   dependencies: CreateTuiRuntimeDependencies = {},
 ): Promise<CreatedTuiRuntime> {
+  assertNestedRuntimeAllowed();
   const getSourceConfig = dependencies.getConfig ?? getDefaultLocalRuntimeConfig;
   const configPath = options.configPath ?? join(options.dataDir, 'config.yaml');
-  const browserUseToolingEnabled = readBrowserUseToolingOptIn(
+  const browserUseToolingEnabled = readBrowserUseToolingEnabled(
     configPath,
     dependencies.readExplicitBetaFeature ?? readExplicitBetaFeatureFromFile,
   );
@@ -179,6 +194,7 @@ export async function createTuiRuntime(
   const useSharedOAuth =
     Boolean(dependencies.sharedAuthCore) || !usesLegacyAuthTestHarness(dependencies);
   let sharedAuthContext: LocalRuntimeAuthContext | undefined;
+  let sharedAuthExpiresAtMs: number | undefined;
   let sharedAuthGeneration = 0;
   let sharedAuthProjectionRevision = 0;
   let sharedAuthProjectionPending: Promise<void> | undefined;
@@ -188,12 +204,26 @@ export async function createTuiRuntime(
   let applySharedLease:
     | ((signal?: AbortSignal, minValidityMs?: number) => Promise<void>)
     | undefined;
+  let waitForLatestSharedLease:
+    | ((signal?: AbortSignal, minValidityMs?: number) => Promise<void>)
+    | undefined;
   let resolveSharedFeedbackAuthContext:
     | ((forceRefresh: boolean, signal: AbortSignal) => Promise<LocalRuntimeAuthContext | undefined>)
     | undefined;
   const rawAuthContextGetter = useSharedOAuth
-    ? () => sharedAuthContext
-    : () => readAuthContext(options.dataDir, authScope);
+      ? () => {
+          if (
+            sharedAuthContext &&
+            sharedAuthExpiresAtMs !== undefined &&
+            Date.now() >= sharedAuthExpiresAtMs &&
+            !sharedAuthProjectionPending &&
+            !sharedAuthRecovery
+          ) {
+            void applySharedLease?.().catch(() => undefined);
+          }
+          return sharedAuthContext;
+        }
+      : () => readAuthContext(options.dataDir, authScope);
   const projectVerifiedIdentity = (auth: LocalRuntimeAuthContext | undefined) => {
     const accessToken = auth?.accessToken?.trim();
     if (!accessToken || auth?.realUserID?.trim()) return auth;
@@ -216,6 +246,7 @@ export async function createTuiRuntime(
     ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
   });
   let sharedAuthCore: CreateTuiRuntimeDependencies['sharedAuthCore'];
+  let initialSharedLeasePromise: Promise<void> = Promise.resolve();
   if (useSharedOAuth) {
     const activeSharedAuthCore =
       dependencies.sharedAuthCore ??
@@ -235,8 +266,10 @@ export async function createTuiRuntime(
       if (projectionRevision !== sharedAuthProjectionRevision) return;
       if (!lease) {
         sharedAuthContext = undefined;
+        sharedAuthExpiresAtMs = undefined;
         return;
       }
+      sharedAuthExpiresAtMs = lease.expiresAtMs;
       if (
         sharedAuthContext?.realUserID?.trim() &&
         sharedAuthContext.accessToken === lease.accessToken &&
@@ -267,9 +300,24 @@ export async function createTuiRuntime(
       }
     };
     applySharedLease = (signal, minValidityMs) => {
-      const pending = projectSharedLease(signal, minValidityMs);
+      const pending = projectSharedLease(signal, minValidityMs).finally(() => {
+        if (sharedAuthProjectionPending === pending) {
+          sharedAuthProjectionPending = undefined;
+        }
+      });
       sharedAuthProjectionPending = pending;
       return pending;
+    };
+    waitForLatestSharedLease = async (
+      signal?: AbortSignal,
+      minValidityMs?: number,
+    ): Promise<void> => {
+      let pending = applySharedLease?.(signal, minValidityMs);
+      while (pending) {
+        await pending;
+        if (pending === sharedAuthProjectionPending) break;
+        pending = sharedAuthProjectionPending;
+      }
     };
     resolveSharedFeedbackAuthContext = async (forceRefresh, signal) => {
       if (signal.aborted) throw signal.reason;
@@ -278,21 +326,24 @@ export async function createTuiRuntime(
         const loginEpoch = sharedAuthContext?.loginEpoch;
         sharedAuthProjectionRevision += 1;
         sharedAuthContext = undefined;
+        sharedAuthExpiresAtMs = undefined;
         const action = await activeSharedAuthCore.handleUnauthorized({
           generation: rejectedGeneration,
           loginEpoch,
         });
         if (action !== 'retry') return undefined;
       }
-      await applySharedLease?.(signal);
+      await waitForLatestSharedLease?.(signal);
       return sharedAuthContext;
     };
-    // Account checks surface transient failures; startup can still render local work.
-    await applySharedLease().catch(() => undefined);
+    // Account checks surface transient failures; start lease projection before subscribing
+    // the watcher and await it alongside mcode-tools readiness below.
+    initialSharedLeasePromise = applySharedLease().catch(() => undefined);
     stopSharedAuthWatch = activeSharedAuthCore.watch((status) => {
       if (!isSharedCredentialState(status)) {
         sharedAuthProjectionRevision += 1;
         sharedAuthContext = undefined;
+        sharedAuthExpiresAtMs = undefined;
         sharedAuthGeneration = status.generation;
         return;
       }
@@ -335,19 +386,27 @@ export async function createTuiRuntime(
     requestedMcodeTools,
     authScope.buildEnv,
   );
-  if (useSharedOAuth && sharedAuthCore) {
-    mcodeToolsReadiness = await (
-      dependencies.prepareMcodeToolsIntegration ?? prepareTuiMcodeToolsIntegration
-    )({
-      requested: requestedMcodeTools,
-      dataDir: options.dataDir,
-      buildEnv: authScope.buildEnv,
-      region: authScope.region,
-      session: createMcodeToolsBrokerAuthSession(sharedAuthCore),
-      entryUrl: import.meta.url,
-      ...(bedrockLane ? { bedrockLane } : {}),
-    });
-  }
+  const mcodeToolsAuthSession =
+    useSharedOAuth && sharedAuthCore
+      ? createMcodeToolsBrokerAuthSession(sharedAuthCore)
+      : undefined;
+  // Await initial lease projection in parallel with mcode-tools broker startup instead of
+  // stacking two independent cold-start waits.
+  const mcodeToolsReadinessPromise = mcodeToolsAuthSession
+    ? (dependencies.prepareMcodeToolsIntegration ?? prepareTuiMcodeToolsIntegration)({
+        requested: requestedMcodeTools,
+        dataDir: options.dataDir,
+        buildEnv: authScope.buildEnv,
+        region: authScope.region,
+        session: mcodeToolsAuthSession,
+        entryUrl: import.meta.url,
+        ...(bedrockLane ? { bedrockLane } : {}),
+      })
+    : Promise.resolve(mcodeToolsReadiness);
+  [, mcodeToolsReadiness] = await Promise.all([
+    initialSharedLeasePromise,
+    mcodeToolsReadinessPromise,
+  ]);
   const effectiveMcodeTools = mcodeToolsReadiness.ready;
   let authShutdown = false;
   const shutdownAuth = async (): Promise<void> => {
@@ -381,13 +440,12 @@ export async function createTuiRuntime(
       surface: options.surface ?? 'inspection',
     });
   const logging = (dependencies.createLogging ?? createTuiRuntimeLogging)(options.dataDir);
-  const hostOptions: Omit<
-    CreateLocalRuntimeHostOptions,
-    'runtimeOwnerKind' | 'runtimeMode' | 'legacyOpencodeEnabled' | 'enableLiveMcp'
-  > = {
+  let processPermissionMode = options.permissionMode;
+  const hostOptions: EmbeddedRuntimeHostOptions = {
     dataDir: options.dataDir,
     defaultWorkspaceDir: options.workspaceDir,
     appVersion: options.version,
+    ...(options.diagnosticUploadsEnabled === false ? { diagnosticUploadsEnabled: false } : {}),
     ...(options.promptMode ? { promptMode: options.promptMode } : {}),
     ...(options.systemPromptOverrides
       ? { systemPromptOverrides: options.systemPromptOverrides }
@@ -397,7 +455,14 @@ export async function createTuiRuntime(
       return {
         ...config,
         dataDir: options.dataDir,
-        ...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+        ...(processPermissionMode ? { permissionMode: processPermissionMode } : {}),
+        // Short-lived protocol and automation surfaces (ACP, exec, inspection) must not trigger
+        // full-profile storage retention sweeps or SQLite page reclaim on cold start.
+        ...(options.surface === 'acp' ||
+        options.surface === 'headless' ||
+        options.surface === 'inspection'
+          ? { smartCleanup: { ...config.smartCleanup, enabled: false } }
+          : {}),
         beta: {
           ...config.beta,
           mcodeTools: effectiveMcodeTools,
@@ -438,18 +503,30 @@ export async function createTuiRuntime(
         // A logout notification can clear the projection before the old 401 arrives.
         // Keep its response without clearing or recovering a different login.
         if (!requestEpoch || requestEpoch !== sharedAuthContext?.loginEpoch) return;
-        sharedAuthProjectionRevision += 1;
-        sharedAuthContext = undefined;
+        const recoveryRevision = ++sharedAuthProjectionRevision;
+        const clearStaleProjection = () => {
+          if (sharedAuthProjectionRevision === recoveryRevision) {
+            sharedAuthContext = undefined;
+            sharedAuthExpiresAtMs = undefined;
+          }
+        };
         const recovery = (async () => {
           try {
             const action = await sharedAuthCore.handleUnauthorized({
               generation: rejectedGeneration,
               loginEpoch: requestEpoch,
             });
-            if (action !== 'retry') return;
-            await applySharedLease();
+            if (action !== 'retry') {
+              clearStaleProjection();
+              return;
+            }
+            await waitForLatestSharedLease?.();
           } catch (error) {
-            if (error instanceof AuthSessionChangedError) await applySharedLease();
+            if (error instanceof AuthSessionChangedError) {
+              await waitForLatestSharedLease?.();
+              return;
+            }
+            clearStaleProjection();
             // The rejected request retains its original 401 when recovery cannot complete.
           }
         })().finally(() => {
@@ -471,14 +548,11 @@ export async function createTuiRuntime(
     ...(options.surface === 'headless' ||
     options.surface === 'acp' ||
     (dependencies.getDataEnvironment ?? resolveMcodeDataEnvironment)() === 'test'
-      ? { startupExecutionPolicy: 'quarantined' }
+      ? { startupExecutionPolicy: 'quarantined' as const }
       : {}),
-    // Only the interactive composer can show a next-message suggestion; headless
-    // exec, ACP and inspection runs would pay for an unseen request.
     promptSuggestionSurface: options.surface === 'tui',
-    // The TUI offers suggestions on every model, BYOK and OAuth included; the
-    // user turns the feature off globally with `promptSuggestion.enabled: false`.
     promptSuggestionUngated: options.surface === 'tui',
+    partialStreamRecoverySurface: options.surface === 'tui',
   };
   const startupStartedAt = performance.now();
   if (ownsObservability) {
@@ -514,6 +588,9 @@ export async function createTuiRuntime(
     return {
       host,
       adapter: new TuiRuntimeAdapter(host.cliService, {
+        ...(options.defaultAgentName !== undefined
+          ? { defaultAgentName: options.defaultAgentName }
+          : {}),
         workspaceDir: options.workspaceDir,
         observability,
         ...(options.ptcLaunchOverride
@@ -529,6 +606,14 @@ export async function createTuiRuntime(
             }
           : {}),
         ...(options.contextMode ? { contextMode: options.contextMode } : {}),
+        ...(options.permissionModeScope === 'process'
+          ? {
+              writeProcessPermissionMode: async (mode: TuiPermissionMode) => {
+                processPermissionMode = mode;
+                return mode;
+              },
+            }
+          : {}),
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)
           : (sessionId) => disposeTuiBrowserSessionStorage(options.dataDir, sessionId),
@@ -588,16 +673,12 @@ export async function createTuiRuntime(
         if (authState === 'logged_out') {
           sharedAuthProjectionRevision += 1;
           sharedAuthContext = undefined;
+          sharedAuthExpiresAtMs = undefined;
           return;
         }
         // A file-watch update may supersede this read. Login must wait for the
         // latest projection too, instead of returning with the old Bearer.
-        let pending = applySharedLease?.();
-        do {
-          await pending;
-          if (pending === sharedAuthProjectionPending) break;
-          pending = sharedAuthProjectionPending;
-        } while (pending);
+        await waitForLatestSharedLease?.();
       },
       shutdownAuth,
       shutdownLogging: () => logging.shutdown(),
@@ -646,14 +727,24 @@ export async function createTuiRuntime(
   }
 }
 
-function readBrowserUseToolingOptIn(
+/**
+ * TUI Browser is on unless this data directory's config.yaml sets
+ * `beta.browserUseTooling: false`. The shared Desktop default is ignored on
+ * purpose: Desktop activation is Plugin-managed. A missing config.yaml means
+ * the default; an unreadable or invalid one keeps Browser off, and startup
+ * rejects that config anyway.
+ */
+function readBrowserUseToolingEnabled(
   configPath: string,
   readFeature: typeof readExplicitBetaFeatureFromFile,
 ): boolean {
   try {
-    return readFeature(configPath, 'browserUseTooling') === true;
-  } catch {
-    return false;
+    return readFeature(configPath, 'browserUseTooling') !== false;
+  } catch (error) {
+    return (
+      error instanceof ConfigFileError &&
+      (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+    );
   }
 }
 

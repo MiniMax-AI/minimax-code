@@ -207,6 +207,72 @@
     "./memory-limits": {
       "types": "./src/memory-limits.ts",
       "import": "./dist/memory-limits.js"
+    },
+    "./base64": {
+      "types": "./src/base64.ts",
+      "import": "./dist/base64.js"
+    },
+    "./local-resource-errors": {
+      "types": "./src/local-resource-errors.ts",
+      "import": "./dist/local-resource-errors.js"
+    },
+    "./platform-error-codes": {
+      "types": "./src/platform-error-codes.ts",
+      "import": "./dist/platform-error-codes.js"
+    },
+    "./mcp-invoke-arguments": {
+      "types": "./src/mcp-invoke-arguments.ts",
+      "import": "./dist/mcp-invoke-arguments.js"
+    },
+    "./thinking-effort": {
+      "types": "./src/thinking-effort.ts",
+      "import": "./dist/thinking-effort.js"
+    },
+    "./byok-error-attribution": {
+      "types": "./src/byok-error-attribution.ts",
+      "import": "./dist/byok-error-attribution.js"
+    },
+    "./advisor-call": {
+      "types": "./src/advisor-call.ts",
+      "import": "./dist/advisor-call.js"
+    },
+    "./hard-link-support": {
+      "types": "./src/hard-link-support.ts",
+      "import": "./dist/hard-link-support.js"
+    },
+    "./sensitive-paths": {
+      "types": "./src/sensitive-paths.ts",
+      "import": "./dist/sensitive-paths.js"
+    },
+    "./rollout-bucket": {
+      "types": "./src/rollout-bucket.ts",
+      "import": "./dist/rollout-bucket.js"
+    },
+    "./local-runtime-managed-skills": {
+      "types": "./src/local-runtime-managed-skills.ts",
+      "import": "./dist/local-runtime-managed-skills.js"
+    },
+    "./next-step": {
+      "types": "./src/next-step.ts",
+      "import": "./dist/next-step.js"
+    },
+    "./local-runtime-logging/metric-registry": {
+      "types": "./src/local-runtime-logging/metric-registry.ts",
+      "import": "./dist/local-runtime-logging/metric-registry.js",
+      "default": "./dist/local-runtime-logging/metric-registry.js"
+    },
+    "./storage-cleanup": {
+      "types": "./src/storage-cleanup.ts",
+      "import": "./dist/storage-cleanup.js",
+      "default": "./dist/storage-cleanup.js"
+    },
+    "./miniapp-suggestion": {
+      "types": "./src/miniapp-suggestion.ts",
+      "import": "./dist/miniapp-suggestion.js"
+    },
+    "./nested-runtime-guard": {
+      "types": "./src/nested-runtime-guard.ts",
+      "import": "./dist/nested-runtime-guard.js"
     }
   },
   "types": "./src/index.ts",
@@ -337,12 +403,55 @@
       ],
       "safety-check-v2": [
         "src/safety-check-v2.ts"
+      ],
+      "base64": [
+        "src/base64.ts"
+      ],
+      "local-resource-errors": [
+        "src/local-resource-errors.ts"
+      ],
+      "platform-error-codes": [
+        "src/platform-error-codes.ts"
+      ],
+      "mcp-invoke-arguments": [
+        "src/mcp-invoke-arguments.ts"
+      ],
+      "thinking-effort": [
+        "src/thinking-effort.ts"
+      ],
+      "byok-error-attribution": [
+        "src/byok-error-attribution.ts"
+      ],
+      "advisor-call": [
+        "src/advisor-call.ts"
+      ],
+      "hard-link-support": [
+        "src/hard-link-support.ts"
+      ],
+      "sensitive-paths": [
+        "src/sensitive-paths.ts"
+      ],
+      "rollout-bucket": [
+        "src/rollout-bucket.ts"
+      ],
+      "local-runtime-managed-skills": [
+        "src/local-runtime-managed-skills.ts"
+      ],
+      "next-step": [
+        "src/next-step.ts"
+      ],
+      "miniapp-suggestion": [
+        "src/miniapp-suggestion.ts"
+      ],
+      "nested-runtime-guard": [
+        "src/nested-runtime-guard.ts"
       ]
     }
   },
   "dependencies": {
     "pino": "^10",
-    "pino-pretty": "^11"
+    "pino-pretty": "^11",
+    "minimatch": "10.2.6"
   },
   "devDependencies": {
     "@types/node": "^20",

@@ -1,20 +1,20 @@
 /**
- * matrix-tools package entry point: `buildCloudToolRegistry` (`../index.ts`) obtains all 18
- * RuntimeTools here.
+ * matrix-tools 工具包入口 —— `buildCloudToolRegistry`(`../index.ts`)从这里
+ * 一把抓 18 个 RuntimeTool。
  *
- * Responsibilities:
- * 1. Instantiate all matrix-tools classes, convert with toRuntimeTool, and return an array.
- * 2. Export `MATRIX_TOOL_NAMES` (RuntimeTool names), spread directly into
- *   `CAPABILITY_TO_TOOL_NAMES.Other`.
- * 3. Export `getSuppressedToolNamesForModelCapabilities`, the shared model capability gate consumed
- *   by cloud-runtime and local-runtime. During per-turn tool assembly, suppress fallback tools
- *   (`images_understand` / `videos_understand`) covered by native modalities.
+ * 单一职责:
+ *   1. 实例化全部 matrix-tools Tool class,toRuntimeTool 后返回数组
+ *   2. 导出 `MATRIX_TOOL_NAMES` 常量(RuntimeTool name 列表),
+ *      `CAPABILITY_TO_TOOL_NAMES.Other` 直接 spread 引用
+ *   3. 导出 `getSuppressedToolNamesForModelCapabilities` —— 共享的 model
+ *      capability gate(harness turn tool catalog 与 cloud tool catalog 都消费这一份 SoT),
+ *      用于在每 turn 装配 tool 时屏蔽已被原生模态吸收的兜底工具
+ *      (`images_understand` / `videos_understand`)
  *
- * Capability maps / withToolResultTruncation belong to `../index.ts::buildCloudToolRegistry` and
- * are applied during Map assembly, not here.
+ * 不在这里处理 capability map / withToolResultTruncation —— 那些都是
+ * `../index.ts::buildCloudToolRegistry` 的责任,在 Map 装配阶段统一套上。
  */
 
-import type { IModelCapabilities } from '@mavis/protocol';
 import { toRuntimeTool, type RuntimeTool } from '@mavis/agent-core/tools';
 import type { TSchema } from '@sinclair/typebox';
 
@@ -90,7 +90,15 @@ export type {
   MatrixUploadOptions,
   MatrixUploadResult,
 } from './types.js';
-export { MatrixMediaError, readMatrixMediaErrorKind } from './types.js';
+export {
+  MatrixAuthRequiredError,
+  MatrixMediaError,
+  readMatrixAuthRequiredReason,
+  readMatrixGatewayBackend,
+  readMatrixMediaErrorKind,
+  type MatrixAuthRequiredReason,
+  type MatrixGatewayBackend,
+} from './types.js';
 export { workspaceRootOf } from './path-guard.js';
 export {
   FileTransferError,
@@ -125,14 +133,15 @@ export { MatrixVideosUnderstandTool } from './tools/videos-understand.js';
 export { MatrixWebSearchTool } from './tools/web-search.js';
 
 /**
- * Tool name constants, used as the spread source for `CAPABILITY_TO_TOOL_NAMES.Other`.
+ * 工具名常量列表 —— 跟 `CAPABILITY_TO_TOOL_NAMES.Other` 的 spread 源。
  *
- * Ordering follows `api.post` declarations in `mcp_service.thrift::McpService` so new tools can be
- * inserted in the corresponding position; do not sort alphabetically.
+ * 顺序约定:跟 `mcp_service.thrift::McpService` 里 `api.post` 出现顺序一致,
+ * 方便后续新增工具时插入到对应位置;不要按 alphabetical 排序。
  *
- * **`web_search` is excluded**: like `web_fetch`, it belongs to `CAPABILITY_TO_TOOL_NAMES.WEB`, not
- * `Other` (`tools/index.ts` adds `MatrixWebSearchToolDef.name` directly to WEB). Pure MCP tools for
- * media / understanding / TTS remain in Other.
+ * **`web_search` 不在此列**:它跟 `web_fetch` 同属 web 检索类工具,挂在
+ * `CAPABILITY_TO_TOOL_NAMES.WEB` 而不是 `Other`(由 `tools/index.ts` 引用
+ * `MatrixWebSearchToolDef.name` 直接放进 WEB 列表)。media / understanding /
+ * tts 等纯 mcp 工具仍属 Other。
  */
 export const MATRIX_TOOL_NAMES = [
   MatrixImagesUnderstandToolDef.name,
@@ -161,19 +170,21 @@ export interface BuildMatrixToolsOptions {
 }
 
 /**
- * Factory: Instantiate all matrix-tools classes and return their toRuntimeTool conversions.
+ * 工厂:把所有 matrix-tools tool class 实例化,toRuntimeTool 后返回。
  *
- * Three dependencies:
- * - `archonServer`: RemoteArchonServerAdapter; all tools share its `postJson` path, with
- *   identity/auditing/rate limits handled by archon-server.
- * - `ossMediaClient`: OSS media client for file-I/O tools to upload LLM-specified workspace files
- *   and download CDN URLs. Non-file tools (web_search / get_voice_list) accept but do not use it.
- * - `workspaceScope`: Input boundary for path-guard. A string means workspaceRoot (legacy
- *   behavior); an object may add `extraInputRoots` (the local runtime's dataDir assets subtree).
- *   Every file_path input passes this boundary check; output paths always use only workspaceRoot.
+ * 三件依赖:
+ *   - `archonServer` —— RemoteArchonServerAdapter,所有 tool 共享同一份
+ *     `postJson` 出口,身份/审计/限流由 archon-server 统一兜
+ *   - `ossMediaClient` —— OSS 媒体客户端,文件 I/O 类工具用它把 LLM 给的
+ *     workspace 文件上传 + 拉回 CDN URL;非文件类工具(web_search /
+ *     get_voice_list)透传该依赖但不会调用
+ *   - `workspaceScope` —— path-guard 的输入 fence 范围:纯 string 即
+ *     workspaceRoot(旧行为);对象形式可附加 `extraInputRoots`(本地
+ *     runtime 的 dataDir assets 子树)。所有 file_path 入参都先过这
+ *     一关防越界;输出路径永远只认 workspaceRoot
  *
- * Elements have type `RuntimeTool<TSchema, MatrixToolContext>`, so callers can push directly into
- * `tools[]` without casts.
+ * 返回元素类型用 `RuntimeTool<TSchema, MatrixToolContext>`,caller 装进
+ * `tools[]` 数组直接 push 就行,不需要再 cast。
  */
 export function buildMatrixTools(
   archonServer: MatrixExecutor,
@@ -295,34 +306,5 @@ function withMatrixLogger(
 
 export { MATRIX_TOOL_PATHS };
 
-/**
- * Model capability → concrete tool suppression table.
- *
- * Tool authorization still starts from `agent_config.tools[]`; this table only
- * narrows redundant model-assist tools when the active model can natively
- * consume that modality. Model switches are explicit turn-level capability
- * changes, so the per-turn tool snapshot should reflect the current model's
- * real effective surface instead of keeping stale fallback tools around.
- *
- * Shared by both cloud-runtime (`packages/cloud-runtime/src/tools/index.ts`)
- * and local-runtime (`packages/local-runtime/src/api/local-native-tools.ts`)
- * so the two runtimes apply the same gate against the same `IModelCapabilities`
- * shape.
- */
-const MODEL_CAPABILITY_SUPPRESSED_TOOL_NAMES = {
-  supportImage: [MatrixImagesUnderstandToolDef.name],
-  supportVideo: [MatrixVideosUnderstandToolDef.name],
-} as const;
-
-export function getSuppressedToolNamesForModelCapabilities(
-  capabilities: IModelCapabilities | undefined,
-): Set<string> {
-  const suppressed = new Set<string>();
-  if (capabilities?.support_image === true) {
-    for (const name of MODEL_CAPABILITY_SUPPRESSED_TOOL_NAMES.supportImage) suppressed.add(name);
-  }
-  if (capabilities?.support_video === true) {
-    for (const name of MODEL_CAPABILITY_SUPPRESSED_TOOL_NAMES.supportVideo) suppressed.add(name);
-  }
-  return suppressed;
-}
+// The model-capability gate is host-neutral; it lives in tool-policy/.
+export { getSuppressedToolNamesForModelCapabilities } from '../../tool-policy/model-capability-suppression.js';

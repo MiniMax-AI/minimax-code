@@ -1,7 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, chmod, mkdir, readFile, rm, statfs } from 'node:fs/promises';
-import { platform } from 'node:os';
+import { chmod, mkdir, open, readFile, readlink, rm, statfs } from 'node:fs/promises';
+import { hostname, platform } from 'node:os';
 import { join, win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -14,6 +13,7 @@ import type {
   BrowserTransportEventListener,
 } from '@mavis/browser-core';
 import { describeCdpException } from '@mavis/browser-core';
+import { ensureChromeForTesting, isChromeExecutableCandidate } from './chrome-for-testing.js';
 import { CdpConnection } from './headless-cdp-connection.js';
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 900 };
@@ -22,6 +22,14 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000;
 const PROCESS_EXIT_TIMEOUT_MS = 3_000;
 const CHROME_PROFILE_LOCK_NAMES = ['SingletonCookie', 'SingletonLock', 'SingletonSocket'] as const;
+/** Unclaimed popups of owned pages kept at once; the oldest is closed beyond this. */
+export const MAX_PREPARED_RELATED_PAGES = 8;
+/**
+ * An unclaimed popup is closed after this. Only an action that started before
+ * the popup was created claims it, right after the action settles, so this
+ * outlives the longest claiming action (its navigation wait is capped at 120s).
+ */
+export const PREPARED_RELATED_PAGE_TTL_MS = 180_000;
 
 export function resolveChromeSandboxArgs(
   runtimePlatform: NodeJS.Platform,
@@ -71,19 +79,6 @@ export async function ensurePrivateBrowserDirectory(
   if (runtimePlatform !== 'win32') await chmod(directory, 0o700);
 }
 
-/** Probe a default Chrome candidate without reading the executable into memory. */
-export async function isChromeExecutableCandidate(
-  candidate: string,
-  runtimePlatform: NodeJS.Platform = platform(),
-): Promise<boolean> {
-  try {
-    await access(candidate, runtimePlatform === 'win32' ? constants.F_OK : constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Parse the endpoint Chrome writes for its atomically allocated debugging port. */
 export function parseDevToolsActivePort(contents: string): string | null {
   const [portLine, pathLine] = contents.split(/\r?\n/u);
@@ -97,11 +92,50 @@ export function parseDevToolsActivePort(contents: string): string | null {
 export interface HeadlessChromeLaunchOptions {
   readonly chromePath?: string;
   readonly dataDir: string;
+  /** Chrome for Testing cache, shared by every session of the data directory. Unused with `chromePath`. */
+  readonly chromeForTestingDir: string;
   readonly userDataDir?: string;
   readonly downloadDir?: string;
   readonly viewport?: { width: number; height: number };
   readonly extraArgs?: readonly string[];
   readonly commandTimeoutMs?: number;
+  /** `false` opens a visible Chrome window; default is headless. */
+  readonly headless?: boolean;
+}
+
+/** Where one launch saves downloads: the configured directory, else under its data directory. */
+export function resolveHeadlessDownloadDir(
+  options: Pick<HeadlessChromeLaunchOptions, 'dataDir' | 'downloadDir'>,
+): string {
+  return options.downloadDir ?? join(options.dataDir, 'browser', 'headless', 'downloads');
+}
+
+/** Fixed Chrome command line for one provider-owned launch. */
+export function resolveChromeLaunchArgs(options: {
+  readonly userDataDir: string;
+  readonly downloadDir: string;
+  readonly viewport: { width: number; height: number };
+  readonly headless: boolean;
+  readonly platformArgs: readonly string[];
+  readonly extraArgs?: readonly string[];
+}): string[] {
+  return [
+    ...(options.headless ? ['--headless=new'] : []),
+    '--remote-debugging-port=0',
+    '--remote-debugging-address=127.0.0.1',
+    `--user-data-dir=${options.userDataDir}`,
+    `--download-default-directory=${options.downloadDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-sync',
+    '--disable-features=Translate,MediaRouter',
+    ...options.platformArgs,
+    `--window-size=${options.viewport.width},${options.viewport.height}`,
+    'about:blank',
+    ...(options.extraArgs ?? []),
+  ];
 }
 
 /** Only the page session or one of its known child-frame sessions is owned by a page. */
@@ -148,17 +182,45 @@ export function isHeadlessSessionAlreadyAbsentError(error: unknown): boolean {
 export interface HeadlessChromePage {
   readonly targetId: string;
   readonly transport: BrowserPageTransport;
+  /**
+   * Resolve once the document is DOM-ready. Also resolves, with readyState
+   * `dialog`, when a JavaScript dialog pauses the page first: the page cannot
+   * progress until the model answers it, which Browser Core reports.
+   */
   waitForReady(
     timeoutMs?: number,
     signal?: AbortSignal,
   ): Promise<{ url: string; readyState: string }>;
   resetConnection(): Promise<void>;
+  /** See BrowserTransport.pendingJavaScriptDialog. */
+  pendingJavaScriptDialog(): Record<string, unknown> | undefined;
   close(): Promise<void>;
 }
 
-interface RelatedPageTarget {
-  readonly targetId: string;
-  readonly sessionId: string;
+interface PreparedRelatedPage {
+  readonly openerTargetId: string;
+  readonly page: HeadlessChromePageImpl;
+  /** Page session enabled; the target was then released to run. */
+  readonly ready: Promise<void>;
+  /** Creation order across this browser; see relatedPageCheckpoint. */
+  readonly sequence: number;
+  /** Absent in a visible window, whose popups only the user closes. */
+  readonly expiry: NodeJS.Timeout | undefined;
+}
+
+export interface RelatedPageClaim {
+  /** relatedPageCheckpoint() taken before the action; older popups are never claimed. */
+  readonly openedAfter: number;
+  /** Claim exactly this popup (the one whose dialog paused the action), not the oldest. */
+  readonly targetId?: string;
+  readonly signal?: AbortSignal;
+}
+
+/** See HeadlessChromeBrowser.watchRelatedPageDialog. */
+export interface RelatedPageDialogWatch {
+  /** Resolves with the target id of the popup whose dialog opened. */
+  readonly opened: Promise<string>;
+  readonly dispose: () => void;
 }
 
 /**
@@ -170,6 +232,16 @@ export class HeadlessChromeBrowser {
   private readonly process: ChildProcess;
   private readonly connection: CdpConnection;
   private readonly pages = new Set<HeadlessChromePageImpl>();
+  /**
+   * Popups of owned pages, keyed by target id, until takeRelatedPage adopts
+   * them. Map insertion order is creation order, so the first match is the
+   * oldest (FIFO). Bounded by MAX_PREPARED_RELATED_PAGES and
+   * PREPARED_RELATED_PAGE_TTL_MS; an evicted or expired popup is closed. A
+   * visible window has neither bound: an unclaimed popup there can be the
+   * user's own, such as a sign-in window opened between agent actions.
+   */
+  private readonly preparedRelatedPages = new Map<string, PreparedRelatedPage>();
+  private relatedPageSequence = 0;
   private readonly unexpectedExitListeners = new Set<(error: Error) => void>();
   private closed = false;
   private closePromise: Promise<void> | undefined;
@@ -195,6 +267,7 @@ export class HeadlessChromeBrowser {
     connection: CdpConnection,
     private readonly downloadDir: string,
     private readonly userDataDir: string,
+    private readonly headed = false,
   ) {
     this.process = process;
     this.connection = connection;
@@ -205,38 +278,67 @@ export class HeadlessChromeBrowser {
   static async launch(
     options: HeadlessChromeLaunchOptions,
     signal?: AbortSignal,
+    sources: ChromeExecutableSources = DEFAULT_CHROME_EXECUTABLE_SOURCES,
   ): Promise<HeadlessChromeBrowser> {
     throwIfAborted(signal);
-    const chromePath = await resolveChromePath(options.chromePath);
-    throwIfAborted(signal);
+    const { chromeForTestingDir } = options;
+    const chromePath = await resolveChromeExecutable(
+      {
+        ...(options.chromePath ? { chromePath: options.chromePath } : {}),
+        chromeForTestingDir,
+      },
+      signal,
+      sources,
+    );
     const userDataDir =
       options.userDataDir ?? join(options.dataDir, 'browser', 'headless', 'profile');
-    const downloadDir =
-      options.downloadDir ?? join(options.dataDir, 'browser', 'headless', 'downloads');
+    try {
+      return await HeadlessChromeBrowser.start(chromePath, userDataDir, options, signal);
+    } catch (error) {
+      if (options.chromePath?.trim()) throw error;
+      const local = await localChromeAfterStartFailure(
+        error,
+        { chromePath, chromeForTestingDir, userDataDir },
+        signal,
+        sources,
+      );
+      if (!local) throw error;
+      try {
+        return await HeadlessChromeBrowser.start(local, userDataDir, options, signal);
+      } catch (fallbackError) {
+        // Both failed: keep why Chrome for Testing did not start.
+        throw new Error(
+          `${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)} (local Chrome ${local}, after Chrome for Testing ${chromePath} failed to start: ${error instanceof Error ? error.message : String(error)})`,
+          { cause: error },
+        );
+      }
+    }
+  }
+
+  private static async start(
+    chromePath: string,
+    userDataDir: string,
+    options: HeadlessChromeLaunchOptions,
+    signal?: AbortSignal,
+  ): Promise<HeadlessChromeBrowser> {
+    throwIfAborted(signal);
+    const downloadDir = resolveHeadlessDownloadDir(options);
     await ensurePrivateBrowserDirectory(options.dataDir);
     await ensurePrivateBrowserDirectory(userDataDir);
     await ensurePrivateBrowserDirectory(downloadDir);
     const devToolsActivePortPath = join(userDataDir, 'DevToolsActivePort');
     await rm(devToolsActivePortPath, { force: true });
-    const viewport = options.viewport ?? DEFAULT_VIEWPORT;
-    const args = [
-      '--headless=new',
-      '--remote-debugging-port=0',
-      '--remote-debugging-address=127.0.0.1',
-      `--user-data-dir=${userDataDir}`,
-      `--download-default-directory=${downloadDir}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-background-networking',
-      '--disable-component-update',
-      '--disable-sync',
-      '--disable-features=Translate,MediaRouter',
-      ...resolveChromeSandboxArgs(platform(), process.geteuid?.()),
-      ...(await resolveChromeSharedMemoryArgs(platform())),
-      `--window-size=${viewport.width},${viewport.height}`,
-      'about:blank',
-      ...(options.extraArgs ?? []),
-    ];
+    const args = resolveChromeLaunchArgs({
+      userDataDir,
+      downloadDir,
+      viewport: options.viewport ?? DEFAULT_VIEWPORT,
+      headless: options.headless !== false,
+      platformArgs: [
+        ...resolveChromeSandboxArgs(platform(), process.geteuid?.()),
+        ...(await resolveChromeSharedMemoryArgs(platform())),
+      ],
+      ...(options.extraArgs ? { extraArgs: options.extraArgs } : {}),
+    });
     const child = spawn(chromePath, args, { stdio: ['ignore', 'ignore', 'ignore'] });
     try {
       const endpoint = await waitForDevToolsEndpoint(child, devToolsActivePortPath, signal);
@@ -246,7 +348,15 @@ export class HeadlessChromeBrowser {
         signal,
       );
       throwIfAborted(signal);
-      return new HeadlessChromeBrowser(child, connection, downloadDir, userDataDir);
+      const browser = new HeadlessChromeBrowser(
+        child,
+        connection,
+        downloadDir,
+        userDataDir,
+        options.headless === false,
+      );
+      await browser.holdNewPagesUntilEnabled(signal);
+      return browser;
     } catch (error) {
       await terminateChildProcess(child).catch(() => undefined);
       // This launch never acquired ownership when Chrome rejected an already
@@ -306,39 +416,43 @@ export class HeadlessChromeBrowser {
     return this.downloadDir;
   }
 
+  /**
+   * Sequence of the newest popup prepared so far. An action takes it before it
+   * runs and passes it to takeRelatedPage/watchRelatedPageDialog, so a popup
+   * opened earlier (by a page timer or an earlier action, never claimed) is not
+   * mistaken for the one this action opened.
+   */
+  relatedPageCheckpoint(): number {
+    return this.relatedPageSequence;
+  }
+
+  /**
+   * Adopt the oldest popup `openerTargetId` opened after `claim.openedAfter`
+   * (or exactly `claim.targetId`). The adopted page becomes an owned page: its
+   * own popups are prepared, and closing it or the browser closes it.
+   * Every popup is held by browser-level auto-attach before it runs
+   * (holdNewPagesUntilEnabled), so prepared popups are the only candidates.
+   */
   async takeRelatedPage(
     openerTargetId: string,
-    signal?: AbortSignal,
+    claim: RelatedPageClaim,
   ): Promise<HeadlessChromePage | undefined> {
     this.assertOpen();
-    throwIfAborted(signal);
+    throwIfAborted(claim.signal);
     if (![...this.pages].some((page) => page.targetId === openerTargetId)) return undefined;
-    const targets = await this.connection.send<{
-      targetInfos?: Array<{
-        targetId?: string;
-        type?: string;
-        openerId?: string;
-      }>;
-    }>('Target.getTargets', undefined, undefined, { signal });
-    const ownedTargetIds = new Set([...this.pages].map((page) => page.targetId));
-    const relatedTarget = targets.targetInfos?.find(
-      (target) =>
-        target.type === 'page' &&
-        target.openerId === openerTargetId &&
-        typeof target.targetId === 'string' &&
-        !ownedTargetIds.has(target.targetId),
-    );
-    if (!relatedTarget?.targetId) return undefined;
-    const attached = await this.connection.send<{ sessionId: string }>(
-      'Target.attachToTarget',
-      { targetId: relatedTarget.targetId, flatten: true },
-      undefined,
-      { signal },
-    );
-    return this.adoptRelatedPage(
-      { targetId: relatedTarget.targetId, sessionId: attached.sessionId },
-      signal,
-    );
+    const entry = this.findPreparedRelatedPage(openerTargetId, claim.openedAfter, claim.targetId);
+    if (!entry) return undefined;
+    this.takePreparedRelatedPage(entry.page.targetId);
+    this.pages.add(entry.page);
+    try {
+      await entry.ready;
+      throwIfAborted(claim.signal);
+      return entry.page;
+    } catch (error) {
+      this.pages.delete(entry.page);
+      await entry.page.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   onUnexpectedExit(listener: (error: Error) => void): () => void {
@@ -361,10 +475,13 @@ export class HeadlessChromeBrowser {
 
   private async closeOwnedResources(): Promise<void> {
     try {
-      await Promise.allSettled([...this.pages].map((page) => page.close()));
+      const preparedPages = [...this.preparedRelatedPages.keys()].flatMap(
+        (targetId) => this.takePreparedRelatedPage(targetId)?.page ?? [],
+      );
+      await Promise.allSettled([...this.pages, ...preparedPages].map((page) => page.close()));
       await this.connection.close().catch(() => undefined);
       await terminateChildProcess(this.process);
-      await removeChromeProfileLocks(this.userDataDir);
+      await removeChromeProfileLocks(this.userDataDir, this.process.pid);
     } finally {
       this.process.removeListener('error', this.processErrorListener);
       this.process.removeListener('exit', this.processExitListener);
@@ -372,29 +489,136 @@ export class HeadlessChromeBrowser {
     }
   }
 
-  private async adoptRelatedPage(
-    target: RelatedPageTarget,
-    signal?: AbortSignal,
-  ): Promise<HeadlessChromePage> {
-    this.assertOpen();
-    throwIfAborted(signal);
+  /**
+   * Resolve with the target id of a popup that `openerTargetId` opened after
+   * `openedAfter` (relatedPageCheckpoint), not adopted yet, once it shows a
+   * JavaScript dialog. A same-site popup shares its opener's renderer, so its
+   * dialog pauses the opener too: an action running there cannot finish
+   * until the dialog is answered in the popup.
+   */
+  watchRelatedPageDialog(openerTargetId: string, openedAfter: number): RelatedPageDialogWatch {
+    let resolveOpened: (targetId: string) => void = () => undefined;
+    const opened = new Promise<string>((resolve) => {
+      resolveOpened = resolve;
+    });
+    const check = (): void => {
+      for (const entry of this.preparedRelatedPages.values()) {
+        if (
+          entry.openerTargetId === openerTargetId &&
+          entry.sequence > openedAfter &&
+          entry.page.pendingJavaScriptDialog()
+        ) {
+          resolveOpened(entry.page.targetId);
+          return;
+        }
+      }
+    };
+    // A popup prepared during the watch registers its tracker after this
+    // listener; check once every listener has seen the event.
+    const dispose = this.connection.onEvent((event) => {
+      if (event.method === 'Page.javascriptDialogOpening') queueMicrotask(check);
+    });
+    check();
+    return { opened, dispose };
+  }
+
+  private findPreparedRelatedPage(
+    openerTargetId: string,
+    openedAfter: number,
+    targetId: string | undefined,
+  ): PreparedRelatedPage | undefined {
+    for (const entry of this.preparedRelatedPages.values()) {
+      if (entry.openerTargetId !== openerTargetId || entry.sequence <= openedAfter) continue;
+      if (targetId === undefined || entry.page.targetId === targetId) return entry;
+    }
+    return undefined;
+  }
+
+  /** Remove a prepared popup from the registry and stop its expiry; the caller owns the page. */
+  private takePreparedRelatedPage(targetId: string): PreparedRelatedPage | undefined {
+    const entry = this.preparedRelatedPages.get(targetId);
+    if (!entry) return undefined;
+    this.preparedRelatedPages.delete(targetId);
+    clearTimeout(entry.expiry);
+    return entry;
+  }
+
+  private discardPreparedRelatedPage(targetId: string): void {
+    void this.takePreparedRelatedPage(targetId)?.page.close();
+  }
+
+  /**
+   * A page Chrome opens by itself (window.open, a target=_blank link) can show
+   * a dialog from its first script. Attaching it after the opener's action
+   * returned is too late: Page.enable then waits on the paused renderer, and
+   * Chromium cannot answer a dialog it reported to no Page-enabled session
+   * ("No dialog is showing"), so the popup and its opener, which shares the
+   * renderer, stay paused. Browser-level auto-attach holds every new page
+   * before it runs; a popup of an owned page gets its page session enabled
+   * before it is released, every other new page is released at once.
+   */
+  private async holdNewPagesUntilEnabled(signal?: AbortSignal): Promise<void> {
+    this.connection.onEvent((event) => this.handleBrowserTargetEvent(event));
+    await this.connection.send(
+      'Target.setAutoAttach',
+      { autoAttach: true, waitForDebuggerOnStart: true, flatten: true, filter: [{ type: 'page' }] },
+      undefined,
+      signal ? { signal } : undefined,
+    );
+  }
+
+  private handleBrowserTargetEvent(event: BrowserTransportEvent): void {
+    if (event.sessionId) return;
+    const params = asRecord(event.params);
+    if (event.method === 'Target.detachedFromTarget') {
+      this.discardPreparedRelatedPage(asString(params.targetId));
+      return;
+    }
+    // Explicit Target.attachToTarget sessions and pages that existed before
+    // auto-attach was enabled are reported without waitingForDebugger.
+    if (event.method !== 'Target.attachedToTarget' || params.waitingForDebugger !== true) return;
+    const sessionId = asString(params.sessionId);
+    const targetInfo = asRecord(params.targetInfo);
+    const targetId = asString(targetInfo.targetId);
+    const openerTargetId = asString(targetInfo.openerId);
+    if (!sessionId || !targetId) return;
+    const release = (): Promise<unknown> =>
+      this.connection
+        .send('Runtime.runIfWaitingForDebugger', undefined, sessionId)
+        .catch(() => undefined);
+    if (this.closed || ![...this.pages].some((page) => page.targetId === openerTargetId)) {
+      // createPage attaches its own session; nothing else here is owned.
+      void release().then(() =>
+        this.connection.send('Target.detachFromTarget', { sessionId }).catch(() => undefined),
+      );
+      return;
+    }
     const page = new HeadlessChromePageImpl(
       this.connection,
-      target.targetId,
-      target.sessionId,
+      targetId,
+      sessionId,
       this.downloadDir,
       () => this.pages.size === 1,
       (closedPage) => this.pages.delete(closedPage),
     );
-    this.pages.add(page);
-    try {
-      await page.enable(signal);
-      throwIfAborted(signal);
-      return page;
-    } catch (error) {
-      this.pages.delete(page);
-      await page.close().catch(() => undefined);
-      throw error;
+    const ready = page.enable(undefined, release);
+    // Never leave a page held when enabling failed before the release was sent.
+    ready.catch(() => release());
+    this.relatedPageSequence += 1;
+    const expiry = this.headed
+      ? undefined
+      : setTimeout(() => this.discardPreparedRelatedPage(targetId), PREPARED_RELATED_PAGE_TTL_MS);
+    expiry?.unref();
+    this.preparedRelatedPages.set(targetId, {
+      openerTargetId,
+      page,
+      ready,
+      sequence: this.relatedPageSequence,
+      expiry,
+    });
+    if (!this.headed && this.preparedRelatedPages.size > MAX_PREPARED_RELATED_PAGES) {
+      const [oldestTargetId] = this.preparedRelatedPages.keys();
+      if (oldestTargetId) this.discardPreparedRelatedPage(oldestTargetId);
     }
   }
 
@@ -448,7 +672,19 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boole
   });
 }
 
-async function removeChromeProfileLocks(userDataDir: string): Promise<void> {
+/**
+ * Remove the Singleton* entries the exited Chrome left behind. They stay when
+ * SingletonLock names another live Chrome, which took the profile meanwhile:
+ * deleting its locks would let a further Chrome open the same profile.
+ */
+async function removeChromeProfileLocks(
+  userDataDir: string,
+  chromePid: number | undefined,
+): Promise<void> {
+  const lockOwner = await readlink(join(userDataDir, 'SingletonLock')).catch(() => undefined);
+  if (lockOwner !== `${hostname()}-${chromePid}` && (await isChromeProfileInUse(userDataDir))) {
+    return;
+  }
   await Promise.all(
     CHROME_PROFILE_LOCK_NAMES.map((name) =>
       rm(join(userDataDir, name), { force: true, recursive: true }).catch(() => undefined),
@@ -456,10 +692,51 @@ async function removeChromeProfileLocks(userDataDir: string): Promise<void> {
   );
 }
 
+/**
+ * Whether a live Chrome, possibly owned by another MCode process, holds this
+ * profile. POSIX Chrome writes `SingletonLock -> <host>-<pid>`; Windows Chrome
+ * keeps `lockfile` open exclusively. Unknown owners count as live: a wrong
+ * "in use" only costs an isolated profile, a wrong "free" makes Chrome hand
+ * the launch to the other process and exit.
+ */
+export async function isChromeProfileInUse(
+  userDataDir: string,
+  runtimePlatform: NodeJS.Platform = platform(),
+): Promise<boolean> {
+  if (runtimePlatform === 'win32') {
+    try {
+      const handle = await open(join(userDataDir, 'lockfile'), 'r+');
+      await handle.close();
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+    }
+  }
+  let owner: string;
+  try {
+    owner = await readlink(join(userDataDir, 'SingletonLock'));
+  } catch {
+    return false;
+  }
+  const separator = owner.lastIndexOf('-');
+  const pid = Number(owner.slice(separator + 1));
+  if (separator <= 0 || owner.slice(0, separator) !== hostname() || !Number.isInteger(pid)) {
+    return true;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
 class HeadlessChromePageImpl implements HeadlessChromePage {
   private closed = false;
   private readonly attachedFrames = new Map<string, BrowserAttachedFrame>();
   private eventDisposer: (() => void) | undefined;
+  /** `Page.javascriptDialogOpening` params of the dialog still open on this page. */
+  private openDialog: Record<string, unknown> | undefined;
 
   constructor(
     private readonly connection: CdpConnection,
@@ -474,34 +751,53 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
     return this;
   }
 
-  async enable(signal?: AbortSignal): Promise<void> {
+  pendingJavaScriptDialog(): Record<string, unknown> | undefined {
+    return this.openDialog;
+  }
+
+  /**
+   * Enable the page session. `releaseHeldTarget` resumes a page Chrome holds
+   * for the debugger (holdNewPagesUntilEnabled): it is sent right after the
+   * enable commands, not after their replies. A popup without a renderer yet
+   * (a `noopener` / target=_blank link opens one in a new process) cannot
+   * answer Page.enable until its navigation runs, which the hold blocks. The
+   * session queues the commands in order, so Page events still reach this
+   * session before the page's first script.
+   */
+  async enable(signal?: AbortSignal, releaseHeldTarget?: () => Promise<unknown>): Promise<void> {
     this.eventDisposer?.();
-    this.eventDisposer = this.connection.onEvent((event) => this.trackAttachedTarget(event));
+    this.eventDisposer = this.connection.onEvent((event) => {
+      this.trackAttachedTarget(event);
+      this.trackOpenDialog(event);
+    });
     const options = signal ? { signal } : undefined;
-    // Keep auto-attach scoped to this already-attached page session. A
-    // browser-level command would also attach unrelated top-level tabs and
-    // would require a second global target demultiplexer in this provider.
-    await this.send(
-      'Target.setAutoAttach',
-      { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-      undefined,
-      options,
-    );
-    await this.send('Page.enable', undefined, undefined, options);
-    await this.send('Runtime.enable', undefined, undefined, options);
-    await this.send('DOM.enable', undefined, undefined, options);
-    await this.send('Network.enable', undefined, undefined, options).catch((error) => {
+    const ignoreUnlessAborted = (error: unknown): void => {
       if (signal?.aborted) throw error;
-    });
-    await this.send('Page.setLifecycleEventsEnabled', { enabled: true }, undefined, options);
-    await this.send(
-      'Page.setDownloadBehavior',
-      { behavior: 'allow', downloadPath: this.downloadDir },
-      undefined,
-      options,
-    ).catch((error) => {
-      if (signal?.aborted) throw error;
-    });
+    };
+    const commands = [
+      // Keep frame auto-attach scoped to this already-attached page session.
+      // The browser owner's own auto-attach only holds new top-level pages
+      // (holdNewPagesUntilEnabled); frames stay demultiplexed per page here.
+      this.send(
+        'Target.setAutoAttach',
+        { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+        undefined,
+        options,
+      ),
+      this.send('Page.enable', undefined, undefined, options),
+      this.send('Runtime.enable', undefined, undefined, options),
+      this.send('DOM.enable', undefined, undefined, options),
+      this.send('Network.enable', undefined, undefined, options).catch(ignoreUnlessAborted),
+      this.send('Page.setLifecycleEventsEnabled', { enabled: true }, undefined, options),
+      this.send(
+        'Page.setDownloadBehavior',
+        { behavior: 'allow', downloadPath: this.downloadDir },
+        undefined,
+        options,
+      ).catch(ignoreUnlessAborted),
+    ];
+    if (releaseHeldTarget) commands.push(releaseHeldTarget());
+    await Promise.all(commands);
   }
 
   send<T = unknown>(
@@ -595,9 +891,16 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
     throwIfAborted(signal);
     const deadline = Date.now() + Math.max(1_000, Math.min(120_000, Math.floor(timeoutMs)));
     let navigationFailure: string | undefined;
+    // A dialog pauses the page: the running poll would wait on it until its
+    // deadline, so the dialog aborts it and is returned below.
+    let pausedPoll = new AbortController();
     const dispose = this.onEvent((event) => {
-      if (event.method !== 'Network.loadingFailed') return;
       if (!isHeadlessRootSessionEvent(event.sessionId, this.sessionId)) return;
+      if (event.method === 'Page.javascriptDialogOpening') {
+        pausedPoll.abort();
+        return;
+      }
+      if (event.method !== 'Network.loadingFailed') return;
       const params = asRecord(event.params);
       if (asString(params.type) !== 'Document' || params.canceled === true) return;
       navigationFailure = asString(params.errorText) || 'Document navigation failed';
@@ -606,12 +909,16 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
       while (Date.now() <= deadline) {
         throwIfAborted(signal);
         if (navigationFailure) throw new Error(`NAVIGATION_FAILED: ${navigationFailure}`);
+        if (this.openDialog) {
+          return { url: asString(this.openDialog.url), readyState: 'dialog' };
+        }
+        pausedPoll = new AbortController();
         try {
           const state = await this.evaluate<{ url: string; readyState: string }>(
             '({ url: location.href, readyState: document.readyState })',
             {
               timeoutMs: Math.min(5_000, Math.max(1, deadline - Date.now())),
-              ...(signal ? { signal } : {}),
+              signal: signal ? AbortSignal.any([signal, pausedPoll.signal]) : pausedPoll.signal,
             },
           );
           if (
@@ -621,7 +928,8 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
             return state;
           }
         } catch {
-          // A navigation can replace the execution context between polls.
+          // A navigation can replace the execution context between polls; a
+          // dialog aborts the paused poll and is returned above.
         }
         await delay(50);
       }
@@ -650,6 +958,8 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
     });
     this.sessionId = attached.sessionId;
     this.attachedFrames.clear();
+    // Chromium does not report a dialog to the replacement session.
+    this.openDialog = undefined;
     await this.enable();
   }
 
@@ -670,6 +980,21 @@ class HeadlessChromePageImpl implements HeadlessChromePage {
 
   private assertOpen(): void {
     if (this.closed) throw new Error('Headless Chrome page is closed');
+  }
+
+  private trackOpenDialog(event: BrowserTransportEvent): void {
+    // Chromium reports dialogs, also those of OOPIFs, on the page session.
+    if (!isHeadlessRootSessionEvent(event.sessionId, this.sessionId)) return;
+    if (event.method === 'Page.javascriptDialogOpening') {
+      this.openDialog = asRecord(event.params);
+    } else if (event.method === 'Page.javascriptDialogClosed') {
+      this.openDialog = undefined;
+    } else if (
+      event.method === 'Page.frameNavigated' &&
+      !asRecord(asRecord(event.params).frame).parentId
+    ) {
+      this.openDialog = undefined;
+    }
   }
 
   private trackAttachedTarget(event: BrowserTransportEvent): void {
@@ -718,6 +1043,9 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+/** Chrome did not open DevTools: a spawn error, an exit during startup, or a timeout. */
+class ChromeStartError extends Error {}
+
 async function waitForDevToolsEndpoint(
   child: ChildProcess,
   devToolsActivePortPath: string,
@@ -734,10 +1062,10 @@ async function waitForDevToolsEndpoint(
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (processError) {
-        throw new Error(`CHROME_START_FAILED: ${processError.message}`);
+        throw new ChromeStartError(`CHROME_START_FAILED: ${processError.message}`);
       }
       if (childProcessExited(child)) {
-        throw new Error(
+        throw new ChromeStartError(
           `Chrome exited during startup (${child.exitCode !== null ? `code ${child.exitCode}` : `signal ${child.signalCode ?? 'unknown'}`})`,
         );
       }
@@ -750,8 +1078,8 @@ async function waitForDevToolsEndpoint(
       }
       await delay(100);
     }
-    if (processError) throw new Error(`CHROME_START_FAILED: ${processError.message}`);
-    throw new Error(
+    if (processError) throw new ChromeStartError(`CHROME_START_FAILED: ${processError.message}`);
+    throw new ChromeStartError(
       `Timed out waiting for Chrome DevTools${lastError ? `: ${String(lastError)}` : ''}`,
     );
   } finally {
@@ -796,15 +1124,86 @@ export function resolveDefaultChromeCandidates(
   return candidates;
 }
 
-async function resolveChromePath(explicit?: string): Promise<string> {
-  if (explicit?.trim()) return explicit;
-  const candidates = resolveDefaultChromeCandidates();
-  for (const candidate of candidates) {
-    if (await isChromeExecutableCandidate(candidate)) return candidate;
+export interface ChromeExecutableSources {
+  readonly ensureChromeForTesting: (options: {
+    cacheDir: string;
+    signal?: AbortSignal;
+  }) => Promise<string>;
+  readonly findLocalChrome: () => Promise<string | undefined>;
+}
+
+const DEFAULT_CHROME_EXECUTABLE_SOURCES: ChromeExecutableSources = {
+  ensureChromeForTesting,
+  findLocalChrome: async () => {
+    for (const candidate of resolveDefaultChromeCandidates()) {
+      if (await isChromeExecutableCandidate(candidate)) return candidate;
+    }
+    return undefined;
+  },
+};
+
+/** Local Chrome chosen after Chrome for Testing failed, per cache, for this process. */
+const localChromeFallbacks = new Map<string, string>();
+
+/**
+ * Configured path first, then the pinned Chrome for Testing build, then a
+ * local Chrome install. A successful local fallback is reused for the process
+ * lifetime so an offline host does not retry the download on every launch.
+ * HeadlessChromeBrowser.launch also falls back when the build cannot start;
+ * see localChromeAfterStartFailure.
+ */
+export async function resolveChromeExecutable(
+  options: { readonly chromePath?: string; readonly chromeForTestingDir: string },
+  signal?: AbortSignal,
+  sources: ChromeExecutableSources = DEFAULT_CHROME_EXECUTABLE_SOURCES,
+): Promise<string> {
+  if (options.chromePath?.trim()) return options.chromePath;
+  const cacheDir = options.chromeForTestingDir;
+  const remembered = localChromeFallbacks.get(cacheDir);
+  if (remembered) return remembered;
+  let chromeForTestingError: unknown;
+  try {
+    return await sources.ensureChromeForTesting({ cacheDir, ...(signal ? { signal } : {}) });
+  } catch (error) {
+    throwIfAborted(signal);
+    chromeForTestingError = error;
   }
+  const local = await sources.findLocalChrome();
+  if (local) {
+    localChromeFallbacks.set(cacheDir, local);
+    return local;
+  }
+  const reason =
+    chromeForTestingError instanceof Error
+      ? chromeForTestingError.message
+      : String(chromeForTestingError);
   throw new Error(
-    'Chrome executable not found; configure browser.chromePath or set MCODE_CHROME_PATH',
+    `Chrome executable not found: Chrome for Testing is unavailable (${reason}) and no local Chrome was found; configure browser.chromePath or set MCODE_CHROME_PATH`,
+    { cause: chromeForTestingError },
   );
+}
+
+/**
+ * The local Chrome to start once after a Chrome for Testing build installed
+ * but did not start here (musl libc, an unsupported OS version, blocked by
+ * policy, a broken extract). Like a failed download, the choice is kept for
+ * the cache. Undefined when the failed executable was already the local
+ * fallback, startup was cancelled, or Chrome exited because another live
+ * Chrome holds the profile, which is not the build's fault.
+ */
+async function localChromeAfterStartFailure(
+  error: unknown,
+  failed: { chromePath: string; chromeForTestingDir: string; userDataDir: string },
+  signal: AbortSignal | undefined,
+  sources: ChromeExecutableSources,
+): Promise<string | undefined> {
+  if (!(error instanceof ChromeStartError) || signal?.aborted) return undefined;
+  if (localChromeFallbacks.get(failed.chromeForTestingDir) === failed.chromePath) return undefined;
+  if (await isChromeProfileInUse(failed.userDataDir)) return undefined;
+  const local = await sources.findLocalChrome();
+  if (!local || local === failed.chromePath) return undefined;
+  localChromeFallbacks.set(failed.chromeForTestingDir, local);
+  return local;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

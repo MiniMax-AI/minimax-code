@@ -4,6 +4,7 @@ export type TuiProcessStopSource =
   | 'signal'
   | 'uncaughtException'
   | 'unhandledRejection'
+  | 'stdin.error'
   | 'stdout.error'
   | 'stderr.error'
   | 'suspend.failure'
@@ -32,7 +33,7 @@ export interface TuiProcessStopCause {
 const DEAD_TERMINAL_CODES = new Set(['EIO', 'EPIPE', 'ENOTCONN', 'EOF']);
 
 export function isDeadTerminalFailure(source: TuiProcessStopSource, error: unknown): boolean {
-  return isTerminalOutputSource(source) && hasDeadTerminalCode(error);
+  return isTerminalStreamSource(source) && hasDeadTerminalCode(error);
 }
 
 function hasDeadTerminalCode(error: unknown): boolean {
@@ -45,6 +46,11 @@ function hasDeadTerminalCode(error: unknown): boolean {
   );
 }
 
-function isTerminalOutputSource(source: TuiProcessStopSource): boolean {
-  return source === 'stdout.error' || source === 'stderr.error' || source.startsWith('terminal.');
+function isTerminalStreamSource(source: TuiProcessStopSource): boolean {
+  return (
+    source === 'stdin.error' ||
+    source === 'stdout.error' ||
+    source === 'stderr.error' ||
+    source.startsWith('terminal.')
+  );
 }

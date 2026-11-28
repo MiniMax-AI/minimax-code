@@ -2,6 +2,8 @@ import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, resolve } from 'node:path';
 import type { TuiAttachment } from '../../../application/invocation.js';
+import type { TuiPastedTextSummary } from '../../../types/invocation.js';
+import { inferTuiAudioPdfMimeType } from '../../../application/audio-pdf-mime.js';
 import { inferTuiNativeVideoMimeType } from '../../../application/video-mime.js';
 import { resolveWslPath } from '../../../host/wsl-path.js';
 import { sanitizeTerminalText } from '../../rendering/terminal-text.js';
@@ -11,13 +13,29 @@ import { getTuiTerminalImagePasteFallbackPath } from './terminal-image-paste.js'
 export type { TuiAttachment } from '../../../application/invocation.js';
 
 export function tuiAttachmentLabel(
-  attachment: { type: 'image' | 'file'; mimeType: string; fileName: string },
+  attachment: {
+    type: 'image' | 'file';
+    mimeType: string;
+    fileName: string;
+    pastedText?: Pick<TuiPastedTextSummary, 'lineCount' | 'charCount'>;
+  },
   index: number,
 ): string {
   if (attachment.type === 'image') return `[Image #${index + 1}]`;
-  if (!attachment.mimeType.startsWith('video/')) return `[File #${index + 1}]`;
+  if (attachment.pastedText) {
+    const { lineCount, charCount } = attachment.pastedText;
+    return lineCount > 1
+      ? `[Pasted text #${index + 1} +${lineCount} lines]`
+      : `[Pasted text #${index + 1} ${charCount} chars]`;
+  }
+  const kind = attachment.mimeType.startsWith('video/')
+    ? 'Video'
+    : attachment.mimeType.startsWith('audio/')
+      ? 'Audio'
+      : undefined;
+  if (!kind) return `[File #${index + 1}]`;
   const name = attachment.fileName.replaceAll(/[\u0000-\u001F\u007F[\]]/gu, '_').trim();
-  return `[Video #${index + 1} ${name || 'video'}]`;
+  return `[${kind} #${index + 1} ${name || kind.toLowerCase()}]`;
 }
 
 export interface ResolveTuiAttachmentOptions {
@@ -37,7 +55,6 @@ const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   '.json': 'application/json',
   '.log': 'text/plain',
   '.md': 'text/markdown',
-  '.pdf': 'application/pdf',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
   '.tsv': 'text/tab-separated-values',
@@ -89,6 +106,7 @@ export async function resolveTuiAttachment(
   const fileName = basename(filePath);
   const mimeType =
     MIME_BY_EXTENSION[extname(fileName).toLowerCase()] ??
+    inferTuiAudioPdfMimeType(fileName) ??
     inferTuiNativeVideoMimeType(fileName) ??
     'application/octet-stream';
   return {

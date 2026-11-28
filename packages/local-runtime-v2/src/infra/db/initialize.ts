@@ -5,6 +5,10 @@ import {
   type DatabaseBackupResult,
   type DatabaseBackupRetentionResult,
 } from './backup.js';
+import {
+  repairTurnIngressAllocatorHighWater,
+  type TurnIngressAllocatorRepair,
+} from './turn-ingress-allocator-recovery.js';
 import { runMigrations } from './migrate.js';
 import { ALL_MIGRATIONS } from './migrations.js';
 import { migration as queryCollapseMigration } from './migrations/session/migration-0016-create-query-collapse-view-states.js';
@@ -55,6 +59,8 @@ export interface DatabaseInitializationResult {
   readonly degradedLegacySessionCount: number;
   readonly recoveredProjectPreferenceCount: number;
   readonly skippedSessionProjectRepairCount: number;
+  readonly repairedTurnIngressAllocator?: TurnIngressAllocatorRepair;
+  readonly turnIngressAllocatorRepairError?: string;
 }
 
 export async function initializeDatabase(options: {
@@ -73,10 +79,13 @@ export async function initializeDatabase(options: {
   reportDatabaseMigration(options.onMigration, 'started', startedAtEpochMs, pendingVersions.length);
   try {
     const backupStartedAtMs = Date.now();
+    const appliedMaxVersion = applied.size > 0 ? Math.max(...applied) : 0;
     const backup = await createDatabaseBackupIfPending({
       database: options.database,
       dataDir: options.dataDir,
-      pending: pendingVersions.length > 0,
+      ...(pendingVersions.length > 0
+        ? { campaign: { appliedMaxVersion, pendingVersions } }
+        : {}),
     });
     const backupMs = Math.max(0, Date.now() - backupStartedAtMs);
     const migrationsStartedAtMs = Date.now();
@@ -104,6 +113,7 @@ export async function initializeDatabase(options: {
       migration32Pending: pendingVersions.includes(32),
     });
     runMigrations(options.database.rawDb, ALL_MIGRATIONS);
+    const turnIngressAllocator = repairTurnIngressAllocatorWithoutBlockingStartup(options.database);
     const migrationsMs = Math.max(0, Date.now() - migrationsStartedAtMs);
     const schemaCheckStartedAtMs = Date.now();
     assertDatabaseSchemaConsistent(options.database.rawDb);
@@ -134,6 +144,7 @@ export async function initializeDatabase(options: {
       degradedLegacySessionCount: sessionRecovery.degradedCount,
       recoveredProjectPreferenceCount,
       skippedSessionProjectRepairCount,
+      ...turnIngressAllocator,
     };
   } catch (error) {
     reportDatabaseMigration(
@@ -253,5 +264,21 @@ function reportDatabaseMigration(
     );
   } catch {
     // Synchronous notification only: never wait for delivery or replace a DB error.
+  }
+}
+
+function repairTurnIngressAllocatorWithoutBlockingStartup(
+  database: DatabaseClient,
+): Pick<
+  DatabaseInitializationResult,
+  'repairedTurnIngressAllocator' | 'turnIngressAllocatorRepairError'
+> {
+  try {
+    const repaired = repairTurnIngressAllocatorHighWater(database);
+    return repaired ? { repairedTurnIngressAllocator: repaired } : {};
+  } catch (error) {
+    return {
+      turnIngressAllocatorRepairError: error instanceof Error ? error.message : String(error),
+    };
   }
 }

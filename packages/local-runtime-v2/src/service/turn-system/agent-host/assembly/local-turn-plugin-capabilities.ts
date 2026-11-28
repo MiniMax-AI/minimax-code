@@ -373,11 +373,12 @@ function mergeSearchableTools(
     input.plan.deferred ? input.plan.deferredRegistry : [],
   );
   for (const tool of selected.searchable) deferredRegistry.set(tool.def.name, tool);
+  const deferredEntries = [...deferredRegistry.values()].map((tool) => ({
+    tool,
+    source: 'configured' as const,
+  }));
   const index = buildOrReuseIndex(
-    [...deferredRegistry.values()].map((tool) => ({
-      tool,
-      source: 'configured' as const,
-    })),
+    deferredEntries,
     { maxSchemaTextLen: input.options.maxSchemaTextLen },
   );
   const estimate = input.options.estimateTokens ?? estimateToolTokens;
@@ -386,6 +387,7 @@ function mergeSearchableTools(
     deferred: true,
     inlineTools: input.plan.inlineTools,
     deferredRegistry,
+    deferredEntries,
     index,
     stats: {
       candidateCount:

@@ -7,6 +7,7 @@ import { ProcessTerminal, setKeybindings, type Terminal, type TuiMode } from './
 import { detectProcessTerminalCapabilities } from './platform/terminal-capabilities.js';
 import {
   installTuiProcessGuards,
+  installTuiProcessWarningGuard,
   type TuiProcessFailureContext,
 } from './platform/process-guards.js';
 import { createObservedTerminal } from './platform/observed-terminal.js';
@@ -21,8 +22,8 @@ import {
 } from '../host/tui-keybindings.js';
 import { createTuiApp, type CreateTuiAppOptions, type TuiApp } from './app.js';
 import type { CreatedTuiRuntime, CreateTuiRuntimeDependencies } from '../runtime/lifecycle.js';
-import { parseHeadlessModelOverride } from '../headless/model-selection.js';
-import type { TuiRuntime, TuiWorkspaceRoot } from '../runtime/port.js';
+import { parseAdvisorOverride, parseHeadlessModelOverride } from '../headless/model-selection.js';
+import type { TuiAdvisorSelection, TuiRuntime, TuiWorkspaceRoot } from '../runtime/port.js';
 import { createDeferredTuiRuntime } from '../runtime/deferred.js';
 import {
   captureTuiIncidentBestEffort,
@@ -33,7 +34,21 @@ import {
   type TuiIncidentReporter,
   type TuiObservability,
 } from '../observability/index.js';
-import { resolveMcodeAuthEnvironment } from '../auth/environment.js';
+import {
+  TUI_CRASH_OUTCOMES,
+  createTuiClientMetrics,
+  noopTuiClientMetrics,
+  resolveTuiRunOutcome,
+  withTuiClientMetrics,
+  type CreateTuiClientMetricsOptions,
+  type TuiClientMetrics,
+} from '../observability/client-metrics.js';
+import { isVitestRuntime } from '../observability/vitest-runtime.js';
+import {
+  isMcodeAdvisorAvailable,
+  readMcodeAdvisorConfigured,
+  resolveMcodeAuthEnvironment,
+} from '../auth/environment.js';
 import { TuiMatrixAccountClient } from '../account/matrix-account-client.js';
 import {
   createMcodeBusinessTelemetry,
@@ -46,7 +61,6 @@ import { createMcodeSharedAuthSession } from '../runtime/auth-session.js';
 import {
   MCODE_OAUTH_SCOPES,
   resolveMCodeOAuthEndpointConfig,
-  type AccessTokenLease,
   type MCodeOAuthCore,
 } from '@mavis/oauth-core';
 import {
@@ -56,7 +70,13 @@ import {
 import { resolveMcodeStartupUpdateNotice } from '../update/startup-notice.js';
 import type { McodeUpdateApplication } from '../update/application.js';
 import { tuiErrorDiagnostic } from '../user-facing-failure.js';
-import { getConfig, resetConfig, writeTuiStatusLineSetting, type MavisRegion } from '@mavis/config';
+import {
+  readProfileConfigNotice,
+  resetConfig,
+  resolveTuiTelemetryPolicy,
+  writeTuiStatusLineSetting,
+  type MavisRegion,
+} from '@mavis/config';
 import { markLoginRestartHandoff } from './login-restart-handoff.js';
 import {
   readTuiModeSetting,
@@ -70,6 +90,10 @@ import {
   type SystemPromptOverrides,
 } from '../cli/system-prompt-options.js';
 import { MCODE_TUI_RESULT_PATH_ENV } from './automation/result-writer.js';
+import {
+  MINIMAX_CODE_DEFAULT_AGENT_NAME,
+  createTuiProductContext,
+} from '../product-context.js';
 import { startTuiStartupStatus, type TuiStartupStatus } from './startup-status.js';
 import type { McodeContextMode } from '@mavis/protocol/local';
 
@@ -78,6 +102,11 @@ export interface LaunchTuiOptions {
   version: string;
   initialPrompt?: string;
   model?: string;
+  /**
+   * `--advisor`: provider/model or off for the startup Session only; the default is unchanged. A
+   * model also turns the global advisor switch on when it is off.
+   */
+  advisor?: string;
   sessionId?: string;
   showSessionPicker?: boolean;
   continueLatestSession?: boolean;
@@ -115,8 +144,10 @@ interface RuntimeLifecycleModule {
       workspaceDir: string;
       version: string;
       surface: 'tui';
+      defaultAgentName: string;
       ptcLaunchOverride?: boolean;
       observability: TuiObservability;
+      diagnosticUploadsEnabled: boolean;
       contextMode?: McodeContextMode;
       lane?: string;
       systemPromptOverrides?: SystemPromptOverrides;
@@ -147,6 +178,7 @@ export interface LaunchTuiDependencies {
   createBusinessTelemetry?: typeof createMcodeBusinessTelemetry;
   readTelemetryEnabled?: () => boolean;
   createIncidentReporter?: typeof createTuiIncidentReporter;
+  createClientMetrics?: typeof createTuiClientMetrics;
   readTuiMode?: typeof readTuiModeSetting;
   writeTuiMode?: typeof writeTuiModeSetting;
   readTuiTheme?: typeof readTuiThemeSetting;
@@ -173,10 +205,17 @@ export async function launchTui(
   options: LaunchTuiOptions,
   dependencies: LaunchTuiDependencies = {},
 ): Promise<void> {
+  const { defaultAgentName } = createTuiProductContext('tui');
   if (options.model !== undefined) parseHeadlessModelOverride(options.model.trim());
   if (options.model !== undefined && options.showSessionPicker) {
     throw new Error(
       '--model requires a Session id with --session; use --session <id> or --continue.',
+    );
+  }
+  if (options.advisor !== undefined) parseAdvisorOverride(options.advisor);
+  if (options.advisor !== undefined && options.showSessionPicker) {
+    throw new Error(
+      '--advisor requires a Session id with --session; use --session <id> or --continue.',
     );
   }
   if (!options.terminal && (!process.stdin.isTTY || !process.stdout.isTTY)) {
@@ -186,6 +225,9 @@ export async function launchTui(
   const homeDirectory = options.homeDir ?? homedir();
   const workspaceDir = options.workspaceDir ?? process.cwd();
   const dataDir = options.dataDir ?? (await (dependencies.prepareDataDir ?? prepareTuiDataDir)());
+  const { diagnosticUploadsEnabled, usageEnabled } = resolveTuiTelemetryPolicy(
+    path.join(dataDir, 'config.yaml'),
+  );
   const baseTerminal = options.terminal ?? new ProcessTerminal();
   const tuiMode = options.tuiMode ?? (dependencies.readTuiMode ?? readTuiModeSetting)(dataDir);
   const theme = options.theme ?? (dependencies.readTuiTheme ?? readTuiThemeSetting)(dataDir);
@@ -202,47 +244,46 @@ export async function launchTui(
     ...authEnvironment,
     oauthEndpoints: resolveMCodeOAuthEndpointConfig(process.env, authEnvironment),
   });
-  let accountAuthContext: { accessToken: string; realUserID?: string } | undefined;
-  const accountIdentityClient = new TuiMatrixAccountClient({
-    authContextGetter: () => accountAuthContext,
+  const incidentIdentityClient = new TuiMatrixAccountClient({
+    authContextGetter: () => undefined,
     ...(routingContext ? { routingContextGetter: () => routingContext } : {}),
     ...authEnvironment,
   });
-  const resolveAccessTokenLease = async (): Promise<AccessTokenLease | undefined> => {
-    try {
-      const lease = await sharedAuthCore.getAccessToken({
-        requiredScopes: [...MCODE_OAUTH_SCOPES],
-        minValidityMs: 30_000,
-      });
-      if (accountAuthContext?.accessToken !== lease.accessToken) {
-        accountAuthContext = { accessToken: lease.accessToken };
-      }
-      return lease;
-    } catch {
-      accountAuthContext = undefined;
-      return undefined;
-    }
+  const resolveIncidentUserId = createTokenScopedAsyncResolver((accessToken) =>
+    incidentIdentityClient.getRealUserIDForAuth({ accessToken }),
+  );
+  const clientMetricsOptions: CreateTuiClientMetricsOptions = {
+    appVersion: options.version,
+    environment: {
+      os: terminalCapabilities.platform,
+      transport: terminalCapabilities.transport,
+      multiplexer: terminalCapabilities.multiplexer,
+    },
   };
-  const resolveIdentityForToken = createTokenScopedAsyncResolver(async () => {
-    const accessToken = accountAuthContext?.accessToken;
-    if (!accessToken) return undefined;
-    const realUserID = await accountIdentityClient.getRealUserID();
-    if (realUserID && accountAuthContext?.accessToken === accessToken) {
-      accountAuthContext = { ...accountAuthContext, realUserID };
-    }
-    return realUserID;
-  });
+  const createClientMetrics =
+    dependencies.createClientMetrics ?? (isVitestRuntime() ? undefined : createTuiClientMetrics);
+  const clientMetrics: TuiClientMetrics =
+    (diagnosticUploadsEnabled ? createClientMetrics?.(clientMetricsOptions) : undefined) ??
+    noopTuiClientMetrics;
   const incidentReporterOptions = {
     dataDir,
     appVersion: options.version,
+    onUncleanRunRecovered: (recovery) => clientMetrics.uncleanExitRecovered(recovery),
+    onCapture: (summary) => clientMetrics.incidentCaptured(summary),
+    runLabels: clientMetrics.runLabels,
     ...authEnvironment,
     terminal: terminalCapabilities.terminalId,
     tuiMode,
+    readTelemetryEnabled: () => diagnosticUploadsEnabled,
     resolveAuthContext: async () => {
-      const auth = await resolveAccessTokenLease();
-      if (!auth) return undefined;
-      const realUserID = await resolveIdentityForToken(auth.accessToken.trim());
-      return realUserID ? { accessToken: auth.accessToken, realUserID } : undefined;
+      const { accessToken } = await sharedAuthCore.getAccessToken({
+        requiredScopes: [...MCODE_OAUTH_SCOPES],
+        minValidityMs: 30_000,
+      });
+      return {
+        accessToken,
+        realUserID: await resolveIncidentUserId(accessToken.trim()),
+      };
     },
   } satisfies CreateTuiIncidentReporterOptions;
   const incidentReporter: TuiIncidentReporter = dependencies.createIncidentReporter
@@ -263,24 +304,15 @@ export async function launchTui(
       handled: false,
     });
   };
-  const businessTelemetry = createConfiguredTuiBusinessTelemetry({
-    configEnabled: (dependencies.readTelemetryEnabled ?? (() => getConfig().telemetry.enabled))(),
-    environment: process.env,
-    telemetryOptions: {
-      ...authEnvironment,
-      version: options.version,
-    },
-    ...(dependencies.createBusinessTelemetry
-      ? { createTelemetry: dependencies.createBusinessTelemetry }
-      : isVitestRuntime()
-        ? {
-            createTelemetry: () => ({
-              track: () => undefined,
-              flush: async () => undefined,
-            }),
-          }
-        : {}),
-  });
+  const createBusinessTelemetry =
+    dependencies.createBusinessTelemetry ??
+    (isVitestRuntime() ? undefined : createMcodeBusinessTelemetry);
+  const effectiveUsageEnabled = dependencies.readTelemetryEnabled
+    ? resolveMcodeBusinessTelemetryPolicy({ configEnabled: dependencies.readTelemetryEnabled() }).enabled
+    : usageEnabled;
+  const businessTelemetry: McodeBusinessTelemetry | undefined = effectiveUsageEnabled
+    ? createBusinessTelemetry?.({ ...authEnvironment, version: options.version })
+    : undefined;
   const trackTuiLaunch = (launchType: 'cold' | 'hot'): void => {
     try {
       businessTelemetry?.track('tui_launch', { launch_type: launchType });
@@ -288,15 +320,18 @@ export async function launchTui(
       // Business telemetry must not affect TUI lifecycle.
     }
   };
-  const observability: TuiObservability = (
-    dependencies.createObservability ?? createTuiObservability
-  )(dataDir, { surface: 'tui' });
+  const observability: TuiObservability = withTuiClientMetrics(
+    (dependencies.createObservability ?? createTuiObservability)(dataDir, { surface: 'tui' }),
+    clientMetrics,
+  );
   let processStopRecorded = false;
   let terminalDeadObserved = false;
+  let firstProcessStopCause: TuiProcessStopCause | undefined;
   const recordFirstProcessStop = (cause: TuiProcessStopCause): void => {
     if (cause.terminalDead) terminalDeadObserved = true;
     if (processStopRecorded) return;
     processStopRecorded = true;
+    firstProcessStopCause = cause;
     try {
       observability.recordProcessStop(
         createTuiProcessStopObservation(cause, { homeDirectory, workspaceDir }),
@@ -307,6 +342,7 @@ export async function launchTui(
   };
   const terminal = createObservedTerminal(baseTerminal, recordFirstProcessStop);
   observability.recordStartup({ phase: 'cli.process', outcome: 'started' });
+  clientMetrics.runStarted();
   observability.recordTerminal({
     ...terminalCapabilities,
     columns: terminal.columns,
@@ -342,6 +378,12 @@ export async function launchTui(
   let restartRequested = false;
   let restartRegion: MavisRegion | undefined;
   let restartInitialPrompt: string | undefined;
+  let launchFailed = false;
+  let launchError: unknown;
+  const restoreProcessWarnings = installTuiProcessWarningGuard({
+    process,
+    onWarning: () => undefined,
+  });
   if (incidentReporter.runId) {
     process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
   }
@@ -359,8 +401,10 @@ export async function launchTui(
           workspaceDir,
           version: options.version,
           surface: 'tui',
+          defaultAgentName,
           ...(options.ptc ? { ptcLaunchOverride: true } : {}),
           observability,
+          diagnosticUploadsEnabled,
           ...(options.contextMode ? { contextMode: options.contextMode } : {}),
           ...(bedrockLane ? { lane: bedrockLane } : {}),
           ...(options.systemPromptOverrides
@@ -384,6 +428,9 @@ export async function launchTui(
     const tuiStartedAt = performance.now();
     observability.recordStartup({ phase: 'tui.start', outcome: 'started' });
     const presentationConfig = await readTuiPresentationConfig(dataDir);
+    // The `/advisor` entry follows the same rule as the Runtime projection, so it never shows an
+    // action the Runtime would reject.
+    const advisorConfigured = readMcodeAdvisorConfigured(dataDir);
     const tuiKeybindingRead = readTuiKeybindingOverrides(dataDir);
     let tuiKeybindingOverrides = tuiKeybindingRead.overrides;
     let initialStateReady = true;
@@ -401,7 +448,12 @@ export async function launchTui(
       setKeybindings(keybindings.manager);
       app = (dependencies.createApp ?? createTuiApp)({
         runtime: createDeferredTuiRuntime(initializingRuntime.then((created) => created.adapter)),
+        defaultAgentName,
+        // The Runtime config is projected from the same package identity and config.yaml value
+        // (embedded-host), so the entry and the action agree.
+        productFeatures: { advisor: isMcodeAdvisorAvailable(advisorConfigured) },
         dataDir,
+        readConfigIssues: readProfileConfigNotice,
         version: options.version,
         workspaceDir,
         terminalCapabilities,
@@ -451,8 +503,6 @@ export async function launchTui(
           const activeRuntime = await initializingRuntime;
           await activeRuntime.synchronizeAuthContext(authState);
           await activeRuntime.host.notifyAuthContextChanged?.(authState);
-          if (authState === 'authenticated') await resolveAccessTokenLease();
-          else accountAuthContext = undefined;
           incidentReporter.breadcrumb('cli.auth.context.changed', { authState });
           if (authState === 'authenticated') void incidentReporter.drain();
         },
@@ -567,7 +617,12 @@ export async function launchTui(
         durationMs: performance.now() - runtimeStartedAt,
       });
       await app.ready;
-      initialStateReady = await prepareInitialTuiState(app, observability, options, runtime.adapter);
+      initialStateReady = await prepareInitialTuiState(
+        app,
+        observability,
+        options,
+        runtime.adapter,
+      );
       startupStatus.stop();
       startupStatus = undefined;
       if (app.editor) app.editor.disableSubmit = false;
@@ -602,6 +657,8 @@ export async function launchTui(
     ]);
     if (stoppedNormally) activeSessionId = app.controller?.snapshot().session?.sessionId;
   } catch (error) {
+    launchFailed = true;
+    launchError = error;
     captureTuiIncidentBestEffort(incidentReporter, {
       eventType: tuiRunning ? 'cli_process_error' : 'cli_startup_error',
       error,
@@ -614,62 +671,83 @@ export async function launchTui(
     });
     throw error;
   } finally {
-    incidentReporter.setPhase('shutdown');
-    incidentReporter.breadcrumb('cli.shutdown.started');
-    stopStartupStatus(startupStatus);
-    removeProcessGuards?.();
-    if (app) {
-      try {
-        await Promise.resolve(app.stop());
-      } catch (error) {
-        captureShutdownFailure(incidentReporter, 'cli-ui', error);
+    try {
+      incidentReporter.setPhase('shutdown');
+      incidentReporter.breadcrumb('cli.shutdown.started');
+      stopStartupStatus(startupStatus);
+      removeProcessGuards?.();
+      if (app) {
+        incidentReporter.setStep('ui');
+        try {
+          await Promise.resolve(app.stop());
+        } catch (error) {
+          captureShutdownFailure(incidentReporter, 'cli-ui', error);
+        }
       }
-    }
-    if (runtime && lifecycle) {
+      if (runtime && lifecycle) {
+        incidentReporter.setStep('runtime');
+        try {
+          runtimeShutdownFailed = await lifecycle.shutdownTuiRuntime(runtime, {
+            reportFailure: (step, error) => {
+              captureShutdownFailure(incidentReporter, step, error);
+              try {
+                process.stderr.write(
+                  `[minimax-code] ${step} cleanup failed: ${tuiErrorDiagnostic(error)}\n`,
+                );
+              } catch {
+                // The terminal may already be disconnected.
+              }
+            },
+          });
+        } catch (error) {
+          runtimeShutdownFailed = true;
+          captureShutdownFailure(incidentReporter, 'runtime', error);
+        }
+        if (runtimeShutdownFailed) process.exitCode = 1;
+      } else if (runtimePromise && lifecycle) {
+        schedulePendingRuntimeShutdown(runtimePromise, lifecycle, incidentReporter);
+      }
+      incidentReporter.setStep('flush');
       try {
-        runtimeShutdownFailed = await lifecycle.shutdownTuiRuntime(runtime, {
-          reportFailure: (step, error) => {
-            captureShutdownFailure(incidentReporter, step, error);
-            try {
-              process.stderr.write(
-                `[minimax-code] ${step} cleanup failed: ${tuiErrorDiagnostic(error)}\n`,
-              );
-            } catch {
-              // The terminal may already be disconnected.
-            }
-          },
+        await observability.flush();
+      } catch (error) {
+        captureTuiIncidentBestEffort(incidentReporter, {
+          eventType: 'cli_persistence_error',
+          error,
+          component: 'observability',
+          operation: 'flush',
+          codeLocation: 'src/tui/launcher.ts#observability.flush',
+          severity: 'warning',
+          impact: 'degraded',
+          handled: true,
         });
-      } catch (error) {
-        runtimeShutdownFailed = true;
-        captureShutdownFailure(incidentReporter, 'runtime', error);
       }
-      if (runtimeShutdownFailed) process.exitCode = 1;
-    } else if (runtimePromise && lifecycle) {
-      schedulePendingRuntimeShutdown(runtimePromise, lifecycle, incidentReporter);
-    }
-    try {
-      await observability.flush();
-    } catch (error) {
-      captureTuiIncidentBestEffort(incidentReporter, {
-        eventType: 'cli_persistence_error',
-        error,
-        component: 'observability',
-        operation: 'flush',
-        codeLocation: 'src/tui/launcher.ts#observability.flush',
-        severity: 'warning',
-        impact: 'degraded',
-        handled: true,
+      try {
+        await businessTelemetry?.flush();
+      } catch {
+        // Business telemetry must not affect TUI shutdown.
+      }
+      const runOutcome = resolveTuiRunOutcome({
+        ...(firstProcessStopCause ? { stopCause: firstProcessStopCause } : {}),
+        launchError: launchFailed,
+        tuiRunning,
+        stoppedNormally,
       });
-    }
-    try {
-      await businessTelemetry?.flush();
-    } catch {
-      // Business telemetry must not affect TUI shutdown.
-    }
-    incidentReporter.completeRun();
-    await incidentReporter.flush();
-    if (incidentReporter.runId) {
-      process.off('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
+      const crashError = firstProcessStopCause ? firstProcessStopCause.error : launchError;
+      clientMetrics.runEnded(runOutcome, crashError);
+      // A crash report is the one metric worth waiting a little longer for on the way out.
+      await clientMetrics.flush(
+        TUI_CRASH_OUTCOMES.has(runOutcome)
+          ? TUI_CLIENT_METRICS_CRASH_FLUSH_TIMEOUT_MS
+          : TUI_CLIENT_METRICS_FLUSH_TIMEOUT_MS,
+      );
+      incidentReporter.completeRun();
+      await incidentReporter.flush();
+      if (incidentReporter.runId) {
+        process.off('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
+      }
+    } finally {
+      restoreProcessWarnings();
     }
   }
   if (restartRequested && stoppedNormally && runtimeInitialized && !runtimeShutdownFailed) {
@@ -696,7 +774,8 @@ function captureProcessFailure(
   error: unknown,
   context: TuiProcessFailureContext,
 ): void {
-  const terminalFailure = context.origin === 'stdout' || context.origin === 'stderr';
+  const terminalFailure =
+    context.origin === 'stdin' || context.origin === 'stdout' || context.origin === 'stderr';
   const shutdownFailure = context.origin === 'shutdown';
   captureTuiIncidentBestEffort(incidentReporter, {
     eventType: terminalFailure
@@ -788,7 +867,7 @@ async function observeFirstTuiFrame(
 }
 
 function createTokenScopedAsyncResolver(
-  resolveValue: () => Promise<string | undefined>,
+  resolveValue: (accessToken: string) => Promise<string | undefined>,
 ): (accessToken: string | undefined) => Promise<string | undefined> {
   let activeAccessToken: string | undefined;
   let resolvedValue: string | undefined;
@@ -807,14 +886,16 @@ function createTokenScopedAsyncResolver(
     if (Date.now() < retryAfter) return undefined;
     const pending =
       resolvePromise ??
-      resolveValue()
+      resolveValue(accessToken)
         .then((value) => {
-          if (value) resolvedValue = value;
-          else retryAfter = Date.now() + 60_000;
+          if (activeAccessToken === accessToken) {
+            if (value) resolvedValue = value;
+            else retryAfter = Date.now() + 60_000;
+          }
           return value;
         })
         .catch(() => {
-          retryAfter = Date.now() + 60_000;
+          if (activeAccessToken === accessToken) retryAfter = Date.now() + 60_000;
           return undefined;
         });
     resolvePromise = pending;
@@ -903,12 +984,8 @@ function isNodeExecutable(executable: string): boolean {
   return base === 'node' || base === 'node.exe';
 }
 
-function isVitestRuntime(): boolean {
-  return (
-    Boolean((import.meta as ImportMeta & { vitest?: unknown }).vitest) ||
-    process.env.VITEST === 'true'
-  );
-}
+const TUI_CLIENT_METRICS_FLUSH_TIMEOUT_MS = 300;
+const TUI_CLIENT_METRICS_CRASH_FLUSH_TIMEOUT_MS = 1_000;
 
 function isExistingFile(file: string): boolean {
   try {
@@ -962,22 +1039,62 @@ async function prepareInitialTuiState(
       return false;
     }
   }
-  if (options.model !== undefined) {
-    const model = parseHeadlessModelOverride(options.model.trim());
+  if (options.model !== undefined || options.advisor !== undefined) {
+    const model =
+      options.model === undefined ? undefined : parseHeadlessModelOverride(options.model.trim());
+    const advisor =
+      options.advisor === undefined ? undefined : parseAdvisorOverride(options.advisor);
     if (!app.controller?.ensureSession || !app.openSession) {
       throw new Error('TUI Session model selection is unavailable.');
     }
+    // A Session this TUI creates is returned only after the default advisor was copied into
+    // it, so the startup advisor below replaces that copy rather than racing it.
     const session = await app.controller.ensureSession();
-    // The normal model picker also saves the global default. Startup overrides
-    // must use the Session-only operation, before login checks or any submission.
-    if (!(await runtime.selectSessionModel(model, session.sessionId))) {
-      throw new Error(`Could not select --model ${options.model}. Check the provider and model id.`);
+    // The normal pickers also save the global default. Startup overrides
+    // must use the Session-only operations, before login checks or any submission.
+    if (model && !(await runtime.selectSessionModel(model, session.sessionId))) {
+      throw new Error(
+        `Could not select --model ${options.model}. Check the provider and model id.`,
+      );
     }
-    // Rehydrate account status, model/effort and queued-input state from Runtime.
+    if (advisor) {
+      await selectStartupAdvisor(runtime, advisor, options.advisor ?? '', session.sessionId);
+    }
+    // Rehydrate account status, model/effort, advisor and queued-input state from Runtime.
     await app.openSession(session.sessionId);
+    // A model named with --advisor is an explicit choice to use it, as a pick in /advisor is:
+    // with the global switch off, `/advisor on` turns it on and says so in the Transcript.
+    if (
+      advisor?.enabled &&
+      (await runtime.getAdvisorEnabled?.().catch(() => undefined)) === false
+    ) {
+      await app.submit('/advisor on');
+    }
   }
   if (options.showSessionPicker) await app.submit('/sessions');
   return true;
+}
+
+
+async function selectStartupAdvisor(
+  runtime: TuiRuntime,
+  selection: TuiAdvisorSelection,
+  requested: string,
+  sessionId: string,
+): Promise<void> {
+  if (!runtime.selectSessionAdvisor) {
+    throw new Error(`Could not select --advisor ${requested.trim()}: this Runtime has no advisor.`);
+  }
+  try {
+    await runtime.selectSessionAdvisor(selection, sessionId);
+  } catch (error) {
+    throw new Error(
+      `Could not select --advisor ${requested.trim()}: ${tuiErrorDiagnostic(error)}`,
+      {
+        cause: error,
+      },
+    );
+  }
 }
 
 async function submitInitialTuiPrompt(

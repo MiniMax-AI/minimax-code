@@ -1,4 +1,35 @@
-import { MINIMAX_MODELS } from "./minimax-model-catalog.js";
+import { MINIMAX_FIRST_RUN_DEFAULT_MODEL_ID, MINIMAX_MODELS } from "./minimax-model-catalog.js";
+import { configFileSignature } from "./config-file-signature.js";
+import { createSectionFallback } from "./config-section-fallback.js";
+import { parseContextManagementConfig } from "./context-management-config.js";
+import {
+  fileSha256,
+  reportConfigIssues,
+  type ConfigFileWrite,
+  readConfigFileForResolve,
+  holdsOnlyDefaults,
+  readConfigTextWithSha256,
+  snapshotConfigFile,
+  textSha256,
+  trackConfigFileLifecycle,
+  withWholeFileFallback,
+} from "./config-file-state.js";
+import {
+  parseNotificationsConfig,
+  parsePluginsConfig,
+  readableForbiddenPlugins,
+  parseStartupRecoveryFault,
+} from "./config-section-parsers.js";
+import { parseConfigText } from "./comment-preserving-config-write.js";
+import { parseExplicitPtc, type PtcConfigFields } from "./ptc-default-config.js";
+import { parseDiagnosticsConfig, type DiagnosticsConfig } from "./diagnostics-config.js";
+import { parseWorktreeConfig, type WorktreeConfig } from "./worktree-config.js";
+import { parseExplicitEnabled, type NextStepBoxConfig } from "./prompt-suggestion-config.js";
+import { parseAdvisorConfigFields, type AdvisorConfigFields } from "./advisor-config.js";
+import { parsePluginRecommendationConfig } from "./plugin-recommendation-config.js";
+import { parseMcpToolSearchConfig, type McpToolSearchConfig } from "./mcp-tool-search-config.js";
+import { parseStorageRetentionConfig, type StorageRetentionConfig } from "./storage-retention-config.js";
+import { betaResolutionContextFor } from "./beta-resolution-context.js";
 import {
   resolveRunawayGuardConfig,
   type RunawayGuardSettings,
@@ -36,7 +67,11 @@ import {
   type PermissionConfig,
 } from "./permission-config.js";
 
-import type { SkillEvolveConfig } from "./skill-evolve-config.js";
+import {
+  parseSkillEvolveConfig,
+  SKILL_EVOLVE_CONFIG_DEFAULTS,
+  type SkillEvolveConfig,
+} from "./skill-evolve-config.js";
 import {
   DEFAULT_SKILLS_CONFIG,
   parseSkillsConfig,
@@ -81,7 +116,14 @@ import {
   type SandboxConfig,
 } from "./sandbox-config.js";
 
+export {
+  betaResolutionContextFor,
+  currentBetaResolutionContext,
+  productionBetaResolutionContext,
+} from "./beta-resolution-context.js";
 export type { TuiConfig, TuiCustomStatusLineConfig } from "./tui-config.js";
+export type { McpToolSearchConfig } from "./mcp-tool-search-config.js";
+export type { StorageRetentionConfig } from "./storage-retention-config.js";
 
 /** Set to `true` by esbuild during `pnpm build:npm`; undefined in dev (tsx). */
 declare const __IS_NPM_BUILD__: boolean | undefined;
@@ -253,6 +295,16 @@ export interface NotificationsConfig {
   branchFinish?: boolean;
 }
 
+export interface PluginsConfig {
+  forbidden: string[];
+  onlyOfficial?: boolean;
+}
+
+export interface StartupRecoveryFaultConfig {
+  readonly step: string;
+  readonly mode: "hang" | "fail";
+}
+
 export interface PromptConfig {
   /** Automatic prompt delivery switch; enabled by default in official prod and inside builds, disabled in internal and non-prod builds. */
   autoUpdate: boolean;
@@ -421,6 +473,7 @@ export interface BetaConfig {
    * `beta.browserAgentCursor: false` remains available as a kill switch.
    */
   browserAgentCursor: boolean;
+  browserReadV2: boolean;
   /**
    * Desktop Plan Mode. Available online by default, with explicit `false` as
    * an emergency kill switch for new entry. Runtime owners must keep exit and
@@ -443,6 +496,8 @@ export interface BetaConfig {
    * (`toolCallMode`) so toggling this never rewrites an existing prompt prefix.
    */
   ptc: boolean;
+  ptcScripts: boolean;
+  ptcStore: boolean;
   /**
    * /btw side-question peek command (the UI's "Aside" slash palette row). Both visibility fields
    * are `test`, so dev/test ships ON by default while prod is force-off regardless of config.yaml
@@ -513,6 +568,8 @@ export interface BetaConfig {
    * `config.yaml` and OAuth credentials stay in `<dataDir>/codex-auth.json`.
    */
   codexOAuth: boolean;
+  pluginMarketplaces: boolean;
+  advisor: boolean;
 }
 
 export type FeatureVisibility = "none" | "test" | "internal" | "online";
@@ -634,6 +691,7 @@ export const BETA_FEATURE_DEFS = {
     defaultVisibility: "online",
     configurableVisibility: "online",
   },
+  browserReadV2: { defaultVisibility: "none", configurableVisibility: "online" },
   desktopPlanMode: {
     defaultVisibility: "online",
     configurableVisibility: "online",
@@ -646,6 +704,16 @@ export const BETA_FEATURE_DEFS = {
   // test channel, Internal and inside packages through their build variant. An explicit `false`
   // always wins, and explicit `true` still opts a production install in.
   ptc: {
+    defaultVisibility: "test",
+    defaultBuildVariants: ["internal", "inside"],
+    configurableVisibility: "online",
+  },
+  ptcScripts: {
+    defaultVisibility: "test",
+    defaultBuildVariants: ["internal", "inside"],
+    configurableVisibility: "online",
+  },
+  ptcStore: {
     defaultVisibility: "test",
     defaultBuildVariants: ["internal", "inside"],
     configurableVisibility: "online",
@@ -670,6 +738,8 @@ export const BETA_FEATURE_DEFS = {
     defaultVisibility: "online",
     configurableVisibility: "online",
   },
+  pluginMarketplaces: { defaultVisibility: "internal", configurableVisibility: "internal" },
+  advisor: { defaultVisibility: "online", configurableVisibility: "online" },
 } satisfies Record<keyof BetaConfig, BetaFeatureDef>;
 
 assertBetaFeatureDefinitions(BETA_FEATURE_DEFS);
@@ -716,7 +786,7 @@ function isDefaultEnabledForBuildEnvironment(
   return def.defaultBuildEnvironments?.includes(buildEnv) === true;
 }
 
-function getBetaDefaultBuildEnvironment(): MavisBuildEnv {
+export function getBetaDefaultBuildEnvironment(): MavisBuildEnv {
   const electronBuildEnv = isElectronProcess()
     ? process.env.NEXT_PUBLIC_BUILD_ENV
     : undefined;
@@ -779,7 +849,7 @@ export function isInternalBuild(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.__MAVIS_BUILD_INTERNAL === "true";
 }
 
-function isInsideBuild(env: NodeJS.ProcessEnv = process.env): boolean {
+export function isInsideBuild(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.__MAVIS_BUILD_INSIDE === "true";
 }
 
@@ -939,16 +1009,6 @@ export interface ContextManagementConfig {
  * value is `undefined` and the feature stays off (empty whitelist matches no
  * model). See `packages/local-runtime/src/mcp/disclosure-options.ts`.
  */
-export interface McpToolSearchConfig {
-  enabled?: boolean;
-  modelWhitelist?: string[];
-  thresholdPct?: number;
-  minDeferCount?: number;
-  topKDefault?: number;
-  topKMax?: number;
-  systemHint?: boolean;
-  maxSchemaTextLen?: number;
-}
 
 export interface ReviewConfig {
   mode: "inline" | "subagent";
@@ -965,7 +1025,7 @@ export interface TelemetryConfig {
   diagnostics?: boolean;
 }
 
-export interface Config {
+export interface Config extends WorktreeConfig, PtcConfigFields, AdvisorConfigFields {
   logLevel: string;
   devPort: number;
   provider: ModelsConfig;
@@ -994,6 +1054,9 @@ export interface Config {
   permissionMode: PermissionMode;
   /** Explicit Windows TUI hard-safety opt-out; defaults to false and is read at startup. */
   skipWindowsHardSafetyChecks: boolean;
+  skipParentDeathGuard: boolean;
+  diagnostics?: DiagnosticsConfig;
+  startupRecoveryFault?: StartupRecoveryFaultConfig;
   permission: PermissionConfig;
   /** Global SSE error event publishing controls. */
   sseErrorPush: SSEErrorPushConfig;
@@ -1032,6 +1095,12 @@ export interface Config {
   sessionTitle: SessionTitleConfig;
   /** Post-turn next-user-prompt suggestion — see `PromptSuggestionConfig`. */
   promptSuggestion: PromptSuggestionConfig;
+  productionParity: boolean;
+  nextStepBox: NextStepBoxConfig;
+  smartCleanup?: { enabled?: boolean };
+  plugins: PluginsConfig;
+  pluginRecommendation: ReturnType<typeof parsePluginRecommendationConfig>;
+  taskSuggestion: { enabled?: boolean };
   /** CLI feature flags. */
   cli: CliConfig;
   /** Browser provider options; activation is owned by V2 Plugin/config policy. */
@@ -1057,6 +1126,7 @@ export interface Config {
    * Default: 3. A value of 0 or undefined also defaults to 3.
    */
   logRetentionDays: number;
+  storageRetention?: StorageRetentionConfig;
   /** Content review (safety) test controls. Production routing is fixed. */
   contentReview?: { enabled?: boolean; testBaseURL?: string };
   /** MCP progressive-disclosure ("tool search") tunables — undefined when absent. */
@@ -1066,7 +1136,6 @@ export interface Config {
   /** Built-in local code review behavior. */
   review: ReviewConfig;
   /** Fetch the selected upstream before creating a new worktree. */
-  worktreeRefreshBeforeCreate: boolean;
   /** Automatic prompt delivery policy. */
   promptConfig: PromptConfig;
   /** Durable Goal policy, budgets, breaker, and verifier defaults. */
@@ -1075,6 +1144,25 @@ export interface Config {
   sandbox: SandboxConfig;
   /** Non-fatal corrections made while parsing Goal policy. */
   goalWarnings: readonly string[];
+  configIssues: readonly ConfigIssue[];
+}
+
+export type ConfigIssueKind =
+  | "unreadable"
+  | "invalid_yaml"
+  | "invalid_root"
+  | "invalid_section"
+  | "missing"
+  | "empty";
+
+export interface ConfigIssue {
+  kind: ConfigIssueKind;
+  section?: string;
+  line?: number;
+  code?: string;
+  fileInUse?: boolean;
+  failClosed?: boolean;
+  message: string;
 }
 
 // --- Modality & Status ---
@@ -1127,6 +1215,7 @@ export interface ModelCapabilitiesConfig {
   max_attachments_count?: number | string;
   /** Most images one provider request may carry; older history images become placeholders. */
   max_images_per_request?: number | string;
+  thinking_prefix_binding?: boolean;
   [key: string]: unknown;
 }
 
@@ -1153,6 +1242,8 @@ export interface ModelConfig {
   parameterErrors?: { contextOptions?: true; effortOptions?: true };
   /** Semantic UI hints keyed by decimal context-window size. */
   contextWindowOptionHints?: Record<string, ModelContextWindowOptionHint>;
+  advisorRecommended?: boolean;
+  hint?: string;
   modalities?: ModelModalities;
   experimental?: boolean;
   status?: ModelStatus;
@@ -1686,7 +1777,7 @@ function buildPresetEntry(key: PresetKey) {
   };
   return {
     provider: { minimax: provider } as ModelsConfig,
-    defaultModel: "minimax/MiniMax-M3.1-Flash",
+    defaultModel: `minimax/${MINIMAX_FIRST_RUN_DEFAULT_MODEL_ID}`,
   };
 }
 
@@ -1725,6 +1816,7 @@ const DEFAULTS: Omit<
   devPort: DEFAULT_UI_PORT,
   permissionMode: "auto",
   skipWindowsHardSafetyChecks: false,
+  skipParentDeathGuard: false,
   sseErrorPush: {
     history: true,
     stream: true,
@@ -1743,27 +1835,7 @@ const DEFAULTS: Omit<
       enabled: false,
     },
   },
-  skillEvolve: {
-    enabled: true,
-    inSession: {
-      N: 20,
-      minIntervalSeconds: 30,
-      maxPendingPerSession: 1,
-    },
-    signalCooldownHours: 24,
-    minConfidence: 0.7,
-    excludeAgents: ["skill-editor"],
-    disableModelPrefixes: ["MiniMax-M2"],
-    builtinMrEnabled: false,
-    sourceRepo: undefined,
-    proposal: {
-      enabled: false,
-      eligibleAgents: ["mavis"],
-      minMessageCount: 40,
-      skipPassiveSessionEnd: true,
-    },
-    lifecycle: { staleThresholdDays: 15, archiveThresholdDays: 30 }, // tightened from legacy 30d/90d
-  },
+  skillEvolve: SKILL_EVOLVE_CONFIG_DEFAULTS,
   sessionRotate: {
     enabled: true,
     activeSessionLookbackHours: 12,
@@ -1782,6 +1854,11 @@ const DEFAULTS: Omit<
   promptSuggestion: {
     // Unset: the effective default is resolved with the remote policy.
   },
+  productionParity: false,
+  nextStepBox: {},
+  plugins: parsePluginsConfig(undefined),
+  pluginRecommendation: parsePluginRecommendationConfig({}),
+  taskSuggestion: {},
   cli: {
     spawn: {
       enabled: false,
@@ -1819,7 +1896,7 @@ const DEFAULTS: Omit<
   },
   logRetentionDays: 3,
   cuBackend: DEFAULT_CU_BACKEND,
-  worktreeRefreshBeforeCreate: true,
+  ...parseWorktreeConfig({}),
   review: {
     mode: "subagent",
     modeSource: "default",
@@ -1827,82 +1904,79 @@ const DEFAULTS: Omit<
   goal: structuredClone(GOAL_CONFIG_DEFAULTS),
   sandbox: structuredClone(SANDBOX_CONFIG_DEFAULTS),
   goalWarnings: [],
+  configIssues: [],
 };
 
-function ensureConfigFile(): void {
+function ensureConfigFile(): ConfigFileWrite {
   const configPath = getConfigPath();
   const dir = path.dirname(configPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   if (fs.existsSync(configPath)) {
+    const fromSha256 = fileSha256(configPath);
     prepareConfigFileForRead(configPath);
-    return;
+    const { text, sha256: toSha256 } = readConfigTextWithSha256(configPath);
+    const matchesDefaults =
+      text !== undefined &&
+      isManagedRuntime() &&
+      holdsOnlyDefaults(parseConfigText(text), defaultConfigDocuments());
+    return {
+      ...(toSha256 !== fromSha256 ? { rewrite: { fromSha256, toSha256 } } : {}),
+      ...(matchesDefaults ? { matchesDefaultsSha256: toSha256 } : {}),
+    };
   }
 
-  // In non-managed runtime (pnpm dev / npm package), the UI onboarding flow
-  // owns config.yaml generation — it walks the user through getting an API
-  // key and writes the file. Daemon must NOT pre-seed a placeholder here,
-  // otherwise the UI flow has no way to know whether the user has actually
-  // configured anything.
-  //
-  // However, when a worktree daemon starts with a derived dataDir (e.g.
-  // <dataDir>-feature-foo/), the developer's API keys live in the default
-  // dataDir (<dataDir>/config.yaml). Copy it over so the worktree daemon
-  // inherits the existing configuration.
   if (!isManagedRuntime()) {
     const defaultDataDir = resolveDataDir({ homeDir: os.homedir() });
     const defaultConfigPath = path.join(defaultDataDir, "config.yaml");
     if (configPath !== defaultConfigPath && fs.existsSync(defaultConfigPath)) {
       restrictConfigFileSync(defaultConfigPath);
       writePrivateConfigFileSync(configPath, fs.readFileSync(defaultConfigPath), true);
+      return { copied: true };
     }
-    return;
+    return {};
   }
 
-  const preset = DEFAULT_MODEL_PRESETS[getRuntimePresetKey()];
-  const content = yaml.dump({
+  const defaults = yaml.dump(defaultConfigDocument());
+  writePrivateConfigFileSync(configPath, defaults, true);
+  return { generatedSha256: textSha256(defaults) };
+}
+
+let cachedDefaultConfigDocuments: Record<string, unknown>[] | undefined;
+function defaultConfigDocuments(): Record<string, unknown>[] {
+  cachedDefaultConfigDocuments ??= (Object.keys(DEFAULT_MODEL_PRESETS) as PresetKey[]).flatMap(
+    (key) =>
+      [true, false].map((withProvider) =>
+        parseConfigText(yaml.dump(defaultConfigDocument(key, withProvider))),
+      ),
+  );
+  return cachedDefaultConfigDocuments;
+}
+
+function defaultConfigDocument(
+  presetKey = getRuntimePresetKey(),
+  withProvider = managedPresetBaseUrlSyncEnabled,
+): Record<string, unknown> {
+  const preset = DEFAULT_MODEL_PRESETS[presetKey];
+  return {
     logLevel: DEFAULTS.logLevel,
-    provider: managedPresetBaseUrlSyncEnabled ? preset.provider : undefined,
+    provider: withProvider ? preset.provider : undefined,
     defaultModel: preset.defaultModel,
-    // Written on first install as an editable safe default; existing files are not changed.
     skipWindowsHardSafetyChecks: DEFAULTS.skipWindowsHardSafetyChecks,
-  });
-  writePrivateConfigFileSync(configPath, content, true);
+    skipParentDeathGuard: DEFAULTS.skipParentDeathGuard,
+  };
 }
 
 function readConfigFile(configPath = getConfigPath()): Record<string, unknown> {
   try {
-    const raw = fs.readFileSync(configPath, "utf-8");
-    const parsed = yaml.load(raw);
-    if (
-      parsed != null &&
-      typeof parsed === "object" &&
-      !Array.isArray(parsed)
-    ) {
-      return parsed as Record<string, unknown>;
-    }
-    return {};
+    return parseConfigText(fs.readFileSync(configPath, "utf-8"));
   } catch {
     return {};
   }
 }
 
 let _cached: Config | null = null;
-
-function parseNotificationsConfig(
-  raw: unknown,
-): NotificationsConfig | undefined {
-  if (raw == null || typeof raw !== "object" || Array.isArray(raw))
-    return undefined;
-  const obj = raw as Record<string, unknown>;
-  return {
-    branchFinish:
-      typeof obj.branchFinish === "boolean" ? obj.branchFinish : false,
-  };
-}
-
-// ── BYOK config parsing + required provider overrides: see ./byok-config.ts ──
 
 const REQUIRED_PROVIDER_OVERRIDE_DEPS: RequiredProviderOverrideDeps = {
   isManagedRuntime,
@@ -1918,7 +1992,6 @@ export function setLegacyByokProviderMigrationEnabled(enabled: boolean): void {
   legacyByokProviderMigrationEnabled = enabled;
 }
 
-/** Hosts sharing config with older clients can use the current preset without persisting it. */
 export function setManagedPresetBaseUrlSyncEnabled(enabled: boolean): void {
   managedPresetBaseUrlSyncEnabled = enabled;
 }
@@ -1939,12 +2012,27 @@ export function resetConfig(): void {
   _cached = null;
 }
 
+let cachedConfigSignature: string | undefined;
 export function getConfig(): Config {
-  if (_cached) return _cached;
+  const signature = configFileSignature(getConfigPath());
+  if (_cached && signature === cachedConfigSignature) return _cached;
+  _cached = null;
 
-  ensureConfigFile();
-  const raw = readConfigFile();
-  _cached = resolveConfigFromRaw(raw, getDataDir());
+  const before = snapshotConfigFile(getConfigPath());
+  const write = ensureConfigFile();
+  const readSignature = configFileSignature(getConfigPath());
+  const file = readConfigFileForResolve(getConfigPath());
+  const fileIssues = [
+    ...trackConfigFileLifecycle(getConfigPath(), before, write, file),
+    ...file.issues,
+  ];
+  const resolved = withWholeFileFallback(resolveConfigFromRaw(file.raw, getDataDir()), file);
+  _cached =
+    fileIssues.length > 0
+      ? { ...resolved, configIssues: [...fileIssues, ...resolved.configIssues] }
+      : resolved;
+  cachedConfigSignature = readSignature;
+  reportConfigIssues(_cached.configIssues);
   return _cached;
 }
 
@@ -1952,6 +2040,23 @@ export function resolveConfigFromRaw(
   raw: Record<string, unknown>,
   dataDir: string,
 ): Config {
+  const storageRetention = parseStorageRetentionConfig(raw);
+  const configIssues: ConfigIssue[] = [];
+  const section = createSectionFallback(raw, configIssues);
+  const failClosed = <T>(
+    name: string,
+    parse: (source: Record<string, unknown>) => T,
+    strict: (value: T) => T,
+    fallback?: () => T,
+  ): T => {
+    const start = configIssues.length;
+    const value = section(name, parse, fallback);
+    if (configIssues.length === start) return value;
+    for (let index = start; index < configIssues.length; index += 1) {
+      configIssues[index] = { ...configIssues[index]!, failClosed: true };
+    }
+    return strict(value);
+  };
   const rawSSEErrorPush = raw.sseErrorPush;
   const sseErrorPush =
     rawSSEErrorPush != null &&
@@ -1960,7 +2065,6 @@ export function resolveConfigFromRaw(
       ? (rawSSEErrorPush as Record<string, unknown>)
       : undefined;
 
-  // devPort resolution (kept in Config for UI dev server)
   let devPort =
     typeof raw.devPort === "number" ? raw.devPort : DEFAULTS.devPort;
   if (shouldUseGitAutoConfig() && !shouldPreferExplicitPort()) {
@@ -1969,34 +2073,42 @@ export function resolveConfigFromRaw(
       devPort = gitInfo.uiPort;
     }
   }
-  const goalParsed = parseGoalConfig(raw.goal);
-  const managedProvider = applyRequiredProviderOverrides(
-    {
-      provider:
-        raw.provider != null &&
-        typeof raw.provider === "object" &&
-        !Array.isArray(raw.provider)
-          ? normalizeLegacyThinkingEfforts(raw.provider as ModelsConfig)
-          : {},
-      defaultModel:
-        typeof raw.defaultModel === "string" ? raw.defaultModel : undefined,
+  const goalParsed = section("goal", (source) => parseGoalConfig(source.goal));
+  const managedProvider = section(["provider", "defaultModel"], (source) =>
+    applyRequiredProviderOverrides(
+      {
+        provider:
+          source.provider != null &&
+          typeof source.provider === "object" &&
+          !Array.isArray(source.provider)
+            ? normalizeLegacyThinkingEfforts(source.provider as ModelsConfig)
+            : {},
+        defaultModel:
+          typeof source.defaultModel === "string" ? source.defaultModel : undefined,
+      },
+      REQUIRED_PROVIDER_OVERRIDE_DEPS,
+    ),
+  );
+  const managedContext = section(
+    "minimaxModelContextLimits",
+    (source) => {
+      const limits = parseModelContextLimits(source.minimaxModelContextLimits);
+      return {
+        limits,
+        provider: applyManagedMinimaxContextLimits(managedProvider.provider, limits),
+      };
     },
-    REQUIRED_PROVIDER_OVERRIDE_DEPS,
+    () => ({ limits: undefined, provider: managedProvider.provider }),
   );
-  const minimaxModelContextLimits = parseModelContextLimits(
-    raw.minimaxModelContextLimits,
-  );
-  const beta = parseBetaConfig(raw);
+  const minimaxModelContextLimits = managedContext.limits;
+  const { explicitPtc, ...beta } = section("beta", (source) => parseBetaConfig(source));
 
   return {
     logLevel:
       typeof raw.logLevel === "string" ? raw.logLevel : DEFAULTS.logLevel,
     devPort,
     ...managedProvider,
-    provider: applyManagedMinimaxContextLimits(
-      managedProvider.provider,
-      minimaxModelContextLimits,
-    ),
+    provider: managedContext.provider,
     defaultModelVariant:
       typeof raw.defaultModelVariant === "string"
         ? raw.defaultModelVariant
@@ -2014,9 +2126,12 @@ export function resolveConfigFromRaw(
       Number(raw.defaultModelContextWindow) <= 2_147_483_647
         ? Number(raw.defaultModelContextWindow)
         : undefined,
-    minimax_api: parseMinimaxApiConfig(raw.minimax_api),
+    ...section(["advisor", "defaultAdvisor"], (source) => parseAdvisorConfigFields(source)),
+    minimax_api: section("minimax_api", (source) => parseMinimaxApiConfig(source.minimax_api)),
     minimaxModelContextLimits,
-    custom_provider: parseCustomProvidersConfig(raw.custom_provider),
+    custom_provider: section("custom_provider", (source) =>
+      parseCustomProvidersConfig(source.custom_provider),
+    ),
     minimaxModelSource:
       typeof raw.minimaxModelSource === "string" &&
       (raw.minimaxModelSource === "token_plan" ||
@@ -2032,7 +2147,6 @@ export function resolveConfigFromRaw(
             if (typeof Reflect.get(raw.nexus, "enabled") === "boolean") {
               parsed.enabled = Reflect.get(raw.nexus, "enabled") as boolean;
             }
-
             const rawModel = Reflect.get(raw.nexus, "model");
             if (
               rawModel != null &&
@@ -2045,13 +2159,10 @@ export function resolveConfigFromRaw(
                 providerID: Reflect.get(rawModel, "providerID") as string,
                 modelID: Reflect.get(rawModel, "modelID") as string,
                 ...(typeof Reflect.get(rawModel, "variant") === "string"
-                  ? {
-                      variant: Reflect.get(rawModel, "variant") as string,
-                    }
+                  ? { variant: Reflect.get(rawModel, "variant") as string }
                   : {}),
               };
             }
-
             return Object.keys(parsed).length > 0 ? parsed : undefined;
           })()
         : undefined,
@@ -2060,6 +2171,11 @@ export function resolveConfigFromRaw(
         ? raw.defaultLightModel
         : undefined,
     skipWindowsHardSafetyChecks: raw.skipWindowsHardSafetyChecks === true,
+    skipParentDeathGuard: raw.skipParentDeathGuard === true,
+    diagnostics: section("diagnostics", (source) => parseDiagnosticsConfig(source.diagnostics)),
+    ...section("startupRecoveryFault", (source) =>
+      parseStartupRecoveryFault(source.startupRecoveryFault),
+    ),
     permissionMode:
       typeof raw.permissionMode === "string" &&
       ["default", "bypassPermissions", "auto", "off"].includes(
@@ -2067,7 +2183,7 @@ export function resolveConfigFromRaw(
       )
         ? (raw.permissionMode as PermissionMode)
         : DEFAULTS.permissionMode,
-    permission: parsePermissionConfig(raw),
+    permission: section("permission", (source) => parsePermissionConfig(source)),
     sseErrorPush: {
       history:
         typeof sseErrorPush?.history === "boolean"
@@ -2078,7 +2194,9 @@ export function resolveConfigFromRaw(
           ? (sseErrorPush.stream as boolean)
           : DEFAULTS.sseErrorPush.stream,
     },
-    notifications: parseNotificationsConfig(raw.notifications),
+    notifications: section("notifications", (source) =>
+      parseNotificationsConfig(source.notifications),
+    ),
     dataDir,
     agentsDir: path.join(dataDir, "agents"),
     sessionsDir: path.join(dataDir, "sessions"),
@@ -2091,38 +2209,78 @@ export function resolveConfigFromRaw(
     harnessesDir: path.join(dataDir, "harnesses"),
     subAgentsDir: path.join(dataDir, "subagents"),
     beta,
-    agents: parseAgentsConfig(raw.agents),
-    memory: parseMemoryConfig(raw),
-    skillEvolve: parseSkillEvolveConfig(raw, beta),
-    sessionRotate: parseSessionRotateConfig(raw),
-    agentStop: parseAgentStopDetectorConfig(raw),
-    asr: parseAsrConfig(raw),
-    skills: parseSkillsConfig(raw),
-    askUser: parseAskUserConfig(raw, DEFAULTS.askUser),
-    sessionTitle: parseSessionTitleConfig(raw),
-    promptSuggestion: parsePromptSuggestionConfig(raw),
-    cli: parseCliConfig(raw),
-    browser: parseBrowserConfig(raw.browser),
-    tui: parseTuiConfig(raw),
-    telemetry: parseTelemetryConfig(raw.telemetry),
-    opencode: parseOpenCodeAdapterConfig(raw, DEFAULTS.opencode),
-    contextManagement: parseContextManagementConfig(raw),
-    runawayGuard: resolveRunawayGuardConfig(raw.runawayGuard),
-    toolResultCompaction: parseToolResultCompactionConfig(
-      raw.toolResultCompaction,
+    explicitPtc,
+    agents: section("agents", (source) => parseAgentsConfig(source.agents)),
+    memory: section("memory", (source) => parseMemoryConfig(source)),
+    skillEvolve: failClosed(
+      "skillEvolve",
+      (source) => parseSkillEvolveConfig(source, beta),
+      (value) => ({
+        ...structuredClone(value),
+        enabled: false,
+        builtinMrEnabled: false,
+        proposal: { ...structuredClone(value.proposal), enabled: false },
+      }),
+      () => structuredClone(DEFAULTS.skillEvolve),
     ),
-    requestMedia: parseRequestMediaConfig(raw.requestMedia),
-    agentRuntime: parseAgentRuntimeConfig(raw.agentRuntime),
+    sessionRotate: section("sessionRotate", (source) => parseSessionRotateConfig(source)),
+    agentStop: section("agentStop", (source) => parseAgentStopDetectorConfig(source)),
+    asr: section("asr", (source) => parseAsrConfig(source)),
+    skills: section("skills", (source) => parseSkillsConfig(source)),
+    askUser: section("askUser", (source) => parseAskUserConfig(source, DEFAULTS.askUser)),
+    sessionTitle: section("sessionTitle", (source) => parseSessionTitleConfig(source)),
+    promptSuggestion: section("promptSuggestion", (source) =>
+      parseExplicitEnabled(source.promptSuggestion),
+    ),
+    productionParity: raw.productionParity === true,
+    nextStepBox: section("nextStepBox", (source) => parseExplicitEnabled(source.nextStepBox)),
+    plugins: failClosed(
+      "plugins",
+      (source) => parsePluginsConfig(source.plugins),
+      () => ({ forbidden: readableForbiddenPlugins(raw.plugins), onlyOfficial: true }),
+    ),
+    pluginRecommendation: section("pluginRecommendation", (source) =>
+      parsePluginRecommendationConfig(source),
+    ),
+    taskSuggestion: section("taskSuggestion", (source) =>
+      parseExplicitEnabled(source.taskSuggestion),
+    ),
+    cli: section("cli", (source) => parseCliConfig(source)),
+    browser: section("browser", (source) => parseBrowserConfig(source.browser)),
+    tui: section("tui", (source) => parseTuiConfig(source)),
+    telemetry: section("telemetry", (source) => parseTelemetryConfig(source.telemetry)),
+    opencode: section("opencode", (source) =>
+      parseOpenCodeAdapterConfig(source, DEFAULTS.opencode),
+    ),
+    contextManagement: section("contextManagement", (source) =>
+      parseContextManagementConfig(source, DEFAULTS.contextManagement),
+    ),
+    runawayGuard: section("runawayGuard", (source) =>
+      resolveRunawayGuardConfig(source.runawayGuard),
+    ),
+    toolResultCompaction: section("toolResultCompaction", (source) =>
+      parseToolResultCompactionConfig(source.toolResultCompaction),
+    ),
+    requestMedia: section("requestMedia", (source) => parseRequestMediaConfig(source.requestMedia)),
+    agentRuntime: section("agentRuntime", (source) => parseAgentRuntimeConfig(source.agentRuntime)),
     logRetentionDays: parseLogRetentionDays(raw),
-    contentReview: parseContentReviewConfig(raw),
-    mcpToolSearch: parseMcpToolSearchConfig(raw),
-    cuBackend: parseCuBackend(raw.cuBackend),
-    review: parseReviewConfig(raw.review, DEFAULTS.review),
-    worktreeRefreshBeforeCreate: raw.worktreeRefreshBeforeCreate !== false,
-    promptConfig: resolvePromptConfig(raw.promptConfig),
+    contentReview: section("contentReview", (source) => parseContentReviewConfig(source)),
+    mcpToolSearch: section("mcpToolSearch", (source) => parseMcpToolSearchConfig(source)),
+    cuBackend: section("cuBackend", (source) => parseCuBackend(source.cuBackend)),
+    review: section("review", (source) =>
+      parseReviewConfig(source.review, structuredClone(DEFAULTS.review)),
+    ),
+    ...section(
+      ["worktreeAutoCleanupEnabled", "worktreeKeepCount", "worktreeRefreshBeforeCreate"],
+      (source) => parseWorktreeConfig(source),
+    ),
+    promptConfig: section("promptConfig", (source) => resolvePromptConfig(source.promptConfig)),
+    smartCleanup: section("smartCleanup", (source) => parseExplicitEnabled(source.smartCleanup)),
+    ...(storageRetention ? { storageRetention } : {}),
     goal: goalParsed.config,
     goalWarnings: goalParsed.warnings,
-    sandbox: parseSandboxConfig(raw.sandbox),
+    sandbox: section("sandbox", (source) => parseSandboxConfig(source.sandbox)),
+    configIssues,
   };
 }
 
@@ -2176,250 +2334,19 @@ function parseMemoryConfig(raw: Record<string, unknown>): MemoryConfig {
 
 // ── Beta features config parsing ────────────────────────────────
 
-function parseBetaConfig(raw: Record<string, unknown>): BetaConfig {
+function parseBetaConfig(raw: Record<string, unknown>): BetaConfig & PtcConfigFields {
   const obj =
     raw.beta != null && typeof raw.beta === "object" && !Array.isArray(raw.beta)
       ? (raw.beta as Record<string, unknown>)
       : {};
 
-  const context = currentBetaResolutionContext();
+  const context = betaResolutionContextFor(raw);
   const result = {} as BetaConfig;
   for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
     result[key] = resolveBetaFeature(key, obj[key], context);
   }
-  return result;
+  return Object.assign(result, parseExplicitPtc(raw));
 }
-
-/**
- * The build facts `parseBetaConfig` resolves every flag with. Exported so a caller holding a
- * raw (unparsed) config can resolve one flag exactly as `getConfig()` would for this process,
- * instead of rebuilding the context and drifting from it.
- */
-export function currentBetaResolutionContext(): BetaFeatureResolutionContext {
-  return {
-    buildEnv: getRuntimeBuildEnv(),
-    defaultBuildEnvironment: getBetaDefaultBuildEnvironment(),
-    internalBuild: isInternalBuild(),
-    insideBuild: isInsideBuild(),
-    mcodeToolsDevMode:
-      process.env.MAVIS_DEV_MCODE_TOOLS_MODE === "published"
-        ? "published"
-        : undefined,
-  };
-}
-
-// ── Skill Evolve config parsing ─────────────────────────────────
-
-/**
- * Collect all model IDs from the provider config.
- * Returns an empty array when no models are configured.
- */
-function collectModelIds(raw: Record<string, unknown>): string[] {
-  const providerRaw = raw.provider;
-  if (
-    providerRaw == null ||
-    typeof providerRaw !== "object" ||
-    Array.isArray(providerRaw)
-  ) {
-    return [];
-  }
-  const ids: string[] = [];
-  for (const prov of Object.values(providerRaw as Record<string, unknown>)) {
-    if (prov == null || typeof prov !== "object" || Array.isArray(prov))
-      continue;
-    const { models } = prov as Record<string, unknown>;
-    if (models == null || typeof models !== "object" || Array.isArray(models))
-      continue;
-    ids.push(...Object.keys(models as Record<string, unknown>));
-  }
-  return ids;
-}
-
-/**
- * Auto-derive the `skillEvolve.enabled` flag from the configured model list.
- *
- * When **every** configured model ID starts with one of the
- * `disableModelPrefixes` (case-insensitive), skill-evolve has no capable
- * model to work with, so it is disabled automatically.
- * If at least one model does NOT match, the feature is enabled.
- *
- * Edge cases: no providers / no models configured → `false`
- * (no capable model means the feature cannot operate).
- */
-function deriveSkillEvolveEnabled(
-  raw: Record<string, unknown>,
-  disableModelPrefixes: string[],
-): boolean {
-  if (disableModelPrefixes.length === 0) return true;
-  const modelIds = collectModelIds(raw);
-  if (modelIds.length === 0) return false;
-  const lowerPrefixes = disableModelPrefixes.map((p) => p.toLowerCase());
-  return !modelIds.every((id) =>
-    lowerPrefixes.some((p) => id.toLowerCase().startsWith(p)),
-  );
-}
-
-function parsePositiveDays(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? value
-    : fallback;
-}
-
-function parseSkillEvolveConfig(
-  raw: Record<string, unknown>,
-  betaConfig: BetaConfig,
-): SkillEvolveConfig {
-  const defaults = DEFAULTS.skillEvolve;
-  const se = raw.skillEvolve;
-  const hasSection = se != null && typeof se === "object" && !Array.isArray(se);
-  const obj = hasSection
-    ? (se as Record<string, unknown>)
-    : ({} as Record<string, unknown>);
-
-  const inSessionRaw = obj.inSession;
-  let { inSession } = defaults;
-  if (
-    inSessionRaw != null &&
-    typeof inSessionRaw === "object" &&
-    !Array.isArray(inSessionRaw)
-  ) {
-    const ins = inSessionRaw as Record<string, unknown>;
-    inSession = {
-      N: typeof ins.N === "number" && ins.N > 0 ? ins.N : defaults.inSession.N,
-      minIntervalSeconds:
-        typeof ins.minIntervalSeconds === "number" &&
-        ins.minIntervalSeconds >= 0
-          ? ins.minIntervalSeconds
-          : defaults.inSession.minIntervalSeconds,
-      maxPendingPerSession:
-        typeof ins.maxPendingPerSession === "number" &&
-        ins.maxPendingPerSession >= 1
-          ? ins.maxPendingPerSession
-          : defaults.inSession.maxPendingPerSession,
-    };
-  }
-
-  const excludeRaw = obj.excludeAgents;
-  const excludeAgents =
-    Array.isArray(excludeRaw) && excludeRaw.every((e) => typeof e === "string")
-      ? (excludeRaw as string[])
-      : defaults.excludeAgents;
-
-  const disableModelPrefixes =
-    Array.isArray(obj.disableModelPrefixes) &&
-    obj.disableModelPrefixes.every((e: unknown) => typeof e === "string")
-      ? (obj.disableModelPrefixes as string[])
-      : defaults.disableModelPrefixes;
-
-  // `enabled` — beta gate wins first; then explicit config; then auto-derive from model list.
-  const enabled = !betaConfig.skillEvolve
-    ? false
-    : typeof obj.enabled === "boolean"
-      ? obj.enabled
-      : deriveSkillEvolveEnabled(raw, disableModelPrefixes);
-
-  // `builtinMrEnabled` — beta gate wins first; then explicit config; then default.
-  // Implicitly false when the parent `enabled` is false (no point evolving built-ins
-  // when the pipeline as a whole is off).
-  const builtinMrEnabled = !enabled
-    ? false
-    : !betaConfig.skillEvolveBuiltinMr
-      ? false
-      : typeof obj.builtinMrEnabled === "boolean"
-        ? obj.builtinMrEnabled
-        : defaults.builtinMrEnabled;
-
-  const sourceRepoRaw = obj.sourceRepo;
-  const sourceRepo =
-    typeof sourceRepoRaw === "string" && sourceRepoRaw.trim().length > 0
-      ? sourceRepoRaw.trim()
-      : defaults.sourceRepo;
-
-  // v3: `proposal` — beta gate + parent gate must both be true; otherwise
-  // resolved sub-config still parses but `enabled` is forced false. Other
-  // fields (eligibleAgents, minMessageCount, skipPassiveSessionEnd) are
-  // honored even when the gate is off so operators can pre-stage config.
-  const proposalRaw = obj.proposal;
-  const proposalDefaults = defaults.proposal;
-  const proposalObj =
-    proposalRaw != null &&
-    typeof proposalRaw === "object" &&
-    !Array.isArray(proposalRaw)
-      ? (proposalRaw as Record<string, unknown>)
-      : ({} as Record<string, unknown>);
-
-  const proposalEligibleAgents =
-    Array.isArray(proposalObj.eligibleAgents) &&
-    proposalObj.eligibleAgents.every((e) => typeof e === "string")
-      ? (proposalObj.eligibleAgents as string[])
-      : proposalDefaults.eligibleAgents;
-
-  const proposalMinMessageCount =
-    typeof proposalObj.minMessageCount === "number" &&
-    proposalObj.minMessageCount >= 1
-      ? Math.floor(proposalObj.minMessageCount)
-      : proposalDefaults.minMessageCount;
-
-  const proposalSkipPassiveSessionEnd =
-    typeof proposalObj.skipPassiveSessionEnd === "boolean"
-      ? proposalObj.skipPassiveSessionEnd
-      : proposalDefaults.skipPassiveSessionEnd;
-
-  const proposalEnabledExplicit =
-    typeof proposalObj.enabled === "boolean" ? proposalObj.enabled : null;
-  const proposalEnabled = !enabled
-    ? false
-    : !betaConfig.skillProposal
-      ? false
-      : (proposalEnabledExplicit ?? true);
-
-  // `lifecycle` — strict invariant stale < archive (fail-fast at boot).
-  const lcRaw = obj.lifecycle;
-  const lc =
-    lcRaw && typeof lcRaw === "object" && !Array.isArray(lcRaw)
-      ? (lcRaw as Record<string, unknown>)
-      : {};
-  const staleThresholdDays = parsePositiveDays(lc.staleThresholdDays, defaults.lifecycle.staleThresholdDays); // prettier-ignore
-  const archiveThresholdDays = parsePositiveDays(lc.archiveThresholdDays, defaults.lifecycle.archiveThresholdDays); // prettier-ignore
-  if (!(staleThresholdDays < archiveThresholdDays)) {
-    throw new Error(
-      `Invalid skillEvolve.lifecycle config: staleThresholdDays (${staleThresholdDays}) must be strictly less than archiveThresholdDays (${archiveThresholdDays}).`,
-    );
-  }
-
-  return {
-    enabled,
-    inSession,
-    signalCooldownHours:
-      typeof obj.signalCooldownHours === "number" && obj.signalCooldownHours > 0
-        ? obj.signalCooldownHours
-        : defaults.signalCooldownHours,
-    minConfidence:
-      typeof obj.minConfidence === "number" &&
-      obj.minConfidence >= 0 &&
-      obj.minConfidence <= 1
-        ? obj.minConfidence
-        : defaults.minConfidence,
-    scannerModel:
-      typeof obj.scannerModel === "string" ? obj.scannerModel : undefined,
-    excludeAgents,
-    disableModelPrefixes,
-    builtinMrEnabled,
-    sourceRepo,
-    proposal: {
-      enabled: proposalEnabled,
-      eligibleAgents: proposalEligibleAgents,
-      minMessageCount: proposalMinMessageCount,
-      skipPassiveSessionEnd: proposalSkipPassiveSessionEnd,
-    },
-    lifecycle: { staleThresholdDays, archiveThresholdDays },
-  };
-}
-
-/**
- * v3 helper: `isProposalEligibleAgent` lives in `./skill-evolve-config.ts`
- * — re-exported above with the rest of the SkillEvolve types.
- */
 
 // ── Session Rotate config parsing ───────────────────────────────
 
@@ -2507,19 +2434,6 @@ function parseSessionTitleConfig(
   };
 }
 
-// ── prompt suggestion config parsing ────────────────────────────
-
-function parsePromptSuggestionConfig(raw: Record<string, unknown>): PromptSuggestionConfig {
-  const value = raw.promptSuggestion;
-  const enabled =
-    value != null && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>).enabled
-      : undefined;
-  // Keep "never chose" distinct from an explicit `false`: the effective default
-  // depends on the remote policy, which parsing cannot see.
-  return typeof enabled === 'boolean' ? { enabled } : {};
-}
-
 // ── CLI config parsing ──────────────────────────────────────────
 
 function parseCliConfig(raw: Record<string, unknown>): CliConfig {
@@ -2546,53 +2460,6 @@ function parseCliConfig(raw: Record<string, unknown>): CliConfig {
     },
   };
 }
-
-// ── Context Management config parsing ───────────────────────────
-
-function parseContextManagementConfig(
-  raw: Record<string, unknown>,
-): ContextManagementConfig {
-  const defaults = DEFAULTS.contextManagement;
-  const rawCm = raw.contextManagement;
-  if (rawCm == null || typeof rawCm !== "object" || Array.isArray(rawCm)) {
-    return {
-      disableSystemReminderModels: [...defaults.disableSystemReminderModels],
-      cuMaxScreenshotsInContext: defaults.cuMaxScreenshotsInContext,
-    };
-  }
-  const obj = rawCm as Record<string, unknown>;
-  const rawList = obj.disableSystemReminderModels;
-  const disableSystemReminderModels =
-    Array.isArray(rawList) &&
-    rawList.every((e) => typeof e === "string" && e.length > 0)
-      ? (rawList as string[])
-      : [...defaults.disableSystemReminderModels];
-
-  const rawCuMax = obj.cuMaxScreenshotsInContext;
-  const cuMaxScreenshotsInContext =
-    typeof rawCuMax === "number" && Number.isFinite(rawCuMax) && rawCuMax >= 0
-      ? Math.floor(rawCuMax)
-      : defaults.cuMaxScreenshotsInContext;
-
-  // Semantic validation (ratio vs. token count) lives with the trigger in
-  // @mavis/context-manager; keep numbers so the runtime can warn on bad ones.
-  const compactionTriggerAt =
-    typeof obj.compactionTriggerAt === "number"
-      ? obj.compactionTriggerAt
-      : undefined;
-
-  return {
-    disableSystemReminderModels,
-    cuMaxScreenshotsInContext,
-    ...(compactionTriggerAt === undefined ? {} : { compactionTriggerAt }),
-  };
-}
-
-// ── Agent Runtime config parsing — see ./agent-runtime-config.ts for the
-// canonical implementation. Re-exposed here so the public `getConfig()`
-// surface keeps a single import point for callers; the helper is the
-// source of truth for the `AgentRuntimeFramework` string union and the
-// Pi-only runtime selection parser.
 
 // ── Log Retention config parsing ────────────────────────────────
 
@@ -2622,65 +2489,8 @@ function parseContentReviewConfig(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-// ── MCP tool-search config parsing ──────────────────────────────
 
-function parseMcpToolSearchConfig(
-  raw: Record<string, unknown>,
-): McpToolSearchConfig | undefined {
-  const obj = raw.mcpToolSearch;
-  if (obj == null || typeof obj !== "object" || Array.isArray(obj))
-    return undefined;
 
-  const result: McpToolSearchConfig = {};
-
-  const enabled = Reflect.get(obj, "enabled");
-  if (typeof enabled === "boolean") result.enabled = enabled;
-
-  const systemHint = Reflect.get(obj, "systemHint");
-  if (typeof systemHint === "boolean") result.systemHint = systemHint;
-
-  const thresholdPct = Reflect.get(obj, "thresholdPct");
-  if (typeof thresholdPct === "number") result.thresholdPct = thresholdPct;
-
-  const minDeferCount = Reflect.get(obj, "minDeferCount");
-  if (typeof minDeferCount === "number") result.minDeferCount = minDeferCount;
-
-  const topKDefault = Reflect.get(obj, "topKDefault");
-  if (typeof topKDefault === "number") result.topKDefault = topKDefault;
-
-  const topKMax = Reflect.get(obj, "topKMax");
-  if (typeof topKMax === "number") result.topKMax = topKMax;
-
-  const maxSchemaTextLen = Reflect.get(obj, "maxSchemaTextLen");
-  if (typeof maxSchemaTextLen === "number")
-    result.maxSchemaTextLen = maxSchemaTextLen;
-
-  const modelWhitelist = Reflect.get(obj, "modelWhitelist");
-  if (Array.isArray(modelWhitelist)) {
-    result.modelWhitelist = modelWhitelist.filter(
-      (v): v is string => typeof v === "string",
-    );
-  }
-
-  return Object.keys(result).length > 0 ? result : undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Port resolution — compute the target local runtime port from env / git / defaults
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the target local runtime port.
- *
- * Priority:
- * 0. DISABLE_GIT_AUTO_CONFIG=1 → skip git auto-detection
- * 1. Explicit profile-scoped port (__MAVIS_RUNTIME_PROFILE + __MAVIS_RUNTIME_PORT both set)
- * 2. Git auto-detection (hash-based offset from branch name in mavis repo)
- * 3. __MAVIS_RUNTIME_PORT env var (only when git detection is not active)
- * 4. DEFAULT_PORT (5321)
- *
- * Not cached — env vars and git state can change between calls.
- */
 export function resolvePort(): number {
   const explicitPort = getExplicitPortEnv();
 

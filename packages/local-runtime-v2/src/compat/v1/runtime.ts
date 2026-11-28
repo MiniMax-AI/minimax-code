@@ -867,6 +867,24 @@ function createPeripheralApplication(
         });
         return host.apiHost.configGetter().promptSuggestion?.enabled === true;
       },
+      getPtcEnabled: async () =>
+        host.apiHost.configGetter().beta?.ptc === true,
+      setPtcEnabled: async ({ enabled }) => {
+        await host.apiHost.updateConfig({
+          field: "beta.ptc",
+          set: enabled,
+        });
+        return host.apiHost.configGetter().beta?.ptc === true;
+      },
+      getAdvisorEnabled: async () =>
+        host.apiHost.configGetter().advisor?.enabled === true,
+      setAdvisorEnabled: async ({ enabled }) => {
+        await host.apiHost.updateConfig({
+          field: "advisor.enabled",
+          set: enabled,
+        });
+        return host.apiHost.configGetter().advisor?.enabled === true;
+      },
     },
     backgroundTasks: {
       list: async ({

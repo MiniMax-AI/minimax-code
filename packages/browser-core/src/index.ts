@@ -24,6 +24,7 @@ export type {
   SnapshotNode,
   BrowserAXNode,
   BrowserDOMNode,
+  BrowserFormState,
   BrowserInteractiveElement,
   BrowserSnapshotNode,
   BrowserWaitInput,
@@ -34,12 +35,17 @@ export * from './browser-action-targets.js';
 export * from './browser-actions.js';
 export * from './browser-constants.js';
 export * from './browser-core.js';
+export * from './browser-errors.js';
+export * from './browser-js-dialog.js';
 export * from './browser-extended-actions.js';
 export * from './browser-keyboard.js';
+export * from './browser-write-record.js';
 export * from './clipboard.js';
 export * from './browser-query.js';
 export * from './browser-snapshot-helpers.js';
 export * from './browser-script.js';
+export * from './browser-tabs.js';
+export * from './tabs/agent-browser-control.js';
 export * from './cdp-file-upload.js';
 export * from './cdp-helper.js';
 export * from './cdp-helper-contracts.js';
@@ -47,6 +53,7 @@ export * from './console-diagnostic-sanitizer.js';
 export * from './dom-serializer.js';
 export * from './element-map-manager.js';
 export * from './operation-timeout.js';
+export * from './program/host-results.js';
 export {
   BrowserSnapshotSupport,
   type AccessibilityNode,

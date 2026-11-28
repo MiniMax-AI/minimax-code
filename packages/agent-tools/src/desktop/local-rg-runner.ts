@@ -7,12 +7,14 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, statSync } from '../shared/physical-fs.js';
 import { createRequire } from 'node:module';
-import { basename, dirname, isAbsolute, resolve } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
-import type { ToolResult } from '@mavis/agent-core/tools';
+import { type GrepTarget, resolveSearchRoot } from '../core-tools/paths.js';
+
+export { type GrepTarget, resolveSearchRoot, textResult } from '../core-tools/paths.js';
 
 const PATH_RG_FALLBACK = 'rg';
 const ASAR_PATH_PATTERN = /\.asar([/\\])/;
@@ -80,17 +82,6 @@ export interface RgResult {
   stdoutTruncated: boolean;
   /** A caller-supplied complete-record limit was reached before process exit. */
   stdoutLimitReached: boolean;
-}
-
-export function resolveSearchRoot(workspaceRoot: string, inputPath?: string): string {
-  if (!inputPath?.trim()) return resolve(workspaceRoot);
-  return isAbsolute(inputPath) ? resolve(inputPath) : resolve(workspaceRoot, inputPath);
-}
-
-/** rg working directory + positional search path for one grep invocation. */
-export interface GrepTarget {
-  cwd: string;
-  searchPath: string;
 }
 
 /**
@@ -329,12 +320,4 @@ export function runRg(args: string[], cwd: string, opts: RunRgOptions = {}): Pro
       });
     });
   });
-}
-
-export function textResult(toolName: string, text: string): ToolResult {
-  return {
-    tool_name: toolName,
-    text,
-    content: [{ type: 'text', text }],
-  };
 }

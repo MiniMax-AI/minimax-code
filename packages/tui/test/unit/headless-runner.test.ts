@@ -68,6 +68,203 @@ function runtimeWith(events: readonly TuiStreamEvent[] = successEvents) {
   };
 }
 
+describe('runTuiExec model replacement visibility', () => {
+  it('warns on stderr and separates requested and actual models in JSON', async () => {
+    const runtime = runtimeWith([
+      { type: 'message' as const, message: { id: 'assistant-1', turnId: 'turn-1', role: 'assistant' as const, kind: 'final' as const, content: 'fixed' } },
+      { type: 'session-status' as const, status: 'finished' as const },
+    ]);
+    runtime.listModels.mockResolvedValue([
+      { providerId: 'custom_provider:gateway', modelId: 'gpt-6-astra' },
+    ]);
+    runtime.getSessionUsage.mockResolvedValue({
+      rows: [{ turnId: 'turn-1', model: 'custom_provider:gateway/gpt-6-astra' }],
+    } as never);
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runTuiExec(
+      {
+        prompt: 'hi',
+        workspaceDir: '/tmp/workspace',
+        version: '0.1.0',
+        format: 'json',
+        model: 'minimax/MiniMax-Custom-Pro',
+      },
+      { runtime, stdout, stderr, shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.toBe(0);
+
+    const result = JSON.parse(stdout.mock.calls[0]?.[0] ?? '');
+    expect(result).toMatchObject({
+      model: { providerId: 'custom_provider:gateway', modelId: 'gpt-6-astra' },
+      requestedModel: { providerId: 'minimax', modelId: 'MiniMax-Custom-Pro' },
+      modelReplacement: {
+        tier: 'runtime_fallback',
+        reason: 'requested_model_not_in_runtime_catalog',
+      },
+    });
+    expect(stderr.mock.calls.map(([value]) => value).join('')).toContain(
+      'minimax/MiniMax-Custom-Pro',
+    );
+    expect(stderr.mock.calls.map(([value]) => value).join('')).toContain(
+      'custom_provider:gateway/gpt-6-astra',
+    );
+  });
+
+  it('emits a structured model.replaced event in stream-json', async () => {
+    const runtime = runtimeWith();
+    runtime.listModels.mockResolvedValue([
+      { providerId: 'custom_provider:gateway', modelId: 'gpt-6-astra' },
+    ]);
+    runtime.getSessionUsage.mockResolvedValue({
+      rows: [{ turnId: 'turn-1', model: 'custom_provider:gateway/gpt-6-astra' }],
+    } as never);
+    const stdout = vi.fn();
+
+    await expect(runTuiExec(
+      {
+        prompt: 'hi',
+        workspaceDir: '/tmp/workspace',
+        version: '0.1.0',
+        format: 'stream-json',
+        model: 'minimax/MiniMax-Custom-Pro',
+      },
+      { runtime, stdout, stderr: vi.fn(), shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.toBe(0);
+
+    const replacementEvent = stdout.mock.calls
+      .map(([value]) => JSON.parse(value))
+      .find((event) => event.type === 'model.replaced');
+    expect(replacementEvent).toMatchObject({
+      requestedModel: { providerId: 'minimax', modelId: 'MiniMax-Custom-Pro' },
+      actualModel: { providerId: 'custom_provider:gateway', modelId: 'gpt-6-astra' },
+      tier: 'runtime_fallback',
+      reason: 'requested_model_not_in_runtime_catalog',
+    });
+  });
+
+  it('does not warn when no model was requested', async () => {
+    const runtime = runtimeWith();
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runTuiExec(
+      { prompt: 'hi', workspaceDir: '/tmp/workspace', version: '0.1.0', format: 'json' },
+      { runtime, stdout, stderr, shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.toBe(0);
+
+    const result = JSON.parse(stdout.mock.calls[0]?.[0] ?? '');
+    expect(result).not.toHaveProperty('requestedModel');
+    expect(result).not.toHaveProperty('modelReplacement');
+    expect(stderr.mock.calls.map(([value]) => value).join('')).not.toContain(
+      'requested model',
+    );
+  });
+
+  it('does not warn when the explicit model is available', async () => {
+    const runtime = runtimeWith();
+    runtime.listModels.mockResolvedValue([
+      { providerId: 'minimax', modelId: 'MiniMax-Custom-Pro' },
+    ]);
+    runtime.getSessionUsage.mockResolvedValue({
+      rows: [{ turnId: 'turn-1', model: 'minimax/MiniMax-Custom-Pro' }],
+    } as never);
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runTuiExec(
+      {
+        prompt: 'hi',
+        workspaceDir: '/tmp/workspace',
+        version: '0.1.0',
+        format: 'json',
+        model: 'minimax/MiniMax-Custom-Pro',
+      },
+      { runtime, stdout, stderr, shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.toBe(0);
+
+    const result = JSON.parse(stdout.mock.calls[0]?.[0] ?? '');
+    expect(result).toMatchObject({
+      requestedModel: { providerId: 'minimax', modelId: 'MiniMax-Custom-Pro' },
+      model: { providerId: 'minimax', modelId: 'MiniMax-Custom-Pro' },
+    });
+    expect(result).not.toHaveProperty('modelReplacement');
+    expect(stderr.mock.calls.map(([value]) => value).join('')).not.toContain(
+      'requested model',
+    );
+  });
+
+  it('keeps explicit effort validation errors free of replacement warnings', async () => {
+    const runtime = runtimeWith();
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runTuiExec(
+      {
+        prompt: 'hi',
+        workspaceDir: '/tmp/workspace',
+        version: '0.1.0',
+        format: 'json',
+        model: 'minimax/MiniMax-Custom-Pro',
+        effort: 'high',
+      },
+      { runtime, stdout, stderr, shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.not.toBe(0);
+    expect(stderr.mock.calls.map(([value]) => value).join('')).not.toContain(
+      'requested model',
+    );
+  });
+
+  it('warns on stderr in the default text format', async () => {
+    const runtime = runtimeWith([
+      { type: 'message' as const, message: { id: 'assistant-1', turnId: 'turn-1', role: 'assistant' as const, kind: 'final' as const, content: 'fixed' } },
+      { type: 'session-status' as const, status: 'finished' as const },
+    ]);
+    runtime.listModels.mockResolvedValue([
+      { providerId: 'custom_provider:gateway', modelId: 'gpt-6-astra' },
+    ]);
+    runtime.getSessionUsage.mockResolvedValue({
+      rows: [{ turnId: 'turn-1', model: 'custom_provider:gateway/gpt-6-astra' }],
+    } as never);
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runTuiExec(
+      {
+        prompt: 'hi',
+        workspaceDir: '/tmp/workspace',
+        version: '0.1.0',
+        model: 'minimax/MiniMax-Custom-Pro',
+      },
+      { runtime, stdout, stderr, shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.toBe(0);
+
+    const stderrText = stderr.mock.calls.map(([value]) => value).join('');
+    expect(stderrText).toContain('requested model minimax/MiniMax-Custom-Pro');
+    expect(stderrText).toContain('custom_provider:gateway/gpt-6-astra');
+    const stdoutText = stdout.mock.calls.map(([value]) => value).join('');
+    expect(stdoutText).not.toContain('requested model');
+    expect(stdoutText).toContain('fixed');
+  });
+
+  it('reads no model facts in the text format without a requested model', async () => {
+    const runtime = runtimeWith();
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runTuiExec(
+      { prompt: 'hi', workspaceDir: '/tmp/workspace', version: '0.1.0' },
+      { runtime, stdout, stderr, shutdown: async () => undefined, createTurnId: () => 'turn-1' },
+    )).resolves.toBe(0);
+
+    expect(runtime.getSessionUsage).not.toHaveBeenCalled();
+    expect(runtime.listModels).not.toHaveBeenCalled();
+    expect(stderr.mock.calls.map(([value]) => value).join('')).not.toContain(
+      'requested model',
+    );
+  });
+});
+
 describe('runTuiExec response usage', () => {
   const completed: TuiMessage = { id: 'first', turnId: 'turn-1', role: 'assistant', kind: 'final', content: 'fixed', usage: { inputTokens: 10, outputTokens: 4, cacheReadTokens: 50, reasoningTokens: 2, totalTokens: 64 } };
 
@@ -106,7 +303,7 @@ describe('runTuiExec response usage', () => {
     )).resolves.toBe(0);
 
     expect(JSON.parse(stdout.mock.calls[0]?.[0] ?? '')).toMatchObject({
-      usage: { inputTokens: 30, outputTokens: 5, cacheReadTokens: 50, totalTokens: 35 },
+      usage: { inputTokens: 30, outputTokens: 5, cacheReadTokens: 50, totalTokens: 85 },
       usageSource: 'completed_responses',
       usageIncomplete: false,
     });
@@ -117,7 +314,7 @@ describe('runTuiExec response usage', () => {
     runtime.listMessagePage.mockResolvedValue({ messages: [{ ...completed, usage: { inputTokens: 6 } }], hasMore: false } as never);
 
     expect(await resultFor(runtime)).toMatchObject({
-      usage: { inputTokens: 6, outputTokens: 4, reasoningTokens: 2, cacheReadTokens: 50, totalTokens: 10 },
+      usage: { inputTokens: 6, outputTokens: 4, reasoningTokens: 2, cacheReadTokens: 50, totalTokens: 60 },
       usageSource: 'completed_responses', usageIncomplete: false,
     });
   });
@@ -133,7 +330,7 @@ describe('runTuiExec response usage', () => {
 
       expect(await resultFor(usageRuntime([completed, partial]))).toMatchObject({
         status: 'succeeded',
-        usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+        usage: { inputTokens: 10, outputTokens: 4, totalTokens: 64 },
         usageSource: 'completed_responses',
         usageIncomplete: true,
       });
@@ -155,9 +352,35 @@ describe('runTuiExec response usage', () => {
     const runtime = usageRuntime([second]);
     runtime.listMessagePage.mockResolvedValueOnce({ messages: [second], hasMore: true, nextCursor: 'older' } as never)
       .mockResolvedValueOnce({ messages: [completed, { ...completed, id: 'old-turn', turnId: 'turn-old' }], hasMore: false } as never);
-    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 30, outputTokens: 7, cacheReadTokens: 50, totalTokens: 37 }, usageIncomplete: false });
+    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 30, outputTokens: 7, cacheReadTokens: 50, totalTokens: 87 }, usageIncomplete: false });
     expect(runtime.listMessagePage).toHaveBeenCalledTimes(2);
     expect(runtime.listMessagePage).toHaveBeenLastCalledWith('session-1', { limit: 200, before: 'older' });
+  });
+
+  it('stops reading history once an older Turn precedes the current Turn', async () => {
+    const older = { id: 'older', turnId: 'turn-old', role: 'assistant' as const, content: 'old' };
+    const runtime = usageRuntime([completed]);
+    runtime.listMessagePage.mockImplementation(async (_sessionId: string, input?: { before?: string }) => (
+      input?.before
+        ? { messages: [older], hasMore: true, nextCursor: `${input.before}-older` }
+        : { messages: [older, completed], hasMore: true, nextCursor: 'page-2' }
+    ) as never);
+
+    expect(await resultFor(runtime)).toMatchObject({ usage: { totalTokens: 64 }, usageIncomplete: false });
+    expect(runtime.listMessagePage).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps reading past Turn-less messages until an older Turn is proven', async () => {
+    const turnless = { id: 'marker', role: 'assistant' as const, content: 'marker' };
+    const earlier = { ...completed, id: 'earlier', usage: { inputTokens: 1, outputTokens: 1 } };
+    const older = { id: 'older', turnId: 'turn-old', role: 'assistant' as const, content: 'old' };
+    const runtime = usageRuntime([earlier, completed]);
+    runtime.listMessagePage
+      .mockResolvedValueOnce({ messages: [turnless, completed], hasMore: true, nextCursor: 'page-2' } as never)
+      .mockResolvedValueOnce({ messages: [older, earlier], hasMore: true, nextCursor: 'page-3' } as never);
+
+    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 11, outputTokens: 5 }, usageIncomplete: false });
+    expect(runtime.listMessagePage).toHaveBeenCalledTimes(2);
   });
 
   it('reports complete response coverage after terminal history recovery', async () => {
@@ -166,7 +389,7 @@ describe('runTuiExec response usage', () => {
     runtime.getActiveRun.mockResolvedValue({ schemaVersion: 1, sessionId: 'session-1', state: 'idle', actions: {} } as never);
     runtime.getSession.mockResolvedValue({ sessionId: 'session-1', workspaceDir: '/tmp/workspace', status: 'idle' } as never);
     runtime.listMessagePage.mockResolvedValue({ messages: [completed], hasMore: false } as never);
-    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 }, usageIncomplete: false });
+    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 10, outputTokens: 4, totalTokens: 64 }, usageIncomplete: false });
   });
 
   it.each([
@@ -183,7 +406,7 @@ describe('runTuiExec response usage', () => {
   it.each(['aborted', 'error'] as const)('keeps completed usage after an %s terminal without claiming complete billing', async (status) => {
     expect(await resultFor(usageRuntime([completed], { type: 'session-status', status }))).toMatchObject({
       status: status === 'aborted' ? 'cancelled' : 'failed',
-      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 64 },
       usageSource: 'completed_responses', usageIncomplete: true,
     });
   });
@@ -191,7 +414,7 @@ describe('runTuiExec response usage', () => {
   it('keeps known stream usage when final history inspection fails', async () => {
     const runtime = usageRuntime([completed]);
     runtime.listMessagePage.mockRejectedValue(new Error('inspection unavailable'));
-    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 }, usageSource: 'completed_responses', usageIncomplete: true });
+    expect(await resultFor(runtime)).toMatchObject({ usage: { inputTokens: 10, outputTokens: 4, totalTokens: 64 }, usageSource: 'completed_responses', usageIncomplete: true });
   });
 
   it('bounds final inspection time and does not let stalled analytics hide stream usage', async () => {
@@ -203,7 +426,7 @@ describe('runTuiExec response usage', () => {
       runtime.getSessionUsage.mockImplementation(() => new Promise(() => undefined));
       const result = resultFor(runtime);
       await vi.advanceTimersByTimeAsync(1_001);
-      expect(await result).toMatchObject({ status: 'succeeded', usage: { totalTokens: 14 }, usageSource: 'completed_responses', usageIncomplete: true });
+      expect(await result).toMatchObject({ status: 'succeeded', usage: { totalTokens: 64 }, usageSource: 'completed_responses', usageIncomplete: true });
       finishPage({ messages: [completed], hasMore: true, nextCursor: 'late-page' });
       await vi.advanceTimersByTimeAsync(0);
       expect(runtime.listMessagePage).toHaveBeenCalledTimes(1);
@@ -215,7 +438,7 @@ describe('runTuiExec response usage', () => {
   it('does not claim completeness when history pagination stalls', async () => {
     const runtime = usageRuntime([completed]);
     runtime.listMessagePage.mockResolvedValue({ messages: [completed], hasMore: true, nextCursor: 'same' } as never);
-    expect(await resultFor(runtime)).toMatchObject({ usage: { totalTokens: 14 }, usageIncomplete: true });
+    expect(await resultFor(runtime)).toMatchObject({ usage: { totalTokens: 64 }, usageIncomplete: true });
     expect(runtime.listMessagePage).toHaveBeenCalledTimes(2);
   });
 
@@ -224,7 +447,7 @@ describe('runTuiExec response usage', () => {
       const runtime = usageRuntime([completed]);
       let page = 0;
       runtime.listMessagePage.mockImplementation(async () => ({ messages: [completed], hasMore: true, ...(mode === 'page-limit' ? { nextCursor: String(++page) } : {}) }) as never);
-      expect(await resultFor(runtime)).toMatchObject({ usage: { totalTokens: 14 }, usageIncomplete: true });
+      expect(await resultFor(runtime)).toMatchObject({ usage: { totalTokens: 64 }, usageIncomplete: true });
       expect(runtime.listMessagePage).toHaveBeenCalledTimes(mode === 'page-limit' ? 100 : 1);
     }
   });
@@ -248,6 +471,36 @@ describe('runTuiExec response usage', () => {
     expect(result.usage).not.toHaveProperty('outputTokens');
   });
 
+  it("keeps the advisor's usage rows out of the Turn's model and analytics fallback", async () => {
+    // The Turn stopped right after an advisor call, so the advisor's row is the Turn's last one.
+    const advisorCall: TuiMessage = {
+      id: 'advisor-step',
+      turnId: 'turn-1',
+      role: 'assistant',
+      toolCalls: [
+        {
+          id: 'call-advisor',
+          name: 'advisor',
+          arguments: '{}',
+          advisor: { providerId: 'custom_provider:acme', modelId: 'critic', outcome: 'advice' },
+        },
+      ],
+    } as TuiMessage;
+    const final: TuiMessage = { id: 'final', turnId: 'turn-1', role: 'assistant', kind: 'final', content: 'fixed' };
+    const runtime = usageRuntime([advisorCall, final]);
+    runtime.getSessionUsage.mockResolvedValue({
+      rows: [
+        { id: 1, turnId: 'turn-1', model: 'default-provider/default-model', inputTokens: 10 },
+        { id: 2, turnId: 'turn-1', model: 'custom_provider:acme/critic', inputTokens: 900 },
+      ],
+    } as never);
+
+    const result = await resultFor(runtime);
+
+    expect(result.model).toMatchObject({ providerId: 'default-provider', modelId: 'default-model' });
+    expect(result).toMatchObject({ usage: { inputTokens: 10 }, usageSource: 'analytics_fallback' });
+  });
+
   it('leaves unavailable usage absent instead of fabricating zero', async () => {
     const result = await resultFor(runtimeWith());
     expect(result).toMatchObject({ usageSource: 'unavailable', usageIncomplete: true });
@@ -256,8 +509,8 @@ describe('runTuiExec response usage', () => {
 
   it('preserves usage completeness metadata in both JSONL terminal records', async () => {
     const records = await resultFor(usageRuntime([completed]), 'stream-json');
-    expect(records.find((record: { type: string }) => record.type === 'turn.completed')).toMatchObject({ usage: { totalTokens: 14 }, usageSource: 'completed_responses', usageIncomplete: false });
-    expect(records.at(-1).result).toMatchObject({ usage: { totalTokens: 14 }, usageSource: 'completed_responses', usageIncomplete: false });
+    expect(records.find((record: { type: string }) => record.type === 'turn.completed')).toMatchObject({ usage: { totalTokens: 64 }, usageSource: 'completed_responses', usageIncomplete: false });
+    expect(records.at(-1).result).toMatchObject({ usage: { totalTokens: 64 }, usageSource: 'completed_responses', usageIncomplete: false });
   });
 
   it.each(['stream', 'history'] as const)('marks compaction usage unavailable through %s without changing response totals', async (source) => {
@@ -267,7 +520,7 @@ describe('runTuiExec response usage', () => {
 
     const result = await resultFor(runtime);
     expect(result).toMatchObject({ status: 'succeeded', usageSource: 'completed_responses', usageIncomplete: true });
-    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 4, cacheReadTokens: 50, reasoningTokens: 2, totalTokens: 14 });
+    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 4, cacheReadTokens: 50, reasoningTokens: 2, totalTokens: 64 });
   });
 });
 
@@ -544,7 +797,7 @@ describe('runTuiExec', () => {
           outputTokens: 4,
           reasoningTokens: 2,
           cacheReadTokens: 3,
-          totalTokens: 14,
+          totalTokens: 17,
         },
       });
     } finally {
@@ -875,6 +1128,102 @@ describe('runTuiExec', () => {
     expect(stderr).toHaveBeenCalledWith(expect.stringContaining('Available levels: low, high'));
   });
 
+  // exec gets an advisor only from --advisor: written to the Run's Session (kept by an
+  // existing one), never to the default, after every other check and before the first Turn.
+  it.each([
+    ['a new Session', { advisor: { enabled: true, providerId: 'acme', modelId: 'critic' } }],
+    ['an existing Session', { sessionId: 'session-1', advisor: { enabled: false } }],
+    ['no --advisor', {}],
+  ] as const)('applies --advisor to %s before the first Turn', async (_name, options) => {
+    const runtime = {
+      ...runtimeWith(),
+      selectSessionAdvisor: vi.fn(async () => ({ enabled: true })),
+    };
+
+    await expect(
+      runTuiExec(
+        { prompt: 'Fix it', workspaceDir: '/tmp/workspace', version: '0.1.0', ...options },
+        { runtime, stdout: vi.fn(), stderr: vi.fn(), shutdown: async () => undefined },
+      ),
+    ).resolves.toBe(0);
+
+    if (!('advisor' in options)) {
+      expect(runtime.selectSessionAdvisor).not.toHaveBeenCalled();
+      return;
+    }
+    expect(runtime.selectSessionAdvisor).toHaveBeenCalledWith(options.advisor, 'session-1');
+    expect(runtime.selectSessionAdvisor.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.sendMessage.mock.invocationCallOrder[0]!,
+    );
+    expect(runtime.createSession).toHaveBeenCalledTimes('sessionId' in options ? 0 : 1);
+  });
+
+  it.each([
+    ['turns the switch on and says so when it is off', false, true],
+    ['leaves the switch alone when it is on', true, false],
+  ])('%s for an --advisor model', async (_name, initial, written) => {
+    const stderr = vi.fn();
+    let switchOn = initial;
+    const runtime = {
+      ...runtimeWith(),
+      selectSessionAdvisor: vi.fn(async () => ({ enabled: true })),
+      getAdvisorEnabled: vi.fn(async () => switchOn),
+      setAdvisorEnabled: vi.fn(async (enabled: boolean) => {
+        switchOn = enabled;
+        return enabled;
+      }),
+    };
+
+    await expect(
+      runTuiExec(
+        {
+          prompt: 'Fix it',
+          workspaceDir: '/tmp/workspace',
+          version: '0.1.0',
+          advisor: { enabled: true, providerId: 'acme', modelId: 'critic' },
+        },
+        { runtime, stdout: vi.fn(), stderr, shutdown: async () => undefined },
+      ),
+    ).resolves.toBe(0);
+
+    expect(runtime.setAdvisorEnabled).toHaveBeenCalledTimes(written ? 1 : 0);
+    if (!written) return;
+    expect(runtime.setAdvisorEnabled).toHaveBeenCalledWith(true);
+    expect(runtime.setAdvisorEnabled.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.sendMessage.mock.invocationCallOrder[0]!,
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('--advisor turned the advisor on for all sessions'),
+    );
+  });
+
+  it('fails as a configuration error before the Turn when Runtime rejects --advisor', async () => {
+    const stderr = vi.fn();
+    const runtime = {
+      ...runtimeWith(),
+      selectSessionAdvisor: vi.fn(async () => {
+        throw new Error('Advisor model is unavailable');
+      }),
+    };
+
+    await expect(
+      runTuiExec(
+        {
+          prompt: 'Fix it',
+          workspaceDir: '/tmp/workspace',
+          version: '0.1.0',
+          advisor: { enabled: true, providerId: 'missing', modelId: 'model' },
+        },
+        { runtime, stdout: vi.fn(), stderr, shutdown: async () => undefined },
+      ),
+    ).resolves.toBe(3);
+
+    expect(runtime.sendMessage).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('--advisor missing/model could not be applied: Advisor model is unavailable'),
+    );
+  });
+
   it('streams only the versioned ExecEvent contract with one terminal result', async () => {
     const stdout: string[] = [];
     const runtime = runtimeWith();
@@ -925,6 +1274,63 @@ describe('runTuiExec', () => {
       },
       expect.any(AbortSignal),
     );
+  });
+
+  // stream-json consumers read the facts per call; json and stream-json read the Run summary.
+  it('reports advisor calls on stream-json tool items and in the terminal result', async () => {
+    const facts = {
+      outcome: 'truncated',
+      providerId: 'custom_provider:acme',
+      modelId: 'critic',
+      inputTokens: 900,
+      outputTokens: 4096,
+      durationMs: 1200,
+    };
+    const events: TuiStreamEvent[] = [
+      {
+        type: 'message',
+        message: {
+          id: 'response-1',
+          role: 'assistant',
+          toolCalls: [
+            { id: 'read-1', name: 'read', status: 2 },
+            { id: 'advisor-1', name: 'advisor', status: 2, advisor: facts },
+          ],
+        },
+      },
+      { type: 'message', message: { id: 'response-2', role: 'assistant', content: 'fixed' } },
+      { type: 'session-status', status: 'finished' },
+    ];
+    const summary = {
+      stepCount: 2,
+      toolCallCount: 2,
+      calls: [{ toolCallId: 'advisor-1', stepNumber: 1, toolCallNumber: 2, ...facts }],
+    };
+    const run = async (format: 'json' | 'stream-json') => {
+      const stdout: string[] = [];
+      await expect(
+        runTuiExec(
+          { prompt: 'Fix it', workspaceDir: '/tmp/workspace', version: '0.1.0', format },
+          {
+            runtime: runtimeWith(events),
+            stdout: (value) => stdout.push(value),
+            stderr: vi.fn(),
+            shutdown: async () => undefined,
+            createTurnId: () => 'turn-1',
+          },
+        ),
+      ).resolves.toBe(0);
+      return stdout.join('').trim().split('\n').map((line) => JSON.parse(line));
+    };
+
+    const [result] = await run('json');
+    expect(result.advisor).toEqual(summary);
+    const records = await run('stream-json');
+    const toolItems = records.filter(
+      (record) => record.type === 'item.completed' && record.item.type === 'tool_call',
+    );
+    expect(toolItems.map((record) => record.item.toolCall.advisor)).toEqual([undefined, facts]);
+    expect(records.at(-1)).toMatchObject({ type: 'exec.completed', result: { advisor: summary } });
   });
 
   it('preserves an empty selected-model variant in machine output', async () => {

@@ -217,18 +217,32 @@ export class TuiInteractionFlow {
     this.options.onChanged();
   }
 
-  setQuestionnaire(request: TuiQuestionnaireRequest, sessionId?: string, agentName?: string): void {
+  /**
+   * `presentationSessionId` is the Session whose surface hosts the decision panel. It differs
+   * from the requesting Session when a dispatched Task asks the question: the reply is routed by
+   * request id and agent name, so the coordinator's own Session can host the panel and the user
+   * never has to leave it. Mirrors how `setPermission` already presents a Task's approval.
+   */
+  setQuestionnaire(
+    request: TuiQuestionnaireRequest,
+    presentationSessionId?: string,
+    agentName?: string,
+  ): void {
     if (this.isStopped()) return;
-    const active = createActiveQuestionnaire(request, sessionId, agentName);
-    const ownerSessionId = sessionId ?? this.options.controller.snapshot().session?.sessionId;
-    const previous = ownerSessionId
-      ? selectSessionView(this.options.stateStore.snapshot(), ownerSessionId)?.interactions
+    const ownerSessionId =
+      request.requester?.sessionId ??
+      presentationSessionId ??
+      this.options.controller.snapshot().session?.sessionId;
+    const targetSessionId = presentationSessionId ?? ownerSessionId;
+    const active = createActiveQuestionnaire(request, targetSessionId, agentName);
+    const previous = targetSessionId
+      ? selectSessionView(this.options.stateStore.snapshot(), targetSessionId)?.interactions
           .questionnaire
       : undefined;
-    if (ownerSessionId) {
+    if (targetSessionId) {
       this.options.stateStore.dispatch({
         type: 'interaction/questionnaireReceived',
-        sessionId: ownerSessionId,
+        sessionId: targetSessionId,
         questionnaire: active,
       });
     }
@@ -238,10 +252,10 @@ export class TuiInteractionFlow {
       this.clearPlanReviewBody(previous.request.id);
     }
     const projected =
-      ownerSessionId === this.options.stateStore.snapshot().activeSessionId
+      targetSessionId === this.options.stateStore.snapshot().activeSessionId
         ? this.questionnaire()
-        : ownerSessionId
-          ? selectSessionView(this.options.stateStore.snapshot(), ownerSessionId)?.interactions
+        : targetSessionId
+          ? selectSessionView(this.options.stateStore.snapshot(), targetSessionId)?.interactions
               .questionnaire
           : undefined;
     if (projected?.request.id !== request.id) return;
@@ -592,13 +606,24 @@ export class TuiInteractionFlow {
     }
     const permissionPresentationSessionId =
       event.type === 'permission.ask' || event.type === 'permission.resolved'
-        ? this.permissionPresentationSessionId(permissionOwnerSessionId, currentSessionId)
+        ? this.interactionPresentationSessionId(permissionOwnerSessionId, currentSessionId)
         : undefined;
-    if (event.sessionId !== currentSessionId && !permissionPresentationSessionId) return false;
+    const questionnairePresentationSessionId: string | undefined = undefined;
+    if (
+      event.sessionId !== currentSessionId &&
+      !permissionPresentationSessionId &&
+      !questionnairePresentationSessionId
+    ) {
+      return false;
+    }
     if (await this.continuation.handleEvent(event, currentSessionId)) return true;
     if (this.isStopped()) return false;
     if (event.type === 'questionnaire.ask') {
-      this.setQuestionnaire(event.request, currentSessionId, event.agentName);
+      this.setQuestionnaire(
+        event.request,
+        questionnairePresentationSessionId ?? currentSessionId,
+        event.agentName,
+      );
       return true;
     }
     if (event.type === 'questionnaire.dismiss' || event.type === 'questionnaire.superseded') {
@@ -1397,7 +1422,7 @@ export class TuiInteractionFlow {
     return true;
   }
 
-  private permissionPresentationSessionId(
+  private interactionPresentationSessionId(
     ownerSessionId: string | undefined,
     activeSessionId: string,
   ): string | undefined {

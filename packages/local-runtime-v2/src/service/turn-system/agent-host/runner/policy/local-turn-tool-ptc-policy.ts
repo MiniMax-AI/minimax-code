@@ -27,6 +27,7 @@ const PTC_DIRECT_ONLY_TOOL_NAMES = new Set([
   'task',
   'task_append',
   'code_review',
+  'advisor',
   'run_code',
 ]);
 

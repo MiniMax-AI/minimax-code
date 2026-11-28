@@ -33,6 +33,23 @@ export function classifyBrowserNavigationEvent(
   return frameId ? 'main' : 'unknown';
 }
 
+/**
+ * One poll of a wait condition. A selector condition looks at every match
+ * (querySelectorAll): visible = some match is visible, hidden = no match is
+ * visible, attached = something matches, detached = nothing matches. Checking
+ * only the first match waited out the whole timeout whenever that match was a
+ * hidden input, a template row or an off-screen copy (one evaluation run: 22
+ * selector waits timed out while the visible match was on the page). The
+ * counts of the last poll explain a timeout.
+ */
+export interface BrowserWaitPoll {
+  met: boolean;
+  /** Elements matching the selector; only for a selector condition. */
+  matched?: number;
+  /** Visible matches, for state visible/hidden; visible stops counting at the first. */
+  visible?: number;
+}
+
 export function waitExpression(input: Record<string, unknown>): string {
   const selector = asString(input.selector);
   const text = asString(input.text);
@@ -47,30 +64,58 @@ export function waitExpression(input: Record<string, unknown>): string {
     ${
       selector
         ? `
-      const element = document.querySelector(${JSON.stringify(selector)});
+      const elements = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
       const state = ${JSON.stringify(selectorState)};
-      if (state === 'detached') {
-        if (element) return false;
+      const matched = elements.length;
+      if (state === 'attached' || state === 'detached') {
+        if ((state === 'attached') !== (matched > 0)) return { met: false, matched };
       } else {
-        if (!element) return state === 'hidden';
-        if (state === 'visible' || state === 'hidden') {
+        let visible = 0;
+        for (const element of elements) {
           const style = getComputedStyle(element);
           const rect = element.getBoundingClientRect();
-          const visible = !element.hasAttribute('hidden') &&
+          if (!element.hasAttribute('hidden') &&
             style.display !== 'none' && style.visibility !== 'hidden' &&
-            style.opacity !== '0' && rect.width > 0 && rect.height > 0;
-          if (state === 'visible' && !visible) return false;
-          if (state === 'hidden' && visible) return false;
+            style.opacity !== '0' && rect.width > 0 && rect.height > 0) {
+            visible += 1;
+            if (state === 'visible') break;
+          }
         }
+        if ((state === 'visible') !== (visible > 0)) return { met: false, matched, visible };
       }
     `
         : ''
     }
-    ${text ? `if (!String(document.body?.innerText || '').includes(${JSON.stringify(text)})) return false;` : ''}
-    ${url ? `if (!location.href.includes(${JSON.stringify(url)})) return false;` : ''}
-    ${load ? "if (document.readyState !== 'complete') return false;" : ''}
-    return true;
+    ${text ? `if (!String(document.body?.innerText || '').includes(${JSON.stringify(text)})) return { met: false };` : ''}
+    ${url ? `if (!location.href.includes(${JSON.stringify(url)})) return { met: false };` : ''}
+    ${load ? "if (document.readyState !== 'complete') return { met: false };" : ''}
+    return { met: true };
   })()`;
+}
+
+/**
+ * Recovery for a selector wait that timed out, from the counts of its last
+ * poll. Without it the model could not tell a wrong selector from a hidden
+ * first match or a page that never finished.
+ */
+export function waitSelectorTimeoutRecovery(
+  selector: string,
+  state: string,
+  poll: BrowserWaitPoll,
+): string | undefined {
+  const matched = poll.matched;
+  if (matched === undefined) return undefined;
+  const quoted = JSON.stringify(selector);
+  if ((state === 'visible' || state === 'attached') && matched === 0) {
+    return `No element matches ${quoted}. Inspect the page or query kind "text" to find the element instead of guessing the selector.`;
+  }
+  if (state === 'visible') {
+    return `${matched} element(s) match ${quoted} but none is visible. Use a more specific selector for the visible element, or pass state: "attached" if presence is enough.`;
+  }
+  if (state === 'hidden') {
+    return `${poll.visible ?? 0} of ${matched} element(s) matching ${quoted} are still visible.`;
+  }
+  return state === 'detached' ? `${matched} element(s) still match ${quoted}.` : undefined;
 }
 
 export function buttonName(value: unknown): string {
@@ -92,4 +137,25 @@ export function modifierBit(value: string): number {
     default:
       return 0;
   }
+}
+
+/**
+ * The keys of a combo such as "Control+Shift+A", modifiers first: a trailing
+ * "+" is the plus key ("Control++"), and a single character is itself. The
+ * run_script keyboard splits a combo by the same rules.
+ */
+export function splitKeyCombo(combo: string): string[] {
+  if (combo.length <= 1 || combo.indexOf('+') <= 0) return [combo];
+  const parts = combo.split('+');
+  if (parts[parts.length - 1] === '') {
+    parts.pop();
+    parts[parts.length - 1] = '+';
+  }
+  return parts.filter((part) => part.length > 0);
+}
+
+/** Playwright's "ControlOrMeta": Meta on macOS, Control elsewhere; any other name as it is. */
+export function platformModifier(name: string): string {
+  if (name.toLowerCase() !== 'controlormeta') return name;
+  return process.platform === 'darwin' ? 'Meta' : 'Control';
 }

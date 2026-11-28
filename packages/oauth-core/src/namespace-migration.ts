@@ -1,15 +1,18 @@
+import { CredentialStorePermissionError } from './credential-store/types.js';
 import { CrossProcessAuthLock } from './cross-process-lock.js';
 import type { AuthNamespace } from './namespace.js';
-import {
-  AUTH_STATE_SCHEMA_VERSION,
-  AuthStateStore,
-  type AuthState,
-} from './state-store.js';
+import { AUTH_STATE_SCHEMA_VERSION, AuthStateStore, type AuthState } from './state-store.js';
 
 export async function migrateLegacyAuthNamespace(namespace: AuthNamespace): Promise<void> {
-  const legacyState = await retireMatchingLegacyRootState(namespace);
-  const targetStore = new AuthStateStore(namespace.statePath);
-  const targetLock = new CrossProcessAuthLock(namespace.lockPath);
+  // Legacy root entries owned by another account are not this client's to retire,
+  // and a local reset cannot change them either. An older client run by the same
+  // user cannot read them, so skipping the migration is safe.
+  const legacyState = await retireMatchingLegacyRootState(namespace).catch((error: unknown) => {
+    if (error instanceof CredentialStorePermissionError) return null;
+    throw error;
+  });
+  const targetStore = new AuthStateStore(namespace.statePath, namespace.authHome);
+  const targetLock = new CrossProcessAuthLock(namespace.lockPath, { root: namespace.authHome });
 
   await targetLock.withLock(async () => {
     const targetState = await targetStore.read();
@@ -21,7 +24,7 @@ export async function migrateLegacyAuthNamespace(namespace: AuthNamespace): Prom
 }
 
 async function retireMatchingLegacyRootState(namespace: AuthNamespace): Promise<AuthState | null> {
-  const legacyStore = new AuthStateStore(namespace.legacyStatePath);
+  const legacyStore = new AuthStateStore(namespace.legacyStatePath, namespace.authHome);
   const legacyLock = new CrossProcessAuthLock(namespace.legacyLockPath);
 
   return legacyLock.withLock(async () => {

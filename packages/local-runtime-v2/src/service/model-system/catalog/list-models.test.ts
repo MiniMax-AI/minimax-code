@@ -190,6 +190,24 @@ describe('model catalog entry helpers', () => {
     },
   );
 
+  it('carries a delivered usage hint and omits it when the catalog has none', () => {
+    const entry = (model: Parameters<typeof buildModelEntry>[0]['model']) =>
+      buildModelEntry({
+        providerId: 'minimax',
+        modelId: 'MiniMax-M3.1-Flash',
+        model,
+        selected: false,
+        providerSource: 'provider',
+        providerKind: 'minimax-managed',
+        providerName: 'MiniMax',
+      });
+
+    expect(entry({ name: 'M3.1-Flash', hint: '用量翻倍' }).hint).toBe('用量翻倍');
+    expect(entry({ name: 'M3.1-Flash', hint: '  用量翻倍  ' }).hint).toBe('用量翻倍');
+    expect(entry({ name: 'M3.1-Flash' })).not.toHaveProperty('hint');
+    expect(entry({ name: 'M3.1-Flash', hint: '   ' })).not.toHaveProperty('hint');
+  });
+
   it('builds rich and implicit model entries', () => {
     const rich = buildModelEntry({
       providerId: 'custom_provider:work',
@@ -274,15 +292,79 @@ describe('model catalog entry helpers', () => {
       providerSource: 'custom_provider',
       providerKind: 'custom',
       providerName: 'Work',
-      implicitCustomProviderThinking: true,
     });
     expect(effortOnly).toMatchObject({
       displayName: 'effort-only',
       effortOptions: ['none', 'high'],
+      defaultEffort: 'high',
       thinkingConfig: { mode: 'forced_on' },
     });
   });
+});
 
+describe('switchable thinking default', () => {
+  it.each([
+    { defaultVariant: 'thinking', defaultValue: 'false' },
+    { defaultVariant: 'none-thinking', defaultValue: 'true' },
+  ])(
+    'reports the default the resolver runs when defaultVariant is $defaultVariant and default_value is $defaultValue',
+    ({ defaultVariant, defaultValue }) => {
+      const model: Parameters<typeof buildModelEntry>[0]['model'] = {
+        defaultVariant,
+        thinking_config: { mode: 'switchable', default_value: defaultValue },
+      };
+      const entry = buildModelEntry({
+        providerId: 'minimax',
+        modelId: 'switchable',
+        model,
+        // The main model chose the opposite state; the reported default stays the model's own.
+        selected: true,
+        selectionVariant: defaultVariant === 'thinking' ? '' : 'thinking',
+        hasSelectionVariant: true,
+        providerSource: 'provider',
+        providerKind: 'minimax-managed',
+        providerName: 'MiniMax',
+      });
+      // A request without a variant (the advisor's) runs at this default.
+      const resolverThinks = resolveThinkingLevel(model, undefined) !== ThinkingLevel.OFF;
+      expect(entry.thinkingConfig).toEqual({
+        mode: 'switchable',
+        default_value: resolverThinks ? 'true' : 'false',
+      });
+    },
+  );
+
+  it.each([
+    { reasoning: true, defaultVariant: 'none-thinking' },
+    { reasoning: undefined, defaultVariant: 'thinking' },
+  ])(
+    'keeps the reasoning default of an implicit custom provider switch with defaultVariant $defaultVariant',
+    ({ reasoning, defaultVariant }) => {
+      const model: Parameters<typeof buildModelEntry>[0]['model'] = {
+        defaultVariant,
+        ...(reasoning !== undefined ? { reasoning } : {}),
+      };
+      const entry = buildModelEntry({
+        providerId: 'custom_provider:work',
+        modelId: 'implicit',
+        model,
+        selected: false,
+        providerSource: 'custom_provider',
+        providerKind: 'custom',
+        providerName: 'Work',
+        implicitCustomProviderThinking: true,
+      });
+      // Without a configured mode the resolver reads `reasoning` only, not `defaultVariant`.
+      const resolverThinks = resolveThinkingLevel(model, undefined, true) !== ThinkingLevel.OFF;
+      expect(entry.thinkingConfig).toEqual({
+        mode: 'switchable',
+        default_value: resolverThinks ? 'true' : 'false',
+      });
+    },
+  );
+});
+
+describe('model catalog capability and selection helpers', () => {
   it('exposes Kimi K3 low/high/max effort options in the model roster', () => {
     const entry = buildModelEntry({
       providerId: 'custom_provider:moonshotai',
@@ -302,8 +384,23 @@ describe('model catalog entry helpers', () => {
       modelId: 'kimi-k3',
       displayName: 'Kimi K3',
       effortOptions: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      thinkingConfig: { mode: 'forced_on' },
     });
-    expect(entry.defaultEffort).toBeUndefined();
+    expect(
+      buildModelEntry({
+        providerId: 'custom_provider:work',
+        modelId: 'gemini-4-carbon',
+        model: { reasoning: true, thinking: { effortOptions: ['high', 'medium', 'low'] } },
+        selected: true,
+        providerSource: 'custom_provider',
+        providerKind: 'custom',
+        providerName: 'Work',
+      }),
+    ).toMatchObject({
+      modelId: 'gemini-4-carbon',
+      effortOptions: ['low', 'medium', 'high'],
+    });
   });
 
   it('exposes context option hints only for managed models', () => {

@@ -511,7 +511,6 @@ export function createTuiApplicationSurface(options: {
  */
 export function createTuiBusinessEventTracker(options: {
   readonly telemetry?: McodeBusinessTelemetry;
-  readonly workspaceDir: string;
   readonly controller: TuiChatController;
   readonly featureFlow: TuiFeatureFlow;
   readonly stateStore: TuiStateStore;

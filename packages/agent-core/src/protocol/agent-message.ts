@@ -78,23 +78,21 @@ export interface ToolCall {
 }
 
 /**
- * Marks display messages from flows not driven by the user. The UI uses these for lifecycle status
- * outside model context, such as context compaction and parent-session Review activity.
+ * 标记来自非用户驱动流程的 display message。UI 据此渲染不进入模型上下文
+ * 的生命周期状态，例如上下文压缩与父会话 Review activity。
  *
- * The local-runtime-v2 agent projection persists three compaction lifecycle states:
- * - `compaction_start`: Compaction started (summary LLM call in progress). A running frame; the UI
- *   displays "Compacting".
- * - `compaction`: Terminal frame for successful compaction.
- * - `compaction_failed`: Terminal frame for failed compaction. Besides live failures, orphaned
- *   `compaction_start` frames left by a process crash are downgraded to this state on reload.
+ * 压缩生命周期三态由 local-runtime-v2 的 agent projection 持久化：
+ * - `compaction_start`：压缩已开始（摘要 LLM 调用进行中）。运行态帧，UI 渲染"压缩中"。
+ * - `compaction`：压缩成功完成的终态帧。
+ * - `compaction_failed`：压缩失败的终态帧。除实时失败外，进程崩溃遗留的
+ *   孤儿 `compaction_start` 也会在重载时被降级成此态。
  *
- * The kind fully expresses whether compaction is running or terminal; do not include
- * `finish_reason`. That field describes assistant response completion, and reusing it for
- * compaction would confuse response terminal-state detection.
+ * 压缩帧的运行/终止状态完全由 kind 表达，不应携带 `finish_reason` ——
+ * finish_reason 是助手回答消息的完成语义，压缩帧复用它会与回答消息的
+ * 终态判定混淆。
  *
- * All three frames share one `msg_id` (compactionId). Persistence upserts by msg_id, replacing the
- * previous frame in place, so the session ultimately contains one compaction message whose kind is
- * the latest state.
+ * 三帧共用同一个 `msg_id`（即 compactionId），持久化按 msg_id upsert，
+ * 后一帧原地覆盖前一帧 —— 会话里最终只留一条压缩消息，其 kind 就是最新状态。
  */
 export type MessageKind =
   | 'compaction_start'
@@ -125,6 +123,8 @@ export type MsgType = (typeof MsgType)[keyof typeof MsgType];
 export interface TokenUsage {
   total_tokens: number;
   context_window: number;
+  /** Single-turn context footprint when `total_tokens` sums multiple continuation hops. */
+  context_tokens?: number;
   /** Provider-reported prompt tokens for this physical request. */
   input_tokens?: number;
   /** Provider-reported generated tokens for this physical request. */
@@ -171,8 +171,6 @@ export interface AgentMessageChunk {
   msg_id: string;
   parent_msg_id?: string;
   msg_content?: string;
-  /** Set when `msg_content` is runtime-authored rather than model output. */
-  msg_content_source?: 'system_error';
   tool_calls?: ToolCall[];
   thinking_content?: string;
   thinking_duration_ms?: number;

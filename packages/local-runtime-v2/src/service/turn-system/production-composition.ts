@@ -788,26 +788,21 @@ function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSna
   options: CreateLocalAgentHostOptions<TAgent>,
 ): () => ToolResultCompactionConfig {
   const fileConfig = parseToolResultCompactionConfig(readToolResultCompactionFileConfig(options));
-  const base: Required<Omit<ToolResultCompactionConfig, 'checkpointSharedPrefix'>> = {
-    enabled: fileConfig.enabled,
+  const base = {
     maxInlineBytes: fileConfig.maxInlineKiB * 1_024,
     mcpDetailsMaxInlineBytes: fileConfig.mcpDetailsMaxInlineKiB * 1_024,
-    watermarkBytes: fileConfig.watermarkKiB * 1_024,
-    minSavingsBytes: fileConfig.minSavingsKiB * 1_024,
-    minCandidateBytes: fileConfig.minCandidateKiB * 1_024,
-    keepRecentRounds: fileConfig.keepRecentRounds,
   };
   return () => {
     const override = readToolResultCompactionOverride(options.getToolResultCompactionConfig);
     return {
-      enabled: typeof override?.enabled === 'boolean' ? override.enabled : base.enabled,
+      enabled: false,
       maxInlineBytes: positiveSafeInteger(override?.maxInlineBytes) ?? base.maxInlineBytes,
       mcpDetailsMaxInlineBytes:
         positiveSafeInteger(override?.mcpDetailsMaxInlineBytes) ?? base.mcpDetailsMaxInlineBytes,
-      watermarkBytes: positiveSafeInteger(override?.watermarkBytes) ?? base.watermarkBytes,
-      minSavingsBytes: positiveSafeInteger(override?.minSavingsBytes) ?? base.minSavingsBytes,
-      minCandidateBytes: positiveSafeInteger(override?.minCandidateBytes) ?? base.minCandidateBytes,
-      keepRecentRounds: positiveSafeInteger(override?.keepRecentRounds) ?? base.keepRecentRounds,
+      watermarkBytes: Number.MAX_SAFE_INTEGER,
+      minSavingsBytes: Number.MAX_SAFE_INTEGER,
+      minCandidateBytes: Number.MAX_SAFE_INTEGER,
+      keepRecentRounds: 0,
     };
   };
 }
@@ -982,10 +977,10 @@ export function createSessionLLMRetryEventObserver(
   publish: SessionLLMRetryEventPublisher,
 ): NonNullable<LLMRetryOptions['observer']> {
   return (event) => {
-    if (event.scope === 'title') return;
+    if (event.scope !== 'agent' && event.scope !== 'compaction') return;
     publish({
       type: 'session.llm_retry',
-      payload: { schemaVersion: 1, ...event },
+      payload: { schemaVersion: 1, ...event, scope: event.scope },
     });
   };
 }

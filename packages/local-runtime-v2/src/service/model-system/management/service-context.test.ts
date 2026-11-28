@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocalModelCache } from '../catalog/model-cache.js';
+import { ModelConnectionTester } from '../connectivity/test-connection.js';
 import type {
   LocalByokConfigDraft,
   LocalRuntimeConfig,
@@ -29,7 +30,9 @@ interface Harness {
 
 function createHarness(
   initial: Partial<LocalRuntimeConfig> = {},
-  options: Pick<ModelProviderServiceContext['deps'], 'implicitCustomProviderThinking'> = {},
+  options: Partial<
+    Pick<ModelProviderServiceContext['deps'], 'implicitCustomProviderThinking' | 'tester'>
+  > = {},
 ): Harness {
   const config: LocalRuntimeConfig = {
     dataDir,
@@ -216,5 +219,108 @@ describe('LocalModelProviderService context', () => {
     expect(() =>
       harness.service.assertModelSelectable(provider.providerId, 'model-a'),
     ).not.toThrow();
+  });
+});
+
+describe('connectivity check request identity', () => {
+  const OPENCODE_GO_URL = 'https://opencode.ai/inference/go/openai/v1';
+  const EFFORTS = ['low', 'high', 'max'];
+
+  function createProbeHarness() {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({ choices: [{ message: { role: 'assistant', content: 'pong' } }] }),
+    );
+    const harness = createHarness({}, { tester: new ModelConnectionTester({ fetchImpl }) });
+    const sent = () =>
+      fetchImpl.mock.calls.map(([, init]) => ({
+        headers: new Headers(init?.headers),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      }));
+    return { harness, fetchImpl, sent };
+  }
+
+  function providerInput(baseUrl: string, headers?: Record<string, string>) {
+    return {
+      name: 'Probe',
+      baseUrl,
+      apiKey: CUSTOM_KEY,
+      apiFormat: 'openai-completions',
+      ...(headers ? { headers } : {}),
+      models: [{ modelId: 'kimi-k2.6', effortOptions: EFFORTS }],
+    };
+  }
+
+  function sessionsOf(requests: ReadonlyArray<{ headers: Headers }>) {
+    return requests.map(({ headers }) => headers.get('x-opencode-session'));
+  }
+
+  it('sends one OpenCode Go session across the Think Effort cases of a saved model', async () => {
+    const { harness, fetchImpl, sent } = createProbeHarness();
+    const provider = await harness.service.createUserProvider(
+      providerInput(OPENCODE_GO_URL, {
+        'X-OpenCode-Session': 'stale-static-id',
+        'User-Agent': 'generic-sdk',
+        'X-Tenant': 'tenant-a',
+      }),
+    );
+    fetchImpl.mockClear();
+
+    const outcome = await harness.service.testModel(provider.providerId, 'kimi-k2.6');
+
+    expect(outcome).toMatchObject({ ok: true });
+    const requests = sent();
+    expect(requests.map(({ body }) => body.reasoning_effort)).toEqual(EFFORTS);
+    expect(new Set(sessionsOf(requests)).size).toBe(1);
+    expect(requests[0]?.headers.get('x-opencode-session')).toMatch(/^[0-9a-f-]{36}$/u);
+    for (const { headers } of requests) {
+      expect(headers.get('user-agent')).toBe('MiniMaxCode');
+      expect(headers.get('authorization')).toBe(`Bearer ${CUSTOM_KEY}`);
+      expect(headers.get('x-tenant')).toBe('tenant-a');
+    }
+  });
+
+  it('gives each separate check its own session', async () => {
+    const { harness, fetchImpl, sent } = createProbeHarness();
+    const provider = await harness.service.createUserProvider(providerInput(OPENCODE_GO_URL));
+    fetchImpl.mockClear();
+
+    await harness.service.testModel(provider.providerId, 'kimi-k2.6');
+    await harness.service.testModel(provider.providerId, 'kimi-k2.6');
+
+    const sessions = sessionsOf(sent());
+    expect(new Set(sessions.slice(0, 3)).size).toBe(1);
+    expect(new Set(sessions.slice(3)).size).toBe(1);
+    expect(sessions[0]).not.toBe(sessions[3]);
+  });
+
+  it('sends one OpenCode Go session for a draft provider check', async () => {
+    const { harness, sent } = createProbeHarness();
+
+    const outcome = await harness.service.testUserModelCandidate(
+      providerInput(OPENCODE_GO_URL),
+      'kimi-k2.6',
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    const requests = sent();
+    expect(requests).toHaveLength(EFFORTS.length);
+    expect(new Set(sessionsOf(requests)).size).toBe(1);
+    expect(requests[0]?.headers.get('x-opencode-session')).toBeTruthy();
+  });
+
+  it('sends no OpenCode Go identity to other providers and keeps their User-Agent', async () => {
+    const { harness, sent } = createProbeHarness();
+
+    await harness.service.testUserModelCandidate(
+      providerInput('https://api.example.com/v1', { 'User-Agent': 'relay-client/1.0' }),
+      'kimi-k2.6',
+    );
+
+    const requests = sent();
+    expect(requests).toHaveLength(EFFORTS.length);
+    for (const { headers } of requests) {
+      expect(headers.has('x-opencode-session')).toBe(false);
+      expect(headers.get('user-agent')).toBe('relay-client/1.0');
+    }
   });
 });

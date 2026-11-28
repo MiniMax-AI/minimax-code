@@ -11,6 +11,13 @@ export type TuiTransportAttachment = TuiAttachmentMetadata &
 export interface TuiAttachment extends TuiAttachmentMetadata {
   filePath: string;
   sizeBytes: number;
+  /** Present when the TUI saved a long paste as this text file; display only, never sent. */
+  pastedText?: TuiPastedTextSummary;
+}
+
+export interface TuiPastedTextSummary {
+  lineCount: number;
+  charCount: number;
 }
 
 export interface TuiInvocation {

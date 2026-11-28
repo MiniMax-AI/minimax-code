@@ -112,7 +112,7 @@ type ReserveSteeringReceiptResult =
   | { readonly status: 'duplicate'; readonly turnId: string }
   | { readonly status: 'not-accepted' };
 
-type SessionDeletionState =
+export type SessionDeletionState =
   | { readonly status: 'not-started' | 'quiescent' | 'maintenance' }
   | { readonly status: 'active'; readonly turnId: string };
 
@@ -237,6 +237,7 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
     sessionId: string,
   ): Promise<Exclude<SessionDeletionState, { status: 'not-started' }>>;
   readSessionDeletion(sessionId: string): Promise<SessionDeletionState>;
+  abandonSessionDeletion(sessionId: string): Promise<SessionDeletionState>;
   isSessionDeleting(sessionId: string): Promise<boolean>;
   deleteSessionData(sessionId: string): Promise<void>;
   completeSessionDeletion(sessionId: string): Promise<void>;

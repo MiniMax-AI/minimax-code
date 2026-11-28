@@ -30,3 +30,18 @@ export function parseCronSessionPurpose(
 export function isLegacyMemoryCleanupTitle(title: string | undefined): boolean {
   return /^Memory cleanup \d{4}-\d{2}-\d{2}$/.test(title ?? '');
 }
+
+/** Self-reminders use a dedicated Cron ID format; ordinary Cron definitions use UUIDs. */
+export function isSelfReminderId(cronId: string | undefined): boolean {
+  return /^self-[a-f0-9]{32}$/.test(cronId ?? '');
+}
+
+export const SELF_REMINDER_NAME_PREFIX = '@self-reminder/';
+
+export function isSelfReminderName(cronName: string | undefined): boolean {
+  return (cronName ?? '').trim().toLowerCase().startsWith(SELF_REMINDER_NAME_PREFIX);
+}
+
+export function formatSelfReminderName(reminderId: string): string {
+  return `Task follow-up (${reminderId.slice(-8)})`;
+}

@@ -4,7 +4,7 @@ Follow these rules:
 
 1. Accurately summarize the user's core intent. Do not copy the question format, answer the question, or perform the task.
 
-2. Use the same natural language as the user's message and never translate it because these instructions are in English. English input must produce English, Japanese input must produce Japanese, Spanish input must produce Spanish, and Chinese input must produce Chinese. For mixed-language input, use the main language. Preserve code identifiers, filenames, commands, product names, and proper nouns.
+2. Use the same natural language as the user's message and never translate it because these instructions are in English. English input must produce English, Japanese input must produce Japanese, Spanish input must produce Spanish, and Chinese input must produce Chinese. For mixed-language input, use the main language. The App locale given after the message is only a fallback: use its language only when the message has no natural-language words, such as only a command, a path, code or a URL, and never let it override the language of the message. Preserve code identifiers, filenames, commands, product names, and proper nouns.
 
 3. For a modification request, start with a clear action verb such as add, fix, update, refactor, or remove. For a question or research request, use a verb that expresses the goal, such as investigate, locate, find, compare, count, or calculate.
 

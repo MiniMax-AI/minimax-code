@@ -76,6 +76,7 @@ export function createSessionForkDataCapability(input: {
           effectiveModelThinking: session.effectiveModelThinking,
           effectiveModelContextWindow: session.effectiveModelContextWindow,
           effectiveModelMaxOutputTokens: session.effectiveModelMaxOutputTokens,
+          advisor: session.advisor,
           ...(session.purpose ? { purpose: session.purpose } : {}),
           origin: 'user',
         });
@@ -144,6 +145,7 @@ type ForkSessionInput = {
   readonly effectiveModelThinking?: SessionRecord['effectiveModelThinking'];
   readonly effectiveModelContextWindow?: SessionRecord['effectiveModelContextWindow'];
   readonly effectiveModelMaxOutputTokens?: SessionRecord['effectiveModelMaxOutputTokens'];
+  readonly advisor?: SessionRecord['advisor'];
   readonly parentSessionId?: string;
   readonly visibility?: 'hidden' | 'visible';
   readonly purpose?: string;

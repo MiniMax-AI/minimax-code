@@ -4,12 +4,15 @@ import type {
   TranscriptProjectionSource,
   TranscriptTurnRange,
 } from './projection-window.js';
+import { normalizeToolName } from './tool-definitions.js';
 
 export interface TranscriptActivitySource {
   readonly length: number;
   findVisibleError(error: string): { readonly turnId?: string } | undefined;
   latestSettledFailure(): { readonly turnId?: string } | undefined;
   hasConcreteTurnActivity(turnId: string): boolean;
+  /** Start of the latest still-open `toolName` call in a Turn; undefined once none is open. */
+  runningToolStartedAt(turnId: string, toolName: string): number | undefined;
 }
 
 export class TranscriptStore implements TranscriptProjectionSource, TranscriptActivitySource {
@@ -111,6 +114,17 @@ export class TranscriptStore implements TranscriptProjectionSource, TranscriptAc
       }
     }
     return false;
+  }
+
+  runningToolStartedAt(turnId: string, toolName: string): number | undefined {
+    const name = normalizeToolName(toolName);
+    for (let index = this.orderedIds.length - 1; index >= 0; index -= 1) {
+      const cell = this.cellAt(index);
+      if (cell?.kind !== 'tool' || cell.turnId !== turnId) continue;
+      if (cell.status !== 'pending' && cell.status !== 'running') continue;
+      if (normalizeToolName(cell.title) === name) return cell.createdAtMs;
+    }
+    return undefined;
   }
 
   upsert(update: TranscriptCellUpdate): TranscriptCell {

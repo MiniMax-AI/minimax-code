@@ -1,9 +1,3 @@
-import {
-  abortLocalPluginHookSessionTurn,
-  endLocalPluginHookSession,
-  markNextLocalPluginHookSessionStart,
-} from '@mavis/local-runtime-v2/turn-system';
-
 import type { CreateTuiAppOptions } from '../../types/tui-app.js';
 
 interface ActiveRunSnapshot {
@@ -27,19 +21,19 @@ export function createTuiSessionLifecycleBridge(runtime: CreateTuiAppOptions['ru
       }
       if (!nextSessionStartsAfterClear) return;
       nextSessionStartsAfterClear = false;
-      markNextLocalPluginHookSessionStart(sessionId, 'clear');
+      runtime.markNextPluginHookSessionStart?.(sessionId, 'clear');
     },
     async preparePluginHookSessionSwitch(
       sessionId: string,
       reason: 'clear' | 'resume_other',
     ): Promise<void> {
-      await abortLocalPluginHookSessionTurn(sessionId, async (executionSessionId) => {
+      await runtime.abortPluginHookSessionTurn?.(sessionId, async (executionSessionId) => {
         // `session_leave`, not `user_stop`: switching Sessions or running `/clear`
         // still stops the live Turn and pauses the Goal/Queue, but it is not a stop
         // request and must not tear down background work left running there.
         await runtime.abortSession({ id: executionSessionId, reason: 'session_leave' });
       });
-      await endLocalPluginHookSession(sessionId, reason);
+      await runtime.endPluginHookSession?.(sessionId, reason);
     },
     adoptForegroundRun(
       sessionId: string | undefined,

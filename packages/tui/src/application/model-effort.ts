@@ -31,7 +31,8 @@ const THINKING_ON_VARIANT = 'thinking';
  * omitted the level and let the provider fall back to its own default.
  *
  * The catalog default wins over the midpoint, and can be fixed without editable
- * options. Without either default, even-length lists use the higher midpoint.
+ * options. Without either default, even-length lists use the higher midpoint, as
+ * Runtime does.
  *
  * This lives in the application layer because Session creation resolves the
  * same level the status line shows; a second rule would let the two drift.
@@ -49,6 +50,19 @@ export function resolveTuiEffortChoice(
   const trimmed = (selected ?? (model?.selected ? model.thinking?.effort : undefined))?.trim();
   if (trimmed && allowed.includes(trimmed)) return trimmed;
   if (variant !== undefined && variant !== THINKING_ON_VARIANT) return undefined;
-  if (defaultEffort && allowed.includes(defaultEffort)) return defaultEffort;
-  return options[Math.floor(options.length / 2)];
+  return resolveTuiDefaultEffort(model);
+}
+
+/**
+ * The level a model runs at while thinking is on and nothing valid is chosen, as Runtime resolves
+ * it: the catalog default when the model accepts it, else the middle level (the higher one of an
+ * even count).
+ */
+export function resolveTuiDefaultEffort(model: TuiModel | undefined): string | undefined {
+  const options = normalizeTuiEffortOptions(model?.effortOptions);
+  const defaultEffort = model?.defaultEffort?.trim();
+  const allowed = options.length > 0 ? options : defaultEffort ? [defaultEffort] : [];
+  return defaultEffort && allowed.includes(defaultEffort)
+    ? defaultEffort
+    : options[Math.floor(options.length / 2)];
 }

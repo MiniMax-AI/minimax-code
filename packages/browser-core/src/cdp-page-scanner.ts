@@ -1,4 +1,4 @@
-import type { InteractiveElement } from './browser-core-contracts.js';
+import type { BrowserFormState, InteractiveElement } from './browser-core-contracts.js';
 import { buildSemanticPageTree, type SemanticPageTree } from './browser-semantic-tree.js';
 import type { BrowserTransport } from './browser-transport.js';
 import {
@@ -7,6 +7,11 @@ import {
   throwIfAborted,
   withTimeout,
 } from './operation-timeout.js';
+import {
+  exposedFormState,
+  isCredentialControl,
+  readSnapshotFormStates,
+} from './browser-form-state.js';
 import {
   CONTAINER_TAGS,
   INTERACTIVE_ROLES,
@@ -17,6 +22,7 @@ import {
   type AXNode,
   type DOMNode,
   type DOMSnapshotResult,
+  type FormStateScanOptions,
   type SnapshotNode,
 } from './cdp-helper-contracts.js';
 
@@ -52,6 +58,9 @@ function rethrowBrowserInterruption(error: unknown): void {
  */
 export class CDPPageScanner {
   private lastSemanticPageTree: SemanticPageTree | null = null;
+  /** Set per scan; like the semantic tree, one scan owns the scanner at a time. */
+  private collectFormState = false;
+  private passwordFields: Set<number> | undefined;
 
   constructor(
     private readonly transport: BrowserTransport,
@@ -139,8 +148,13 @@ export class CDPPageScanner {
     return resolved;
   }
 
-  async scan(signal: AbortSignal): Promise<InteractiveElement[]> {
+  async scan(
+    signal: AbortSignal,
+    options: FormStateScanOptions = {},
+  ): Promise<InteractiveElement[]> {
     throwIfAborted(signal);
+    this.collectFormState = options.formState === true;
+    this.passwordFields = options.passwordFields;
     const startedAt = Date.now();
     const logPhase = (phase: string, extra: Record<string, unknown> = {}) => {
       browserInputDiagnosticLogger.info({
@@ -152,7 +166,7 @@ export class CDPPageScanner {
       });
     };
 
-    // Try to connect CDP; return silently on failure.
+    // 尝试连接 CDP，失败则静默返回
     logPhase('start');
     const attached = await this.ensureAttached(signal).catch((error) => {
       rethrowBrowserInterruption(error);
@@ -162,7 +176,7 @@ export class CDPPageScanner {
     logPhase('attached');
 
     try {
-      // Enable required CDP domains.
+      // 启用必要的 CDP 域
       await Promise.all([
         this.sendCommand('DOM.enable', undefined, BROWSER_TIMEOUTS.cdpCommand, signal).catch(
           (error) => {
@@ -194,7 +208,7 @@ export class CDPPageScanner {
       throwIfAborted(signal);
       logPhase('domains-enabled');
 
-      // 1. Fetch the three data sources and detect JS event listeners in parallel.
+      // 1. 并行获取三个数据源 + JS 事件监听器检测
       const [
         snapshotResult,
         domTreeResult,
@@ -203,14 +217,14 @@ export class CDPPageScanner {
         viewportInfo,
         snapshotToCssScale,
       ] = await Promise.all([
-        // DOMSnapshot.captureSnapshot: Fetch layout information and computed styles.
+        // DOMSnapshot.captureSnapshot - 获取布局信息和计算样式
         this.captureSnapshot(signal).catch((e) => {
           rethrowBrowserInterruption(e);
           console.warn('Failed to capture snapshot:', e);
           return null;
         }),
 
-        // DOM.getDocument: Fetch the full DOM tree.
+        // DOM.getDocument - 获取完整 DOM 树
         this.sendCommand(
           'DOM.getDocument',
           { depth: -1, pierce: true },
@@ -222,7 +236,7 @@ export class CDPPageScanner {
           return null;
         }) as Promise<{ root: DOMNode } | null>,
 
-        // Accessibility.getFullAXTree: Fetch the accessibility tree.
+        // Accessibility.getFullAXTree - 获取可访问性树
         this.sendCommand(
           'Accessibility.getFullAXTree',
           undefined,
@@ -234,13 +248,13 @@ export class CDPPageScanner {
           return null;
         }) as Promise<{ nodes: AXNode[] } | null>,
 
-        // Detect JS event listeners.
+        // 检测 JS 事件监听器
         this.detectJSEventListeners(signal).catch((error) => {
           rethrowBrowserInterruption(error);
           return new Set<number>();
         }),
 
-        // Get viewport information, including scroll offsets.
+        // 获取视口信息（包含滚动信息）
         withTimeout(
           (commandSignal) =>
             this.transport.evaluate<{
@@ -289,7 +303,7 @@ export class CDPPageScanner {
           };
         }),
 
-        // Electron/Chromium DOMSnapshot layout uses legacy viewport units; convert to CSS viewport units.
+        // Electron/Chromium 的 DOMSnapshot layout 使用 legacy viewport 数值；换成 CSS viewport。
         this.getSnapshotToCssScale(signal).catch((error) => {
           rethrowBrowserInterruption(error);
           return 1;
@@ -303,15 +317,16 @@ export class CDPPageScanner {
         jsListenerCount: jsListenerBackendIds.size,
       });
 
-      // 2. DOMSnapshot bounds use each Document's coordinates; normalize legacy units, scroll offsets, and viewport.
+      // 2. DOMSnapshot bounds 是各 Document 的文档坐标；统一 legacy 单位、滚动量和 viewport。
       const mainFrameId = domTreeResult?.root?.frameId ?? 'main';
       const snapshotLookup = this.buildSnapshotLookup(
         snapshotResult,
         mainFrameId,
         snapshotToCssScale,
+        this.collectFormState,
       );
 
-      // 3. Build the AX tree lookup (backendDOMNodeId → AX node).
+      // 3. 构建 AX tree lookup（backendDOMNodeId -> AX 节点）
       const axTreeLookup = new Map<number, AXNode>();
       if (axTreeResult?.nodes) {
         for (const node of axTreeResult.nodes) {
@@ -321,7 +336,7 @@ export class CDPPageScanner {
         }
       }
 
-      // 4. Traverse the DOM tree and collect interactive elements.
+      // 4. 遍历 DOM 树，收集可交互元素
       const elements: InteractiveElement[] = [];
       const processedBackendIds = new Set<number>();
 
@@ -340,20 +355,20 @@ export class CDPPageScanner {
         );
       }
 
-      // 5. If DOM traversal found no elements, supplement it with a JavaScript scan.
+      // 5. 如果 DOM 树遍历没有找到元素，使用 JavaScript 补充扫描
       if (elements.length === 0) {
         const jsElements = await this.scanInteractiveElementsViaJS(viewportInfo, signal);
         elements.push(...jsElements);
       }
 
-      // 6. Sort by position, top to bottom and left to right.
+      // 6. 按位置排序（从上到下，从左到右）
       elements.sort((a, b) => {
         const yDiff = a.boundingBox.y - b.boundingBox.y;
         if (Math.abs(yDiff) > 10) return yDiff;
         return a.boundingBox.x - b.boundingBox.x;
       });
 
-      // 7. Reassign indices.
+      // 7. 重新分配索引
       elements.forEach((el, idx) => {
         el.index = idx;
       });
@@ -374,7 +389,7 @@ export class CDPPageScanner {
         error: error instanceof Error ? error.message : String(error),
       });
       console.warn('Failed to get interactive elements:', error);
-      // Fall back to a pure JS scan.
+      // 降级到纯 JS 扫描
       try {
         const viewportInfo = await withTimeout(
           (commandSignal) =>
@@ -424,7 +439,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Capture a page snapshot using DOMSnapshot.captureSnapshot.
+   * 使用 DOMSnapshot.captureSnapshot 获取页面快照
    */
   private async captureSnapshot(signal?: AbortSignal): Promise<DOMSnapshotResult | null> {
     const result = (await this.sendCommand(
@@ -444,8 +459,8 @@ export class CDPPageScanner {
   }
 
   /**
-   * DOMSnapshot layout and Page.getLayoutMetrics' deprecated viewport share legacy units. Compare
-   * legacy/CSS viewports to derive the conversion ratio; this is not the system devicePixelRatio.
+   * DOMSnapshot layout 与 Page.getLayoutMetrics 的 deprecated viewport 使用同一套 legacy
+   * 数值。这里比较 legacy/CSS viewport 得到转换比例；它不是系统 devicePixelRatio。
    */
   private async getSnapshotToCssScale(signal?: AbortSignal): Promise<number> {
     try {
@@ -472,14 +487,15 @@ export class CDPPageScanner {
   }
 
   /**
-   * Build the snapshot lookup (backendNodeId → layout information).
-   * @param snapshot DOMSnapshot result.
-   * @param mainFrameId Main frame CDP id.
+   * 构建 snapshot lookup（backendNodeId -> 布局信息）
+   * @param snapshot DOMSnapshot 结果
+   * @param mainFrameId 主 Frame CDP id
    */
   buildSnapshotLookup(
     snapshot: DOMSnapshotResult | null,
     mainFrameId: string,
     snapshotToCssScale = 1,
+    collectFormState = false,
   ): Map<number, SnapshotNode> {
     const lookup = new Map<number, SnapshotNode>();
     if (!snapshot?.documents) return lookup;
@@ -506,8 +522,9 @@ export class CDPPageScanner {
       const coordinateSpace = isMainDocument ? 'main-frame-viewport' : 'frame-local';
 
       if (!nodes?.backendNodeId) continue;
+      const formStates = collectFormState ? readSnapshotFormStates(nodes, strings) : undefined;
 
-      // Build the nodeIndex → layoutIndex mapping.
+      // 构建 nodeIndex -> layoutIndex 映射
       const layoutIndexMap = new Map<number, number>();
       if (layout?.nodeIndex) {
         for (let i = 0; i < layout.nodeIndex.length; i++) {
@@ -518,25 +535,25 @@ export class CDPPageScanner {
         }
       }
 
-      // Traverse all nodes.
+      // 遍历所有节点
       for (let i = 0; i < nodes.backendNodeId.length; i++) {
         const backendNodeId = nodes.backendNodeId[i];
 
-        // Check whether the node is clickable.
+        // 检查是否可点击
         let isClickable = false;
         if (nodes.isClickable?.index) {
           isClickable = nodes.isClickable.index.includes(i);
         }
 
-        // Get layout information.
+        // 获取布局信息
         let bounds: { x: number; y: number; width: number; height: number } | null = null;
         const computedStyles: Record<string, string> = {};
         let paintOrder: number | null = null;
 
         const layoutIdx = layoutIndexMap.get(i);
         if (layoutIdx !== undefined && layout) {
-          // For the main document, subtract scroll offsets in the same units, then convert to main-frame viewport CSS
-          // coordinates using the legacy/CSS ratio. Child documents remain frame-local until DOM.getContentQuads converts them.
+          // 主文档先扣除同单位的滚动量，再以 legacy/CSS 比例换成主 Frame viewport CSS
+          // 坐标；子文档仍是 frame-local，稍后通过 DOM.getContentQuads 换算。
           if (layout.bounds && layoutIdx < layout.bounds.length) {
             const b = layout.bounds[layoutIdx];
             if (b && b.length >= 4) {
@@ -549,7 +566,7 @@ export class CDPPageScanner {
             }
           }
 
-          // Parse computed styles.
+          // 解析计算样式
           if (layout.styles && layoutIdx < layout.styles.length) {
             const styleIndices = layout.styles[layoutIdx];
             if (styleIndices) {
@@ -568,13 +585,14 @@ export class CDPPageScanner {
             }
           }
 
-          // Parse paint order.
+          // 解析 paint order
           if (layout.paintOrders && layoutIdx < layout.paintOrders.length) {
             paintOrder = layout.paintOrders[layoutIdx] ?? null;
           }
         }
 
         if (backendNodeId === undefined) continue;
+        const formState = formStates?.get(i);
         lookup.set(backendNodeId, {
           bounds,
           coordinateSpace,
@@ -582,6 +600,7 @@ export class CDPPageScanner {
           isClickable,
           paintOrder,
           frameId: documentFrameId || mainFrameId,
+          ...(formState ? { formState } : {}),
         });
       }
     }
@@ -590,9 +609,8 @@ export class CDPPageScanner {
   }
 
   /**
-   * DOM.getContentQuads returns viewport-relative CSS quads, reliably mapping child-frame elements
-   * to the main-frame viewport. Union multiple fragments into one bounding box; callers fail closed
-   * on protocol errors.
+   * DOM.getContentQuads 返回相对 viewport 的 CSS quad，可将子 Frame 元素可靠映射到
+   * 主 Frame viewport。多个 fragment 取联合包围盒；协议失败时由调用方 fail closed。
    */
   async getViewportBoundsByBackendNodeId(
     backendNodeId: number,
@@ -626,14 +644,14 @@ export class CDPPageScanner {
   }
 
   /**
-   * Detect JavaScript event listeners using CDP's getEventListeners API (requires
-   * includeCommandLineAPI).
+   * 检测 JavaScript 事件监听器
+   * 使用 CDP 的 getEventListeners API（需要 includeCommandLineAPI）
    */
   private async detectJSEventListeners(signal?: AbortSignal): Promise<Set<number>> {
     const backendIds = new Set<number>();
 
     try {
-      // Use Runtime.evaluate with includeCommandLineAPI to access getEventListeners.
+      // 使用 Runtime.evaluate 配合 includeCommandLineAPI 来访问 getEventListeners
       const result = (await this.sendCommand(
         'Runtime.evaluate',
         {
@@ -734,7 +752,7 @@ export class CDPPageScanner {
                   }
                 }
               } catch (e) {
-                // Ignore errors for individual elements.
+                // 忽略单个元素的错误
               }
             }
 
@@ -751,7 +769,7 @@ export class CDPPageScanner {
       const objectId = result?.result?.objectId;
       if (!objectId) return backendIds;
 
-      // Get array properties.
+      // 获取数组属性
       const propsResult = (await this.sendCommand(
         'Runtime.getProperties',
         { objectId, ownProperties: true },
@@ -759,7 +777,7 @@ export class CDPPageScanner {
         signal,
       )) as { result?: Array<{ name: string; value?: { objectId?: string } }> };
 
-      // Get each element's backendNodeId.
+      // 获取每个元素的 backendNodeId
       const elementObjectIds: string[] = [];
       for (const prop of propsResult.result || []) {
         if (prop.name && /^\d+$/.test(prop.name) && prop.value?.objectId) {
@@ -767,7 +785,7 @@ export class CDPPageScanner {
         }
       }
 
-      // Fetch backendNodeIds in parallel.
+      // 并行获取 backendNodeId
       const nodePromises = elementObjectIds.map(async (objId) => {
         try {
           const nodeInfo = (await this.sendCommand(
@@ -790,7 +808,7 @@ export class CDPPageScanner {
         }
       }
 
-      // Release objects.
+      // 释放对象
       try {
         await this.sendCommand(
           'Runtime.releaseObject',
@@ -800,7 +818,7 @@ export class CDPPageScanner {
         );
       } catch (error) {
         rethrowBrowserInterruption(error);
-        // Ignore release errors.
+        // 忽略释放错误
       }
     } catch (error) {
       rethrowBrowserInterruption(error);
@@ -811,7 +829,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Traverse the DOM tree and collect interactive elements.
+   * 遍历 DOM 树，收集可交互元素
    */
   private axBooleanProperty(axNode: AXNode | undefined, name: string): boolean {
     return (
@@ -917,18 +935,18 @@ export class CDPPageScanner {
     signal?: AbortSignal,
   ): Promise<void> {
     if (signal?.aborted) return;
-    // Skip nodes already processed.
+    // 跳过已处理的节点
     if (processedBackendIds.has(node.backendNodeId)) return;
     processedBackendIds.add(node.backendNodeId);
 
     const tagName = node.nodeName?.toLowerCase() || '';
 
-    // Skip text and comment nodes (nodeType: 1=Element, 3=Text, 8=Comment).
+    // 跳过文本节点和注释节点（nodeType: 1=Element, 3=Text, 8=Comment）
     if (node.nodeType === 3 || node.nodeType === 8) {
       return;
     }
 
-    // Tags to skip entirely, including their descendants.
+    // 完全跳过的标签（不处理本身，也不递归子节点）
     if (SKIP_TAGS.has(tagName) || SVG_ELEMENTS.has(tagName)) {
       return;
     }
@@ -940,13 +958,13 @@ export class CDPPageScanner {
     const isContainer = CONTAINER_TAGS.has(tagName) && !hasJSEventListener;
 
     if (!isContainer) {
-      // Get snapshot information.
+      // 获取快照信息
       let snapshotNode = snapshotLookup.get(node.backendNodeId);
 
-      // Get AX node information.
+      // 获取 AX 节点信息
       const axNode = axTreeLookup.get(node.backendNodeId);
 
-      // Check whether the element is interactive.
+      // 检查元素是否可交互
       const isInteractive = this.isElementInteractive(
         node,
         snapshotNode,
@@ -954,7 +972,7 @@ export class CDPPageScanner {
         hasJSEventListener,
       );
 
-      // Only issue additional CDP quad queries for interactive child-frame nodes, avoiding a round trip per DOM node.
+      // 只为最终可交互的子 Frame 节点调用额外的 CDP quad 查询，避免逐 DOM 节点 round-trip。
       if (isInteractive && snapshotNode?.coordinateSpace === 'frame-local') {
         const viewportBounds = await this.getViewportBoundsByBackendNodeId(
           node.backendNodeId,
@@ -972,10 +990,10 @@ export class CDPPageScanner {
             };
       }
 
-      // Check element visibility.
+      // 检查元素是否可见
       const isVisible = this.isElementVisible(snapshotNode, viewportInfo);
 
-      // Add visible, interactive elements to the results.
+      // 如果可见且可交互，添加到结果
       if (isVisible && isInteractive) {
         const element = this.createInteractiveElement(
           node,
@@ -1034,7 +1052,7 @@ export class CDPPageScanner {
       }
     }
 
-    // Recursively process child nodes.
+    // 递归处理子节点
     if (node.children) {
       for (const child of node.children) {
         await this.traverseDOMTree(
@@ -1052,7 +1070,7 @@ export class CDPPageScanner {
       }
     }
 
-    // Process shadow DOM.
+    // 处理 shadow DOM
     if (node.shadowRoots) {
       for (const shadowRoot of node.shadowRoots) {
         await this.traverseDOMTree(
@@ -1070,7 +1088,7 @@ export class CDPPageScanner {
       }
     }
 
-    // Process iframe contentDocument.
+    // 处理 iframe 的 contentDocument
     if (node.contentDocument) {
       await this.traverseDOMTree(
         node.contentDocument,
@@ -1088,7 +1106,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Check element visibility.
+   * 检查元素是否可见
    */
   isElementVisible(
     snapshotNode: SnapshotNode | undefined,
@@ -1098,10 +1116,10 @@ export class CDPPageScanner {
 
     const { bounds, computedStyles } = snapshotNode;
 
-    // Check dimensions.
+    // 检查尺寸
     if (bounds.width <= 0 || bounds.height <= 0) return false;
 
-    // Check CSS visibility.
+    // 检查 CSS 可见性
     const display = computedStyles.display?.toLowerCase();
     const visibility = computedStyles.visibility?.toLowerCase();
     const opacity = computedStyles.opacity;
@@ -1113,11 +1131,11 @@ export class CDPPageScanner {
       if (!isNaN(opacityValue) && opacityValue <= 0) return false;
     }
 
-    // Keep child-frame refs whose coordinates cannot be converted, but do not expose their rect to the model later.
+    // 保留无法换算坐标的子 Frame ref，但后续不会向模型暴露 rect。
     if (snapshotNode.coordinateSpace === 'unavailable') return true;
 
-    // Check whether the element is in the viewport, allowing a margin.
-    const threshold = 1000; // Allow elements within 1000px outside the viewport.
+    // 检查是否在视口内（允许一定的阈值）
+    const threshold = 1000; // 允许视口外 1000px 的元素
     const viewportRight = viewportInfo.width;
     // Keep vertically offscreen controls discoverable so the Core can scroll
     // them into view. Horizontally detached nodes are commonly focus traps or
@@ -1131,7 +1149,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Search-related keywords (following browser-use).
+   * 搜索相关的关键词（参考 browser-use）
    */
   private static readonly SEARCH_INDICATORS = new Set([
     'search',
@@ -1147,10 +1165,10 @@ export class CDPPageScanner {
   ]);
 
   /**
-   * Check whether the element is search-related.
+   * 检查元素是否是搜索相关元素
    */
   private isSearchElement(node: DOMNode): boolean {
-    // Check class.
+    // 检查 class
     const className = this.getNodeAttribute(node, 'class')?.toLowerCase() || '';
     const classList = className.split(/\s+/);
     for (const cls of classList) {
@@ -1159,13 +1177,13 @@ export class CDPPageScanner {
       }
     }
 
-    // Check id.
+    // 检查 id
     const id = this.getNodeAttribute(node, 'id')?.toLowerCase() || '';
     for (const indicator of CDPPageScanner.SEARCH_INDICATORS) {
       if (id.includes(indicator)) return true;
     }
 
-    // Check data attributes.
+    // 检查 data 属性
     if (node.attributes) {
       for (let i = 0; i < node.attributes.length; i += 2) {
         const attrName = node.attributes[i];
@@ -1182,19 +1200,19 @@ export class CDPPageScanner {
   }
 
   /**
-   * Check whether the element is an interactive icon (a small 10–50px element).
+   * 检查元素是否是可交互的图标（10-50px 大小的小元素）
    */
   private isInteractiveIcon(node: DOMNode, snapshotNode: SnapshotNode | undefined): boolean {
     if (!snapshotNode?.bounds) return false;
 
     const { width, height } = snapshotNode.bounds;
 
-    // Check icon dimensions (10–50px).
+    // 检查是否是图标大小（10-50px）
     if (width < 10 || width > 50 || height < 10 || height > 50) {
       return false;
     }
 
-    // Check for interaction-related attributes.
+    // 检查是否有交互相关的属性
     const hasInteractiveAttr =
       this.getNodeAttribute(node, 'class') !== null ||
       this.getNodeAttribute(node, 'role') !== null ||
@@ -1233,7 +1251,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Check element interactivity, following browser-use's ClickableElementDetector.
+   * 检查元素是否可交互（参考 browser-use 的 ClickableElementDetector）
    */
   isElementInteractive(
     node: DOMNode,
@@ -1243,42 +1261,42 @@ export class CDPPageScanner {
   ): boolean {
     const tagName = node.nodeName?.toLowerCase() || '';
 
-    // 0. Exclude text and non-element nodes.
+    // 0. 排除文本节点和非元素节点
     if (tagName === '#text' || tagName === '#comment' || node.nodeType !== 1) {
       return false;
     }
 
-    // 1. Check JS event listeners (highest priority).
+    // 1. 检查 JS 事件监听器（最高优先级）
     if (hasJSClickListener) return true;
 
     // 1.1 AX ignored only means the accessibility tree does not expose the
     // node; it cannot override positive Runtime listener evidence above.
     if (axNode?.ignored) return false;
 
-    // 2. Check natively interactive tags.
+    // 2. 检查原生可交互标签
     if (INTERACTIVE_TAGS.has(tagName)) return true;
 
-    // 3. Check ARIA role.
+    // 3. 检查 ARIA role
     const role = this.getNodeAttribute(node, 'role')?.toLowerCase();
     if (role && INTERACTIVE_ROLES.has(role)) return true;
 
-    // 4. Check AX tree role, excluding generic and none.
+    // 4. 检查 AX tree role（排除 generic 和 none）
     if (axNode?.role?.value) {
       const axRole = axNode.role.value.toLowerCase();
-      // generic and none are not truly interactive roles.
+      // generic 和 none 不是真正的可交互 role
       if (axRole !== 'generic' && axRole !== 'none' && INTERACTIVE_ROLES.has(axRole)) {
         return true;
       }
     }
 
-    // 5. Check contenteditable.
+    // 5. 检查 contenteditable
     if (this.getNodeAttribute(node, 'contenteditable') === 'true') return true;
 
-    // 6. Check tabindex (other than -1).
+    // 6. 检查 tabindex（非 -1）
     const tabindex = this.getNodeAttribute(node, 'tabindex');
     if (tabindex !== null && tabindex !== '-1') return true;
 
-    // 7. Check event attributes such as onclick.
+    // 7. 检查 onclick 等事件属性
     const eventAttrs = [
       'onclick',
       'onmousedown',
@@ -1291,13 +1309,13 @@ export class CDPPageScanner {
       if (this.getNodeAttribute(node, attr) !== null) return true;
     }
 
-    // 8. Check search elements (following browser-use).
+    // 8. 检查搜索元素（参考 browser-use）
     if (this.isSearchElement(node)) return true;
 
-    // 9. Check interactive icons (small 10–50px elements).
+    // 9. 检查可交互图标（10-50px 小元素）
     if (this.isInteractiveIcon(node, snapshotNode)) return true;
 
-    // 9.1 Check rich-text editor surfaces that mount/focus their actual input proxy only after a click.
+    // 9.1 检查点击后才挂载/聚焦真实输入代理的富文本编辑器表面。
     if (
       this.isTextEntryActivationSurface(node, snapshotNode, axNode) &&
       (snapshotNode?.isClickable === true ||
@@ -1307,23 +1325,23 @@ export class CDPPageScanner {
       return true;
     }
 
-    // 10. Check cursor: pointer, requiring additional interaction signals.
+    // 10. 检查 cursor: pointer 样式（但需要有其他交互信号）
     const hasCursorPointer = snapshotNode?.computedStyles?.cursor === 'pointer';
 
-    // 11. Check the snapshot's isClickable flag.
-    // Note: isClickable can produce false positives; combine it with other signals.
+    // 11. 检查 snapshot 的 isClickable 标志
+    // 注意：isClickable 可能误报，需要结合其他信号
     const isClickable = snapshotNode?.isClickable === true;
 
-    // 12. Check AX properties.
+    // 12. 检查 AX 属性
     let hasInteractiveAxProp = false;
     if (axNode?.properties) {
       for (const prop of axNode.properties) {
-        // Editable or settable, excluding focusable because many elements are focusable.
+        // 可编辑、可设置（不包括 focusable，因为很多元素都是 focusable）
         if (['editable', 'settable'].includes(prop.name) && prop.value?.value === true) {
           hasInteractiveAxProp = true;
           break;
         }
-        // Interaction-state properties: their presence indicates interactivity.
+        // 交互状态属性（存在即表示可交互）
         if (['checked', 'expanded', 'pressed', 'selected'].includes(prop.name)) {
           hasInteractiveAxProp = true;
           break;
@@ -1331,9 +1349,9 @@ export class CDPPageScanner {
       }
     }
 
-    // Generic elements such as div/span require multiple signals to count as interactive.
+    // 对于 div/span 等通用元素，需要多个信号才认为是可交互的
     if (tagName === 'div' || tagName === 'span') {
-      // Require at least two signals or an explicit interaction attribute.
+      // 需要至少两个信号，或者有明确的交互属性
       const signals = [hasCursorPointer, isClickable, hasInteractiveAxProp].filter(Boolean).length;
       if (signals >= 2 || hasInteractiveAxProp) {
         return true;
@@ -1341,19 +1359,19 @@ export class CDPPageScanner {
       return false;
     }
 
-    // For other elements, any signal is sufficient.
+    // 其他元素，有任一信号即可
     if (hasCursorPointer || isClickable || hasInteractiveAxProp) {
       return true;
     }
 
-    // 13. Check for labels containing form controls.
+    // 13. 检查 label 包含表单控件
     if (tagName === 'label') {
-      // Skip labels with a for attribute to avoid duplicates.
+      // 跳过有 for 属性的 label（避免重复）
       if (this.getNodeAttribute(node, 'for')) return false;
       if (this.hasFormControlDescendant(node)) return true;
     }
 
-    // 14. Check iframes; those larger than 100x100 may require interaction.
+    // 14. 检查 iframe（大于 100x100 的 iframe 可能需要交互）
     if ((tagName === 'iframe' || tagName === 'frame') && snapshotNode?.bounds) {
       if (snapshotNode.bounds.width > 100 && snapshotNode.bounds.height > 100) {
         return true;
@@ -1364,7 +1382,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Get node attributes.
+   * 获取节点属性
    */
   private getNodeAttribute(node: DOMNode, name: string): string | null {
     if (!node.attributes) return null;
@@ -1377,7 +1395,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Check whether the node contains descendant form controls.
+   * 检查节点是否包含表单控件子元素
    */
   private hasFormControlDescendant(node: DOMNode, maxDepth = 2): boolean {
     if (maxDepth <= 0) return false;
@@ -1396,7 +1414,7 @@ export class CDPPageScanner {
   }
 
   /**
-   * Create an interactive element object.
+   * 创建可交互元素对象
    */
   private createInteractiveElement(
     node: DOMNode,
@@ -1418,7 +1436,7 @@ export class CDPPageScanner {
       axNode,
     );
 
-    // Get the element type.
+    // 获取元素类型
     let type = tagName;
     if (textEntryActivationSurface) {
       type = 'textbox';
@@ -1428,7 +1446,7 @@ export class CDPPageScanner {
       const role = this.getNodeAttribute(node, 'role');
       if (role) type = role.toLowerCase();
     }
-    // Get the element text.
+    // 获取元素文本
     let text = '';
     if (axNode?.name?.value) {
       text = axNode.name.value;
@@ -1443,10 +1461,10 @@ export class CDPPageScanner {
     if (!text && runtimeDiscovered) text = this.getDescendantText(node);
     text = text.slice(0, 100).trim();
 
-    // Filter empty generic elements with no text or meaningful attributes.
-    // These are usually container divs with no interaction value for the LLM.
+    // 过滤空的 generic 元素（没有文本、没有有意义的属性）
+    // 这些通常是容器 div，对 LLM 没有交互价值
     if (!runtimeDiscovered && (type === 'generic' || type === 'none') && !text) {
-      // Check for meaningful attributes.
+      // 检查是否有有意义的属性
       const meaningfulAttrs = [
         'aria-label',
         'title',
@@ -1460,19 +1478,19 @@ export class CDPPageScanner {
         (attr) => this.getNodeAttribute(node, attr) !== null,
       );
 
-      // Check whether the element is small (possibly an icon button).
+      // 检查是否是小尺寸元素（可能是图标按钮）
       const isSmallElement = bounds.width <= 60 && bounds.height <= 60;
 
-      // Filter elements with no meaningful attributes unless they are small.
+      // 如果没有有意义的属性，且不是小元素，则过滤掉
       if (!hasMeaningfulAttr && !isSmallElement) {
         return null;
       }
     }
 
-    // Generate a selector, preferring backendNodeId.
+    // 生成选择器（优先使用 backendNodeId）
     const selector = `[data-backend-node-id="${node.backendNodeId}"]`;
 
-    // Compute normalized coordinates.
+    // 计算归一化坐标
     const centerX = bounds.x + bounds.width / 2;
     const centerY = bounds.y + bounds.height / 2;
     const hasViewportCoordinates = snapshotNode?.coordinateSpace === 'main-frame-viewport';
@@ -1483,7 +1501,7 @@ export class CDPPageScanner {
       ? Math.round((centerY / viewportInfo.height) * 1000) / 1000
       : 0;
 
-    // Check whether the element is in the viewport.
+    // 检查是否在视口内
     const isInViewport =
       hasViewportCoordinates &&
       bounds.y < viewportInfo.height &&
@@ -1491,7 +1509,7 @@ export class CDPPageScanner {
       bounds.x < viewportInfo.width &&
       bounds.x + bounds.width > 0;
 
-    // Collect attributes.
+    // 收集属性
     const attributes: Record<string, string> = {};
     const attrNames = [
       'id',
@@ -1520,10 +1538,28 @@ export class CDPPageScanner {
       if (val) attributes[attrName] = val;
     }
 
-    // Check whether the element is disabled.
+    // 检查是否禁用
     const isDisabled =
       this.getNodeAttribute(node, 'disabled') !== null ||
       this.getNodeAttribute(node, 'aria-disabled') === 'true';
+    let formState: BrowserFormState | undefined;
+    if (this.collectFormState) {
+      const inputType = this.getNodeAttribute(node, 'type');
+      if (tagName.toLowerCase() === 'input' && inputType?.trim().toLowerCase() === 'password') {
+        this.passwordFields?.add(node.backendNodeId);
+      }
+      const credential = isCredentialControl({
+        tag: tagName,
+        type: inputType,
+        name: this.getNodeAttribute(node, 'name'),
+        id: this.getNodeAttribute(node, 'id'),
+        autocomplete: this.getNodeAttribute(node, 'autocomplete'),
+        observedAsPassword: this.passwordFields?.has(node.backendNodeId) === true,
+      });
+      // A credential shows neither its live value nor its serialized default.
+      if (credential) delete attributes.value;
+      formState = exposedFormState(tagName, inputType, credential, snapshotNode?.formState);
+    }
 
     return {
       index,
@@ -1546,6 +1582,7 @@ export class CDPPageScanner {
       attributes,
       paintOrder: snapshotNode?.paintOrder ?? undefined,
       ...(textEntryActivationSurface ? { inputStrategy: 'focused-keyboard' as const } : {}),
+      ...(formState ? { formState } : {}),
     };
   }
 
@@ -1562,41 +1599,42 @@ export class CDPPageScanner {
   }
 
   /**
-   * Generate a unique selector.
+   * 生成唯一选择器
    */
   private generateSelector(node: DOMNode): string {
     const tagName = node.nodeName?.toLowerCase() || 'div';
 
-    // Prefer id.
+    // 优先使用 id
     const id = this.getNodeAttribute(node, 'id');
     if (id && /^[a-zA-Z][a-zA-Z0-9_-]*$/.test(id)) {
       return `#${id}`;
     }
 
-    // Use data-testid.
+    // 使用 data-testid
     const testId = this.getNodeAttribute(node, 'data-testid');
     if (testId) {
       return `[data-testid="${testId}"]`;
     }
 
-    // Use aria-label.
+    // 使用 aria-label
     const ariaLabel = this.getNodeAttribute(node, 'aria-label');
     if (ariaLabel) {
-      return `${tagName}[aria-label="${ariaLabel.replace(/"/g, '\\"')}"]`;
+      return `${tagName}[aria-label="${ariaLabel.replace(/[\\"]/g, '\\$&')}"]`;
     }
 
-    // Use name.
+    // 使用 name
     const name = this.getNodeAttribute(node, 'name');
     if (name) {
       return `${tagName}[name="${name}"]`;
     }
 
-    // Fall back to backendNodeId.
+    // 使用 backendNodeId 作为后备
     return `[data-backend-node-id="${node.backendNodeId}"]`;
   }
 
   /**
-   * Scan interactive elements using JavaScript as a fallback when CDP methods fail.
+   * 通过 JavaScript 扫描可交互元素（降级方案）
+   * 当 CDP 方法失败时使用
    */
   private async scanInteractiveElementsViaJS(
     _viewportInfo: {
@@ -1618,7 +1656,7 @@ export class CDPPageScanner {
           const elements = [];
           const processedElements = new WeakSet();
 
-          // Generate a unique selector.
+          // 生成唯一选择器
           function getUniqueSelector(el) {
             if (el.id && /^[a-zA-Z][a-zA-Z0-9_-]*$/.test(el.id)) {
               const selector = '#' + CSS.escape(el.id);
@@ -1639,7 +1677,7 @@ export class CDPPageScanner {
               const selector = tag + '[name="' + CSS.escape(el.name) + '"]';
               if (document.querySelectorAll(selector).length === 1) return selector;
             }
-            // Build a path selector.
+            // 构建路径选择器
             const path = [];
             let current = el;
             while (current && current !== document.body && path.length < 4) {
@@ -1661,7 +1699,7 @@ export class CDPPageScanner {
             return path.join(' > ');
           }
 
-          // Get element text.
+          // 获取元素文本
           function getElementText(el) {
             const ariaLabel = el.getAttribute('aria-label');
             if (ariaLabel) return ariaLabel.trim().slice(0, 100);
@@ -1675,7 +1713,7 @@ export class CDPPageScanner {
             return '';
           }
 
-          // Detect nested form controls.
+          // 检测表单控件嵌套
           function hasFormControlDescendant(el, maxDepth = 2) {
             if (maxDepth <= 0) return false;
             for (const child of el.children) {
@@ -1686,12 +1724,12 @@ export class CDPPageScanner {
             return false;
           }
 
-          // Determine whether the element is interactive.
+          // 判断元素是否可交互
           function isInteractive(el) {
             const tag = el.tagName.toLowerCase();
             if (tag === 'html' || tag === 'body') return { interactive: false };
 
-            // Natively interactive tags.
+            // 原生交互式标签
             const interactiveTags = new Set([
               'button', 'input', 'select', 'textarea', 'a',
               'details', 'summary', 'option', 'optgroup', 'video', 'audio'
@@ -1714,7 +1752,7 @@ export class CDPPageScanner {
             const tabIndex = el.getAttribute('tabindex');
             if (tabIndex !== null && tabIndex !== '-1') return { interactive: true, type: 'focusable' };
 
-            // Event attributes such as onclick.
+            // onclick 等事件属性
             if (el.hasAttribute('onclick') || el.onclick !== null) return { interactive: true, type: 'clickable' };
             const eventAttrs = ['onmousedown', 'onmouseup', 'onkeydown', 'onkeyup', 'ontouchstart'];
             for (const attr of eventAttrs) {
@@ -1725,16 +1763,16 @@ export class CDPPageScanner {
             const style = window.getComputedStyle(el);
             if (style.cursor === 'pointer') return { interactive: true, type: 'clickable' };
 
-            // label contains form controls.
+            // label 包含表单控件
             if (tag === 'label') {
               if (el.hasAttribute('for')) return { interactive: false };
               if (hasFormControlDescendant(el, 2)) return { interactive: true, type: 'label' };
             }
 
-            // span contains form controls.
+            // span 包含表单控件
             if (tag === 'span' && hasFormControlDescendant(el, 2)) return { interactive: true, type: 'wrapper' };
 
-            // Interaction-state attributes.
+            // 交互状态属性
             const stateAttrs = ['aria-expanded', 'aria-pressed', 'aria-selected', 'aria-checked'];
             for (const attr of stateAttrs) {
               if (el.hasAttribute(attr)) return { interactive: true, type: 'stateful' };
@@ -1743,7 +1781,7 @@ export class CDPPageScanner {
             return { interactive: false };
           }
 
-          // Add the element.
+          // 添加元素
           function addElement(el, type, text) {
             if (processedElements.has(el)) return false;
 
@@ -1780,7 +1818,7 @@ export class CDPPageScanner {
             return true;
           }
 
-          // Traverse the DOM.
+          // 遍历 DOM
           const walker = document.createTreeWalker(
             document.body,
             NodeFilter.SHOW_ELEMENT,

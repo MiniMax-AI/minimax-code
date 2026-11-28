@@ -12,6 +12,8 @@ import {
 import { inferTuiNativeVideoMimeType } from '../application/video-mime.js';
 import { resolveWslPath } from '../host/wsl-path.js';
 import { TuiExecError } from './exit-policy.js';
+import { parseAdvisorOverride } from './model-selection.js';
+import type { TuiAdvisorSelection } from '../runtime/port.js';
 import {
   resolveSystemPromptOverrides,
   type RawSystemPromptOptions,
@@ -32,6 +34,7 @@ export interface RawTuiExecOptions extends RawSystemPromptOptions {
   file?: string[];
   model?: string;
   effort?: string;
+  advisor?: string;
   mode?: string;
   promptMode?: string;
   session?: string;
@@ -54,6 +57,8 @@ export interface ResolvedTuiExecInvocation {
   attachments: TuiAttachment[];
   model?: string;
   effort?: string;
+  /** `--advisor`: written to the Run's Session before its first Turn, never to the default. */
+  advisor?: TuiAdvisorSelection;
   contextMode?: McodeContextMode;
   /** `--ptc`: PTC for a Session this Run creates; config.yaml is unchanged. */
   ptc?: boolean;
@@ -143,6 +148,7 @@ export async function resolveTuiExecInvocation(
   }
   const permission: TuiPermissionPolicy = requestedPermission;
   const effort = readEffortOption(options);
+  const advisor = options.advisor === undefined ? undefined : parseAdvisorOverride(options.advisor);
   const systemPromptOverrides = readSystemPromptOverrides(options);
   const workspaceDir = await resolveDirectory(options.cwd ?? process.cwd(), '--cwd');
   throwIfAborted(signal);
@@ -200,6 +206,7 @@ export async function resolveTuiExecInvocation(
     attachments,
     ...(options.model?.trim() ? { model: options.model.trim() } : {}),
     ...(effort === undefined ? {} : { effort }),
+    ...(advisor ? { advisor } : {}),
     ...(contextMode === 'lightweight' ? { contextMode } : {}),
     ...(options.ptc === true ? { ptc: true } : {}),
     ...(options.session?.trim() ? { sessionId: options.session.trim() } : {}),

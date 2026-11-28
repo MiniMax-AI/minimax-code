@@ -648,8 +648,8 @@ describe("TuiFeatureFlow", () => {
     const harness = createHarness({ openExternalTarget });
     harness.runtime.listModels.mockResolvedValue([
       {
-        providerId: "custom_provider:mafia-openai",
-        providerName: "Mafia OpenAI Models",
+        providerId: "custom_provider:gateway-openai",
+        providerName: "Gateway OpenAI Models",
         modelId: "codex-auto-review",
         displayName: "Codex Auto Review",
       },
@@ -704,7 +704,7 @@ describe("TuiFeatureFlow", () => {
     expect(harness.shown).toHaveLength(1);
     const picker = harness.shown[0] as { render(width: number): string[] };
     const rendered = picker.render(90).join("\n");
-    expect(rendered).toContain("Add 3rd-party provider");
+    expect(rendered).toContain("Add provider…");
     expect(rendered).not.toContain("OpenAI Codex");
     expect(harness.append).not.toHaveBeenCalledWith(
       expect.stringContaining("No models are available"),

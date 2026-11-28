@@ -25,6 +25,33 @@ export const TurnContinuationState = {
 export type TurnContinuationState =
   (typeof TurnContinuationState)[keyof typeof TurnContinuationState];
 
+export const SessionActivityState = {
+  Idle: 0,
+  Running: 1,
+  WaitingForUser: 2,
+  Scheduled: 3,
+} as const;
+
+export type SessionActivityState =
+  (typeof SessionActivityState)[keyof typeof SessionActivityState];
+
+export const SessionActivityKind = {
+  Turn: 1,
+  QueuedMessages: 2,
+  BackgroundTask: 3,
+  TaskNotification: 4,
+  ThreadGoal: 5,
+  TeamPlan: 6,
+  CronRun: 7,
+  CronSchedule: 8,
+  Questionnaire: 9,
+  Permission: 10,
+  PausedQueue: 11,
+} as const;
+
+export type SessionActivityKind =
+  (typeof SessionActivityKind)[keyof typeof SessionActivityKind];
+
 export const SessionTypeView = {
   Branch: 0,
   Root: 1,
@@ -279,6 +306,7 @@ export interface SessionToolCallView {
   toolCallArgs?: string;
   toolCallResultData?: string;
   pluginProvenances?: PluginCapabilityProvenance[];
+  toolCallResultOriginalBytes?: number;
 }
 
 export interface SessionMessageUsageView {
@@ -288,6 +316,18 @@ export interface SessionMessageUsageView {
   outputTokens?: number;
   cacheRead?: number;
   cacheWrite?: number;
+}
+
+export interface SessionMessageContextUsageComponentView {
+  kind?: string;
+  tokens?: number;
+}
+
+export interface SessionMessageContextUsageView {
+  contextWindowTokens?: number;
+  usedTokens?: number;
+  totalCountSource?: string;
+  components?: SessionMessageContextUsageComponentView[];
 }
 
 export interface SessionMessageActionCapabilities {
@@ -336,6 +376,13 @@ export interface SessionConversationCapabilities {
   rewind: boolean;
 }
 
+export interface SessionFeatures {
+  backgroundTasks?: boolean;
+  manualCompaction?: boolean;
+  sessionUsage?: boolean;
+  questionnaireContextImages?: boolean;
+}
+
 export interface SessionForkOriginView {
   sourceSessionId: string;
   sourceMessageId: string;
@@ -374,6 +421,7 @@ export interface SessionMessageView {
   actions?: SessionMessageActionCapabilities;
   forkOrigin?: SessionForkOriginView;
   memoryReferences?: MemoryReferenceView[];
+  contextUsage?: SessionMessageContextUsageView;
 }
 
 export interface QueryCollapseView {
@@ -403,6 +451,9 @@ export interface GetMessagesInput {
   id: string;
   limit?: number;
   before?: string;
+  source?: string;
+  systemEventsOnly?: boolean;
+  toolResultInlineBytes?: number;
   includeAttachmentReadUrls?: boolean;
 }
 
@@ -679,6 +730,14 @@ export interface ModelInfoView {
   thinking?: ModelThinkingInput;
 }
 
+export interface SessionAdvisorView {
+  enabled: boolean;
+  providerId?: string;
+  modelId?: string;
+  thinking?: ModelThinkingInput;
+  contextLimit?: number;
+}
+
 export interface SessionStatusInfoView {
   statusType?: SessionStatusView;
   message?: string;
@@ -750,6 +809,9 @@ export interface SessionInfoView {
   conversationCapabilities?: SessionConversationCapabilities;
   memoryPolicy?: SessionMemoryPolicyView;
   collaboration?: SessionCollaborationView;
+  projectId?: number;
+  advisor?: SessionAdvisorView;
+  features?: SessionFeatures;
 }
 
 export interface SessionTreeChildView {
@@ -1159,6 +1221,9 @@ export interface PluginMarketplaceSummary {
   category?: MarketplaceCategory;
   darkIconUrl?: string;
   installationPolicy?: PluginInstallationPolicy;
+  marketplace?: string;
+  nameOwner?: string;
+  unavailableReason?: string;
 }
 
 export interface PluginMarketplaceDetail {
@@ -1231,6 +1296,9 @@ export interface InstalledPluginSummary {
   category?: MarketplaceCategory;
   darkIconUrl?: string;
   installationPolicy?: PluginInstallationPolicy;
+  marketplace?: string;
+  nameOwner?: string;
+  unavailableReason?: string;
 }
 
 export interface ListMarketplacePluginsInput {
@@ -1757,6 +1825,15 @@ export interface GetQuestionnaireResult {
   dismissedAt?: number;
 }
 
+export interface LocalMcpOAuthConfig {
+  clientId?: string;
+  scopes?: string[];
+  callbackPort?: number;
+  callbackHost?: string;
+  authServerMetadataUrl?: string;
+  clientSecretConfigured?: boolean;
+}
+
 export interface LocalMcpServerSummary {
   name: string;
   enabled: boolean;
@@ -1764,6 +1841,7 @@ export interface LocalMcpServerSummary {
   description?: string;
   configJson: string;
   endpoint?: string;
+  authState?: string;
 }
 
 export interface ListLocalMcpServersInput {
@@ -1772,4 +1850,69 @@ export interface ListLocalMcpServersInput {
 
 export interface ListLocalMcpServersResult {
   servers: LocalMcpServerSummary[];
+}
+
+export interface SessionActivityItem {
+  kind: SessionActivityKind;
+  sessionId: string;
+  refId?: string;
+  status?: string;
+  detail?: string;
+  atMs?: number;
+}
+
+export interface GetSessionActivityInput {
+  id: string;
+}
+
+export interface GetSessionActivityResult {
+  state: SessionActivityState;
+  items?: SessionActivityItem[];
+  sessionCount?: number;
+  truncated?: boolean;
+  checkedAtMs?: number;
+}
+
+export interface SelectAdvisorModelInput {
+  enabled: boolean;
+  providerId?: string;
+  modelId?: string;
+  sessionId?: string;
+  thinking?: ModelThinkingInput;
+  contextLimit?: number;
+}
+
+export interface SelectAdvisorModelResult {
+  advisor?: SessionAdvisorView;
+}
+
+export interface ApiKeyRest {
+  reason: string;
+  status?: number;
+  until: number;
+}
+
+export interface ApiKeyProbe {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  ms?: number;
+  modelId?: string;
+  at: number;
+}
+
+export interface ApiKeyInfo {
+  id: string;
+  name?: string;
+  masked: string;
+  enabled: boolean;
+  rest?: ApiKeyRest;
+  lastProbe?: ApiKeyProbe;
+}
+
+export interface ApiKeyDraft {
+  id?: string;
+  name?: string;
+  key?: string;
+  enabled: boolean;
 }

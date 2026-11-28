@@ -14,6 +14,8 @@ export interface ToolOutputArtifactInput {
   readonly text: string;
   readonly originalBytes: number;
   readonly sensitive: boolean;
+  /** One of several artifacts of the same tool call (for example `result-01`); names its file. */
+  readonly part?: string;
 }
 
 export interface ToolOutputArtifact {
@@ -57,16 +59,7 @@ export function toolOutputBudgetExtension(
   const sensitiveTools = new Set(options.sensitiveTools ?? []);
 
   const afterToolCall: AfterToolCallHandler = async (toolContext, _signal, turnCtx) => {
-    // A run_code (PTC) child result goes to the program, not to the model
-    // context, so it is not this budget's to cut: a receipt would hand the
-    // script a pointer instead of its data (and its structured data would be
-    // dropped as a rewritten result). Only results the model sees, including
-    // run_code's own outer result, are externalized. Pi sets parentToolCallId
-    // only on PTC child calls (pi-agent-core AfterToolCallContext).
-    if (toolContext.parentToolCallId) return undefined;
-    // A receipt is only a safe replacement when this exact turn can recover
-    // the archived result. Keep the original ToolResult otherwise.
-    if (!toolContext.context.tools?.some((tool) => tool.name === 'read')) return undefined;
+    if (!canRecoverArtifact(toolContext)) return undefined;
 
     const textBlocks = toolContext.result.content.filter(
       (block): block is Extract<(typeof toolContext.result.content)[number], { type: 'text' }> =>
@@ -166,6 +159,23 @@ function boundedSourceReferenceMarkers(
   return sourceMarkerBlocks;
 }
 
+type AfterToolCallContext = Parameters<AfterToolCallHandler>[0];
+
+/**
+ * Whether this exact call may swap text for an artifact reference.
+ *
+ * A run_code (PTC) child result goes to the program, not to the model context:
+ * a reference would hand the script a pointer instead of its data (and its
+ * structured data would be dropped as a rewritten result). Pi sets
+ * parentToolCallId only on PTC child calls (pi-agent-core AfterToolCallContext);
+ * run_code's own outer result is still eligible. A reference is also only safe
+ * when this turn has `read` to open the artifact.
+ */
+function canRecoverArtifact(toolContext: AfterToolCallContext): boolean {
+  if (toolContext.parentToolCallId) return false;
+  return toolContext.context.tools?.some((tool) => tool.name === 'read') ?? false;
+}
+
 function buildArtifactInput(
   ctx: TurnAssemblyCtx,
   toolCallId: string,
@@ -174,6 +184,7 @@ function buildArtifactInput(
   text: string,
   originalBytes: number,
   sensitive: boolean,
+  part?: string,
 ): ToolOutputArtifactInput {
   return {
     sessionId: ctx.sessionId,
@@ -186,7 +197,18 @@ function buildArtifactInput(
     text,
     originalBytes,
     sensitive,
+    ...(part ? { part } : {}),
   };
+}
+
+/**
+ * How to read an artifact the host stored as chunked JSONL (a line longer than
+ * the read limit); empty for a plain text artifact.
+ */
+function artifactFormatInstruction(artifact: ToolOutputArtifact): string {
+  return artifact.metadata?.read_format === 'chunked_jsonl_v1'
+    ? "Artifact format: chunked JSONL; concatenate each chunk row's text field in index order."
+    : '';
 }
 
 function positiveInteger(value: number, field: string): number {
@@ -276,13 +298,10 @@ function buildExternalizedReceipt(input: {
   const source = readReceiptSource(input.toolName, input.args);
   const sourceLine = source ? `Source: ${truncateUtf8(source, 256)}\n` : '';
   const errorLine = input.isError ? 'Result: error\n' : '';
-  const chunkedInstruction =
-    input.artifact.metadata?.read_format === 'chunked_jsonl_v1'
-      ? "\nArtifact format: chunked JSONL; concatenate each chunk row's text field in index order."
-      : '';
+  const formatInstruction = artifactFormatInstruction(input.artifact);
   return `[Tool output externalized
 Tool: ${toolName}
-${sourceLine}${errorLine}Artifact: ${input.artifact.reference}${chunkedInstruction}
+${sourceLine}${errorLine}Artifact: ${input.artifact.reference}${formatInstruction ? `\n${formatInstruction}` : ''}
 
 Recover the needed facts from this artifact now, before answering, inferring, or searching another source.
 Search this artifact first with bounded rg/grep when available, then read the relevant ranges with read(path, offset, limit).
@@ -348,8 +367,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+type ArtifactErrorObserver = ToolOutputBudgetExtensionOptions['onArtifactError'];
+
 async function notifyArtifactError(
-  observer: ToolOutputBudgetExtensionOptions['onArtifactError'],
+  observer: ArtifactErrorObserver,
   error: unknown,
   input: ToolOutputArtifactInput,
 ): Promise<void> {
@@ -357,6 +378,151 @@ async function notifyArtifactError(
   try {
     await observer(error, input);
   } catch {
-    // Observability must not replace the bounded fallback result.
+    // Observability must not change the ToolResult returned to History.
   }
+}
+
+const WEB_SEARCH_TOOL_NAME = 'web_search';
+/** Head plus tail bytes of one page `content` kept in the model-visible result. */
+export const WEB_SEARCH_CONTENT_INLINE_BYTES = 4 * 1_024;
+
+export interface WebSearchContentBudgetExtensionOptions {
+  /** Head plus tail bytes kept inline per page; defaults to WEB_SEARCH_CONTENT_INLINE_BYTES. */
+  readonly maxContentBytes?: number;
+  /** Persists one page's full `content`; `input.part` names the page (`result-01`, ...). */
+  readonly writeArtifact: ToolOutputBudgetExtensionOptions['writeArtifact'];
+  readonly onArtifactError?: ArtifactErrorObserver;
+}
+
+interface SearchPayload {
+  readonly results: unknown[];
+  readonly [key: string]: unknown;
+}
+
+/**
+ * The web_search rule of the output budget: bounds each page once, before the
+ * result enters History and before toolOutputBudgetExtension measures it.
+ * Every page `content` is written to its own artifact, and the result names
+ * that file in `content_file`; a `content` above the limit keeps its head and
+ * tail around a marker. All other fields stay as they were. The result is left
+ * alone when canRecoverArtifact says no, when the search failed, and when a
+ * write fails.
+ */
+export function webSearchContentBudgetExtension(
+  options: WebSearchContentBudgetExtensionOptions,
+): AgentExtension {
+  const maxContentBytes = options.maxContentBytes ?? WEB_SEARCH_CONTENT_INLINE_BYTES;
+  if (!Number.isSafeInteger(maxContentBytes) || maxContentBytes <= 0) {
+    throw new Error('webSearchContentBudgetExtension: maxContentBytes must be a positive integer');
+  }
+
+  const afterToolCall: AfterToolCallHandler = async (toolContext, _signal, turnCtx) => {
+    if (toolContext.toolCall.name !== WEB_SEARCH_TOOL_NAME || toolContext.isError) return undefined;
+    if (!canRecoverArtifact(toolContext)) return undefined;
+
+    const content = toolContext.result.content;
+    const found = findSearchPayload(content);
+    if (!found) return undefined;
+
+    const pages = found.payload.results.flatMap((value, index) =>
+      isRecord(value) && typeof value.content === 'string' && value.content.length > 0
+        ? [{ index, result: value, text: value.content }]
+        : [],
+    );
+    if (pages.length === 0) return undefined;
+
+    const inputs = pages.map((page) =>
+      buildArtifactInput(
+        turnCtx,
+        toolContext.toolCall.id,
+        WEB_SEARCH_TOOL_NAME,
+        toolContext.args,
+        page.text,
+        Buffer.byteLength(page.text),
+        false,
+        `result-${String(page.index + 1).padStart(2, '0')}`,
+      ),
+    );
+
+    let artifacts: ToolOutputArtifact[];
+    try {
+      artifacts = await Promise.all(inputs.map((input) => options.writeArtifact(input)));
+    } catch (error) {
+      await notifyArtifactError(options.onArtifactError, error, inputs[0]!);
+      return undefined;
+    }
+
+    const results = [...found.payload.results];
+    let truncated = 0;
+    pages.forEach((page, position) => {
+      const bytes = inputs[position]!.originalBytes;
+      const artifact = artifacts[position]!;
+      let inline = page.text;
+      if (bytes > maxContentBytes) {
+        const formatInstruction = artifactFormatInstruction(artifact);
+        const notice = `\n\n[web_search content truncated: ${bytes} bytes; middle omitted. Full content: content_file${formatInstruction ? `. ${formatInstruction}` : ''}]\n\n`;
+        inline = headTailPreview(page.text, maxContentBytes, notice);
+        truncated += 1;
+      }
+      results[page.index] = withContentFile(page.result, inline, artifact.reference);
+    });
+
+    const text = JSON.stringify({ ...found.payload, results }, null, 2);
+    const details = toolContext.result.details;
+    return {
+      content: content.map((block, index) =>
+        index === found.blockIndex ? { type: 'text' as const, text } : block,
+      ),
+      details: {
+        ...(isRecord(details) ? details : {}),
+        web_search_content: {
+          pages: pages.length,
+          truncated,
+          max_content_bytes: maxContentBytes,
+        },
+      },
+    };
+  };
+
+  return {
+    id: 'web-search-content-budget',
+    description:
+      'Write every web_search page content to its own artifact and keep a bounded head/tail inline.',
+    init(pi) {
+      pi.on('after_tool_call', afterToolCall);
+    },
+  };
+}
+
+function findSearchPayload(
+  content: readonly { readonly type: string; readonly text?: string }[],
+): { readonly blockIndex: number; readonly payload: SearchPayload } | undefined {
+  for (const [blockIndex, block] of content.entries()) {
+    if (block.type !== 'text' || typeof block.text !== 'string') continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(block.text);
+    } catch {
+      continue;
+    }
+    if (isRecord(parsed) && Array.isArray(parsed.results)) {
+      return { blockIndex, payload: parsed as SearchPayload };
+    }
+  }
+  return undefined;
+}
+
+/** Same field order as the service's page, with `content_file` right after `content`. */
+function withContentFile(
+  result: Readonly<Record<string, unknown>>,
+  content: string,
+  reference: string,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (key === 'content_file') continue;
+    next[key] = key === 'content' ? content : value;
+    if (key === 'content') next.content_file = reference;
+  }
+  return next;
 }

@@ -32,8 +32,9 @@ export class LocalWebFetchClient implements LocalWebFetchAdapter {
   }
 
   async fetch(
-    input: LocalWebFetchToolInput,
-    signal?: AbortSignal,
+    ctxOrInput: import('@mavis/agent-tools/desktop').LocalWebFetchCallContext | LocalWebFetchToolInput,
+    inputOrSignal?: LocalWebFetchToolInput | AbortSignal,
+    maybeSignal?: AbortSignal,
   ): Promise<{
     content?: string;
     status?: number;
@@ -46,6 +47,12 @@ export class LocalWebFetchClient implements LocalWebFetchAdapter {
     retrievalOutcome?: LocalWebFetchRetrievalOutcome;
     base_resp?: { status_code?: number; status_msg?: string };
   }> {
+    const input = (ctxOrInput && typeof ctxOrInput === 'object' && 'url' in ctxOrInput
+      ? ctxOrInput
+      : inputOrSignal) as LocalWebFetchToolInput;
+    const signal = (ctxOrInput && typeof ctxOrInput === 'object' && 'url' in ctxOrInput
+      ? inputOrSignal
+      : maybeSignal) as AbortSignal | undefined;
     const url = normalizeHttpUrl(input.url);
     if (!url) {
       return failure(
@@ -248,19 +255,11 @@ function looksLikeDynamicHtmlShell(content: string): boolean {
     if (isEffectivelyEmptyHtml(rootMatch[3] ?? '')) return true;
   }
 
-  return isEffectivelyEmptyHtml(
-    body
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, '')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, '')
-      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/giu, ''),
-  );
+  return isEffectivelyEmptyHtml(stripHtmlTagBlocks(body, ['script', 'style', 'noscript'], ''));
 }
 
 function hasExecutableApplicationScript(content: string): boolean {
-  const scripts = content.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/giu);
-  for (const scriptMatch of scripts) {
-    const attributes = scriptMatch[1] ?? '';
-    const body = scriptMatch[2] ?? '';
+  for (const { attributes, body } of scanHtmlTagBlocks(content, 'script')) {
     const type = /\btype\s*=\s*["']([^"']+)["']/iu.exec(attributes)?.[1]?.toLowerCase();
     if (type && !['text/javascript', 'application/javascript', 'module'].includes(type)) {
       continue;
@@ -289,25 +288,138 @@ function hasExecutableApplicationScript(content: string): boolean {
   return false;
 }
 
+function isHtmlTagBoundary(ch: string | undefined): boolean {
+  return ch === undefined || ch === '>' || ch === '/' || ch <= ' ';
+}
+
+function findHtmlCloseTag(
+  lower: string,
+  tagName: string,
+  fromIndex: number,
+): { start: number; end: number } | undefined {
+  const needle = `</${tagName}`;
+  let searchFrom = fromIndex;
+  while (searchFrom < lower.length) {
+    const idx = lower.indexOf(needle, searchFrom);
+    if (idx === -1) return undefined;
+    const afterName = idx + needle.length;
+    const boundary = lower[afterName];
+    if (boundary === '>' || (boundary !== undefined && boundary <= ' ')) {
+      const closeGt = boundary === '>' ? afterName : lower.indexOf('>', afterName);
+      if (closeGt === -1) return { start: idx, end: lower.length };
+      return { start: idx, end: closeGt + 1 };
+    }
+    searchFrom = afterName;
+  }
+  return undefined;
+}
+
+function scanHtmlTagBlocks(
+  content: string,
+  tagName: string,
+): Array<{ attributes: string; body: string }> {
+  const lower = content.toLowerCase();
+  const openNeedle = `<${tagName}`;
+  const blocks: Array<{ attributes: string; body: string }> = [];
+  let pos = 0;
+  while (pos < lower.length) {
+    const openIdx = lower.indexOf(openNeedle, pos);
+    if (openIdx === -1) break;
+    const attrStart = openIdx + openNeedle.length;
+    if (!isHtmlTagBoundary(lower[attrStart])) {
+      pos = attrStart;
+      continue;
+    }
+    const openGt = lower.indexOf('>', attrStart);
+    if (openGt === -1) break;
+    const close = findHtmlCloseTag(lower, tagName, openGt + 1);
+    if (!close) break;
+    blocks.push({
+      attributes: content.slice(attrStart, openGt),
+      body: content.slice(openGt + 1, close.start),
+    });
+    pos = close.end;
+  }
+  return blocks;
+}
+
+function stripSingleHtmlTagBlock(content: string, tagName: string, replacement: string): string {
+  const lower = content.toLowerCase();
+  const openNeedle = `<${tagName}`;
+  let out = '';
+  let pos = 0;
+  while (pos < lower.length) {
+    const openIdx = lower.indexOf(openNeedle, pos);
+    if (openIdx === -1) break;
+    const attrStart = openIdx + openNeedle.length;
+    if (!isHtmlTagBoundary(lower[attrStart])) {
+      out += content.slice(pos, attrStart);
+      pos = attrStart;
+      continue;
+    }
+    const openGt = lower.indexOf('>', attrStart);
+    if (openGt === -1) break;
+    const close = findHtmlCloseTag(lower, tagName, openGt + 1);
+    if (!close) break;
+    out += content.slice(pos, openIdx) + replacement;
+    pos = close.end;
+  }
+  return pos === 0 ? content : out + content.slice(pos);
+}
+
+function stripHtmlTagBlocks(
+  content: string,
+  tagNames: readonly string[],
+  replacement: string,
+): string {
+  let result = content;
+  for (const tagName of tagNames) {
+    result = stripSingleHtmlTagBlock(result, tagName, replacement);
+  }
+  return result;
+}
+
+function stripHtmlCommentsAndMarkup(content: string, replacement: string): string {
+  let out = '';
+  let pos = 0;
+  while (pos < content.length) {
+    const lt = content.indexOf('<', pos);
+    if (lt === -1) {
+      out += content.slice(pos);
+      break;
+    }
+    out += content.slice(pos, lt);
+    if (content.startsWith('<!--', lt)) {
+      const endComment = content.indexOf('-->', lt + 4);
+      if (endComment !== -1) {
+        out += replacement;
+        pos = endComment + 3;
+        continue;
+      }
+    }
+    const gt = content.indexOf('>', lt + 1);
+    if (gt > lt + 1) {
+      out += replacement;
+      pos = gt + 1;
+      continue;
+    }
+    out += '<';
+    pos = lt + 1;
+  }
+  return out;
+}
+
 function isEffectivelyEmptyHtml(content: string): boolean {
   return (
-    content
-      .replace(/<!--[\s\S]*?-->/gu, '')
-      .replace(/<[^>]+>/gu, '')
+    stripHtmlCommentsAndMarkup(content, '')
       .replace(/&nbsp;|&#160;|&#x0*a0;/giu, '')
       .replace(/\s+/gu, '') === ''
   );
 }
 
 function visibleText(content: string): string {
-  return content
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, ' ')
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/giu, ' ')
-    .replace(/<!--[\s\S]*?-->/gu, ' ')
-    .replace(/<[^>]+>/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
+  const withoutBlocks = stripHtmlTagBlocks(content, ['script', 'style', 'noscript'], ' ');
+  return stripHtmlCommentsAndMarkup(withoutBlocks, ' ').replace(/\s+/gu, ' ').trim();
 }
 
 function createScopedAbortSignal(

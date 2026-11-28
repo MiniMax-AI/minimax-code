@@ -46,6 +46,7 @@ export interface QueueDispatcher {
   continuePaused(sessionId: string): Promise<QueueSteerDispatchResult>;
   recoverPending(input: { readonly processStartedAtMs: number }): Promise<void>;
   quiesceSession(sessionId: string): Promise<void>;
+  resumeSession(sessionId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -114,6 +115,10 @@ export function createQueueDispatcher(options: QueueDispatcherOptions): QueueDis
     dispatch,
     continuePaused: (sessionId) => continuePaused(context, sessionId),
     quiesceSession: (sessionId) => quiesceSession(context, sessionId),
+    resumeSession: async (sessionId) => {
+      context.blockedSessions.delete(sessionId);
+      if (!context.closed) await dispatch(sessionId);
+    },
     close: () => {
       if (closePromise) return closePromise;
       context.closed = true;

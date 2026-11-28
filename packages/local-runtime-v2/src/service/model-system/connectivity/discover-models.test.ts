@@ -173,6 +173,102 @@ describe('ModelDiscoveryClient', () => {
   });
 });
 
+describe('ModelDiscoveryClient Gemini models.list', () => {
+  it('lists every Gemini generateContent model across pages with only the Gemini key header', async () => {
+    const pages = [
+      {
+        models: [
+          {
+            name: 'models/gemini-3.5-flash',
+            displayName: 'Gemini 3.5 Flash',
+            supportedGenerationMethods: ['generateContent', 'countTokens'],
+          },
+          { name: 'models/gemini-embedding-001', supportedGenerationMethods: ['embedContent'] },
+        ],
+        nextPageToken: 'page-2',
+      },
+      {
+        models: [
+          { name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] },
+        ],
+      },
+    ];
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify(pages.shift()), { status: 200 }),
+    );
+    const client = new ModelDiscoveryClient(fetchImpl as unknown as typeof fetch);
+
+    const result = await client.discover({
+      api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models',
+      apiKey: 'gemini-key',
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      models: [
+        { modelId: 'gemini-3.5-flash', displayName: 'Gemini 3.5 Flash' },
+        { modelId: 'gemini-2.5-pro' },
+      ],
+    });
+    const calls = fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+      'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&pageToken=page-2',
+    ]);
+    const headers = new Headers(calls[0]?.[1]?.headers);
+    expect(headers.get('x-goog-api-key')).toBe('gemini-key');
+    expect(headers.has('authorization')).toBe(false);
+    expect(headers.has('x-api-key')).toBe(false);
+  });
+
+  it('reports a Gemini page failure instead of a partial model list', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ models: [{ name: 'models/gemini-3.5-flash' }], nextPageToken: 'next' }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response('busy', { status: 429 }));
+    const client = new ModelDiscoveryClient(fetchImpl as unknown as typeof fetch);
+
+    await expect(
+      client.discover({
+        api: 'google-generative-ai',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        apiKey: 'gemini-key',
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'http_429' });
+  });
+
+  it('accepts an OpenAI-shaped { data: [...] } list from a Gemini-compatible gateway', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            object: 'list',
+            data: [{ id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' }],
+          }),
+          { status: 200 },
+        ),
+    );
+    const client = new ModelDiscoveryClient(fetchImpl as unknown as typeof fetch);
+
+    await expect(
+      client.discover({
+        api: 'google-generative-ai',
+        baseUrl: 'https://gateway.example.com/v1',
+        apiKey: 'gemini-key',
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      models: [{ modelId: 'gemini-4-carbon', displayName: 'Gemini 4 Carbon' }],
+    });
+  });
+});
+
 describe('ModelDiscoveryClient Messages endpoint fallback', () => {
   it('falls back to the OpenAI-style models endpoint when Messages discovery is missing', async () => {
     const fetchImpl = vi.fn(async (url: string) =>

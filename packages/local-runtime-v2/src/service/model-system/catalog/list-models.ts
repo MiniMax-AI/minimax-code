@@ -1,4 +1,9 @@
-import { getRuntimePresetKey, listRouteModelIds, resolveProviderAuthMode } from '@mavis/config';
+import {
+  getRuntimePresetKey,
+  listRouteModelIds,
+  probeProviderCredential,
+  resolveProviderAuthMode,
+} from '@mavis/config';
 
 import type {
   LocalCustomProviderConfig,
@@ -26,7 +31,11 @@ import {
   minimaxApiBaseUrl,
   minimaxApiModels,
 } from './minimax-api.js';
-import { normalizeModelThinkingEffortOptions } from '../resolution/model-ref.js';
+import {
+  normalizeModelThinkingEffortOptions,
+  resolveDefaultThinkingEffort,
+  type LocalModelRefCapabilities,
+} from '../resolution/model-ref.js';
 
 export {
   MINIMAX_API_DEFAULT_BASE_URL,
@@ -70,7 +79,11 @@ export function builtinProviderKind(
 }
 
 export function hasMinimaxApiKey(config: LocalRuntimeConfig): boolean {
-  return Boolean(config.minimax_api?.apiKey?.trim());
+  return probeProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: 'minimax_api',
+    value: config.minimax_api?.apiKey,
+  }).configured;
 }
 
 /** Models the builtin provider can route under the active runtime preset. */
@@ -107,6 +120,46 @@ export function modelConfigForRef(
   }
   return config.provider?.[provider]?.models?.[modelId];
 }
+
+/** Wire protocol configured for a BYOK provider; managed and MiniMax API sources have none here. */
+function providerApiForRef(config: LocalRuntimeConfig, provider: string): string | undefined {
+  const parsed = parseProviderId(provider);
+  if (parsed?.source === 'custom_provider') {
+    return config.custom_provider?.[parsed.providerKey]?.api;
+  }
+  if (parsed?.source === 'minimax_api') return undefined;
+  return config.provider?.[provider]?.api;
+}
+
+/** Protocols whose wire format carries audio and PDF parts as inline data. */
+const NATIVE_AUDIO_PDF_APIS: ReadonlySet<string> = new Set(['google-generative-ai']);
+
+/**
+ * Adds audio and PDF input declared in the model's `modalities.input` to the
+ * ModelRef capabilities, only when its provider's protocol sends them
+ * natively. Other protocols keep treating them as files: their transports
+ * would send the bytes as an image and the provider would reject it.
+ */
+export function withNativeAudioPdfCapabilities<T extends { readonly capabilities?: object }>(
+  model: T,
+  config: LocalRuntimeConfig,
+  provider: string,
+  modelId: string,
+): T {
+  const api = providerApiForRef(config, provider);
+  if (!api || !NATIVE_AUDIO_PDF_APIS.has(api)) return model;
+  const modalities: readonly string[] =
+    modelConfigForRef(config, provider, modelId)?.modalities?.input ?? [];
+  const audio = modalities.includes('audio');
+  const pdf = modalities.includes('pdf');
+  if (!audio && !pdf) return model;
+  const added: Pick<LocalModelRefCapabilities, 'support_audio' | 'support_pdf'> = {
+    ...(audio ? { support_audio: true } : {}),
+    ...(pdf ? { support_pdf: true } : {}),
+  };
+  return { ...model, capabilities: { ...model.capabilities, ...added } };
+}
+
 export function enabledCustomProviders(
   config: LocalRuntimeConfig,
 ): Array<[string, LocalCustomProviderConfig]> {
@@ -211,6 +264,7 @@ export function buildModelEntry(input: BuildModelEntryInput): ModelProviderModel
     providerName: input.providerName,
     ...(input.apiFormat ? { apiFormat: input.apiFormat } : {}),
     ...modelLimitFields(model),
+    ...modelHintField(model),
     ...modelContextWindowOptionHintFields(input),
     ...modelCapabilityFields(model, input.providerKind === 'minimax-managed'),
     ...modelThinkingFields(input),
@@ -248,6 +302,12 @@ function modelContextWindowOptionHintFields(
 
 function modelDisplayName(model: LocalModelConfig, modelId: string): string {
   return typeof model.name === 'string' ? model.name : modelId;
+}
+
+/** Usage hint delivered with the model, e.g. "用量翻倍"; absent models show none. */
+function modelHintField(model: LocalModelConfig): Partial<ModelProviderModelEntry> {
+  const hint = typeof model.hint === 'string' ? model.hint.trim() : '';
+  return hint ? { hint } : {};
 }
 
 function modelLimitFields(model: LocalModelConfig): Partial<ModelProviderModelEntry> {
@@ -326,24 +386,54 @@ function modelEffortFields(
 
 function modelThinkingFields(input: BuildModelEntryInput): Partial<ModelProviderModelEntry> {
   const { model } = input;
-  const thinkingConfig =
-    normalizeModelThinkingConfig(model.thinking_config) ?? implicitThinkingConfig(input);
+  const configuredThinking = withResolvedSwitchableDefault(
+    normalizeModelThinkingConfig(model.thinking_config),
+    model.defaultVariant,
+  );
+  const implicitThinking = configuredThinking ? undefined : implicitThinkingConfig(input);
+  const thinkingConfig = configuredThinking ?? implicitThinking;
+  const effortOptions = normalizeModelThinkingEffortOptions(model.thinking?.effortOptions);
+  const configuredDefaultEffort = model.thinking?.defaultEffort?.trim();
+  const defaultEffort =
+    implicitThinking?.mode === 'forced_on' &&
+    (!configuredDefaultEffort || !effortOptions?.includes(configuredDefaultEffort))
+      ? resolveDefaultThinkingEffort(effortOptions, configuredDefaultEffort)
+      : undefined;
   const supportedVariants = normalizeSupportedVariants(model.variants);
   const variant = selectedModelVariant(input, thinkingConfig);
   return {
     ...(supportedVariants ? { supportedVariants } : {}),
     ...(thinkingConfig ? { thinkingConfig } : {}),
+    ...(defaultEffort ? { defaultEffort } : {}),
     ...(variant !== undefined ? { variant } : {}),
   };
 }
 
+/**
+ * A configured switchable model's default as the resolver runs it: `defaultVariant` wins over
+ * `default_value` (model-ref.ts `resolveSwitchableThinkingLevel`), the rule `defaultThinkingVariant`
+ * already applies. Reporting that one answer keeps every client, including a request that sends no
+ * variant such as the advisor's, on the state the runtime actually uses. Only configured modes take
+ * it: without one the resolver reads `reasoning`, which the implicit switch already mirrors.
+ */
+function withResolvedSwitchableDefault(
+  config: ModelThinkingConfigView | undefined,
+  defaultVariant: unknown,
+): ModelThinkingConfigView | undefined {
+  if (config?.mode !== 'switchable' || normalizeThinkingVariant(defaultVariant) === undefined) {
+    return config;
+  }
+  const variant = defaultThinkingVariant(config, defaultVariant);
+  return { ...config, default_value: variant === 'thinking' ? 'true' : 'false' };
+}
+
 function implicitThinkingConfig(input: BuildModelEntryInput): ModelThinkingConfigView | undefined {
-  if (input.implicitCustomProviderThinking !== true) return undefined;
   if (input.providerSource !== 'custom_provider') return undefined;
   if (normalizeModelThinkingEffortOptions(input.model.thinking?.effortOptions)) {
     // Effort is the only control surface; there is no separate binary switch.
     return { mode: 'forced_on' };
   }
+  if (input.implicitCustomProviderThinking !== true) return undefined;
   // `reasoning` is capability metadata rather than a user policy: provider
   // presets derive it from the models.dev catalog and always persist a boolean
   // (provider-presets.service.ts `reasoning: value.reasoning === true`), so it

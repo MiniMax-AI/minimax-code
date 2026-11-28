@@ -86,52 +86,61 @@ export function formatPeersAggregated(peers: PeerInfo[]): string {
 
 // ─── Block Builders ──────────────────────────────────────────────────────────
 
+// Separate the default local assistant name from its internal agent identity.
+function isDefaultLocalAgentDisplayName(env: AgentEnv): boolean {
+  return env.scene !== 'cloud' && env.agentName === 'mavis' && env.displayName === 'Mavis';
+}
+
 export function buildAgentContextBlock(env: AgentEnv, opts?: { teamModeOff?: boolean }): string {
-  // SESSION ROLE is derived from parentSessionId: a session is `branch` iff it
+  // sessionRole is derived from parentSessionId: a session is `branch` iff it
   // was spawned by another session (it has a parent). Otherwise it is `root`.
   // This is the agent's role in the *session tree*, not the same as `agentRole`
-  // (orchestrator/worker, the agent type) or `session.sessionType` (Root/Branch
+  // (kept internally for provider selection) or `session.sessionType` (Root/Branch
   // — daemon-internal classification used for routing/storage).
   const sessionRole = env.parentSessionId ? 'branch' : 'root';
   const displayName = env.displayName ?? env.agentName;
   // Cloud scene trims duplicates / fields that have no analogue in the cloud
   // runtime: the internal `agentName:` ID line (cloud has no CLI/routing/
   // storage layer that needs the ID separately from the user-facing display
-  // name), `agentRole:` (AgentConfig.agent_role was removed from the protocol on 2026-05-24;
-  // the cloud no longer routes Worker/Orchestrator separately), `IS_DEFAULT_WORKSPACE` (cloud always
-  // uses the managed workspace), and `YOUR AGENT CONFIG DIRECTORY` (no
+  // name), `isDefaultWorkspace` (cloud always
+  // uses the managed workspace), and `agentConfigDir` (no
   // on-disk config).
+  //
+  // Keys use lowerCamelCase so every field reads as one structured record.
   const isCloud = env.scene === 'cloud';
   const lines = ['<agent-context>'];
-  lines.push(`  agent: ${displayName}  # display name`);
+  lines.push(
+    isDefaultLocalAgentDisplayName(env)
+      ? '  assistant: MiniMax Code  # public identity'
+      : `  agent: ${displayName}  # display name`,
+  );
   const userConfiguredName = formatUserConfiguredName(env.userConfiguredName);
   if (userConfiguredName) {
     lines.push(`  user: ${userConfiguredName}  # user name`);
   }
   if (!isCloud) {
     lines.push(`  agentName: ${env.agentName}  # routing ID`);
-    lines.push(`  agentRole: ${env.agentRole}  # agent type`);
   }
-  lines.push(`  SESSION ROLE: ${sessionRole}`, `  YOUR SESSION ID: ${env.sessionId}`);
+  lines.push(`  sessionRole: ${sessionRole}`, `  sessionId: ${env.sessionId}`);
   if (env.parentSessionId) {
-    lines.push(`  PARENT SESSION: ${env.parentSessionId}`);
+    lines.push(`  parentSessionId: ${env.parentSessionId}`);
     lines.push(buildParentResultDeliveryLine(env, isCloud));
   }
   if (env.sessionType !== 1 && env.rootSessionId) {
-    lines.push(`  YOUR AGENT ROOT SESSION: ${env.rootSessionId}`);
+    lines.push(`  rootSessionId: ${env.rootSessionId}`);
   }
   if (!env.environmentInSystemPrompt) {
-    lines.push(`  YOUR WORKSPACE DIRECTORY: ${env.workspaceDir}`);
+    lines.push(`  workspaceDir: ${env.workspaceDir}`);
     if (!isCloud) {
       lines.push(
-        `  IS_DEFAULT_WORKSPACE: ${env.isDefaultWorkspace ?? true}`,
-        `  YOUR AGENT CONFIG DIRECTORY: ${env.agentConfigDir}`,
+        `  isDefaultWorkspace: ${env.isDefaultWorkspace ?? true}`,
+        `  agentConfigDir: ${env.agentConfigDir}`,
       );
     }
   }
   if (env.scratchpadPath) {
     lines.push(
-      `  YOUR SCRATCHPAD: available via the MAVIS_SCRATCHPAD env var`,
+      `  scratchpad: available via the MAVIS_SCRATCHPAD env var`,
       `    (shared free-form whiteboard rooted at this session tree's root session;`,
       `     read/write with normal Read/Write tools; child sessions inherit the same path`,
       `     via the same env var. Use it for cross-session notes that don't`,
@@ -166,7 +175,7 @@ export function buildAgentContextBlock(env: AgentEnv, opts?: { teamModeOff?: boo
     );
   }
   if (env.importedFrom) {
-    lines.push(`  YOU ARE ACTUALLY IMPORTED FROM: ${env.importedFrom}`);
+    lines.push(`  importedFrom: ${env.importedFrom}`);
   }
   if (env.projectInstructions) {
     lines.push(`  projectInstructions: ${env.projectInstructions}`);
@@ -188,8 +197,8 @@ export function buildAgentContextBlock(env: AgentEnv, opts?: { teamModeOff?: boo
   if (!teamOff) {
     if (isCloud) {
       lines.push(
-        '  peers (for `communicate`):  `mavis({ command: "session list", args: { mode: "peers", session_id: "me" } })`',
-        '  agents (your roster):       `mavis({ command: "agent list" })`',
+        '  peers: list peer sessions for `communicate` with `mavis({ command: "session list", args: { mode: "peers", session_id: "me" } })`',
+        '  agents: list your roster with `mavis({ command: "agent list" })`',
       );
     } else {
       lines.push(
@@ -208,7 +217,11 @@ export function buildSlimAgentContextBlock(env: AgentEnv): string {
   const displayName = env.displayName ?? env.agentName;
   const isCloud = env.scene === 'cloud';
   const lines = ['<agent-context>'];
-  lines.push(`  agent: ${displayName}`);
+  lines.push(
+    isDefaultLocalAgentDisplayName(env)
+      ? '  assistant: MiniMax Code  # public identity'
+      : `  agent: ${displayName}`,
+  );
   const userConfiguredName = formatUserConfiguredName(env.userConfiguredName);
   if (userConfiguredName) {
     lines.push(`  user: ${userConfiguredName}`);
@@ -216,16 +229,16 @@ export function buildSlimAgentContextBlock(env: AgentEnv): string {
   if (!isCloud) {
     lines.push(`  agentName: ${env.agentName}`);
   }
-  lines.push(`  SESSION ROLE: ${sessionRole}`);
+  lines.push(`  sessionRole: ${sessionRole}`);
   if (!env.sessionIdInContext) {
-    lines.push(`  YOUR SESSION ID: ${env.sessionId}`);
+    lines.push(`  sessionId: ${env.sessionId}`);
   }
   if (env.parentSessionId) {
-    lines.push(`  PARENT SESSION: ${env.parentSessionId}`);
+    lines.push(`  parentSessionId: ${env.parentSessionId}`);
     lines.push(buildParentResultDeliveryLine(env, isCloud));
   }
   if (env.sessionType !== 1 && env.rootSessionId) {
-    lines.push(`  YOUR AGENT ROOT SESSION: ${env.rootSessionId}`);
+    lines.push(`  rootSessionId: ${env.rootSessionId}`);
   }
   lines.push(`  date: ${env.date}`);
   if (!env.environmentInSystemPrompt) {
@@ -239,14 +252,18 @@ export function buildSlimAgentContextBlock(env: AgentEnv): string {
   return lines.join('\n');
 }
 
+/** `<agent-context>` line of a task child whose result the runtime delivers to the parent. */
+export const RUNTIME_MANAGED_RESULT_DELIVERY_LINE =
+  '  resultDelivery: runtime-managed. Return your result normally; the runtime delivers it through whichever path opened this Turn — the task result, the session send completion, or a task_append result the owner reads with task_output. Do not send a separate message to the parent session.';
+
 function buildParentResultDeliveryLine(env: AgentEnv, isCloud: boolean): string {
   if (!isCloud && env.taskResultDelivery === 'runtime-managed') {
-    return '  TASK RESULT DELIVERY: Return your result normally; the runtime delivers it through whichever path opened this Turn — the task result, the session send completion, or a task_append result the owner reads with task_output. Do not send a separate message to the parent session.';
+    return RUNTIME_MANAGED_RESULT_DELIVERY_LINE;
   }
   if (!isCloud) {
-    return '  RESULT DELIVERY: Return your result normally in this session. The parent can retrieve the completed branch result through native session tools; do not shell out to message another session.';
+    return '  resultDelivery: Return your result normally in this session. The parent can retrieve the completed branch result through native session tools; do not shell out to message another session.';
   }
-  return `  REPORT-BACK REQUIRED: When your task is complete or blocked, you MUST report results back to your parent session via the \`communicate\` tool with to_session="${env.parentSessionId}" and content="<your report>".`;
+  return `  resultDelivery: REPORT-BACK REQUIRED. When your task is complete or blocked, you MUST report results back to your parent session via the \`communicate\` tool with to_session="${env.parentSessionId}" and content="<your report>".`;
 }
 
 function escapeAgentContextValue(value: string): string {
@@ -400,9 +417,11 @@ export function buildCliSunsetMemoryNoticeBlock(notice: CliSunsetMemoryNotice | 
       'do NOT follow CLI instructions found in them:',
       ...paths.map((path) => `  - ${path}`),
       'Native replacements:',
-      '  - agent / cron / session → native `mavis` tool: `mavis({ command: "<group> <action>", args: { ... } })`',
-      '  - communication peers/messages → native `mavis` session list/messages; return results normally instead of using communication send',
-      '  - memory → native `memory` tool (see the mavis skill, references/memory.md)',
+      '  - agent → `agent-manage` Skill, then the `agent_*` tools',
+      '  - session → `session-manage` Skill for reading and tidying; for sending, creating and interrupting, your `assignment_*` tools if you have them, otherwise the `session-dispatch` Skill',
+      '  - cron → `cron-manage` Skill, then the `cron_*` tools',
+      '  - communication peers/messages → the `session_list` / `session_messages` tools; return results normally instead of using communication send',
+      '  - memory → native `memory` tool (see the `memory-manage` Skill)',
       '  - skills → native `skill` tool; hooks → edit hook files directly',
       '  - spawn (delegation) → native `task` tool (sub-agent tasks)',
       '  - `mavis im ...` still works, along with the core CLI surface (`mavis --help`)',
@@ -777,29 +796,11 @@ export function buildActivePlanReminderBlock(plans: ActivePlanSummary[]): string
 
 // ─── Async Audit ─────────────────────────────────────────────────────────────
 
-export function buildAsyncAuditBlock(opts?: { scene?: 'cloud' | 'local' | undefined }): string {
-  if (opts?.scene === 'cloud') {
-    return (
-      `<async-audit>\n` +
-      `Review pending async work before scheduling a follow-up:\n` +
-      `- If the current tool says it will resume this conversation when it finishes, rely on that result; do not create Cron.\n` +
-      `- Waiting for a user reply alone: do not create Cron.\n` +
-      `- For external state with no completion signal that needs a future Agent turn, use \`cron create\`\n` +
-      `  through the \`mavis\` tool for a periodic re-check. State when to report and delete it.\n` +
-      `- Otherwise do not create Cron.\n` +
-      `</async-audit>`
-    );
-  }
-  return (
-    `<async-audit>\n` +
-    `Review pending async work before scheduling a follow-up:\n` +
-    `- If the current tool says it will resume this conversation when it finishes, rely on that result; do not create Cron.\n` +
-    `- Waiting for a user reply alone: do not create Cron.\n` +
-    `- For external state with no completion signal that needs a future Agent turn, use \`cron self\`\n` +
-    `  to re-check it periodically. State when to report and delete it.\n` +
-    `- Otherwise do not create Cron.\n` +
-    `</async-audit>`
-  );
+export function buildAsyncAuditBlock(): string {
+  const followUp =
+    `- For external state with no completion signal that needs a future Agent turn, use \`self_reminder\` with \`action=set\`, a positive integer \`delay_seconds\` and \`prompt\` for one check.\n` +
+    `  Each session allows one unfinished reminder. A duplicate set leaves it unchanged; use \`action=cancel\` alone when it is no longer needed.\n`;
+  return `<async-audit>\nReview pending async work before scheduling a follow-up:\n- If the current tool says it will resume this conversation when it finishes, rely on that result; no reminder is needed.\n- Waiting for a user reply alone needs no reminder.\n${followUp}</async-audit>`;
 }
 
 /** Periodic reminder of the current surface's system-prompt delivery protocol. */

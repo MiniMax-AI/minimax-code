@@ -28,6 +28,10 @@
     "./runtime/transport/stdio": {
       "types": "./src/runtime/transport/stdio.ts",
       "import": "./dist/runtime/transport/stdio.js"
+    },
+    "./oauth": {
+      "types": "./src/oauth.ts",
+      "import": "./dist/oauth.js"
     }
   },
   "dependencies": {

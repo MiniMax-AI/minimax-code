@@ -28,6 +28,8 @@ export const MANAGED_RUNTIME_KEYS = [
   'MAVIS_BUILD_ENV',
   '__MAVIS_DISABLE_SAFETY',
   'MAVIS_SQLITE3_MODULE_PATH',
+  // Desktop App-owned mcode-tools launcher directory: valid only for the Runtime that App forked.
+  'MAVIS_MCODE_TOOLS_HOST_BIN_DIR',
   'ELECTRON_RUN_AS_NODE',
 ] as const;
 

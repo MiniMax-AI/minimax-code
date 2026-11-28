@@ -5,11 +5,15 @@ import type {
 import { attachProgrammaticErrorRaw } from '@mavis/agent-core/tools';
 import {
   describeMcpCallError,
+  findMcpAuthRequiredError,
   McpNameRegistry,
   pluginMcpNameKey,
   McpConnectionPool,
+  type McpAuthRequiredError,
   type McpConnectionPoolOptions,
+  type McpConnectionTokenOverrides,
   type McpPoolMetrics,
+  type McpRequestAuthorizer,
   type McpRuntimeLogger,
   type McpToolCallResult,
   type McpToolInfo,
@@ -25,16 +29,34 @@ type DesktopRuntimeTool = DesktopTurnCapabilityView['runtimeTools'][number];
 const LIST_TOOLS_CONCURRENCY = 4;
 
 export interface PluginMcpPool {
-  listTools(serverName: string): Promise<McpToolInfo[]>;
+  listTools(
+    serverName: string,
+    tokenOverrides?: McpConnectionTokenOverrides,
+  ): Promise<McpToolInfo[]>;
   callTool(
     serverName: string,
     toolName: string,
     args: Record<string, unknown>,
-    tokenOverrides?: undefined,
+    tokenOverrides?: McpConnectionTokenOverrides,
     options?: { signal?: AbortSignal },
   ): Promise<McpToolCallResult>;
   disconnect(serverName: string): Promise<void>;
   shutdown(): Promise<void>;
+}
+
+/** Resolves OAuth credentials of remote Plugin servers; implemented by `mcp/oauth.ts`. */
+export interface PluginMcpRuntimeAuth {
+  /** Undefined for stdio, Mini App managed, static-Authorization, or unscoped servers. */
+  resolve(entry: PluginSnapshotMcpServer): PluginMcpServerCredential | undefined;
+}
+
+export interface PluginMcpServerCredential {
+  readonly authorizer: McpRequestAuthorizer;
+  /** Local credential-state check only: true while the server is known to need authorization. */
+  shouldSkipBackground(): Promise<boolean>;
+  markObserved(outcome: 'connected' | McpAuthRequiredError): Promise<void>;
+  /** Background discovery or a tool call found that the user must authorize the server. */
+  authRequired(error: McpAuthRequiredError): void;
 }
 
 export interface PluginMcpRuntimePort {
@@ -48,6 +70,16 @@ export interface PluginMcpRuntimePort {
   exportInventory?(): readonly PluginMcpInventorySeed[];
   /** Seed a fresh generation before reconciling its server declarations. */
   importInventory?(seed: readonly PluginMcpInventorySeed[]): void;
+  /**
+   * A retired runtime keeps serving turns admitted before it was replaced; a managed Mini App
+   * server it already resolved must follow that Mini App's restart instead of staying pinned to
+   * the process (and loopback token) publication just replaced.
+   */
+  adoptManagedServers?(entries: readonly PluginSnapshotMcpServer[]): Promise<void>;
+  /** Drops these servers' inventories so the next generation lists them again. */
+  forgetInventories?(serverNames: readonly string[]): void;
+  /** One tools/list with credentials attached, bypassing cached state; never authorizes. */
+  probe?(serverName: string): Promise<'connected' | McpAuthRequiredError | Error>;
 }
 
 export interface PluginMcpInventorySeed {
@@ -67,15 +99,28 @@ export interface PluginMcpReconcileOptions {
   readonly inventoryMode?: 'cached-only' | 'discover-managed' | 'discover';
 }
 
+/** One call of a Mini App's managed MCP tool, with the session and turn that made it. */
+export interface ManagedMiniAppToolCall {
+  readonly pluginName: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+}
+
 export interface PluginMcpRuntimeOptions {
   readonly names?: McpNameRegistry;
   readonly pool?: PluginMcpPool;
+  readonly auth?: PluginMcpRuntimeAuth;
   readonly logger?: McpRuntimeLogger;
   readonly metrics?: McpPoolMetrics;
   readonly poolOptions?: Pick<McpConnectionPoolOptions, 'idleTimeoutMs' | 'maxConcurrency'>;
   readonly listToolsTimeoutMs?: number;
   readonly disconnectTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
+  /**
+   * A call reached a Mini App's managed MCP tool. The observer decides whether it holds the
+   * plugin for the calling turn; it must not throw or block (failures are swallowed).
+   */
+  readonly onManagedMiniAppToolCall?: (call: ManagedMiniAppToolCall) => void;
 }
 
 export interface PluginMcpReconcileResult {
@@ -88,7 +133,7 @@ export interface PluginMcpReconcileResult {
 interface CachedMcpInventory {
   readonly lifecycleKey: string;
   readonly tools: readonly McpToolInfo[];
-  readonly failed: boolean;
+  readonly state: 'ready' | 'failed' | 'auth_required';
 }
 
 /**
@@ -99,22 +144,28 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
   private readonly servers = new Map<string, PluginSnapshotMcpServer>();
   private readonly lifecycleKeys = new Map<string, string>();
   private readonly inventories = new Map<string, CachedMcpInventory>();
+  /** Resolved per lookup generation; `null` caches "no credential" for that server. */
+  private readonly credentials = new Map<string, PluginMcpServerCredential | null>();
   private readonly pool: PluginMcpPool;
+  private readonly auth: PluginMcpRuntimeAuth | undefined;
   private readonly logger: McpRuntimeLogger;
   private readonly metrics: McpPoolMetrics | undefined;
   private readonly listToolsTimeoutMs: number;
   private readonly disconnectTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
+  private readonly onManagedMiniAppToolCall: ((call: ManagedMiniAppToolCall) => void) | undefined;
   private closed = false;
   private readonly names: McpNameRegistry;
 
   constructor(options: PluginMcpRuntimeOptions = {}) {
     this.names = options.names ?? new McpNameRegistry();
+    this.auth = options.auth;
     this.logger = options.logger ?? NOOP_LOGGER;
     this.metrics = options.metrics;
     this.listToolsTimeoutMs = options.listToolsTimeoutMs ?? 15_000;
     this.disconnectTimeoutMs = options.disconnectTimeoutMs ?? 5_000;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
+    this.onManagedMiniAppToolCall = options.onManagedMiniAppToolCall;
     this.pool =
       options.pool ??
       new McpConnectionPool(
@@ -159,17 +210,11 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
 
     for (const [index, entry] of entries.entries()) {
       const inventory = inventories[index];
-      if (!inventory || inventory.failed) {
-        failedServerCount += 1;
-        diagnostics.push(
-          freeze({
-            code: shouldDiscoverInventory(entry, inventoryMode)
-              ? 'MCP_SERVER_LIST_FAILED'
-              : 'MCP_SERVER_WARMING',
-            pluginName: entry.pluginName,
-            capabilityName: entry.server.name,
-          }),
-        );
+      if (!inventory || inventory.state !== 'ready') {
+        const diagnostic = unavailableServerDiagnostic(entry, inventory, inventoryMode);
+        // Waiting on the user is not a failure: retrying cannot succeed before authorization.
+        if (diagnostic.code !== 'MCP_SERVER_AUTH_REQUIRED') failedServerCount += 1;
+        diagnostics.push(diagnostic);
         continue;
       }
       for (const { tool, nativeName } of this.assignToolNames(
@@ -196,6 +241,7 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
             kind: 'mcp',
             source: entry.server.name,
             pluginName: entry.pluginName,
+            mcpToolName: tool.name,
             tool: runtimeTool,
           }),
         );
@@ -235,7 +281,7 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
     if (this.closed) return [];
     return freeze(
       [...this.inventories.entries()].flatMap(([serverName, inventory]) =>
-        inventory.failed
+        inventory.state !== 'ready'
           ? []
           : [
               freeze({
@@ -257,7 +303,7 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
         freeze({
           lifecycleKey: item.lifecycleKey,
           tools: freeze([...item.tools]),
-          failed: false,
+          state: 'ready',
         }),
       );
     }
@@ -269,6 +315,7 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
     this.servers.clear();
     this.lifecycleKeys.clear();
     this.inventories.clear();
+    this.credentials.clear();
     await ignoreFailure(
       withTimeout(
         this.pool.shutdown(),
@@ -282,6 +329,44 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
     await Promise.allSettled(
       [...new Set(serverNames)].map((serverName) => this.disconnectBounded(serverName)),
     );
+  }
+
+  forgetInventories(serverNames: readonly string[]): void {
+    for (const serverName of serverNames) this.inventories.delete(serverName);
+  }
+
+  async probe(serverName: string): Promise<'connected' | McpAuthRequiredError | Error> {
+    const entry = this.servers.get(serverName);
+    if (this.closed || !entry) return new Error('Plugin MCP server is not loaded');
+    try {
+      await withTimeout(
+        this.pool.listTools(serverName, this.connectionOverrides(entry)),
+        this.listToolsTimeoutMs,
+        `Plugin MCP tools/list timed out for ${entry.server.name}`,
+      );
+      return 'connected';
+    } catch (error) {
+      await this.disconnectBounded(serverName);
+      const authError = findMcpAuthRequiredError(error);
+      if (authError) return authError;
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  async adoptManagedServers(entries: readonly PluginSnapshotMcpServer[]): Promise<void> {
+    if (this.closed) return;
+    const changed: string[] = [];
+    for (const entry of entries) {
+      if (entry.managedIdentity?.kind !== 'miniapp') continue;
+      const name = poolName(entry);
+      if (this.servers.get(name)?.managedIdentity?.kind !== 'miniapp') continue;
+      const key = lifecycleKey(entry);
+      if (this.lifecycleKeys.get(name) === key) continue;
+      this.servers.set(name, entry);
+      this.lifecycleKeys.set(name, key);
+      changed.push(name);
+    }
+    await this.disconnectServers(changed);
   }
 
   private async disconnectBounded(serverName: string): Promise<void> {
@@ -306,17 +391,21 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
   private retainExactInventories(entries: readonly PluginSnapshotMcpServer[]): void {
     const nextKeys = new Map(entries.map((entry) => [poolName(entry), lifecycleKey(entry)]));
     for (const [serverName, inventory] of this.inventories) {
-      if (nextKeys.get(serverName) !== inventory.lifecycleKey || inventory.failed) {
+      if (nextKeys.get(serverName) !== inventory.lifecycleKey || inventory.state !== 'ready') {
         this.inventories.delete(serverName);
       }
     }
   }
 
-  private resolveCachedInventory(entry: PluginSnapshotMcpServer): CachedMcpInventory {
+  /** Never connects; a stored needs-authorization state is a local file read. */
+  private async resolveCachedInventory(
+    entry: PluginSnapshotMcpServer,
+  ): Promise<CachedMcpInventory> {
     const key = lifecycleKey(entry);
     const existing = this.inventories.get(poolName(entry));
-    if (existing?.lifecycleKey === key && !existing.failed) return existing;
-    return freeze({ lifecycleKey: key, tools: freeze([] as McpToolInfo[]), failed: true });
+    if (existing?.lifecycleKey === key && existing.state === 'ready') return existing;
+    if (await skipsBackground(this.credentialFor(entry))) return this.authRequired(entry);
+    return freeze({ lifecycleKey: key, tools: freeze([] as McpToolInfo[]), state: 'failed' });
   }
 
   private async resolveInventory(
@@ -325,44 +414,97 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
   ): Promise<CachedMcpInventory> {
     const key = lifecycleKey(entry);
     const existing = this.inventories.get(poolName(entry));
-    if (reuseExisting && existing?.lifecycleKey === key) return existing;
+    if (reuseExisting && existing?.lifecycleKey === key && existing.state !== 'auth_required') {
+      return existing;
+    }
+    const credential = this.credentialFor(entry);
+    if (await skipsBackground(credential)) return this.authRequired(entry);
 
     try {
       const tools = await withTimeout(
-        this.pool.listTools(poolName(entry)),
+        this.pool.listTools(poolName(entry), this.connectionOverrides(entry)),
         this.listToolsTimeoutMs,
         `Plugin MCP tools/list timed out for ${entry.server.name}`,
       );
       this.metrics?.incr('plugin_mcp_list_total', { status: 'ok' });
-      const inventory = freeze({ lifecycleKey: key, tools: freeze([...tools]), failed: false });
+      if (credential) await ignoreFailure(credential.markObserved('connected'));
+      const inventory: CachedMcpInventory = freeze({
+        lifecycleKey: key,
+        tools: freeze([...tools]),
+        state: 'ready',
+      });
       this.inventories.set(poolName(entry), inventory);
       return inventory;
     } catch (error) {
       await this.disconnectBounded(poolName(entry));
-      this.metrics?.incr('plugin_mcp_list_total', { status: 'error' });
+      const authRequired = await this.observeAuthFailure(entry, error);
+      this.metrics?.incr('plugin_mcp_list_total', {
+        status: authRequired ? 'auth_required' : 'error',
+      });
+      if (authRequired) return this.authRequired(entry);
       this.logger.warn('Plugin MCP tools/list failed', {
         pluginName: entry.pluginName,
         source: entry.source,
         serverName: entry.server.name,
         errorType: errorType(error),
       });
-      const inventory = freeze({
+      const inventory: CachedMcpInventory = freeze({
         lifecycleKey: key,
         tools: freeze([] as McpToolInfo[]),
-        failed: true,
+        state: 'failed',
       });
       this.inventories.set(poolName(entry), inventory);
       return inventory;
     }
   }
 
+  private authRequired(entry: PluginSnapshotMcpServer): CachedMcpInventory {
+    const inventory: CachedMcpInventory = freeze({
+      lifecycleKey: lifecycleKey(entry),
+      tools: freeze([] as McpToolInfo[]),
+      state: 'auth_required',
+    });
+    this.inventories.set(poolName(entry), inventory);
+    return inventory;
+  }
+
+  private credentialFor(entry: PluginSnapshotMcpServer): PluginMcpServerCredential | undefined {
+    const name = poolName(entry);
+    const cached = this.credentials.get(name);
+    if (cached !== undefined) return cached ?? undefined;
+    const credential = this.auth?.resolve(entry);
+    this.credentials.set(name, credential ?? null);
+    return credential;
+  }
+
+  private connectionOverrides(
+    entry: PluginSnapshotMcpServer,
+  ): McpConnectionTokenOverrides | undefined {
+    const credential = this.credentialFor(entry);
+    return credential ? { authorizer: credential.authorizer } : undefined;
+  }
+
   private replaceLookup(entries: readonly PluginSnapshotMcpServer[]): void {
     this.servers.clear();
     this.lifecycleKeys.clear();
+    this.credentials.clear();
     for (const entry of entries) {
       this.servers.set(poolName(entry), entry);
       this.lifecycleKeys.set(poolName(entry), lifecycleKey(entry));
     }
+  }
+
+  /** True when `error` means the user must authorize a server that has credentials. */
+  private async observeAuthFailure(
+    entry: PluginSnapshotMcpServer,
+    error: unknown,
+  ): Promise<boolean> {
+    const credential = this.credentialFor(entry);
+    const authError = credential ? findMcpAuthRequiredError(error) : undefined;
+    if (!credential || !authError) return false;
+    await ignoreFailure(credential.markObserved(authError));
+    credential.authRequired(authError);
+    return true;
   }
 
   private runtimeTool(
@@ -380,14 +522,25 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
     return freeze({
       def,
       impl: freeze({
-        execute: async (_context, input, signal) => {
+        execute: async (context, input, signal) => {
+          if (entry.managedIdentity?.kind === 'miniapp') {
+            try {
+              this.onManagedMiniAppToolCall?.({
+                pluginName: entry.pluginName,
+                sessionId: context.sessionId,
+                turnId: context.turnId,
+              });
+            } catch {
+              // The observer is advisory; the tool call proceeds regardless.
+            }
+          }
           let result: McpToolCallResult;
           try {
             result = await this.pool.callTool(
               poolName(entry),
               tool.name,
               toRecord(input),
-              undefined,
+              this.connectionOverrides(entry),
               signal ? { signal } : undefined,
             );
           } catch (error) {
@@ -403,6 +556,7 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
               errorCode: raw?.code ?? null,
               rawAttached: attached,
             });
+            await this.observeAuthFailure(entry, error);
             throw error;
           }
           const text = mcpContentToText(result);
@@ -431,6 +585,20 @@ export class PluginMcpRuntime implements PluginMcpRuntimePort {
   }
 }
 
+function unavailableServerDiagnostic(
+  entry: PluginSnapshotMcpServer,
+  inventory: CachedMcpInventory | undefined,
+  inventoryMode: NonNullable<PluginMcpReconcileOptions['inventoryMode']>,
+): PluginSnapshotDiagnostic {
+  let code = 'MCP_SERVER_AUTH_REQUIRED';
+  if (inventory?.state !== 'auth_required') {
+    code = shouldDiscoverInventory(entry, inventoryMode)
+      ? 'MCP_SERVER_LIST_FAILED'
+      : 'MCP_SERVER_WARMING';
+  }
+  return freeze({ code, pluginName: entry.pluginName, capabilityName: entry.server.name });
+}
+
 function shouldDiscoverInventory(
   entry: PluginSnapshotMcpServer,
   inventoryMode: NonNullable<PluginMcpReconcileOptions['inventoryMode']>,
@@ -452,6 +620,20 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * An unreadable credential store must not fail the whole reconcile: the server
+ * is then attempted normally and fails on its own listing path.
+ */
+async function skipsBackground(
+  credential: PluginMcpServerCredential | undefined,
+): Promise<boolean> {
+  try {
+    return (await credential?.shouldSkipBackground()) === true;
+  } catch {
+    return false;
   }
 }
 
@@ -482,9 +664,11 @@ async function mapBounded<T, R>(
   return results;
 }
 
+/** `server` carries the `oauth` descriptor; the PluginId separates same-name credentials. */
 function lifecycleKey(entry: PluginSnapshotMcpServer): string {
   return JSON.stringify({
     pluginName: entry.pluginName,
+    pluginId: entry.pluginId,
     source: entry.source,
     server: entry.server.resolvedServer,
     ...(entry.managedIdentity ? { managedIdentity: entry.managedIdentity } : {}),

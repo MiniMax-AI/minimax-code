@@ -478,9 +478,19 @@ export class PluginHookCoordinator {
     this.completeTurn(sessionId);
   }
 
-  /** Restores the previous idle anchor after a denied, aborted, or failed turn. */
+  /**
+   * Restores the previous idle anchor after a denied, aborted, or failed turn.
+   * Hosts call this when every Turn settles. For a subagent child the settled
+   * Turn is its whole execution: a child that stops without a normal close
+   * (for example a content-safety stop) must still release its registration,
+   * otherwise the parent's SessionEnd stays fenced and an explicit SessionEnd
+   * keeps rejecting every later parent Turn.
+   */
   resumeIdleCountdown(sessionId: string): void {
-    if (this.subagents.has(sessionId)) return;
+    if (this.subagents.has(sessionId)) {
+      this.releaseSubagent(sessionId);
+      return;
+    }
     const state = this.sessions.get(sessionId);
     if (!state) return;
     state.turnActive = false;

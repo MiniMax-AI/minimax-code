@@ -27,6 +27,13 @@ alone. Half sentences that name tools.bash are only shown when bash is enabled. 
 {{#if tools.bash}}
 - `tools.bash` only for builds, tests, git and other shell work.
 {{/if}}
+{{!-- store/load: keep a large intermediate result out of the conversation and out of
+the next call's return value. The second half stops a stale copy from being used as if it
+were the file. Only with beta.ptcStore on: without a store this line would name a global
+the program does not have, so the section then reads as it did before store/load existed. --}}
+{{#if ptcStore}}
+- Keep large intermediate data with `store` and return only what the next step needs. Re-read a file after changing it instead of using a stored copy.
+{{/if}}
 - Gather context in as few `run_code` calls as possible: put every independent read and search you already know you need into one `Promise.all`; reads and searches run at the same time.{{#if tools.bash}} Shell commands run one at a time, so reads and searches through `tools.bash` do not run in parallel.{{/if}}
 {{!-- Name the owner of timeout_ms: in smoke runs the model set a tools.bash timeout, or put timeout_ms
 into the tools.bash arguments, and the program still stopped at 120 seconds. A tools.bash timeout now

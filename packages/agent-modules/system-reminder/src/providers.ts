@@ -98,7 +98,7 @@ export function findReminderPolicy(
  * `level` exceeds their length — matches the daemon "cap at last interval"
  * behaviour used by every backoff provider.
  *
- * `override` may be `(number | string)[]` because thrift-gen emits i64-capable
+ * `override` may be `(number | string)[]` because wire protocol emits i64-capable
  * fields as `number | string`; SystemReminderFrequency.intervals is i32 so this
  * shows up as `number[]`. We accept both for forward-compat with any future
  * widening.
@@ -124,7 +124,7 @@ export function effectiveMs(override: number | string | undefined, fallback: num
 }
 
 /**
- * Normalise an optional i32 ms override (thrift-gen emits `number | string`)
+ * Normalise an optional i32 ms override (wire protocol emits `number | string`)
  * into `number | undefined`. Used by cold-start cooldown providers that pass
  * the result straight into `tryEnterColdStart`'s `cooldownOverrideMs` slot
  * (undefined → fall back to per-kind default).
@@ -588,13 +588,10 @@ export function _resetAsyncAuditStateForTests(): void {
  * - Always fires on turn 1 (session start)
  * - Then every 5 → 10 → 20 → 20... turns (default; Apollo `intervals` overrides)
  * - Resets when turnCount drops (compaction detected)
- * - Silent when the host has no Cron capability (`cronEnabled === false`)
+ * - Silent when the current host or Agent disables Cron.
  */
 export const asyncAuditProvider: ReminderProviderFn = (input) => {
   if (input.mavisEnabled === false) return undefined;
-  // The block's external follow-up path depends on Cron. Hosts without Cron
-  // (embedded CLI) would otherwise be told every session to call a command
-  // that fails closed with CRON_UNSUPPORTED_HOST.
   if (input.cronEnabled === false) return undefined;
   const turn = input.turnCount ?? 0;
   if (turn < 1) return undefined;
@@ -603,18 +600,17 @@ export const asyncAuditProvider: ReminderProviderFn = (input) => {
   const state = asyncAuditState.get(sessionId);
   const policy = findReminderPolicy(input, 'asyncAuditProvider');
   const overrideIntervals = policy?.frequency?.intervals;
-  const sceneOpts = { scene: input.env?.scene };
 
   // First turn or no state → inject and initialize
   if (turn <= 1 || !state) {
     asyncAuditState.set(sessionId, { lastInjectedAt: turn, backoffLevel: 0 });
-    return buildAsyncAuditBlock(sceneOpts);
+    return buildAsyncAuditBlock();
   }
 
   // Compaction detected: turnCount dropped below last injection point → reset
   if (turn < state.lastInjectedAt) {
     asyncAuditState.set(sessionId, { lastInjectedAt: turn, backoffLevel: 0 });
-    return buildAsyncAuditBlock(sceneOpts);
+    return buildAsyncAuditBlock();
   }
 
   // Check if enough turns have elapsed for the next injection
@@ -624,7 +620,7 @@ export const asyncAuditProvider: ReminderProviderFn = (input) => {
       lastInjectedAt: turn,
       backoffLevel: state.backoffLevel + 1,
     });
-    return buildAsyncAuditBlock(sceneOpts);
+    return buildAsyncAuditBlock();
   }
 
   return undefined;

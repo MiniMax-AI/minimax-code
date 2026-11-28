@@ -91,6 +91,7 @@ export interface NativeAgentPreparationOptions {
 export interface NativeLocalAgentPreparationOptions {
   readonly configBuilder: LocalAgentConfigBuilderOptions;
   readonly modelResolver: LocalModelResolverLike;
+  readonly logger?: LocalAgentPreparationService['options'] extends never ? never : { warn(fields: Readonly<Record<string, unknown>>, message: string): void };
 }
 
 export interface NativeAgentHostProductionDependenciesOptions<
@@ -311,6 +312,7 @@ export function createNativeLocalAgentPreparation(
       environment: options.configBuilder.environment ?? getLocalBashEnvironment,
     }),
     modelResolver: options.modelResolver,
+    ...(options.logger ? { logger: options.logger } : {}),
   });
 }
 
@@ -416,6 +418,7 @@ function toolCatalogBuildOptions(
     ...(input.modelCapabilities ? { modelCapabilities: input.modelCapabilities } : {}),
     ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
     ...(input.ptcEnabled ? { ptcEnabled: true } : {}),
+    ...(input.advisorBound ? { advisorBound: true } : {}),
     ...(options.config ? { config: options.config } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.emitDiagnostic ? { emitDiagnostic: options.emitDiagnostic } : {}),

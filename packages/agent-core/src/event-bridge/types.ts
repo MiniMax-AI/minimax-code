@@ -8,6 +8,7 @@
 import type { RuntimeEvent, RuntimeProtocolError } from '../protocol/runtime-event.js';
 import type { ToolCallProvenanceResolver } from '../tools/types.js';
 import type { RespDataTransform } from './resp-data.js';
+import type { TurnToolCallContent } from './tool-call-content.js';
 import type { PiTurnRunnerLogger } from '../pi-turn-runner/types.js';
 
 /**
@@ -52,6 +53,8 @@ export interface EventBridgeContext {
   captureToolTiming?: boolean;
   /** Turn-local, fail-open resolver for Plugin capability attribution. */
   toolCallProvenanceResolver?: ToolCallProvenanceResolver;
+  /** Host-owned turn registry; receives each call's raw arguments and final result. */
+  toolCallContent?: TurnToolCallContent;
 }
 
 /**

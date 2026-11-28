@@ -15,8 +15,15 @@ export type Schedule = SchedulerJobSchedule;
 /**
  * Timer callback. Business services should use this as synchronous admission and drain accepted
  * work in their own close(); Scheduler.stop() does not await callbacks already in flight.
+ *
+ * `scheduledForMs` is the moment this firing was planned for, which is NOT the moment it
+ * actually runs: croner only re-checks every 30s, so a machine that slept delivers the run
+ * hours late. Callers that must not replay a missed window compare against this, not the clock.
  */
-export type ScheduledHandler = (schedulerId: string) => void | Promise<void>;
+export type ScheduledHandler = (
+  schedulerId: string,
+  scheduledForMs: number,
+) => void | Promise<void>;
 
 export interface ScheduledJob {
   readonly schedulerId: string;
@@ -32,7 +39,6 @@ export interface ScheduledJob {
 
 interface SchedulerMetrics {
   counter(name: string, delta?: number, labels?: Record<string, string>): void;
-  gauge(name: string, value: number, labels?: Record<string, string>): void;
   histogram(name: string, value: number, labels?: Record<string, string>): void;
 }
 
@@ -40,6 +46,13 @@ export interface SchedulerOptions {
   db: AppDb;
   metrics?: SchedulerMetrics;
   nowMs?: () => number;
+  /** Observes the armed timers of one handler; must not change Scheduler behavior. */
+  activeJobObserver?: ActiveJobObserver;
+}
+
+interface ActiveJobObserver {
+  readonly handlerKey: string;
+  readonly onCountChanged: (count: number) => void;
 }
 
 export interface SchedulerStartOptions {
@@ -389,6 +402,10 @@ export class Scheduler {
   private async trigger(schedulerId: string, timer: Cron): Promise<void> {
     const active = this.getActiveTrigger(schedulerId, timer);
     if (!active) return;
+    // Read the planned moment before advanceJob overwrites it with the following run.
+    // Croner's own currentRun() reports the wall clock the callback actually fired at,
+    // so this record is the only place the planned time survives a late firing.
+    const scheduledForMs = active.record.nextRunAtMs ?? this.nowMs();
     const next = this.advanceJob(active.record, timer);
     this.persistTriggeredJob(next, timer);
 
@@ -399,7 +416,7 @@ export class Scheduler {
     }
     this.reportActiveJobs();
 
-    await this.invokeHandler(next);
+    await this.invokeHandler(next, scheduledForMs);
   }
 
   private getActiveTrigger(schedulerId: string, timer: Cron): ActiveTrigger | undefined {
@@ -437,7 +454,7 @@ export class Scheduler {
     }
   }
 
-  private async invokeHandler(record: JobRecord): Promise<void> {
+  private async invokeHandler(record: JobRecord, scheduledForMs: number): Promise<void> {
     const handler = this.handlers.get(record.handlerKey);
     if (!handler) {
       this.reportSkipped('missing_handler');
@@ -445,7 +462,7 @@ export class Scheduler {
     }
     const startedAtMs = this.nowMs();
     try {
-      await handler(record.schedulerId);
+      await handler(record.schedulerId, scheduledForMs);
       this.reportTrigger(record.handlerKey, 'success', startedAtMs);
     } catch {
       this.reportTrigger(record.handlerKey, 'failure', startedAtMs);
@@ -457,26 +474,45 @@ export class Scheduler {
     return this.options.db;
   }
 
+  /**
+   * Tells the active-job observer how many timers its handler has armed. The
+   * Desktop reports no gauge: the server keeps only the last client's value.
+   */
   private reportActiveJobs(): void {
-    this.reportMetric(() => this.options.metrics?.gauge('scheduler_active_jobs', this.timers.size));
+    const observer = this.options.activeJobObserver;
+    if (observer) {
+      this.reportBestEffort(() =>
+        observer.onCountChanged(this.countArmedTimers(observer.handlerKey)),
+      );
+    }
+  }
+
+  private countArmedTimers(handlerKey: string): number {
+    let count = 0;
+    for (const schedulerId of this.timers.keys()) {
+      if (this.jobs.get(schedulerId)?.handlerKey === handlerKey) count += 1;
+    }
+    return count;
   }
 
   private reportSkipped(reason: string): void {
-    this.reportMetric(() =>
+    this.reportBestEffort(() =>
       this.options.metrics?.counter('scheduler_skipped_total', 1, { reason }),
     );
   }
 
   private reportConsistencyMismatch(kind: 'db_only' | 'map_only' | 'diverged'): void {
-    this.reportMetric(() =>
+    this.reportBestEffort(() =>
       this.options.metrics?.counter('scheduler_consistency_mismatch_total', 1, { kind }),
     );
   }
 
   private reportTrigger(handlerKey: string, outcome: TriggerOutcome, startedAtMs: number): void {
     const labels = { handlerKey, outcome };
-    this.reportMetric(() => this.options.metrics?.counter('scheduler_trigger_total', 1, labels));
-    this.reportMetric(() =>
+    this.reportBestEffort(() =>
+      this.options.metrics?.counter('scheduler_trigger_total', 1, labels),
+    );
+    this.reportBestEffort(() =>
       this.options.metrics?.histogram(
         'scheduler_callback_duration_ms',
         Math.max(0, this.nowMs() - startedAtMs),
@@ -485,11 +521,11 @@ export class Scheduler {
     );
   }
 
-  private reportMetric(report: () => void): void {
+  private reportBestEffort(report: () => void): void {
     try {
       report();
     } catch {
-      // Metrics are best-effort and must never change Scheduler behavior.
+      // Metrics and observers are best-effort and must never change Scheduler behavior.
     }
   }
 }

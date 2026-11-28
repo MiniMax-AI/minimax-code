@@ -501,6 +501,7 @@ function createRuntime(): TuiRuntime {
       hasMore: false,
     })),
     inspectProjectMcp: vi.fn(async () => undefined),
+    listMcpAuthStates: vi.fn(async () => []),
     listMcpServers: vi.fn(async () => [
       {
         name: "browser",
@@ -13452,7 +13453,7 @@ describe("createTuiApp", () => {
     expect(app.interaction.isActive()).toBe(true);
     const rendered = app.tui.render(120).join("\n");
     expect(rendered).toContain("No matching models");
-    expect(rendered).toContain("Add 3rd-party provider");
+    expect(rendered).toContain("Add provider…");
     terminal.input?.("\x1b");
     await app.stop();
   });

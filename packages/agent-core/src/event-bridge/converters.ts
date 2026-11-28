@@ -447,17 +447,19 @@ export function extractAssistantUsage(
   const output = finite(u.output);
   const cacheRead = finite(u.cacheRead) ?? 0;
   const cacheWrite = finite(u.cacheWrite) ?? 0;
+  const contextTokens = finite(u.contextTokens);
   const total =
     (finite(u.totalTokens) ?? 0) || (input ?? 0) + (output ?? 0) + cacheRead + cacheWrite;
   return {
     total_tokens: total,
     context_window: contextWindow,
-    // input_tokens / output_tokens populate the main IRuntimeUsage columns. When the
-    // RecordTokenUsage RPC reports to token_usage, InputTokens/OutputTokens are required IDL fields;
-    // omitting them makes the archon-server billing pipeline write zeros for the whole batch, corrupting reports.
-    // Forward any finite provider value unchanged, including explicit 0: a full cache hit
-    // has 0 input tokens. Omitting it makes downstream consumers treat "known zero" as "unknown"
-    // and mark usageIncomplete. Still omit missing or non-finite values to preserve "unknown" semantics.
+    ...(contextTokens !== undefined && contextTokens > 0 ? { context_tokens: contextTokens } : {}),
+    // input_tokens / output_tokens 落 IRuntimeUsage 主列,RecordTokenUsage RPC
+    // 上报 token_usage 表时 InputTokens/OutputTokens 是 required IDL 字段,不
+    // 输的话整批被 archon-server billing pipeline 当 0 写入,污染 reports。
+    // 只要 provider 给出了有限数就原样透传,包括显式的 0:全量 cache 命中时
+    // input 就是 0,省略会让下游把"已知为 0"误判成"未知",进而标记
+    // usageIncomplete。缺失或非有限值仍然省略,保留"未知"语义。
     ...(input === undefined ? {} : { input_tokens: input }),
     ...(output === undefined ? {} : { output_tokens: output }),
     ...(cacheRead > 0 ? { cache_read: cacheRead } : {}),
@@ -584,6 +586,7 @@ interface CompletedAssistantInput {
   runtimeSeq: number;
   msgId: string;
   text: string;
+  systemErrorContent?: boolean;
   thinking?: string;
   toolCalls?: RuntimeToolCall[];
   thinkingDurationMs?: number;
@@ -620,6 +623,10 @@ export async function buildCompletedAssistantMessage(
     { sessionId: input.sessionId, turnId: input.turnId },
     input.logger,
   );
+  // 只标记未被 transform 改写的系统错误，不能让替换后的正文跳过审核。
+  if (input.systemErrorContent && respData.agent_message?.msg_content === input.text) {
+    respData.agent_message.msg_content_source = 'system_error';
+  }
   return buildStreamRespEvent({
     sessionId: input.sessionId,
     turnId: input.turnId,
@@ -829,16 +836,24 @@ export function extractFinalAssistantUsageFromBuffer(
     if (!usage || typeof usage !== 'object') return undefined;
     const u = usage as {
       total_tokens?: unknown;
+      context_tokens?: unknown;
       context_window?: unknown;
       cache_read?: unknown;
       cache_write?: unknown;
     };
     const total = typeof u.total_tokens === 'number' ? u.total_tokens : 0;
+    const contextTokens =
+      typeof u.context_tokens === 'number' &&
+      Number.isFinite(u.context_tokens) &&
+      u.context_tokens > 0
+        ? u.context_tokens
+        : 0;
     const cw = typeof u.context_window === 'number' ? u.context_window : 0;
     const cacheRead = typeof u.cache_read === 'number' ? u.cache_read : 0;
     const cacheWrite = typeof u.cache_write === 'number' ? u.cache_write : 0;
     return {
       total_tokens: total,
+      ...(contextTokens > 0 ? { context_tokens: contextTokens } : {}),
       context_window: cw,
       ...(cacheRead > 0 ? { cache_read: cacheRead } : {}),
       ...(cacheWrite > 0 ? { cache_write: cacheWrite } : {}),

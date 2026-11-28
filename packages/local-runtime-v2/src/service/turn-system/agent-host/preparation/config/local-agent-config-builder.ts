@@ -162,6 +162,10 @@ export class LocalAgentConfigBuilder {
     this.taskSessionBindings = options.taskSessionBindings;
   }
 
+  readRuntimeConfig(): LocalConversationRuntimeConfig {
+    return this.options.config();
+  }
+
   /**
    * Composition binds Session model repair once the SessionSystem exists — the
    * builder is constructed earlier and must not reach for a repository itself.

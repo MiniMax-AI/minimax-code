@@ -88,12 +88,13 @@ function observeProgress(
       continue;
     }
     if (view.type === 'reset') {
-      next.delete(view.loopKey);
-      pollingCandidates.delete(view.loopKey);
+      clearContinuousPolling(next);
+      pollingCandidates.clear();
       continue;
     }
     let prior = previous.get(view.loopKey);
     if (view.continuousPolling) {
+      if (clearContinuousPolling(next, view.loopKey)) pollingCandidates.clear();
       const continuous = next.get(view.loopKey);
       prior = continuous?.continuousPolling === true ? continuous : undefined;
     }
@@ -107,14 +108,20 @@ function observeProgress(
       pollingCandidates.delete(view.loopKey);
       continue;
     }
-    const occurrences = prior?.progressKey === view.progressKey ? prior.occurrences + 1 : 1;
+    const occurrences = view.continuousPolling
+      ? (prior?.occurrences ?? 0) + 1
+      : prior?.progressKey === view.progressKey
+        ? prior.occurrences + 1
+        : 1;
     next.set(view.loopKey, {
       progressKey: view.progressKey,
       occurrences,
       ...(view.continuousPolling ? { continuousPolling: true } : {}),
       ...(view.reminderEligible ? { reminderEligible: true } : {}),
     });
-    if (prior?.progressKey !== view.progressKey) pollingCandidates.delete(view.loopKey);
+    if (!view.continuousPolling && prior?.progressKey !== view.progressKey) {
+      pollingCandidates.delete(view.loopKey);
+    }
     const signalKind: RunawayGuardSignalKind =
       view.kind === 'polling' ? 'polling_repeat' : 'unchanged_progress_repeat';
     recordMaxOccurrences(sinks.state, signalKind, occurrences);
@@ -153,6 +160,19 @@ function observeProgress(
     addReminderCandidate(reminderCandidates, 'polling_repeat');
   }
   return next;
+}
+
+function clearContinuousPolling(
+  streaks: Map<string, ProgressStreak>,
+  exceptLoopKey?: string,
+): boolean {
+  let cleared = false;
+  for (const [loopKey, streak] of streaks) {
+    if (!streak.continuousPolling || loopKey === exceptLoopKey) continue;
+    streaks.delete(loopKey);
+    cleared = true;
+  }
+  return cleared;
 }
 
 function observeRepeatedKeys(

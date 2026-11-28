@@ -97,7 +97,7 @@ async function encodeInlineImage(
   if (!bytes) return candidate;
   const encoded = await encodeAttachmentImage(bytes, candidate.mime, encoding);
   if (encoded === 'undecodable') return undefined;
-  if (!encoded) {
+  if (!encoded || 'deferred' in encoded) {
     return candidate.data
       ? candidate
       : { ...candidate, data: Buffer.from(bytes).toString('base64'), sizeBytes: bytes.length };

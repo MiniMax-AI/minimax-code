@@ -7,7 +7,13 @@ import type {
 } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, AssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { EventBridge } from '../event-bridge/index.js';
+import type { TurnTerminationReason } from '../event-bridge/types.js';
 import type { ToolExecutionContext } from '../tools/index.js';
+import {
+  newContentReviewTurnState,
+  withContentReviewRequests,
+  type ContentReviewTurnState,
+} from './content-review.js';
 import type {
   PiAfterLlmCallHook,
   PiAfterToolCallHook,
@@ -19,10 +25,15 @@ import type {
   PiOnStepEndHook,
   PiStepEndHookInput,
   PiToolExecutionStartHook,
+  PiTurnFailureHook,
 } from './hooks.js';
-import { composeStreamFn } from './llm.js';
+import { composeStreamFn, resolveHostOutputTokenCap } from './llm.js';
+import { withLLMCallPreemption, type LLMCallPreemptionState } from './llm-preemption.js';
 import { withLLMRetry, type LLMCallScope, type LLMCallSettledEvent } from './llm-retry.js';
+import { LLM_RESUME_STALL_MS } from './llm-stream-timeout.js';
 import type { TurnMetricsRecorder } from './metrics.js';
+import { withRejectedMediaRetry } from './rejected-media-retry.js';
+import { withTurnRequestPhase, type TurnRequestPhase } from './turn-timing.js';
 import { newTools } from './tools.js';
 import type {
   LLMModelConfig,
@@ -85,10 +96,17 @@ export interface LlmCaptureAgentEventSource {
   subscribe(listener: (event: AgentEvent) => void): () => void;
 }
 
+/** A failure a turn-failure recovery replaced: its termination and the error text it carried. */
+export interface ReplacedTurnFailure {
+  readonly termination: TurnTerminationReason;
+  readonly errorMessage: string;
+}
+
 export interface turnHooks {
   beforeLLM: readonly PiBeforeLlmCallHook[];
   onLLMPrepared: readonly PiOnLlmCallPreparedHook[];
   afterLLM: readonly PiAfterLlmCallHook[];
+  turnFailure: readonly PiTurnFailureHook[];
   beforeTool: readonly PiBeforeToolCallHook[];
   onToolExecutionStart: readonly PiToolExecutionStartHook[];
   afterTool: readonly PiAfterToolCallHook[];
@@ -115,24 +133,43 @@ export interface turnState<TCtx extends ToolExecutionContext = ToolExecutionCont
   auxiliaryStreamFn?: StreamFn;
   thinkingLevel: ThinkingLevel;
   initialMessages: AgentMessage[];
+  /** The display msg_id each assistant message ended with, for history deltas. */
+  assistantMessageIds: WeakMap<AgentMessage, string>;
   /** Step-local admission facts, handed off before step hooks run. Never persisted. */
   blockedToolCalls: NonNullable<PiStepEndHookInput['blockedToolCalls']>[number][];
   /** One trusted host response consumed by the next provider boundary. */
   syntheticResponse: { pending?: { readonly text: string; readonly reason: string } };
   /** Assistant responses rejected after message_end but still referenced by Pi's loop context. */
   rejectedAssistantMessages: Set<AgentMessage>;
+  /** The provider call the host may preempt, and the resend it owes after doing so. */
+  preemption: LLMCallPreemptionState;
+  /** A request was refused before sending because the host closed the Turn's requests. */
+  requestStoppedBeforeSend: boolean;
   /**
    * At most one recovered provider error per LLM call: `used` clears on the
    * next response that is not an error. `pending` waits for the runner to
    * repeat the request; `active` is handed to the next beforeLlmCall.
-   * `lastRequest` is the request view of the latest provider call.
+   * `lastRequest` is the request view of the latest provider call;
+   * `lastRequestPrepared` is false while a call fails before its request is
+   * prepared. A turn-failure hook's recoveries are counted in
+   * `turnFailureRecoveries`; `replacedFailure` is the failure the latest of
+   * them replaced, and `restoredFailure` the one a hook restored.
    */
   recovery: {
     used: boolean;
     pending?: PiLlmCallRecovery;
     active?: PiLlmCallRecovery;
     lastRequest?: readonly AgentMessage[];
+    lastRequestPrepared?: boolean;
+    turnFailureRecoveries: number;
+    replacedFailure?: ReplacedTurnFailure;
+    restoredFailure?: ReplacedTurnFailure;
   };
+  /**
+   * 网关 content_error 的单轮状态：本次调用已重发次数、等待重发 / 交给下一次请求的重发参数、
+   * 以及本轮的结束结果。
+   */
+  contentReview: ContentReviewTurnState;
   nextEventId(kind: string): string;
   nextRuntimeSeq(): number;
 }
@@ -142,7 +179,15 @@ export function newTurn<TCtx extends ToolExecutionContext>(
   deps: turnDeps,
 ): turnState<TCtx> {
   const resolved = input.llm;
-  const composedStreamFn = composeStreamFn(resolved);
+  // 先校验审核配置：给错直接让本轮在发出任何请求之前失败。
+  const contentReview = newContentReviewTurnState(input.contentReview);
+  const networkRecovery = input.llmRetry?.networkRecovery;
+  const composedStreamFn = composeStreamFn(
+    resolved,
+    networkRecovery
+      ? { onResume: (listener) => networkRecovery.onResume(listener), stallMs: LLM_RESUME_STALL_MS }
+      : undefined,
+  );
   const retryStream = (scope: LLMCallScope): StreamFn => {
     const metricsStreamFn = deps.metrics
       ? deps.metrics.wrapStreamFn(composedStreamFn, { recordTerminalFailure: false })
@@ -151,6 +196,9 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     const callerOnCallSettled = input.llmRetry?.onCallSettled;
     const retryingStreamFn = withLLMRetry(metricsStreamFn, {
       ...input.llmRetry,
+      // A required lifecycle must also run when retries are disabled by the host.
+      ...(!input.llmRetry && resolved.callLifecycle ? { policy: { maxRetries: 0 } } : {}),
+      lifecycle: resolved.callLifecycle ?? input.llmRetry?.lifecycle,
       sessionId: input.sessionId,
       turnId: input.turnId,
       scope,
@@ -180,13 +228,52 @@ export function newTurn<TCtx extends ToolExecutionContext>(
       : capturedStreamFn;
   };
   const mainStreamFn =
-    input.llmRetry || deps.llmCapture
+    input.llmRetry || deps.llmCapture || resolved.callLifecycle
       ? retryStream('agent')
       : deps.metrics
         ? deps.metrics.wrapStreamFn(composedStreamFn)
         : composedStreamFn;
-  const auxiliaryStreamFn = input.llmRetry ? retryStream('compaction') : undefined;
+  const auxiliaryStreamFn =
+    input.llmRetry || resolved.callLifecycle
+      ? withTurnRequestPhase(
+          retryStream('compaction'),
+          () => 'compaction',
+          resolved.turnPhaseHeader,
+        )
+      : undefined;
   const syntheticResponse: turnState['syntheticResponse'] = {};
+  const preemption: LLMCallPreemptionState = {};
+  let logicalCalls = 0;
+  // A call resent because the host preempted the one in flight replaces it and
+  // keeps its phase: a preempted first request is resent as initial.
+  const mainPhase = (): TurnRequestPhase => {
+    const resent = preemption.resendPhase;
+    delete preemption.resendPhase;
+    return resent ?? (logicalCalls++ === 0 ? 'initial' : 'iteration');
+  };
+  // Each resend without rejected media is a logical call of its own. The metrics
+  // have recorded the rejected attempt by the time it is resent, so it comes off
+  // the turn's failure provenance first: an accepted resend leaves no failure
+  // behind, and one that fails is attributed to its own cause. Auxiliary calls
+  // stay unwrapped.
+  const mediaCheckedStreamFn = withRejectedMediaRetry(mainStreamFn, {
+    logger: deps.logger,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    beforeResend: () => deps.metrics?.forgetLLMFailureObservation(),
+  });
+  // Outside retry, so a preempted call is never retried. Outside the media
+  // check too: a preempted call ends in an abort the check passes through, and
+  // the response that stands in for it never reaches the check, so the media it
+  // carried is not taken as accepted. Auxiliary calls stay unwrapped.
+  const preemptibleStreamFn = input.llmPreemption
+    ? withLLMCallPreemption(
+        mediaCheckedStreamFn,
+        preemption,
+        deps.nowMs,
+        input.llmPreemption.wakeReasons,
+      )
+    : mediaCheckedStreamFn;
   let eventSeq = 0;
   let runtimeSeq = 0;
   const nextEventId =
@@ -219,6 +306,7 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     logger: deps.logger,
     ...(input.captureToolTiming ? { captureToolTiming: true } : {}),
     ...(toolCallProvenanceResolver ? { toolCallProvenanceResolver } : {}),
+    ...(input.toolCallContent ? { toolCallContent: input.toolCallContent } : {}),
     ...(typeof modelContextWindow === 'number' &&
     Number.isFinite(modelContextWindow) &&
     modelContextWindow > 0
@@ -238,6 +326,7 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     beforeLLM: input.hooks?.beforeLlmCallHook ?? [],
     onLLMPrepared: input.hooks?.onLlmCallPreparedHook ?? [],
     afterLLM: input.hooks?.afterLlmCallHook ?? [],
+    turnFailure: input.hooks?.turnFailureHook ?? [],
     beforeTool: input.hooks?.beforeToolCallHook ?? [],
     onToolExecutionStart: input.hooks?.onToolExecutionStartHook ?? [],
     afterTool: input.hooks?.afterToolCallHook ?? [],
@@ -257,14 +346,21 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     hooks,
     tools,
     streamFn: withSyntheticResponse(
-      withLlmCallPreparedObservers(mainStreamFn, {
-        input,
-        llm: resolved,
-        tools,
-        thinkingLevel: resolved.thinkingLevel ?? 'off',
-        hooks: hooks.onLLMPrepared,
-        logger: deps.logger,
-      }),
+      // 请求改写在 llm-retry 外层：同一次调用的物理重试复用同一份改写。
+      withLlmCallPreparedObservers(
+        withContentReviewRequests(
+          withTurnRequestPhase(preemptibleStreamFn, mainPhase, resolved.turnPhaseHeader),
+          contentReview,
+        ),
+        {
+          input,
+          llm: resolved,
+          tools,
+          thinkingLevel: resolved.thinkingLevel ?? 'off',
+          hooks: hooks.onLLMPrepared,
+          logger: deps.logger,
+        },
+      ),
       syntheticResponse,
       deps.nowMs,
     ),
@@ -275,10 +371,14 @@ export function newTurn<TCtx extends ToolExecutionContext>(
       : {}),
     thinkingLevel: resolved.thinkingLevel ?? 'off',
     initialMessages: [...(input.history ?? [])],
+    assistantMessageIds: new WeakMap(),
     blockedToolCalls: [],
     syntheticResponse,
     rejectedAssistantMessages: new Set(),
-    recovery: { used: false },
+    preemption,
+    requestStoppedBeforeSend: false,
+    recovery: { used: false, turnFailureRecoveries: 0 },
+    contentReview,
     nextEventId,
     nextRuntimeSeq,
   };
@@ -300,9 +400,11 @@ function withLlmCallPreparedObservers(
   return (async (model, context, streamOptions) => {
     const phase = logicalCallCount === 0 ? 'initial' : 'iteration';
     logicalCallCount += 1;
+    const payloadObservers: ((payload: unknown) => void)[] = [];
     for (const hook of options.hooks) {
       try {
-        await hook({
+        const hostMaxOutputTokens = resolveHostOutputTokenCap(options.llm);
+        const observation = await hook({
           sessionId: options.input.sessionId,
           turnId: options.input.turnId,
           phase,
@@ -310,9 +412,7 @@ function withLlmCallPreparedObservers(
           messages: [...context.messages],
           model,
           ...(options.llm.maxTokens === undefined ? {} : { maxTokens: options.llm.maxTokens }),
-          ...(options.llm.hostMaxOutputTokens === undefined
-            ? {}
-            : { hostMaxOutputTokens: options.llm.hostMaxOutputTokens }),
+          ...(hostMaxOutputTokens === undefined ? {} : { hostMaxOutputTokens }),
           ...(options.llm.maxSerializedInputBytes === undefined
             ? {}
             : { maxSerializedInputBytes: options.llm.maxSerializedInputBytes }),
@@ -328,6 +428,7 @@ function withLlmCallPreparedObservers(
           thinkingLevel: options.thinkingLevel,
           ...(streamOptions?.signal ? { signal: streamOptions.signal } : {}),
         });
+        if (observation?.onPayload) payloadObservers.push(observation.onPayload);
       } catch (error) {
         try {
           options.logger.warn(
@@ -344,8 +445,31 @@ function withLlmCallPreparedObservers(
         }
       }
     }
-    return inner(model, context, streamOptions);
+    return inner(model, context, withPayloadObservers(streamOptions, payloadObservers));
   }) as StreamFn;
+}
+
+/** The request's own payload transform runs first; the observers see what it returned. */
+function withPayloadObservers(
+  streamOptions: Parameters<StreamFn>[2],
+  observers: readonly ((payload: unknown) => void)[],
+): Parameters<StreamFn>[2] {
+  if (observers.length === 0) return streamOptions;
+  const transform = streamOptions?.onPayload;
+  return {
+    ...streamOptions,
+    onPayload: async (payload, model) => {
+      const transformed = await transform?.(payload, model);
+      for (const observe of observers) {
+        try {
+          observe(transformed ?? payload);
+        } catch {
+          // Observers never change the request.
+        }
+      }
+      return transformed;
+    },
+  };
 }
 
 function withSyntheticResponse(

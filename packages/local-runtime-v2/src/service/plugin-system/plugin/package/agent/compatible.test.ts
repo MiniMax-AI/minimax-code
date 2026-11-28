@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 describe('compatible Plugin Agents', () => {
-  it('recursively scans the default directory and maps compatible fields', async () => {
+  it('recursively scans the default directory and maps compatible fields, preloading skills', async () => {
     const root = await pluginRoot('compatible-agent-scan');
     await writePluginTree(
       root,
@@ -58,15 +58,19 @@ describe('compatible Plugin Agents', () => {
       effort: 'xhigh',
       tools: ['read', 'bash', 'mcp__docs__search'],
       disallowedTools: ['web_search'],
+      // A preload list: the same-Plugin Skill gets its runtime name so the
+      // Skill reader finds it. It is no allowlist, so no diagnostic either.
       skills: ['demo:research'],
-      extensionSkills: ['demo:research'],
     });
+    expect(plugin.agents?.[1]?.extensionSkills).toBeUndefined();
     expect(plugin.agents?.[1]?.model).toBeUndefined();
+    expect(plugin.diagnostics.map((diagnostic) => diagnostic.code)).not.toContain(
+      'AGENT_SKILLS_ALLOWLIST',
+    );
     expect(plugin.diagnostics).toEqual(
       expect.arrayContaining([
         agentDiagnostic('AGENT_TOOL_IGNORED', 'agents/reviewer.md#tools:Agent'),
         agentDiagnostic('AGENT_TOOL_IGNORED', 'agents/reviewer.md#tools:NotebookEdit'),
-        agentDiagnostic('AGENT_SKILLS_ALLOWLIST', 'agents/reviewer.md'),
         agentDiagnostic('AGENT_FIELD_IGNORED', 'agents/reviewer.md#model'),
         agentDiagnostic('AGENT_FIELD_IGNORED', 'agents/reviewer.md#permissionMode'),
         agentDiagnostic('AGENT_FIELD_IGNORED', 'agents/reviewer.md#color'),

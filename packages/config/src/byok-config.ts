@@ -4,6 +4,7 @@
 // (they are part of the Config surface); the back edge here is type-only, so
 // there is no runtime import cycle.
 
+import { sortThinkingEffortOptions } from '@mavis/shared/thinking-effort';
 import { MINIMAX_MODELS } from './minimax-model-catalog.js';
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -160,9 +161,10 @@ function normalizeLegacyThinkingEffort(provider: Record<string, unknown>): Recor
       delete thinkingRest.effort;
       delete thinkingRest.effortOptions;
       delete thinkingRest.defaultEffort;
+      const orderedEffortOptions = sortThinkingEffortOptions(effortOptions);
       const thinking = {
         ...thinkingRest,
-        ...(effortOptions.length > 0 ? { effortOptions } : {}),
+        ...(orderedEffortOptions.length > 0 ? { effortOptions: orderedEffortOptions } : {}),
         ...(configuredDefaultEffort ? { defaultEffort: configuredDefaultEffort } : {}),
       };
       const model = { ...value };

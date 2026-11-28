@@ -3,9 +3,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AuthDiagnosticObserver } from '../../src/diagnostics.js';
+import type { AuthRefreshDiagnosticObserver } from '../../src/refresh-diagnostics.js';
 import { MCodeOAuthCore } from '../../src/auth-core.js';
 import { FileStore } from '../../src/credential-store/file-store.js';
 import { createAuthNamespace } from '../../src/namespace.js';
+import { migrateLegacyAuthNamespace } from '../../src/namespace-migration.js';
 import { HttpOAuthClient } from '../../src/oauth-client.js';
 import { createAuthManager } from '../../src/token-provider.js';
 
@@ -13,8 +15,13 @@ import { createAuthManager } from '../../src/token-provider.js';
 export async function createLocalAuthFixture(
   options: {
     onDiagnostic?: AuthDiagnosticObserver;
+    onRefreshDiagnostic?: AuthRefreshDiagnosticObserver;
+    /** Sent as `Trace-Id` on successful refresh responses. */
+    refreshTraceId?: string;
     beforeDeviceTokenResponse?: () => Promise<void>;
     beforeRefreshTokenResponse?: () => Promise<void>;
+    /** Runs the legacy namespace migration on initialize, as the production factory does. */
+    migrateLegacyNamespace?: boolean;
   } = {},
 ) {
   const dataDir = await mkdtemp(join(tmpdir(), 'mcode-auth-recovery-'));
@@ -28,13 +35,24 @@ export async function createLocalAuthFixture(
     | 'invalid_client'
     | 'unauthorized_client'
     | 'invalid_grant_503'
+    /** Account rotated the RT, then the client saw a Chromium empty response. */
+    | 'rotated_then_empty_response'
+    | 'truncated_json_200'
+    | 'missing_refresh_token_200'
     | undefined;
-  const calls = { device: 0, refresh: 0 };
+  const calls = { device: 0, refresh: 0, revoke: 0 };
   const createCore = () =>
     new MCodeOAuthCore({
       namespace,
+      initialize: options.migrateLegacyNamespace
+        ? () => migrateLegacyAuthNamespace(namespace)
+        : undefined,
       onDiagnostic: options.onDiagnostic,
-      credentialStore: new FileStore({ authHome: namespace.namespaceHome }),
+      onRefreshDiagnostic: options.onRefreshDiagnostic,
+      credentialStore: new FileStore({
+        authHome: namespace.namespaceHome,
+        root: namespace.authHome,
+      }),
       now: () => now,
       oauthClient: new HttpOAuthClient({
         deviceAuthorizationEndpoint: 'https://account.example.test/device',
@@ -51,11 +69,33 @@ export async function createLocalAuthFixture(
               interval: 5_000,
             });
           }
-          if (String(url).endsWith('/revoke')) return new Response(null, { status: 200 });
+          if (String(url).endsWith('/revoke')) {
+            calls.revoke += 1;
+            return new Response(null, { status: 200 });
+          }
           if ((init?.body as URLSearchParams).get('grant_type') === 'refresh_token') {
             calls.refresh += 1;
             await options.beforeRefreshTokenResponse?.();
             if (refreshFailure === 'offline') throw new TypeError('fetch failed');
+            if (refreshFailure === 'rotated_then_empty_response') {
+              serial += 1;
+              throw new Error(`net::ERR_EMPTY_RESPONSE test-refresh-${serial}`);
+            }
+            if (refreshFailure === 'truncated_json_200') {
+              return new Response('{"access_token":"test-access-trunc', {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+              });
+            }
+            if (refreshFailure === 'missing_refresh_token_200') {
+              serial += 1;
+              return Response.json({
+                access_token: `test-access-${serial}`,
+                token_type: 'Bearer',
+                scope: 'agent.default',
+                expires_in: 3_600,
+              });
+            }
             if (refreshFailure) {
               return Response.json(
                 {
@@ -78,13 +118,18 @@ export async function createLocalAuthFixture(
             await options.beforeDeviceTokenResponse?.();
           }
           serial += 1;
-          return Response.json({
-            access_token: `test-access-${serial}`,
-            refresh_token: `test-refresh-${serial}`,
-            token_type: 'Bearer',
-            scope: 'agent.default',
-            expires_in: 3_600,
-          });
+          return Response.json(
+            {
+              access_token: `test-access-${serial}`,
+              refresh_token: `test-refresh-${serial}`,
+              token_type: 'Bearer',
+              scope: 'agent.default',
+              expires_in: 3_600,
+            },
+            options.refreshTraceId
+              ? { headers: { 'Trace-Id': options.refreshTraceId } }
+              : undefined,
+          );
         },
       }),
     });

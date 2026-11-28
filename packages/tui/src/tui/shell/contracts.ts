@@ -27,6 +27,8 @@ export interface TuiShellState {
   agentActiveCount?: number;
   /** All delegated Sessions currently projected for the current root Session. */
   agentTotalCount?: number;
+  /** Delegated Sessions blocked on a user decision; a subset of `agentActiveCount`. */
+  agentWaitingCount?: number;
   /** Root-session background Tasks (bash/workflow/custom) not yet settled into a durable root Turn. */
   agentBackgroundCount?: number;
   homeDir?: string;
@@ -40,6 +42,8 @@ export interface TuiShellState {
   thinking?: 'on' | 'off';
   /** Think effort level of the selected model; absent when it exposes none. */
   effort?: string;
+  /** Advisor model as `provider/model` while the advisor is on; absent when it is off. */
+  advisor?: string;
   accountStatus?: string;
   sessionCount?: number;
   /** Aggregate cache-read share of prompt tokens for the active Session. */

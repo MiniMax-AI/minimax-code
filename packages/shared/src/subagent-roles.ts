@@ -22,13 +22,15 @@ export const SUBAGENT_ROLES = {
 
 export const CANONICAL_SUBAGENT_ROLES = Object.keys(SUBAGENT_ROLES) as CanonicalSubagentRole[];
 
-/** Model-visible built-in targets. */
-const TASK_AGENT_TARGETS = ['mavis', ...CANONICAL_SUBAGENT_ROLES] as const;
+/**
+ * Model-visible built-in targets. `mavis` is deliberately absent: the primary
+ * Agent is not dispatchable through the task tool.
+ */
+const TASK_AGENT_TARGETS: readonly CanonicalSubagentRole[] = CANONICAL_SUBAGENT_ROLES;
 
 const TASK_AGENT_TARGET_DESCRIPTIONS: Readonly<
   Record<(typeof TASK_AGENT_TARGETS)[number], string>
 > = {
-  mavis: 'Broad or mixed-scope work that does not fit a specialist role.',
   explore: SUBAGENT_ROLES.explore.whenToUse,
   worker: SUBAGENT_ROLES.worker.whenToUse,
   verifier: SUBAGENT_ROLES.verifier.whenToUse,
@@ -69,7 +71,7 @@ export function toAgentRequestRef(
 }
 
 export const AGENT_REQUEST_REF_DESCRIPTION =
-  'Use the `requestRef` returned by the native `mavis` tool with command "agent list". For built-in work use mavis, explore, worker, or verifier. Use `agent:<stable-name>` to select the exact manual/custom Agent when its name collides with a reserved role or primary alias; ordinary custom names use their raw stable name.';
+  'Use the `requestRef` returned by the native `mavis` tool with command "agent list". For built-in work use explore, worker, or verifier. Use `agent:<stable-name>` to select the exact manual/custom Agent when its name collides with a reserved role or primary alias; ordinary custom names use their raw stable name.';
 
 export const LOCAL_MAVIS_AGENT_NAME_DESCRIPTION = `${AGENT_REQUEST_REF_DESCRIPTION} "me" selects the current Agent.`;
 

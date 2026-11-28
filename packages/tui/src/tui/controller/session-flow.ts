@@ -20,7 +20,9 @@ import type { TuiGoalFlow } from './product/goal-flow.js';
 import {
   isTuiBuiltinSubagentSession,
   isTuiInternalSubagentSession,
+  tuiParentSessionId,
 } from '../../runtime/delegation.js';
+import { isSameWorkspacePath } from '../../runtime/workspace-path.js';
 import {
   BTW_SIDE_SESSION_PURPOSE,
   BTW_SIDE_SESSION_TITLE,
@@ -309,11 +311,12 @@ export class TuiSessionFlow {
     }
     if (!this.allowUserSessionNavigation('/parent')) return;
     const current = this.options.controller.snapshot().session;
-    if (!current?.parentSessionId) {
+    const parentSessionId = tuiParentSessionId(current);
+    if (!parentSessionId) {
       this.options.append('The active session has no parent session.', 'warning');
       return;
     }
-    await this.activateSessionById(current.parentSessionId);
+    await this.activateSessionById(parentSessionId);
   }
 
   /**
@@ -547,7 +550,7 @@ export class TuiSessionFlow {
       .snapshot()
       .sessions.find(
         (session) =>
-          session.workspaceDir === workspaceDir &&
+          isSameWorkspacePath(session.workspaceDir, workspaceDir) &&
           !session.archived &&
           session.visibility !== 'hidden',
       );

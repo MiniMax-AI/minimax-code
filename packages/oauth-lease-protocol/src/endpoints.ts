@@ -74,5 +74,9 @@ function trimTrailingSeparators(
 ): string {
   const root = pathImplementation.parse(value).root;
   if (value === root) return value;
-  return value.replace(/[\\/]+$/u, '');
+  let end = value.length;
+  while (end > 0 && (value[end - 1] === '/' || value[end - 1] === '\\')) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }

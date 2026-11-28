@@ -132,11 +132,50 @@ export interface QuestionnairePlanReview {
 
 export type AskQuestionnairePlanReview = QuestionnairePlanReview;
 
-export type AskQuestionnaireMode = 'questionnaire' | 'feature-enable' | 'plan';
+export type AskQuestionnaireMode =
+  | 'questionnaire'
+  | 'feature-enable'
+  | 'plan'
+  | 'plugin-preparation';
+
+export interface PluginPreparationRequest {
+  pluginName: string;
+  reason: string;
+  requiredApps?: string[];
+  outcome?: 'ready' | 'declined';
+}
+
+export const PLUGIN_PREPARATION_STEP_ID = 'plugin-preparation';
+export const PLUGIN_PREPARATION_READY_OPTION_ID = 'ready';
+
+export type PluginPreparationReadiness =
+  | 'needs-install'
+  | 'needs-enable'
+  | 'needs-app-connection'
+  | 'ready';
+
+export function getPluginPreparationReadiness(
+  detail: {
+    summary: { installExists: boolean; enabled: boolean; capabilities: { appCount: number } };
+    apps: readonly { provider: string; status?: string }[];
+  },
+  requiredApps?: readonly string[],
+): PluginPreparationReadiness {
+  if (!detail.summary.installExists) return 'needs-install';
+  if (!detail.summary.enabled) return 'needs-enable';
+  if (!requiredApps && detail.apps.length < detail.summary.capabilities.appCount) {
+    return 'needs-app-connection';
+  }
+  const apps = requiredApps
+    ? requiredApps.map((provider) => detail.apps.find((app) => app.provider === provider))
+    : detail.apps;
+  return apps.some((app) => app?.status !== 'connected') ? 'needs-app-connection' : 'ready';
+}
 
 export interface AskQuestionnaireModePayload {
   featureKey?: string;
   planReview?: QuestionnairePlanReview;
+  pluginPreparation?: PluginPreparationRequest;
 }
 
 export interface OrdinaryQuestionnaireResponseOrigin {
@@ -294,7 +333,7 @@ export interface AskUserToolStepInput {
 }
 
 /** Model-authored renderer modes carried by the generic ask_user wire contract. */
-export type AskUserToolMode = Exclude<AskQuestionnaireMode, 'plan'>;
+export type AskUserToolMode = Exclude<AskQuestionnaireMode, "plan" | "plugin-preparation">;
 
 export interface AskUserToolModePayload {
   featureKey?: string;
@@ -332,3 +371,10 @@ export const ASK_OTHER_PLACEHOLDER = 'Others...' as const;
  * `<questionnaire-ask>` XML instruction for the LLM to emit.
  */
 export const ASK_USER_TOOL_NAME = 'ask_user' as const;
+
+export interface AskQuestionnaireState {
+  status: "pending" | "answered" | "expired" | "superseded" | "dismissed";
+  answeredAt?: number;
+  injectedAt?: number;
+  dismissedAt?: number;
+}

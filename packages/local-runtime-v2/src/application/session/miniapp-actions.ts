@@ -142,8 +142,10 @@ export function createSessionMiniAppLifecycle(
       };
     },
     init: initializeFromSessionWorkspace,
-    inspect: async (context: MiniAppTargetActionContext) =>
-      inspectDefinition(await definition(context.pluginId)),
+    inspect: async (context: MiniAppTargetActionContext) => ({
+      ...(await inspectDefinition(await definition(context.pluginId))),
+      diagnostics: { scope: 'host' as const, retention: 'runtime-memory' as const, logs: { entries: [], truncated: false, omittedCount: 0 } },
+    }),
     open: async (context: MiniAppTargetActionContext): Promise<MiniAppOpenResult> => {
       if (!surface) throw lifecycleError('OPEN_UNAVAILABLE');
       const miniApp = await definition(context.pluginId);

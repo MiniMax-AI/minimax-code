@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -47,10 +47,40 @@ export type BetterSqlite3Constructor = new (
 
 const DB_FILE = 'runtime-state.sqlite';
 const DB_RELATIVE_PATH = join('v2', 'sqlite', DB_FILE);
+const INCREMENTAL_AUTO_VACUUM = 2;
+const RECLAIM_STEP_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Only a file without tables can switch to incremental auto-vacuum, so the pragma runs for new
+ * files only. On a database that is already incremental the same pragma still takes the write
+ * lock, so running it on every open would fail whenever another connection is writing.
+ */
+const NEW_DATABASE_PRAGMAS = 'PRAGMA auto_vacuum = INCREMENTAL;';
+
+/**
+ * Connection PRAGMAs shared by the v2 client and the v1 compatibility connection.
+ * journal_size_limit truncates the WAL after a checkpoint so one large transaction does not keep
+ * its WAL size on disk.
+ */
+const WRITABLE_CONNECTION_PRAGMAS = `
+  PRAGMA journal_mode = WAL;
+  PRAGMA busy_timeout = 5000;
+  PRAGMA foreign_keys = ON;
+  PRAGMA journal_size_limit = 67108864;
+`;
+
+export interface DatabaseSpaceReclaimResult {
+  readonly outcome: 'reclaimed' | 'nothing_to_reclaim' | 'not_incremental' | 'partial';
+  readonly freedBytes: number;
+}
 
 export interface DatabaseClientOptions {
   readonly dataDir: string;
-  /** Override the better-sqlite3 load path for Electron native rebuilds. */
+  /** Relative database path under dataDir; defaults to `v2/sqlite/runtime-state.sqlite`. */
+  readonly relativePath?: string;
+  /** Open an existing database read-only without creating files or setting write PRAGMAs. */
+  readonly readonly?: boolean;
+  /** Override the better-sqlite3 module load path. */
   readonly sqlite3ModulePath?: string;
 }
 
@@ -62,7 +92,7 @@ export class DatabaseClient {
 
   constructor(options: DatabaseClientOptions) {
     this.options = options;
-    this.dbPath = join(options.dataDir, DB_RELATIVE_PATH);
+    this.dbPath = join(options.dataDir, options.relativePath ?? DB_RELATIVE_PATH);
   }
 
   get db(): AppDb {
@@ -71,7 +101,12 @@ export class DatabaseClient {
     return this.drizzleDb;
   }
 
-  /** Get the underlying better-sqlite3 handle for raw SQL / migrations. */
+  /** 数据库主文件路径（备份 campaign identity 与磁盘预检需要读取源文件元数据）。 */
+  get databasePath(): string {
+    return this.dbPath;
+  }
+
+  /** 获取底层 better-sqlite3 句柄（用于 raw SQL / migration） */
   get rawDb(): BetterSqlite3Instance {
     if (!this.rawDb_) this.open();
     const rawDb = this.rawDb_;
@@ -79,12 +114,12 @@ export class DatabaseClient {
     return rawDb;
   }
 
-  /** Save the current connection to the specified file using SQLite's online backup API. */
+  /** 使用 SQLite 在线备份 API 将当前连接保存到指定文件。 */
   async backup(destinationPath: string): Promise<void> {
     await this.rawDb.backup(destinationPath);
   }
 
-  /** Validate the backup through an independent read-only connection; only a single `ok` row passes. */
+  /** 使用独立只读连接检查备份；只有单行 `ok` 视为通过。 */
   hasValidIntegrity(databasePath: string): boolean {
     const Database = loadSqlite3Constructor(this.options.sqlite3ModulePath);
     const verificationDb = new Database(databasePath, {
@@ -92,11 +127,51 @@ export class DatabaseClient {
       fileMustExist: true,
     });
     try {
+      // Connection-scoped 32 MiB page cache (negative = KiB): the full check
+      // over a multi-GiB backup thrashed the default cache. Not persisted and
+      // released with the connection; the check itself stays complete.
+      verificationDb.exec('PRAGMA cache_size = -32768');
       const rows = verificationDb.prepare('PRAGMA integrity_check').all();
       return rows.length === 1 && isIntegrityOkRow(rows[0]);
     } finally {
       verificationDb.close();
     }
+  }
+
+  /**
+   * Returns free pages to the file system in 16 MiB steps until none are left or `shouldStop`
+   * turns true. Each step holds the write lock, so the caller's pause runs between steps. Only
+   * databases created with incremental auto-vacuum can do this; older files report
+   * `not_incremental` and keep their size.
+   */
+  async reclaimFreePages(limits: {
+    /** True once the caller's deadline passed or the Runtime is stopping. */
+    readonly shouldStop: () => boolean;
+    /** Runs between two steps so writers in other processes get the lock. */
+    readonly yieldToOtherWriters: () => Promise<void>;
+    readonly stepBytes?: number;
+  }): Promise<DatabaseSpaceReclaimResult> {
+    if (this.options.readonly) return { outcome: 'not_incremental', freedBytes: 0 };
+    const db = this.rawDb;
+    if (readPragmaNumber(db, 'auto_vacuum') !== INCREMENTAL_AUTO_VACUUM) {
+      return { outcome: 'not_incremental', freedBytes: 0 };
+    }
+    const pageSize = readPragmaNumber(db, 'page_size');
+    const stepPages = Math.max(1, Math.floor((limits.stepBytes ?? RECLAIM_STEP_BYTES) / pageSize));
+    let freedPages = 0;
+    for (let free = freePages(db); free > 0; free = freePages(db)) {
+      if (limits.shouldStop()) return { outcome: 'partial', freedBytes: freedPages * pageSize };
+      // exec steps the pragma to completion; a prepared statement's run() frees a single page.
+      db.exec(`PRAGMA incremental_vacuum(${Math.min(stepPages, free)})`);
+      const left = freePages(db);
+      if (left >= free) return { outcome: 'partial', freedBytes: freedPages * pageSize };
+      freedPages += free - left;
+      if (left > 0) await limits.yieldToOtherWriters();
+    }
+    return {
+      outcome: freedPages > 0 ? 'reclaimed' : 'nothing_to_reclaim',
+      freedBytes: freedPages * pageSize,
+    };
   }
 
   /** Close the connection and release resources. */
@@ -109,16 +184,19 @@ export class DatabaseClient {
   }
 
   private open(): BetterSqlite3Instance {
-    mkdirSync(dirname(this.dbPath), { recursive: true });
+    if (!this.options.readonly) mkdirSync(dirname(this.dbPath), { recursive: true });
+    const isNewDatabaseFile = !this.options.readonly && isMissingOrEmptyFile(this.dbPath);
     const Database = loadSqlite3Constructor(this.options.sqlite3ModulePath);
-    const sqlite = new Database(this.dbPath);
+    const sqlite = new Database(
+      this.dbPath,
+      this.options.readonly ? { readonly: true, fileMustExist: true } : undefined,
+    );
     try {
-      // v1 and v2 temporarily access the same database through separate connections; keep PRAGMAs aligned.
-      sqlite.exec(`
-        PRAGMA journal_mode = WAL;
-        PRAGMA busy_timeout = 5000;
-        PRAGMA foreign_keys = ON;
-      `);
+      // v1 and v2 access the same database file through separate connections; keep PRAGMAs aligned.
+      if (!this.options.readonly) {
+        if (isNewDatabaseFile) sqlite.exec(NEW_DATABASE_PRAGMAS);
+        sqlite.exec(WRITABLE_CONNECTION_PRAGMAS);
+      }
       const drizzleDb = drizzle({ client: sqlite as never });
       this.rawDb_ = sqlite;
       this.drizzleDb = drizzleDb;
@@ -152,6 +230,27 @@ function resolveSqliteConstructor(loaded: unknown): BetterSqlite3Constructor {
     return loaded.default as BetterSqlite3Constructor;
   }
   throw new TypeError('better-sqlite3 module does not export a database constructor');
+}
+
+function isMissingOrEmptyFile(path: string): boolean {
+  try {
+    return statSync(path).size === 0;
+  } catch {
+    return true;
+  }
+}
+
+function freePages(db: BetterSqlite3Instance): number {
+  return readPragmaNumber(db, 'freelist_count');
+}
+
+function readPragmaNumber(db: BetterSqlite3Instance, name: string): number {
+  const row = db.prepare(`PRAGMA ${name}`).get();
+  const value = isObject(row) ? row[name] : undefined;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
+    throw new Error(`SQLite PRAGMA ${name} returned no integer`);
+  }
+  return value;
 }
 
 function isIntegrityOkRow(row: unknown): boolean {

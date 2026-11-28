@@ -22,6 +22,8 @@ export interface MCodeAuthManager extends MCodeTokenProvider {
   login(options?: LoginOptions): Promise<LoginResult>;
   cancelLogin(): Promise<void>;
   logout(options: { revoke: boolean }): Promise<LogoutResult>;
+  /** Clears an unreadable or corrupt local credential file; see MCodeOAuthCore.resetLocalCredentials. */
+  resetLocalCredentials(): Promise<LogoutResult>;
   watch(listener: (status: AuthStatusSnapshot) => void): () => void;
 }
 
@@ -46,6 +48,7 @@ export function createAuthManager(core: MCodeOAuthCore): MCodeAuthManager {
     }) => core.login(options),
     cancelLogin: () => core.cancelLogin(),
     logout: (options: { revoke: boolean }) => core.logout(options),
+    resetLocalCredentials: () => core.resetLocalCredentials(),
     watch: (listener: (status: AuthStatusSnapshot) => void) => core.watch(listener),
   });
 }

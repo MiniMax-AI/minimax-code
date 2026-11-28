@@ -11,9 +11,7 @@ const TOOL_CONTEXT_BYTE_BUCKETS = [
 
 export function createToolContextHistogramBucketsByName(): Record<string, number[]> {
   return {
-    pi_tool_io_tokens: [...TOOL_CONTEXT_TOKEN_BUCKETS],
     pi_tool_operation_result_tokens: [...TOOL_CONTEXT_TOKEN_BUCKETS],
-    pi_tool_context_resident_tokens: [...TOOL_CONTEXT_TOKEN_BUCKETS],
     pi_tool_io_bytes: [...TOOL_CONTEXT_BYTE_BUCKETS],
     pi_tool_operation_result_bytes: [...TOOL_CONTEXT_BYTE_BUCKETS],
     pi_tool_context_resident_bytes: [...TOOL_CONTEXT_BYTE_BUCKETS],

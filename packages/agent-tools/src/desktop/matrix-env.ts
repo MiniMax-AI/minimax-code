@@ -28,7 +28,10 @@ const MANAGED_MATRIX_BASE_URLS: Record<
 const LEGACY_MANAGED_MATRIX_BASE_URLS = new Set(['https://agent.minimaxi.com']);
 
 export function normalizeMatrixBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/u, '');
+  const trimmed = value.trim();
+  let end = trimmed.length;
+  while (end > 0 && trimmed.charCodeAt(end - 1) === 47) end -= 1;
+  return trimmed.slice(0, end);
 }
 
 export function getDesktopMatrixEndpoint(

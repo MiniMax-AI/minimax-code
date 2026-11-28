@@ -1,9 +1,11 @@
 import { formatContextWindow } from '../../features/model/context-window.js';
 import type {
+  TuiAdvisor,
   TuiConfigurationPort,
   TuiDailyCheckin,
   TuiInspectionPort,
   TuiInteractionPort,
+  TuiMcpAuthPort,
   TuiModel,
   TuiSession,
   TuiSessionPort,
@@ -11,12 +13,20 @@ import type {
   TuiSkillList,
   TuiWorkspaceGitPort,
 } from '../../../runtime/port.js';
+import type { TuiMcpAuthEvent } from '../../../types/runtime-events.js';
 import type { TuiMessage } from '../../../runtime/stream-events.js';
 import type { TuiCommand } from '../../commands/catalog.js';
+import { createTuiSkillsInspectionPanel } from '../../features/inspection/capabilities.js';
 import {
-  createTuiMcpInspectionPanel,
-  createTuiSkillsInspectionPanel,
-} from '../../features/inspection/capabilities.js';
+  TuiMcpManager,
+  type TuiMcpAuthBrowserMode,
+  type TuiMcpManagerContent,
+} from '../../features/mcp/manager.js';
+import {
+  describeMcpAuthTarget,
+  formatMcpAuthAttentionNotice,
+} from '../../../application/mcp-auth.js';
+import { isSshSession } from '../../platform/terminal-capabilities.js';
 import { TuiReportInspectionPanel } from '../../features/inspection/report-panel.js';
 import { TuiModelPicker } from '../../features/model/picker.js';
 import { TuiCodexLogin } from '../../features/auth/codex-login.js';
@@ -66,10 +76,14 @@ import {
 import { buildTuiSkillCommands } from '../run/active-run-flow.js';
 import type { TuiChatController } from '../chat-controller.js';
 import { TuiModelState } from './model-state.js';
+import { TuiAdvisorFlow } from './advisor-flow.js';
 import { isRuntimeErrorCode, isRuntimeMethodNotImplemented } from '../support.js';
 import { resolveTuiThinkingChoice } from '../../features/model/thinking.js';
 import { McodeProviderApplication } from '../../../provider/application.js';
-import type { McodeCodexOAuthStatus, McodeProviderTemplate } from '../../../provider/contract.js';
+import type {
+  McodeCodexOAuthStatus,
+  McodeProviderTemplate,
+} from '../../../provider/contract.js';
 import { McodePluginApplication } from '../../../plugin/application.js';
 import type { McodePluginRuntimeAccess, McodePluginView } from '../../../plugin/contract.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
@@ -90,6 +104,7 @@ type FeatureRuntime = TuiSessionPort &
   TuiDailyCheckin &
   TuiInspectionPort &
   TuiInteractionPort &
+  TuiMcpAuthPort &
   TuiWorkspaceGitPort &
   McodePluginRuntimeAccess &
   Partial<TuiSessionForkPort>;
@@ -120,6 +135,8 @@ export interface TuiFeatureFlowOptions {
   readonly transcriptView: TranscriptView;
   readonly writeClipboardText?: TuiTextClipboardWriter;
   readonly openExternalTarget?: TuiExternalTargetOpener;
+  /** Defaults to `manual` (print the address, paste the redirect) over SSH. */
+  readonly mcpAuthBrowserMode?: TuiMcpAuthBrowserMode;
   readonly exportTranscript?: TuiTranscriptExporter;
   readonly workspaceDir: string;
   readonly version?: string;
@@ -148,6 +165,7 @@ export interface TuiSessionManagerOpenOptions {
 
 export class TuiFeatureFlow {
   private readonly modelState: TuiModelState;
+  private readonly advisorFlow: TuiAdvisorFlow;
   private readonly providerApplication: McodeProviderApplication;
   private readonly pluginApplication: McodePluginApplication;
   private readonly sessionForkFlow: TuiSessionForkFlow;
@@ -159,6 +177,10 @@ export class TuiFeatureFlow {
   private providerOnboarding: Component | undefined;
   private transcriptScreen: TuiFeatureScreenHandle | undefined;
   private pluginScreen: TuiFeatureScreenHandle | undefined;
+  private mcpManager: TuiMcpManager | undefined;
+  private mcpAuthStartupChecked = false;
+  /** Target → `${sessionId}\0${reason}` hints already shown; cleared when the target's state changes. */
+  private readonly mcpAuthRequiredNotices = new Map<string, Set<string>>();
   private sessionGeneration = 0;
   private modelLoadSequence = 0;
   private providerLoadSequence = 0;
@@ -182,6 +204,15 @@ export class TuiFeatureFlow {
       onChanged: options.onChanged,
       isStopped: () => this.isStopped(),
     });
+    this.advisorFlow = new TuiAdvisorFlow({
+      runtime: options.runtime,
+      surface: options.surface,
+      currentSessionId: () => options.controller.snapshot().session?.sessionId,
+      append: options.append,
+      onChanged: options.onChanged,
+      isStopped: () => this.isStopped(),
+      officialModelLoginHint: OFFICIAL_MODEL_LOGIN_HINT,
+    });
     this.providerApplication = new McodeProviderApplication(options.runtime);
     this.pluginApplication = new McodePluginApplication(options.runtime);
     this.sessionForkFlow = new TuiSessionForkFlow({
@@ -201,8 +232,26 @@ export class TuiFeatureFlow {
     return this.modelState.selectedEffort();
   }
 
-  refreshSelectedModel(sessionId?: string): Promise<TuiModel | undefined> {
-    return this.modelState.refresh(sessionId);
+  /** The advisor the status line shows: the current Session's, or the default on welcome. */
+  selectedAdvisor(): TuiAdvisor | undefined {
+    return this.advisorFlow.selected();
+  }
+
+  async refreshSelectedModel(sessionId?: string): Promise<TuiModel | undefined> {
+    const [model] = await Promise.all([
+      this.modelState.refresh(sessionId),
+      this.advisorFlow.refresh(sessionId),
+    ]);
+    return model;
+  }
+
+  showAdvisorPicker(args: string): Promise<void> {
+    return this.advisorFlow.show(args);
+  }
+
+  /** Runs after this TUI creates a Session and before its first Turn. */
+  applyDefaultAdvisor(sessionId: string): Promise<void> {
+    return this.advisorFlow.copyDefaultToSession(sessionId);
   }
 
   /**
@@ -249,6 +298,7 @@ export class TuiFeatureFlow {
     this.invalidateFeatureLoads();
     this.setCompacting(false);
     this.modelState.reset();
+    this.advisorFlow.reset();
     this.pendingSessionModelSelection = undefined;
     this.welcomeModelSelectionSettlement = Promise.resolve();
     this.closeFeatureSurfaces();
@@ -260,6 +310,7 @@ export class TuiFeatureFlow {
     void this.codexLogin?.cancel();
     this.invalidateFeatureLoads({ includeSkillRefresh: true });
     this.modelState.stop();
+    this.advisorFlow.stop();
     this.setCompacting(false);
     this.closeFeatureSurfaces();
   }
@@ -951,6 +1002,7 @@ export class TuiFeatureFlow {
     this.options.surface.show(manager);
   }
 
+
   private showCodexLogin(returnTo: 'provider' | 'model'): void {
     if (this.isStopped()) return;
     const panel = new TuiCodexLogin({
@@ -1293,23 +1345,47 @@ export class TuiFeatureFlow {
     if (this.isStopped()) return;
     try {
       const session = await this.options.controller.ensureSession();
-      const keyword = filter === 'reload' ? '' : filter;
+      const keyword = filter === 'reload' ? '' : filter.trim();
       const preview = await this.options.runtime.inspectProjectMcp(session.sessionId);
       if (preview?.error) this.options.append(`${preview.error} (${preview.path})`, 'warning');
-      const result = await this.options.runtime.listMcpServers(
-        keyword || undefined,
-        session.sessionId,
-      );
+      const scope = { sessionId: session.sessionId };
+      const load = async (): Promise<TuiMcpManagerContent> => {
+        const [servers, auth] = await Promise.all([
+          this.options.runtime.listMcpServers(keyword || undefined, session.sessionId),
+          this.options.runtime.listMcpAuthStates(scope).then(
+            (authStates) => ({ authStates }),
+            (error: unknown) => ({
+              authStates: [],
+              authError: formatTuiActionFailure(error, {
+                summary: "Couldn't load MCP authorization status.",
+                nextStep: 'Press Ctrl+R to retry.',
+              }),
+            }),
+          ),
+        ]);
+        return { servers, ...auth };
+      };
+      const content = await load();
       if (this.currentSessionId() !== session.sessionId) return;
       if (this.isStopped()) return;
-      this.showInspectionPanel(
-        createTuiMcpInspectionPanel(
-          result,
-          keyword,
-          () => this.closeInspectionPanel(),
-          () => this.inspectionMaxRows(),
-        ),
-      );
+      const manager: TuiMcpManager = new TuiMcpManager({
+        ...content,
+        filter: keyword,
+        browserMode:
+          this.options.mcpAuthBrowserMode ?? (isSshSession(process.env) ? 'manual' : 'open'),
+        auth: this.options.runtime,
+        reload: load,
+        loadAuthStates: () => this.options.runtime.listMcpAuthStates(scope),
+        openExternalTarget:
+          this.options.openExternalTarget ??
+          createTuiExternalTargetOpener(this.options.workspaceDir),
+        copyText: this.options.writeClipboardText ?? writeTuiClipboardText,
+        onClose: () => this.closeInspectionPanel(manager),
+        requestRender: this.options.onChanged,
+        maxRows: () => this.inspectionMaxRows(),
+      });
+      this.showInspectionPanel(manager);
+      this.mcpManager = manager;
     } catch (error) {
       if (this.isStopped()) return;
       if (isRuntimeMethodNotImplemented(error)) {
@@ -1327,6 +1403,60 @@ export class TuiFeatureFlow {
         'error',
       );
     }
+  }
+
+  /** Routes Runtime MCP auth events to an open `/mcp` panel and the current Session. */
+  handleMcpAuthEvent(event: TuiMcpAuthEvent): void {
+    if (this.isStopped()) return;
+    const manager = this.inspectionPanel === this.mcpManager ? this.mcpManager : undefined;
+    const target = event.target;
+    const targetKey = [
+      target.kind,
+      target.serverName,
+      target.pluginName ?? '',
+      target.pluginMarketplace ?? '',
+      target.workspaceRoot ?? '',
+    ].join('\0');
+    if (event.type === 'mcp.auth_updated') {
+      // A committed change re-arms the Session hint, like the Runtime's own deduplication.
+      this.mcpAuthRequiredNotices.delete(targetKey);
+      manager?.applyAuthUpdate(event);
+      return;
+    }
+    manager?.applyAuthRequired(target, event.reason);
+    const sessionId = this.currentSessionId();
+    if (!sessionId || event.sessionId !== sessionId) return;
+    const noticed = this.mcpAuthRequiredNotices.get(targetKey) ?? new Set<string>();
+    const noticeKey = `${sessionId}\0${event.reason}`;
+    if (noticed.has(noticeKey)) return;
+    noticed.add(noticeKey);
+    this.mcpAuthRequiredNotices.set(targetKey, noticed);
+    const label = describeMcpAuthTarget(target);
+    this.options.append(
+      event.reason === 'insufficient_scope'
+        ? `${label} needs more permissions for this request. Run /mcp to reauthorize.`
+        : event.reason === 'reauth_required'
+          ? `${label} authorization expired. Run /mcp to reauthorize.`
+          : `${label} needs authorization before its tools can be used. Run /mcp to authorize.`,
+      'warning',
+    );
+  }
+
+  /** Startup hint, once per process, for servers the Runtime already knows need sign-in. */
+  async noticeMcpAuthAttention(): Promise<void> {
+    if (this.mcpAuthStartupChecked || this.isStopped()) return;
+    this.mcpAuthStartupChecked = true;
+    const sessionId = this.currentSessionId();
+    let notice: string | undefined;
+    try {
+      notice = formatMcpAuthAttentionNotice(
+        await this.options.runtime.listMcpAuthStates(sessionId ? { sessionId } : {}),
+      );
+    } catch {
+      // A startup hint must never surface as a startup failure; /mcp reports the real error.
+      return;
+    }
+    if (notice && !this.isStopped()) this.options.append(notice, 'warning');
   }
 
   async showPermissions(): Promise<void> {
@@ -1419,6 +1549,7 @@ export class TuiFeatureFlow {
 
   private closeFeatureSurfaces(): void {
     this.closeModelPicker();
+    this.advisorFlow.closePicker();
     this.closeProviderManager();
     this.closeCodexLogin();
     this.closeProviderOnboarding();
@@ -1430,6 +1561,7 @@ export class TuiFeatureFlow {
   closeOwnedPanel(panel: Component | undefined): void {
     if (panel === this.inspectionPanel) this.inspectionPanel = undefined;
     if (panel === this.modelPicker) this.modelPicker = undefined;
+    this.advisorFlow.closeOwnedPanel(panel);
     if (panel === this.providerManager) this.providerManager = undefined;
     if (panel === this.codexLogin) this.codexLogin = undefined;
     if (panel === this.providerOnboarding) this.providerOnboarding = undefined;

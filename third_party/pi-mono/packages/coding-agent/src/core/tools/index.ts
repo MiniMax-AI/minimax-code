@@ -54,6 +54,15 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	applyShellEncodingDefaults,
+	createShellOutputDecoder,
+	decodeShellOutput,
+	getWindowsAnsiCodePageEncoding,
+	prepareWindowsAnsiCodePageEncoding,
+	type ShellOutputDecoder,
+	type ShellOutputDecoderOptions,
+} from "./shell-encoding.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,

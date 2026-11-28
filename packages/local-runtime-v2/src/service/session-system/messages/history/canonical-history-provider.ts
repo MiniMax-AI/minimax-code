@@ -136,6 +136,7 @@ export interface SessionSystemCanonicalHistoryProvider {
   compact(change: SessionCanonicalHistoryCompactionChange): Promise<SessionCanonicalHistoryCommit>;
   initialize(sessionId: string): Promise<void>;
   delete(sessionId: string): Promise<void>;
+  bindBeforeSettledRead?(hook: (sessionId: string) => Promise<void>): void;
 }
 
 export interface SessionSystemCanonicalHistoryProviderOptions {
@@ -216,6 +217,7 @@ export function createSessionSystemCanonicalHistoryProvider(
     options.locations ??
     createSessionHistoryLocationResolver({ dataDir: options.dataDir, sessions: options.sessions });
   const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
+  let beforeSettledRead: ((sessionId: string) => Promise<void>) | undefined;
 
   return view();
 
@@ -224,7 +226,21 @@ export function createSessionSystemCanonicalHistoryProvider(
       // Only the private default reader proves that messages are deeply immutable.
       // Injected adapters retain the original detach-and-validate boundary.
       ...(options.files === undefined ? { withSnapshotTransform: view } : {}),
-      read: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, false, transform)),
+      bindBeforeSettledRead: (hook) => {
+        beforeSettledRead = hook;
+      },
+      read: async (sessionId) => {
+        if (
+          beforeSettledRead &&
+          (await inLane(sessionId, async () => {
+            const paths = await ensureInitialized(sessionId);
+            return hasTrailingPendingRunCode(await files.readEnvelopesStrict(paths.messages));
+          }))
+        ) {
+          await beforeSettledRead(sessionId);
+        }
+        return inLane(sessionId, () => readSnapshot(sessionId, false, transform));
+      },
       readActive: (sessionId) => inLane(sessionId, () => readSnapshot(sessionId, true, transform)),
       inspectActive: (sessionId) => inLane(sessionId, () => inspectActiveSnapshot(sessionId)),
       initialize: (sessionId) =>
@@ -389,6 +405,38 @@ export function createSessionSystemCanonicalHistoryProvider(
   async function inLane<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     return ioLane.run(sessionId, operation);
   }
+}
+
+function hasTrailingPendingRunCode(records: readonly CanonicalHistoryEnvelope[]): boolean {
+  const completedToolCalls = new Set<string>();
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const message = records[index]?.message;
+    if (!message) return false;
+    if (message.role === 'toolResult') {
+      if (typeof message.toolCallId === 'string') completedToolCalls.add(message.toolCallId);
+      continue;
+    }
+    return (
+      message.role === 'assistant' && hasUnansweredRunCodeCall(message.content, completedToolCalls)
+    );
+  }
+  return false;
+}
+
+function hasUnansweredRunCodeCall(
+  content: unknown,
+  completedToolCalls: ReadonlySet<string>,
+): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (part) =>
+      Boolean(part) &&
+      typeof part === 'object' &&
+      Reflect.get(part, 'type') === 'toolCall' &&
+      Reflect.get(part, 'name') === 'run_code' &&
+      typeof Reflect.get(part, 'id') === 'string' &&
+      !completedToolCalls.has(Reflect.get(part, 'id') as string),
+  );
 }
 
 async function persistCanonical(

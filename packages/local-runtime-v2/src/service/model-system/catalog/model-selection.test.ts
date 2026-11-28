@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  readLocalModelOverride,
-  readLocalModelThinkingSelection,
-  readPersistedLocalModelThinkingSelection,
   readSelectedThinkingEffort,
   resolveLegacyMinimaxModel,
   resolveRequestedSessionModel,
   savedSessionModel,
 } from './model-selection.js';
+import {
+  readLocalModelOverride,
+  readLocalModelThinkingSelection,
+  readPersistedLocalModelThinkingSelection,
+} from '../../../infra/conversation/model-selection.js';
 import type { LocalRuntimeConfig } from '../contracts.js';
 
 it('uses historical model values only for missing columns and preserves explicit clears', () => {

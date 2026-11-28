@@ -190,6 +190,17 @@ function normalizeCustomProvider(provider: McodeRuntimeProviderView): McodeProvi
     ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
     hasApiKey: Boolean(provider.hasApiKey),
     ...(provider.maskedApiKey ? { maskedApiKey: provider.maskedApiKey } : {}),
+    ...(provider.apiKeys && provider.apiKeys.length > 1
+      ? {
+          apiKeys: provider.apiKeys.map((key) => ({
+            id: key.id,
+            ...(key.name ? { name: key.name } : {}),
+            masked: key.masked,
+            enabled: key.enabled,
+            ...(key.rest ? { rest: { reason: key.rest.reason, until: key.rest.until } } : {}),
+          })),
+        }
+      : {}),
     models: (provider.models ?? []).map((model) => ({
       modelId: model.modelId,
       ...(model.displayName ? { displayName: model.displayName } : {}),

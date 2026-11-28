@@ -6,8 +6,14 @@ import {
   type AssistantMessageEventStream,
 } from '@earendil-works/pi-ai';
 import { classifyLLMErrorToCode, LLM_ERROR_CODES } from '@mavis/shared/llm-error-classifier';
+import {
+  BYOK_UPSTREAM_ERROR_SOURCE,
+  formatByokErrorAttribution,
+  isByokErrorAttribution,
+  parseByokErrorAttribution,
+} from '@mavis/shared/byok-error-attribution';
+import { redactSecretText } from '@mavis/shared/logging/redact-log-secret';
 
-const BYOK_ERROR_PREFIX = 'BYOK upstream error';
 const MAX_ERROR_MESSAGE_LENGTH = 1_200;
 
 export function withByokErrorAttribution(input: {
@@ -28,18 +34,16 @@ export function withByokErrorAttribution(input: {
 
 function formatByokErrorMessage(raw: unknown, providerId: string): string {
   const rawMessage = errorText(raw);
-  if (rawMessage.startsWith(BYOK_ERROR_PREFIX)) return rawMessage;
+  if (isByokErrorAttribution(rawMessage)) return rawMessage;
   const classified = classifyLLMErrorToCode(raw);
   const detail = redactByokErrorMessage(
     withHttpStatus(classified?.message ?? rawMessage, rawMessage) || 'LLM provider request failed',
   );
-  return `${BYOK_ERROR_PREFIX}: ${JSON.stringify({
+  return formatByokErrorAttribution({
     errorCode: classified?.status_code ?? LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
-    message: `BYOK provider ${providerId} upstream error: ${detail}`,
-    errorSource: 'byok_upstream',
-    errorDetail: detail,
-    errorProviderId: providerId,
-  })}`;
+    providerId,
+    detail,
+  });
 }
 
 /**
@@ -53,12 +57,7 @@ function withHttpStatus(detail: string, rawMessage: string): string {
 }
 
 function redactByokErrorMessage(message: string): string {
-  return message
-    .slice(0, MAX_ERROR_MESSAGE_LENGTH)
-    .replace(/\bsk-[A-Za-z0-9._-]{8,}\b/gu, 'sk-***')
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"',}]+/giu, '$1***')
-    .replace(/((?:api[_-]?key|x-api-key)\s*[:=]\s*)[^\s"',}]+/giu, '$1***')
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/giu, '$1***');
+  return redactSecretText(message).slice(0, MAX_ERROR_MESSAGE_LENGTH);
 }
 
 function wrapStream(
@@ -122,4 +121,30 @@ function attributeMessage(message: AssistantMessage, providerId: string): Assist
 function errorText(raw: unknown): string {
   if (raw instanceof Error) return raw.message;
   return typeof raw === 'string' ? raw : '';
+}
+
+/** @internal Exported only for focused tests. */
+export { BYOK_UPSTREAM_ERROR_SOURCE };
+
+export interface ByokErrorStatus {
+  errorCode: number;
+  message: string;
+  errorSource: typeof BYOK_UPSTREAM_ERROR_SOURCE;
+  errorDetail: string;
+  errorProviderId: string;
+}
+
+export function parseByokErrorStatus(
+  raw: unknown,
+  fallbackErrorCode?: number,
+): ByokErrorStatus | undefined {
+  const attributed = parseByokErrorAttribution(errorText(raw));
+  if (!attributed) return undefined;
+  return {
+    errorCode: attributed.errorCode ?? fallbackErrorCode ?? LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
+    message: attributed.message,
+    errorSource: BYOK_UPSTREAM_ERROR_SOURCE,
+    errorDetail: attributed.errorDetail,
+    errorProviderId: attributed.errorProviderId,
+  };
 }

@@ -82,6 +82,35 @@ describe('composer image preview', () => {
     preview.dispose();
   });
 
+  it('previews a pasted-text attachment by its size and line count without reading the file', async () => {
+    const { preview, load, select } = fixture();
+    select({ id: '/tmp/pasted-text.txt', label: '[Pasted text #1 +54610 lines]' });
+    preview.setAttachmentSource(() => [
+      {
+        type: 'file',
+        filePath: '/tmp/pasted-text.txt',
+        fileName: 'pasted-text.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 1_346_163,
+        pastedText: { lineCount: 54_610, charCount: 1_335_759 },
+      },
+    ]);
+
+    const locale = vi
+      .spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions')
+      .mockReturnValue({ locale: 'en-US' } as Intl.ResolvedDateTimeFormatOptions);
+    const rendered = preview.render(100).map((row) => stripTerminalSequences(row));
+    locale.mockRestore();
+
+    expect(rendered[0]).toBe('[Pasted text #1 +54610 lines]');
+    expect(rendered[1]).toBe('text/plain · 1.3 MB · 54,610 lines');
+    expect(rendered[2]).toContain('Backspace');
+    expect(rendered).toHaveLength(3);
+    expect(rendered.every((row) => visibleWidth(row) <= 100)).toBe(true);
+    await vi.waitFor(() => expect(load).not.toHaveBeenCalled());
+    preview.dispose();
+  });
+
   it('shows asset-only image metadata without attempting to read a fabricated path', async () => {
     const { preview, load, select } = fixture();
     select({ id: 'edit:asset', label: '[Image #1]' });

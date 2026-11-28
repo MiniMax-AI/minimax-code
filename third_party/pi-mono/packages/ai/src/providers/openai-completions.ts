@@ -40,6 +40,41 @@ import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
+/**
+ * Recognize the official Mistral OpenAI-compatible endpoint without matching
+ * lookalike gateway hostnames.
+ */
+function isMistralApiModel(model: Model<"openai-completions">): boolean {
+	if (model.provider.toLowerCase() === "mistral") {
+		return true;
+	}
+
+	try {
+		return new URL(model.baseUrl).hostname.toLowerCase() === "api.mistral.ai";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Check if conversation messages contain tool calls or tool results.
+ * This is needed because Anthropic (via proxy) requires the tools param
+ * to be present when messages include tool_calls or tool role messages.
+ */
+function hasToolHistory(messages: Message[]): boolean {
+	for (const msg of messages) {
+		if (msg.role === "toolResult") {
+			return true;
+		}
+		if (msg.role === "assistant") {
+			if (msg.content.some((block) => block.type === "toolCall")) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 function isTextContentBlock(block: { type: string }): block is TextContent {
 	return block.type === "text";
 }
@@ -208,11 +243,17 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 				return thinkingBlock;
 			};
+			// A fragment with neither index nor id continues the call last opened: Gemini's
+			// OpenAI-compatible API sends calls without an index.
+			let lastToolCallBlock: StreamingToolCallBlock | undefined;
 			const ensureToolCallBlock = (toolCall: StreamingToolCallDelta) => {
 				const streamIndex = typeof toolCall.index === "number" ? toolCall.index : undefined;
 				let block = streamIndex !== undefined ? toolCallBlocksByIndex.get(streamIndex) : undefined;
 				if (!block && toolCall.id) {
 					block = toolCallBlocksById.get(toolCall.id);
+				}
+				if (!block && streamIndex === undefined && !toolCall.id && lastToolCallBlock) {
+					block = lastToolCallBlock;
 				}
 				if (!block) {
 					block = {
@@ -243,6 +284,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				if (toolCall.id) {
 					toolCallBlocksById.set(toolCall.id, block);
 				}
+				lastToolCallBlock = block;
 				return block;
 			};
 
@@ -479,6 +521,16 @@ function createClient(
 	});
 }
 
+function urlHostMatches(baseUrl: string, domain: string): boolean {
+	try {
+		const host = new URL(baseUrl).hostname.toLowerCase();
+		const target = domain.toLowerCase();
+		return host === target || host.endsWith(`.${target}`);
+	} catch {
+		return false;
+	}
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -494,8 +546,9 @@ function buildParams(
 		messages,
 		stream: true,
 		prompt_cache_key:
-			(model.baseUrl.includes("api.openai.com") && cacheRetention !== "none") ||
-			(cacheRetention === "long" && compat.supportsLongCacheRetention)
+			!isMistralApiModel(model) &&
+			((urlHostMatches(model.baseUrl, "api.openai.com") && cacheRetention !== "none") ||
+				(cacheRetention === "long" && compat.supportsLongCacheRetention))
 				? clampOpenAIPromptCacheKey(options?.sessionId)
 				: undefined,
 		prompt_cache_retention: cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined,
@@ -522,7 +575,7 @@ function buildParams(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertTools(context.tools, compat);
+		params.tools = convertTools(context.tools, compat, isMistralApiModel(model));
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
@@ -730,7 +783,7 @@ function addCacheControlToTextContent(
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
-	compat: ResolvedOpenAICompletionsCompat,
+	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -976,17 +1029,25 @@ export function convertMessages(
 function convertTools(
 	tools: Tool[],
 	compat: ResolvedOpenAICompletionsCompat,
+	stripSchemaMetadata: boolean,
 ): OpenAI.Chat.Completions.ChatCompletionTool[] {
 	return tools.map((tool) => ({
 		type: "function",
 		function: {
 			name: tool.name,
 			description: tool.description,
-			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
+			parameters: stripSchemaMetadata
+				? stripToolSchemaMetadata(tool.parameters as Record<string, unknown>)
+				: (tool.parameters as any), // TypeBox already generates JSON Schema
 			// Only include strict if provider supports it. Some reject unknown fields.
 			...(compat.supportsStrictMode !== false && { strict: false }),
 		},
 	}));
+}
+
+function stripToolSchemaMetadata(parameters: Record<string, unknown>): Record<string, unknown> {
+	const { $schema: _schema, $id: _id, ...withoutMetadata } = parameters;
+	return withoutMetadata;
 }
 
 function parseChunkUsage(
@@ -1073,12 +1134,15 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		/^https?:\/\/(?:dashscope(?:-intl|-us)?|(?:coding(?:-intl)?|cn-hongkong)\.dashscope)\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl) ||
 		/^https?:\/\/[a-z0-9-]+\.(?:cn-beijing|cn-hongkong|ap-southeast-1|ap-northeast-1|eu-central-1|us-east-1)\.maas\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl);
 	const isSiliconFlow = /^https?:\/\/api\.siliconflow\.(?:cn|com)(?::\d+)?(?:\/|$)/i.test(baseUrl);
-	const isMistralApi = /^https?:\/\/api\.mistral\.ai(?::\d+)?(?:\/|$)/i.test(baseUrl);
+	const isMistralApi = isMistralApiModel(model);
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
-	const isCloudflareWorkersAI = provider === "cloudflare-workers-ai" || baseUrl.includes("api.cloudflare.com");
-	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
-	const isNvidia = provider === "nvidia" || baseUrl.includes("integrate.api.nvidia.com");
-	const isAntLing = provider === "ant-ling" || baseUrl.includes("api.ant-ling.com");
+	const isCloudflareWorkersAI =
+		provider === "cloudflare-workers-ai" || urlHostMatches(baseUrl, "api.cloudflare.com");
+	const isCloudflareAiGateway =
+		provider === "cloudflare-ai-gateway" || urlHostMatches(baseUrl, "gateway.ai.cloudflare.com");
+	const isNvidia = provider === "nvidia" || urlHostMatches(baseUrl, "integrate.api.nvidia.com");
+	const isAntLing = provider === "ant-ling" || urlHostMatches(baseUrl, "api.ant-ling.com");
+	const isDeepSeekHost = urlHostMatches(baseUrl, "deepseek.com");
 
 	const isNonStandard =
 		isNvidia ||
@@ -1088,9 +1152,10 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		baseUrl.includes("api.x.ai") ||
 		isTogether ||
 		baseUrl.includes("chutes.ai") ||
-		baseUrl.includes("deepseek.com") ||
+		isDeepSeekHost ||
 		isZai ||
 		isMoonshot ||
+		isMistralApi ||
 		provider === "opencode" ||
 		baseUrl.includes("opencode.ai") ||
 		isCloudflareWorkersAI ||
@@ -1098,10 +1163,16 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isAntLing;
 
 	const useMaxTokens =
-		baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether || isNvidia || isAntLing;
+		baseUrl.includes("chutes.ai") ||
+		isMoonshot ||
+		isCloudflareAiGateway ||
+		isTogether ||
+		isNvidia ||
+		isAntLing ||
+		isMistralApi;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
+	const isDeepSeek = provider === "deepseek" || isDeepSeekHost;
 	const isOpenRouterDeveloperRoleModel =
 		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
@@ -1114,9 +1185,11 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 			!isSiliconFlow &&
 			!isMistralApi &&
 			(isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
+		// Mistral's reasoning_effort and tool-schema metadata support are inferred from
+		// compatibility paths; no real 422 response body has confirmed these fields yet.
 		supportsReasoningEffort:
-			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
-		supportsUsageInStreaming: true,
+			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing && !isMistralApi,
+		supportsUsageInStreaming: !isMistralApi,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
@@ -1136,7 +1209,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
 		zaiToolStream: false,
-		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia,
+		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isMistralApi,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
 		supportsLongCacheRetention: !(
@@ -1144,7 +1217,8 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 			isCloudflareWorkersAI ||
 			isCloudflareAiGateway ||
 			isNvidia ||
-			isAntLing
+			isAntLing ||
+			isMistralApi
 		),
 	};
 }

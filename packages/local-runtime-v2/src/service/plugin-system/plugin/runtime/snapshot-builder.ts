@@ -1,3 +1,4 @@
+import { LOCAL_PLUGIN_MARKETPLACE, OFFICIAL_PLUGIN_MARKETPLACE, type PluginId } from '@mavis/shared';
 import path from 'node:path';
 
 import type {
@@ -47,8 +48,15 @@ interface PluginSnapshotPackageIdentity {
   readonly plugin?: RuntimeEligibleScannedReadPluginPackage;
 }
 
+export interface PluginSnapshotBuilderOptions {
+  readonly forbiddenPluginNames?: ReadonlySet<string>;
+  readonly onlyOfficialPlugins?: boolean;
+}
+
 interface PluginSnapshotLocalProjection {
+  readonly id: PluginId;
   readonly name: string;
+  readonly unavailableReason?: 'SOURCE_MISSING' | 'FORBIDDEN_BY_CONFIG';
   readonly displayName?: string;
   readonly version?: string;
   readonly description?: string;
@@ -74,6 +82,8 @@ interface PluginSnapshotEnabledProjection {
 
 export interface PluginSnapshotMcpServer {
   readonly pluginName: string;
+  readonly pluginId: PluginId;
+  readonly pluginDisplayName?: string;
   readonly source: ReadPluginPackage['source'];
   readonly packageContentDigest: string;
   readonly server: PluginMcpServer;
@@ -121,11 +131,14 @@ interface SnapshotBuildState {
 }
 
 export class PluginSnapshotBuilder {
-  constructor(private readonly names = new McpNameRegistry()) {}
+  constructor(
+    private readonly names = new McpNameRegistry(),
+    private readonly options: PluginSnapshotBuilderOptions = {},
+  ) {}
   build(input: BuildPluginSnapshotInput): PluginSnapshot {
     const state = createSnapshotBuildState(input.reservations);
-    appendOfficialPackages(input.officialPackages, state);
-    appendLocalPackages(input, state);
+    appendOfficialPackages(input.officialPackages, state, this.options);
+    if (!this.options.onlyOfficialPlugins) appendLocalPackages(input, state, this.options);
     const allocated = this.names.assignServers([
       ...input.reservations.mcpServerNames.map((name) => ({
         key: configuredMcpNameKey(name),
@@ -250,6 +263,7 @@ function createSnapshotBuildState(reservations: PluginCapabilityReservations): S
 function appendOfficialPackages(
   packages: readonly OfficialSnapshotPackageInput[],
   state: SnapshotBuildState,
+  options: PluginSnapshotBuilderOptions,
 ): void {
   const sorted = [...packages].sort(
     (left, right) =>
@@ -257,6 +271,10 @@ function appendOfficialPackages(
       left.contentDigest.localeCompare(right.contentDigest),
   );
   for (const entry of sorted) {
+    if (options.forbiddenPluginNames?.has(normalizedSkillKey(entry.plugin.name))) {
+      state.diagnostics.push(freeze({ code: 'FORBIDDEN_BY_CONFIG', pluginName: entry.plugin.name }));
+      continue;
+    }
     const accepted = acceptPackageCapabilities({
       plugin: entry.plugin,
       packageContentDigest: entry.contentDigest,
@@ -284,20 +302,35 @@ function appendOfficialPackages(
   }
 }
 
-function appendLocalPackages(input: BuildPluginSnapshotInput, state: SnapshotBuildState): void {
+function appendLocalPackages(
+  input: BuildPluginSnapshotInput,
+  state: SnapshotBuildState,
+  options: PluginSnapshotBuilderOptions,
+): void {
   const sorted = [...input.localPackages].sort((left, right) =>
     normalizedPath(left.plugin.rootPath).localeCompare(normalizedPath(right.plugin.rootPath)),
   );
-  for (const entry of sorted) appendLocalPlugin(entry, input.isLocalEnabled, state);
+  for (const entry of sorted) appendLocalPlugin(entry, input.isLocalEnabled, state, options);
 }
 
 function appendLocalPlugin(
   entry: LocalSnapshotPackageInput,
   isLocalEnabled: (canonicalRoot: string) => boolean,
   state: SnapshotBuildState,
+  options: PluginSnapshotBuilderOptions,
 ): void {
   const { plugin } = entry;
   const enabled = isLocalEnabled(plugin.rootPath);
+  if (options.forbiddenPluginNames?.has(normalizedSkillKey(plugin.name))) {
+    state.localPlugins.push(
+      freeze({
+        ...localProjection(plugin, entry.contentDigest, enabled),
+        unavailableReason: 'FORBIDDEN_BY_CONFIG',
+      }),
+    );
+    state.diagnostics.push(freeze({ code: 'FORBIDDEN_BY_CONFIG', pluginName: plugin.name }));
+    return;
+  }
   if (state.pluginNames.has(collisionKey(plugin.name))) {
     state.diagnostics.push(freeze({ code: 'LOCAL_PLUGIN_NAME_CONFLICT', pluginName: plugin.name }));
     return;
@@ -344,6 +377,7 @@ function localProjection(
   enabled: boolean,
 ): PluginSnapshotLocalProjection {
   return freeze({
+    id: freeze({ name: plugin.name, marketplace: LOCAL_PLUGIN_MARKETPLACE }),
     name: plugin.name,
     ...(plugin.displayName ? { displayName: plugin.displayName } : {}),
     ...(plugin.version ? { version: plugin.version } : {}),
@@ -529,9 +563,15 @@ function acceptPackageSkills(input: PackageCapabilityAcceptanceInput): PluginSki
 }
 
 function acceptPackageServers(input: PackageCapabilityAcceptanceInput): PluginSnapshotMcpServer[] {
+  const pluginId: PluginId =
+    input.sourceKind === 'official'
+      ? { name: input.plugin.name, marketplace: OFFICIAL_PLUGIN_MARKETPLACE }
+      : { name: input.plugin.name, marketplace: LOCAL_PLUGIN_MARKETPLACE };
   return input.plugin.mcpServers.map((server) =>
     freeze({
       pluginName: input.plugin.name,
+      pluginId: freeze({ ...pluginId }),
+      ...(input.plugin.displayName ? { pluginDisplayName: input.plugin.displayName } : {}),
       source: input.plugin.source,
       packageContentDigest: input.packageContentDigest,
       server,

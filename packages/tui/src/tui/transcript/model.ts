@@ -8,6 +8,7 @@ export type TranscriptCellKind =
   | 'assistant-preamble'
   | 'review'
   | 'compaction'
+  | 'context-reset'
   | 'turn-duration'
   | 'thinking'
   | 'todo'
@@ -167,6 +168,11 @@ export interface TranscriptCell {
   /** Outer `run_code` Tool Call id when this tool ran inside a PTC program. */
   parentToolCallId?: string;
   /**
+   * Target a `tool` row shows in place of the one read from `content`, set by the projection
+   * for facts only the result carries, such as the model that answered an advisor call.
+   */
+  toolSummary?: string;
+  /**
    * Projection only: child calls of this `run_code` program that a long turn
    * folded away, so its summary still counts every call and failure.
    */
@@ -210,6 +216,11 @@ export interface CreateTranscriptCellInput {
   toolCallId?: string;
   /** Outer `run_code` Tool Call id when this tool ran inside a PTC program. */
   parentToolCallId?: string;
+  /**
+   * Target a `tool` row shows in place of the one read from `content`, set by the projection
+   * for facts only the result carries, such as the model that answered an advisor call.
+   */
+  toolSummary?: string;
   toolPayloadBudget?: TranscriptToolPayloadBudget;
   durationMs?: number;
   outputTokensPerSecond?: number;

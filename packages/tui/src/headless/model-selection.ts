@@ -1,5 +1,10 @@
 import { normalizeTuiEffortOptions } from '../application/model-effort.js';
-import type { TuiModel, TuiModelSelection, TuiSession } from '../runtime/port.js';
+import type {
+  TuiAdvisorSelection,
+  TuiModel,
+  TuiModelSelection,
+  TuiSession,
+} from '../runtime/port.js';
 import { TuiExecError } from './exit-policy.js';
 
 /**
@@ -11,6 +16,7 @@ import { TuiExecError } from './exit-policy.js';
 const THINKING_OFF_VARIANTS: ReadonlySet<string> = new Set(['none-thinking', '']);
 
 const MODEL_SYNTAX = '--model must use provider/model or provider/model#variant.';
+const ADVISOR_SYNTAX = '--advisor must use provider/model or off.';
 
 export interface HeadlessModelReference {
   readonly providerId: string;
@@ -41,6 +47,22 @@ export function parseHeadlessModelOverride(value: string): HeadlessModelReferenc
   const variant = hash > 0 ? modelAndVariant.slice(hash + 1) : undefined;
   if (!providerId || !modelId || (hash > 0 && !variant)) throw invocationError(MODEL_SYNTAX);
   return { providerId, modelId, ...(variant ? { variant } : {}) };
+}
+
+/**
+ * `--advisor` takes the `--model` syntax without `#variant`, because an advisor stores only a
+ * model, its effort and its window; `off` in any case switches it off and keeps that model.
+ */
+export function parseAdvisorOverride(value: string): TuiAdvisorSelection {
+  const trimmed = value.trim();
+  if (trimmed.toLowerCase() === 'off') return { enabled: false };
+  const slash = trimmed.indexOf('/');
+  if (slash < 1 || slash === trimmed.length - 1) throw invocationError(ADVISOR_SYNTAX);
+  const modelId = trimmed.slice(slash + 1);
+  if (modelId.includes('#')) {
+    throw invocationError('--advisor does not take a #variant; use provider/model or off.');
+  }
+  return { enabled: true, providerId: trimmed.slice(0, slash), modelId };
 }
 
 /**

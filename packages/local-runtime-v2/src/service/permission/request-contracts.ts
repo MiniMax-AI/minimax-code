@@ -7,6 +7,7 @@ export type LocalPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions
 export type LocalPermissionDecision = 'allowAlways' | 'allowOnce' | 'deny';
 
 export interface LocalPermissionRequest {
+  requester?: string;
   requestId: string;
   sessionId: string;
   turnId: string;

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { TuiRuntime } from './port.js';
 
 const ASYNC_GENERATOR_METHODS = new Set([
@@ -7,9 +8,17 @@ const ASYNC_GENERATOR_METHODS = new Set([
   'watchSessionUsageCommits',
 ]);
 
-/** Lets the product shell render while calls wait for the embedded Runtime to become available. */
-export function createDeferredTuiRuntime(runtimePromise: Promise<TuiRuntime>): TuiRuntime {
-  let resolvedRuntime: TuiRuntime | undefined;
+export interface DeferredTuiRuntimeOptions {
+  /** Fallback used until the underlying Runtime resolves (for example ACP `initialize`). */
+  readonly isGoalEnabled?: () => boolean;
+}
+
+/** Lets the product shell or ACP stdio handshake start while calls wait for the Runtime. */
+export function createDeferredTuiRuntime<TRuntime extends object = TuiRuntime>(
+  runtimePromise: Promise<TRuntime>,
+  options: DeferredTuiRuntimeOptions = {},
+): TRuntime {
+  let resolvedRuntime: TRuntime | undefined;
   void runtimePromise.then(
     (runtime) => {
       resolvedRuntime = runtime;
@@ -17,11 +26,36 @@ export function createDeferredTuiRuntime(runtimePromise: Promise<TuiRuntime>): T
     () => undefined,
   );
 
-  return new Proxy({} as TuiRuntime, {
+  return new Proxy({} as TRuntime, {
     get(_target, property) {
       if (property === 'then') return undefined;
+      if (property === 'newSessionId') {
+        return () => {
+          if (resolvedRuntime) {
+            const fn = Reflect.get(resolvedRuntime, 'newSessionId') as (() => string) | undefined;
+            if (typeof fn === 'function') return fn.call(resolvedRuntime);
+          }
+          return `mvs_${randomUUID().replace(/-/g, '')}`;
+        };
+      }
       if (property === 'isGoalEnabled') {
-        return () => resolvedRuntime?.isGoalEnabled() ?? false;
+        return () => {
+          if (resolvedRuntime) {
+            const fn = Reflect.get(resolvedRuntime, 'isGoalEnabled') as (() => boolean) | undefined;
+            return typeof fn === 'function' ? fn.call(resolvedRuntime) : false;
+          }
+          return options.isGoalEnabled?.() ?? false;
+        };
+      }
+      // Synchronous like `isGoalEnabled`: no Goal Turn runs before the Runtime exists.
+      if (property === 'runningGoalTurnId') {
+        return (sessionId: string) => {
+          if (!resolvedRuntime) return undefined;
+          const fn = Reflect.get(resolvedRuntime, 'runningGoalTurnId') as
+            | ((id: string) => string | undefined)
+            | undefined;
+          return typeof fn === 'function' ? fn.call(resolvedRuntime, sessionId) : undefined;
+        };
       }
       if (typeof property !== 'string') return undefined;
       if (ASYNC_GENERATOR_METHODS.has(property)) {
@@ -38,7 +72,7 @@ export function createDeferredTuiRuntime(runtimePromise: Promise<TuiRuntime>): T
 }
 
 async function* forwardAsyncGenerator(
-  runtimePromise: Promise<TuiRuntime>,
+  runtimePromise: Promise<object>,
   property: string,
   args: unknown[],
 ): AsyncGenerator<unknown> {

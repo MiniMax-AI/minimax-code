@@ -11,19 +11,22 @@ import type {
 import { getContentRulesForTool, hasWholeToolRule } from '../context.js';
 import { matchHardBlockedFsRead } from '../classifier/dangerous-patterns.js';
 import { matchesMcpServerRuntimeName } from '../mcp-runtime-name.js';
-import { shellTokenize } from './shell-tokenize.js';
+import { shellTokenize, shellTokenizeWithMetadata, type ShellToken } from './shell-tokenize.js';
+import { readBashCommand, gitBashCommandName } from './bash-command.js';
 import { splitCommand, findHeredocBodyRanges } from './bash-split.js';
 import { extractSourceTarget } from './bash-permission.js';
 import { isDiscardSinkTarget } from './bash-write-target.js';
 import {
   FS_UMBRELLA_TOOL_NAME,
   READ_ONLY_TOOLS,
+  containsPathTraversal,
   isDangerousRemovalPath,
   isPathAllowed,
   isPublicKeyFile,
   isTempDirectory,
   matchPathRule,
 } from './fs-permission.js';
+import { resolveOperationIdentities, unfoldedAbsolutePath } from './path-identity.js';
 
 export type PathCapabilityAction = 'read' | 'write' | 'delete' | 'execute';
 
@@ -47,6 +50,7 @@ export type PathCapabilityIntent = {
   path: string;
   action: PathCapabilityAction;
   relativeBase?: 'home';
+  pathSyntax?: ShellToken['pathSyntax'];
 };
 
 export function pathActionToToolName(action: PathCapabilityAction): string {
@@ -176,7 +180,13 @@ export function evaluatePathCapability(
     };
   }
 
-  if (action === 'delete' && isDangerousRemovalPath(filePath, context.homeDir)) {
+  // Judge every operand at its session-resolved location, never the daemon cwd:
+  // a Desktop runtime launched from the Dock runs with cwd `/`, so resolving a
+  // bare relative operand there turns `rm build` into `/build` (a direct child
+  // of root). `rm -rf ..` still resolves to the workspace parent. A bare `~`
+  // keeps its raw form so it stays dangerous even without a session home.
+  const removalPath = isBareHomeToken(filePath) ? filePath : candidatePath;
+  if (action === 'delete' && isDangerousRemovalPath(removalPath, context.homeDir)) {
     return {
       behavior: 'deny',
       reason: { type: 'dangerousRemoval', path: candidatePath },
@@ -207,7 +217,12 @@ export function evaluatePathCapability(
     result.reason.type === 'workingDirectory'
   ) {
     const resolved = result.reason.path;
-    if (isTempDirectory(resolved)) {
+    // A shell walking `/tmp/link/..` lands outside the temp directory.
+    const unfolded = unfoldedAbsolutePath(filePath, pathCtx.workingDirectory, pathCtx.homeDir);
+    const identities = resolveOperationIdentities(filePath, resolved, unfolded, action) ?? [
+      resolved,
+    ];
+    if (identities.every((identity) => isTempDirectory(identity))) {
       return { behavior: 'allow', reason: { type: 'tempDirectory', path: resolved } };
     }
   }
@@ -278,11 +293,14 @@ export function evaluatePathCapability(
         effectiveToolName !== FS_UMBRELLA_TOOL_NAME && action !== 'execute'
           ? getContentRulesForTool(context, FS_UMBRELLA_TOOL_NAME, 'allow')
           : [];
+      // Match the session-resolved path: matchPathRule anchors a relative operand
+      // to the daemon cwd, so a relative `.env` would miss the `<workspace>/**`
+      // rule the user just approved whenever the daemon runs elsewhere.
       for (const rule of [...allowRules, ...umbrellaRules]) {
         if (
           ruleAllowsPathAction(rule, action) &&
           rule.ruleValue.ruleContent &&
-          matchPathRule(filePath, rule.ruleValue.ruleContent)
+          matchPathRule(candidatePath, rule.ruleValue.ruleContent)
         ) {
           return { behavior: 'allow', reason: { type: 'rule', rule } };
         }
@@ -446,13 +464,21 @@ function ruleAllowsPathAction(rule: PermissionRule, action: PermissionRuleAction
   return matcher.actions === undefined || matcher.actions.includes(action);
 }
 
+function isBareHomeToken(filePath: string): boolean {
+  const trimmed = filePath.trim();
+  return trimmed === '~' || trimmed === '~/';
+}
+
 function resolveShellAwarePath(
   filePath: string,
   workingDirectory?: string,
   homeDir?: string,
 ): string {
   const looksWindows = /^[A-Za-z]:[\\/]/.test(filePath) || filePath.includes('\\');
-  if (looksWindows) return filePath;
+  // Windows-shaped paths keep their raw form so HARD patterns see the Windows
+  // spelling, but `..` is still folded so `a\b\..\c` matches like `a\c`.
+  if (looksWindows)
+    return containsPathTraversal(filePath) ? path.win32.normalize(filePath) : filePath;
 
   const homeResolvedPath =
     filePath === '~'
@@ -659,8 +685,29 @@ export function extractUnknownToolPathIntents(
   }
 
   intents.push(...extractMatrixToolPathIntents(toolName, input));
+  intents.push(...extractSpaceToolPathIntents(toolName, input));
 
   return dedupePathIntents(intents);
+}
+
+/**
+ * space_upload reads `local_path` (its content goes to the user's Space); space_download writes
+ * it. Other space_* tools only touch Space and carry no local path.
+ */
+const SPACE_TOOL_LOCAL_PATH_ACTIONS: Readonly<Record<string, PathCapabilityIntent['action']>> = {
+  space_upload: 'read',
+  space_download: 'write',
+};
+
+function extractSpaceToolPathIntents(
+  toolName: string,
+  input: Record<string, unknown>,
+): PathCapabilityIntent[] {
+  const action = SPACE_TOOL_LOCAL_PATH_ACTIONS[toolName];
+  const value = input.local_path;
+  if (!action || typeof value !== 'string') return [];
+  const localPath = stripFileUri(value).trim();
+  return localPath ? [{ path: localPath, action }] : [];
 }
 
 const MATRIX_READ_PATH_FIELDS = new Set([
@@ -855,7 +902,41 @@ export const READ_PATH_COMMANDS = new Set(['cat', 'head', 'tail', 'less', 'more'
 export const SEARCH_PATH_COMMANDS = new Set(['grep', 'rg']);
 const EXECUTE_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
 
-export function extractBashPathIntents(command: string): PathCapabilityIntent[] {
+const DIRECTORY_CHANGE_COMMANDS = new Set(['cd', 'pushd', 'popd']);
+
+/**
+ * Does any subcommand change the shell's working directory? Path intents are
+ * resolved against the session working directory, which is wrong after a
+ * `cd` / `pushd` / `popd`; callers use this to stop trusting relative `..`
+ * operands on such a line.
+ */
+export function commandChangesDirectory(command: string): boolean {
+  for (const rawSubcommand of splitCommand(command)) {
+    const tokens = shellTokenize(maskHeredocBodies(rawSubcommand).trim());
+    const head = normalizeCommandToken(tokens[skipEnvPrefixes(tokens)]);
+    if (head && DIRECTORY_CHANGE_COMMANDS.has(head)) return true;
+  }
+  return false;
+}
+
+/**
+ * A relative operand containing `..`: its target depends on the shell's
+ * current directory. Absolute and home-relative operands do not.
+ */
+export function isRelativeTraversalOperand(operand: string): boolean {
+  if (!containsPathTraversal(operand)) return false;
+  if (operand === '~' || operand.startsWith('~/')) return false;
+  return !path.isAbsolute(operand) && !path.win32.isAbsolute(operand);
+}
+
+export function extractBashPathIntents(
+  command: string,
+  windowsPosix = false,
+  options: { retainDynamicTargets?: boolean } = {},
+): PathCapabilityIntent[] {
+  // Hard safety needs unresolved operands; the default classifier delegates
+  // those operands to its separate ASK policy.
+  const retainDynamic = options.retainDynamicTargets === true;
   const intents: PathCapabilityIntent[] = [];
   for (const rawSubcommand of splitCommand(command)) {
     // Heredoc/here-string bodies are DATA, not command arguments. splitCommand
@@ -864,7 +945,7 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
     // mistaken for real path intents. The heredoc operator token itself
     // (`<<EOF`, `<<<…`) is dropped later by isStaticPathToken.
     const subcommand = maskHeredocBodies(rawSubcommand);
-    intents.push(...extractRedirectIntents(subcommand));
+    intents.push(...extractRedirectIntents(subcommand, retainDynamic));
 
     const sourceTarget = extractSourceTarget(subcommand);
     if (sourceTarget) {
@@ -877,9 +958,36 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
     const tokens = shellTokenize(subcommand.trim());
     if (tokens.length === 0) continue;
     const commandIndex = skipEnvPrefixes(tokens);
-    const head = normalizeCommandToken(tokens[commandIndex]);
+    const parsed = windowsPosix ? readBashCommand(subcommand, retainDynamic) : undefined;
+    const head = parsed
+      ? gitBashCommandName(parsed.executable)
+      : normalizeCommandToken(tokens[commandIndex]);
     if (!head) continue;
-    const args = tokens.slice(commandIndex + 1);
+    const args = parsed?.args ?? tokens.slice(commandIndex + 1);
+    const operands: Array<string | ShellToken> = parsed?.argTokens ?? args;
+    const pushOperand = (operand: string | ShellToken, action: PathCapabilityAction) => {
+      intents.push(
+        typeof operand === 'string'
+          ? { path: operand, action }
+          : { path: operand.value, action, pathSyntax: operand.pathSyntax },
+      );
+    };
+
+    if (windowsPosix && ['robocopy', 'xcopy'].includes(head)) {
+      // These native tools receive Bash-decoded words too. Their destination
+      // is the second operand, not a trailing filter or /switch.
+      const nativeOperands = operands.filter(
+        (arg) => !/^\/[a-z]+(?::.*)?$/i.test(operandValue(arg)),
+      );
+      if (nativeOperands[0]) {
+        pushOperand(nativeOperands[0], 'read');
+        if (head === 'robocopy' && args.some((arg) => /^\/(?:mov|move)$/i.test(arg))) {
+          pushOperand(nativeOperands[0], 'delete');
+        }
+      }
+      if (nativeOperands[1]) pushOperand(nativeOperands[1], 'write');
+      continue;
+    }
 
     if (READ_PATH_COMMANDS.has(head)) {
       for (const target of collectPathArgs(args)) {
@@ -893,16 +1001,16 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
       continue;
     }
 
-    if (head === 'rm') {
-      for (const target of collectPathArgs(args)) {
-        intents.push({ path: target, action: 'delete' });
+    if (head === 'rm' || (windowsPosix && head === 'mavis-trash')) {
+      for (const target of collectPathArgs(operands, retainDynamic)) {
+        pushOperand(target, 'delete');
       }
       continue;
     }
 
-    if (head === 'tee') {
-      for (const target of collectPathArgs(args)) {
-        intents.push({ path: target, action: 'write' });
+    if (head === 'tee' || (windowsPosix && ['touch', 'mkdir'].includes(head))) {
+      for (const target of collectPathArgs(operands, retainDynamic)) {
+        pushOperand(target, 'write');
       }
       continue;
     }
@@ -913,8 +1021,8 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
       // DIR — not the last positional. Without this, `cp -t /external/dir src`
       // would treat the in-workspace `src` as the destination and wave the
       // external write through.
-      const targetDir = extractTargetDirectoryFlag(args);
-      const positional = collectPathArgs(args);
+      const targetDir = extractTargetDirectoryFlag(operands, retainDynamic);
+      const positional = collectPathArgs(operands, retainDynamic);
       // Source operands must be read-checked (and, for `mv`, delete-checked):
       // copying / moving a sensitive file (`cp ~/.ssh/id_rsa /tmp/key`) must
       // not slip through just because the destination is writable. With a
@@ -927,15 +1035,15 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
         ? positional.filter((entry) => entry !== targetDir)
         : positional.slice(0, -1);
       for (const source of sources) {
-        intents.push({ path: source, action: 'read' });
+        pushOperand(source, 'read');
         if (head === 'mv') {
-          intents.push({ path: source, action: 'delete' });
+          pushOperand(source, 'delete');
         }
       }
       if (targetDir) {
-        intents.push({ path: targetDir, action: 'write' });
+        pushOperand(targetDir, 'write');
       } else if (positional.length >= 2) {
-        intents.push({ path: positional[positional.length - 1]!, action: 'write' });
+        pushOperand(positional[positional.length - 1]!, 'write');
       }
       continue;
     }
@@ -946,7 +1054,7 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
       // is the inline script, so the first positional must NOT be dropped below.
       // Without this, `sed -i -f ~/.ssh/id_rsa /tmp/out` dropped the key read and
       // only modeled the /tmp write -> the sed-i fast-allow upgraded it to allow.
-      const positional: string[] = [];
+      const positional: Array<string | ShellToken> = [];
       let scriptFromFlag = false;
       let inPlace = false;
       for (let index = 0; index < args.length; index++) {
@@ -1021,12 +1129,12 @@ export function extractBashPathIntents(command: string): PathCapabilityIntent[] 
           }
           continue;
         }
-        if (isStaticPathToken(token)) positional.push(token);
+        if (isStaticPathToken(token, retainDynamic)) positional.push(operands[index] ?? token);
       }
       if (inPlace) {
         const targets = scriptFromFlag ? positional : positional.slice(1);
         for (const target of targets) {
-          intents.push({ path: target, action: 'write' });
+          pushOperand(target, 'write');
         }
       }
       continue;
@@ -1137,14 +1245,33 @@ function skipEnvPrefixes(tokens: readonly string[]): number {
 function normalizeCommandToken(token: string | undefined): string | undefined {
   if (!token) return undefined;
   if (token.startsWith('/')) return token.split('/').pop() ?? token;
-  return token;
+  // The fast allow reads a bare `cat.exe` as `cat` on Windows, so its
+  // operands must surface as read intents too. An extra intent only adds a
+  // check, so this needs no platform gate.
+  return token.replace(/\.exe$/i, '');
 }
 
-function collectPathArgs(tokens: readonly string[]): string[] {
-  const positional: string[] = [];
+function operandValue(operand: string | ShellToken): string {
+  return typeof operand === 'string' ? operand : operand.value;
+}
+
+function sliceOperand(operand: string | ShellToken, start: number): string | ShellToken {
+  return typeof operand === 'string'
+    ? operand.slice(start)
+    : {
+        ...operand,
+        value: operand.value.slice(start),
+      };
+}
+
+function collectPathArgs<T extends string | ShellToken>(
+  tokens: readonly T[],
+  retainDynamic = false,
+): T[] {
+  const positional: T[] = [];
   let afterDoubleDash = false;
   for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index] ?? '';
+    const token = operandValue(tokens[index] ?? '');
     if (!afterDoubleDash && token === '--') {
       afterDoubleDash = true;
       continue;
@@ -1162,10 +1289,10 @@ function collectPathArgs(tokens: readonly string[]): string[] {
     if (!afterDoubleDash && token.startsWith('-')) {
       continue;
     }
-    if (!isStaticPathToken(token)) {
+    if (!isStaticPathToken(token, retainDynamic)) {
       continue;
     }
-    positional.push(token);
+    positional.push(tokens[index]!);
   }
   return positional;
 }
@@ -1319,17 +1446,21 @@ function isRedirectOperatorToken(token: string): boolean {
  *
  * Long `--` and `-T` / `--no-target-directory` (dest-is-a-file) never match.
  */
-function extractTargetDirectoryFlag(args: readonly string[]): string | undefined {
+function extractTargetDirectoryFlag(
+  args: readonly (string | ShellToken)[],
+  retainDynamic = false,
+): string | ShellToken | undefined {
   for (let index = 0; index < args.length; index++) {
-    const arg = args[index] ?? '';
+    const entry = args[index] ?? '';
+    const arg = operandValue(entry);
     if (arg === '--') break;
     if (arg === '-t' || arg === '--target-directory') {
       const value = args[index + 1];
-      return value && isStaticPathToken(value) ? value : undefined;
+      return value && isStaticPathToken(operandValue(value), retainDynamic) ? value : undefined;
     }
     if (arg.startsWith('--target-directory=')) {
-      const value = arg.slice('--target-directory='.length);
-      return value && isStaticPathToken(value) ? value : undefined;
+      const value = sliceOperand(entry, '--target-directory='.length);
+      return value && isStaticPathToken(operandValue(value), retainDynamic) ? value : undefined;
     }
     // Short-option cluster (single leading dash, not `--`). GNU getopt: when
     // `t` is the last char its argument is the next token; otherwise it is the
@@ -1340,10 +1471,10 @@ function extractTargetDirectoryFlag(args: readonly string[]): string | undefined
       if (tIndex !== -1) {
         if (tIndex === arg.length - 1) {
           const value = args[index + 1];
-          return value && isStaticPathToken(value) ? value : undefined;
+          return value && isStaticPathToken(operandValue(value), retainDynamic) ? value : undefined;
         }
-        const value = arg.slice(tIndex + 1);
-        return isStaticPathToken(value) ? value : undefined;
+        const value = sliceOperand(entry, tIndex + 1);
+        return isStaticPathToken(operandValue(value), retainDynamic) ? value : undefined;
       }
     }
   }
@@ -1356,10 +1487,10 @@ function extractTargetDirectoryFlag(args: readonly string[]): string | undefined
  * `$(…)`, backticks) cannot be resolved here — let the bash classifier handle
  * them instead of fabricating a bogus path check.
  */
-function isStaticPathToken(token: string): boolean {
+function isStaticPathToken(token: string, retainDynamic = false): boolean {
   if (!token) return false;
   if (token.startsWith('<') || token.startsWith('>')) return false;
-  if (token.includes('$') || token.includes('`')) return false;
+  if (!retainDynamic && (token.includes('$') || token.includes('`'))) return false;
   return true;
 }
 
@@ -1404,7 +1535,7 @@ function extractShellScriptPath(tokens: readonly string[]): string | undefined {
   return undefined;
 }
 
-function extractRedirectIntents(command: string): PathCapabilityIntent[] {
+function extractRedirectIntents(command: string, retainDynamic = false): PathCapabilityIntent[] {
   const intents: PathCapabilityIntent[] = [];
   let inSingle = false;
   let inDouble = false;
@@ -1463,8 +1594,18 @@ function extractRedirectIntents(command: string): PathCapabilityIntent[] {
     if (ch === '>' || (ch === '&' && next === '>')) {
       let start = index + 1;
       if (ch === '>' && next === '>') start = index + 2;
+      if (ch === '>' && next === '|') start = index + 2;
       if (ch === '&' && next === '>') start = command[index + 2] === '>' ? index + 3 : index + 2;
-      const target = readRedirectTarget(command, skipWhitespace(command, start));
+      let word: ShellToken | undefined;
+      const target = readRedirectTarget(
+        command,
+        skipWhitespace(command, start),
+        retainDynamic
+          ? (raw) => {
+              word = shellTokenizeWithMetadata(raw, true)[0];
+            }
+          : undefined,
+      );
       // Same static-resolvability guard as the input redirect above: a write to a
       // shell-expanded target (`echo x > $HOME/out`) must reach the bash classifier
       // (ASK), not be hard-DENIED by validatePath on the unresolvable path.
@@ -1475,8 +1616,16 @@ function extractRedirectIntents(command: string): PathCapabilityIntent[] {
       // popped a permission dialog (the regression the fix commit repairs)
       // and its `bash(/dev/**)` suggestion would silently allow /dev/tcp
       // reverse-shell and block-device writes on the next command.
-      if (isLikelyLocalPath(target) && isStaticPathToken(target) && !isDiscardSinkTarget(target)) {
-        intents.push({ path: target, action: 'write' });
+      if (
+        (retainDynamic || isLikelyLocalPath(target)) &&
+        isStaticPathToken(target, retainDynamic) &&
+        !isDiscardSinkTarget(target)
+      ) {
+        intents.push({
+          path: word?.value ?? target,
+          action: 'write',
+          ...(word?.pathSyntax ? { pathSyntax: word.pathSyntax } : {}),
+        });
       }
       continue;
     }
@@ -1491,7 +1640,11 @@ function skipWhitespace(command: string, index: number): number {
   return cursor;
 }
 
-function readRedirectTarget(command: string, start: number): string {
+function readRedirectTarget(
+  command: string,
+  start: number,
+  capture?: (raw: string) => void,
+): string {
   let index = start;
   let out = '';
   let inSingle = false;
@@ -1532,5 +1685,6 @@ function readRedirectTarget(command: string, start: number): string {
     out += ch;
     index++;
   }
+  capture?.(command.slice(start, index));
   return out;
 }

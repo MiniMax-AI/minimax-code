@@ -41,6 +41,7 @@ export type {
   SessionAgentDefinitionBackfillSkip,
   SessionBackfillDiagnostics,
 } from './sessions/lifecycle/record-service.js';
+export { createRuntimeSessionId, isRuntimeSessionId } from './sessions/lifecycle/record-service.js';
 export type {
   PendingSessionOperationIntent,
   SessionOperationError,

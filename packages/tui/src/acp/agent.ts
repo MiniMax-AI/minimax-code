@@ -3,6 +3,8 @@ import { isAbsolute, resolve } from 'node:path';
 
 import * as acp from '@agentclientprotocol/sdk';
 
+import type { MavisRegion } from '@mavis/config';
+
 import { executeTuiInteractiveTurn } from '../application/interactive-turn-delivery.js';
 import { TuiLoginRequiredError, requireTuiAgentAccess } from '../application/login-gate.js';
 import type { TuiPermissionMode } from '../application/permission-mode.js';
@@ -13,13 +15,30 @@ import type {
   TuiPlanClientIntent,
   TuiRuntimeEvent,
   TuiModel,
+  TuiModelSelection,
   TuiSession,
   TuiSessionMcpServer,
 } from '../runtime/port.js';
-import { buildTuiMessageParts } from '../runtime/stream-events.js';
+import {
+  bufferPendingModel,
+  createRuntimeSessionMaterializer,
+  withRosterModel,
+  type PendingRuntimeSession,
+} from './reserved-session.js';
 import type { TuiMessage, TuiStreamEvent } from '../runtime/stream-events.js';
 import type { TuiAcpRuntime } from './runtime.js';
-import { availableSkillCommands, executeTuiAcpCommand, TUI_ACP_AVAILABLE_COMMANDS } from './commands.js';
+import {
+  admissionWaitError,
+  retriesAfterBusyWait,
+  waitForRuntimeTurnToSettle,
+  type RuntimeTurnWait,
+  type RuntimeTurnWaitTiming,
+} from './runtime-turn-wait.js';
+import {
+  availableSkillCommands,
+  executeTuiAcpCommand,
+  TUI_ACP_AVAILABLE_COMMANDS,
+} from './commands.js';
 import {
   ACP_CONFIG_MODEL,
   ACP_CONFIG_PERMISSION_MODE,
@@ -33,22 +52,73 @@ import {
 import {
   registerTuiAcpExtensions,
   resolveRootSessionId,
+  createTuiAcpSessionAwaitingDecisionError,
   supportsTuiAcpExtensionNotifications,
   TUI_ACP_EXTENSION_VERSION,
   tuiAcpExtensionCapabilities,
 } from './extensions.js';
+import { projectTuiAcpHistoryMessage } from './history-updates.js';
 import { runTuiAcpInteractions, type TuiAcpRuntimeProjection } from './interactions.js';
 import { modelSupportsVariant } from './model-selection.js';
 import { TuiAcpPromptContinuation } from './prompt-continuation.js';
+import { createTuiAcpPromptResponse } from './prompt-result.js';
+import {
+  isSessionTurnTerminal,
+  settleTuiAcpSession,
+  type TuiAcpSettleOptions,
+} from './session-settle.js';
 import {
   parseTuiAcpPrompt,
-  readTuiAcpHistoryImages,
   writeTuiAcpPromptAttachments,
   type TuiAcpPromptAttachments,
 } from './prompt-content.js';
 import { TuiAcpUpdateProjector } from './updates.js';
 
 const AUTH_METHOD_ID = 'minimax-code-login';
+const AUTH_METHOD_ID_GLOBAL = 'minimax-code-login-global';
+const AUTH_METHOD_ID_API_KEY = 'minimax-code-api-key';
+const AUTH_METHOD_ID_API_KEY_GLOBAL = 'minimax-code-api-key-global';
+const AUTH_API_KEY_ENV = 'MCODE_PROVIDER_API_KEY';
+const AUTH_METHODS = [
+  {
+    type: 'terminal' as const,
+    id: AUTH_METHOD_ID,
+    name: 'Sign in to MiniMax Code (Mainland China)',
+    // Keep the default CLI login region explicit: ACP auth must not inherit a
+    // stale Global preference when the client selected the default method.
+    args: ['login', '--region', 'cn'],
+  },
+  {
+    type: 'terminal' as const,
+    id: AUTH_METHOD_ID_GLOBAL,
+    name: 'Sign in to MiniMax Code (Global)',
+    args: ['login', '--region', 'global'],
+  },
+  {
+    type: 'env_var' as const,
+    id: AUTH_METHOD_ID_API_KEY,
+    name: 'Use a MiniMax API key (Mainland China)',
+    vars: [{ name: AUTH_API_KEY_ENV, label: 'MiniMax API key', secret: true }],
+  },
+  {
+    type: 'env_var' as const,
+    id: AUTH_METHOD_ID_API_KEY_GLOBAL,
+    name: 'Use a MiniMax API key (Global)',
+    vars: [{ name: AUTH_API_KEY_ENV, label: 'MiniMax API key', secret: true }],
+  },
+] satisfies readonly acp.AuthMethod[];
+// Mainland China and Global accounts, keys and hosts are separate, so every method names its
+// region explicitly instead of inheriting whichever region the process happened to start in.
+const AUTH_METHOD_REGIONS: ReadonlyMap<string, MavisRegion> = new Map([
+  [AUTH_METHOD_ID, 'cn'],
+  [AUTH_METHOD_ID_GLOBAL, 'en'],
+  [AUTH_METHOD_ID_API_KEY, 'cn'],
+  [AUTH_METHOD_ID_API_KEY_GLOBAL, 'en'],
+]);
+const AUTH_API_KEY_METHOD_IDS: ReadonlySet<string> = new Set([
+  AUTH_METHOD_ID_API_KEY,
+  AUTH_METHOD_ID_API_KEY_GLOBAL,
+]);
 const AVAILABLE_COMMANDS_RETRY_DELAY_MS = 100;
 const ACP_HISTORY_PAGE_SIZE = 100;
 const MAX_DETACHED_LIFECYCLES_PER_SESSION = 2;
@@ -57,9 +127,23 @@ const MAX_ADMITTED_LIFECYCLES_PER_SESSION = 64;
 const MAX_ADMITTED_LIFECYCLES_TOTAL = 256;
 const MAX_ACTIVE_NEW_OPERATIONS = 8;
 const MAX_ACTIVE_FORK_OPERATIONS = 8;
+/**
+ * Bound on a new prompt waiting for an active Runtime Turn before admission. It matches the
+ * settle bound (session-settle.ts) so one prompt never waits on Runtime-owned work longer.
+ */
+const DEFAULT_PROMPT_ADMISSION_MAX_WAIT_MS = 600_000;
+/**
+ * Re-read spacing while that wait sees the Turn still active after a watch round: starts short so
+ * a cancel-then-prompt steer is admitted right after settlement, doubles each round, and caps at
+ * the settle poll interval (1 s), so a 10-minute wait reads the Runtime at most ~600 times.
+ */
+const DEFAULT_PROMPT_ADMISSION_POLL_INTERVAL_MS = 25;
+const DEFAULT_PROMPT_ADMISSION_MAX_POLL_INTERVAL_MS = 1_000;
 
 interface AcpSession {
   session: TuiSession;
+  /** Present until the reserved Runtime Session is created; see {@link PendingRuntimeSession}. */
+  pending?: PendingRuntimeSession;
   mcpServers: readonly TuiSessionMcpServer[];
   coordinator: TuiRunCoordinator;
   readonly attachmentController: AbortController;
@@ -70,6 +154,12 @@ interface AcpSession {
     readonly targetModeId: typeof ACP_MODE_DEFAULT | typeof ACP_MODE_PLAN;
     steerableTurnId?: string;
   };
+  /**
+   * Turns the last ACP prompt started: its admitted Turn plus every continuation it followed.
+   * Present once a prompt ran, so the next prompt fences on a late Runtime Turn first; steer uses
+   * it to tell the cancelled prompt's own settling Turn from a Turn another entry started.
+   */
+  lastPromptTurnIds?: ReadonlySet<string>;
 }
 
 export interface CreateTuiAcpAgentOptions {
@@ -77,9 +167,50 @@ export interface CreateTuiAcpAgentOptions {
   readonly version: string;
   readonly createTurnId?: () => string;
   readonly runtimeEventProjectionTimeoutMs?: number;
+  /** Timing of the wait for work the admitted Turn leaves behind; defaults in production. */
+  readonly settle?: TuiAcpSettleOptions;
+  /** Bound and re-read spacing of a new prompt waiting for an active Runtime Turn. */
+  readonly promptAdmission?: Partial<RuntimeTurnWaitTiming>;
+  /** Rebuilds the ACP Runtime when authentication selects another account region. */
+  readonly switchRegion?: (region: MavisRegion) => Promise<TuiAcpRuntime>;
+  /**
+   * Remembers the region of a saved API key for later ACP and CLI starts, as
+   * `mcode login --region` does for its own login. It must not throw.
+   */
+  readonly rememberRegion?: (region: MavisRegion) => void;
+  /**
+   * The `MCODE_PROVIDER_API_KEY` value `mcode acp` already took out of the process environment
+   * with {@link takeAcpAuthApiKeyFromEnvironment} before the Runtime started.
+   */
+  readonly authApiKey?: string;
 }
 
 export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentApp {
+  // Kept only in memory: a retry after a failed region switch, or a second API key
+  // authentication, reuses it after the environment variable is gone.
+  let authApiKey = options.authApiKey;
+  const readAuthApiKey = (): string => {
+    // A caller that did not take the key at start (an embedder or a test) still must not leave it
+    // in the environment, so the first read takes it out as well.
+    authApiKey ??= takeAcpAuthApiKeyFromEnvironment();
+    if (!authApiKey) {
+      throw acp.RequestError.invalidParams(
+        undefined,
+        `MiniMax API key is missing. Set ${AUTH_API_KEY_ENV} for this ACP process.`,
+      );
+    }
+    return authApiKey;
+  };
+  let activeRuntime = options.runtime;
+  // The region activeRuntime was started for. After a failed rebuild process.env may already
+  // name the requested region while activeRuntime is the stopped one, so it cannot decide.
+  let activeRuntimeRegion: MavisRegion | undefined = currentAcpRegion();
+  const runtime = new Proxy({} as TuiAcpRuntime, {
+    get(_target, property) {
+      const value = Reflect.get(activeRuntime, property, activeRuntime);
+      return typeof value === 'function' ? value.bind(activeRuntime) : value;
+    },
+  });
   const sessions = new Map<string, AcpSession>();
   const provisionalNewSessions = new Map<
     string,
@@ -97,7 +228,16 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   const runPermissionMutation = createKeyedSerialExecutor();
   const promptCancelEpochs = new Map<string, number>();
   const promptCancelLatches = new Set<string>();
+  /** A Prompt waiting in admission for a Runtime Turn to settle; session/cancel ends the wait. */
+  const promptAdmissionWaits = new Map<string, AbortController>();
   const createTurnId = options.createTurnId ?? randomUUID;
+  const promptAdmissionWait: RuntimeTurnWaitTiming = {
+    maxWaitMs: options.promptAdmission?.maxWaitMs ?? DEFAULT_PROMPT_ADMISSION_MAX_WAIT_MS,
+    pollIntervalMs:
+      options.promptAdmission?.pollIntervalMs ?? DEFAULT_PROMPT_ADMISSION_POLL_INTERVAL_MS,
+    maxPollIntervalMs:
+      options.promptAdmission?.maxPollIntervalMs ?? DEFAULT_PROMPT_ADMISSION_MAX_POLL_INTERVAL_MS,
+  };
   let activeAcpSessionId: string | undefined;
   let activeNewOperations = 0;
   let activeForkOperations = 0;
@@ -106,6 +246,11 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   let clientCapabilities: acp.ClientCapabilities = {};
   let pendingPermissionBroadcast: readonly (readonly [string, AcpSession])[] | undefined;
   let permissionBroadcastRunning = false;
+  // The Runtime event loop. It is the one long-lived subscription, so unlike per-call methods it
+  // cannot go through the proxy: it is bound to one concrete Runtime and replaced on a switch.
+  let runtimeEventLoop:
+    | { readonly runtime: TuiAcpRuntime; readonly controller: AbortController }
+    | undefined;
   const app = acp.agent({ name: 'minimax-code' });
 
   const advertiseAvailableCommands = (client: acp.AgentContext, sessionId: string): void => {
@@ -132,7 +277,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       if (!isCurrent()) return;
       notify();
       void (async () => {
-        const skills = await options.runtime.listSkills(
+        const skills = await runtime.listSkills(
           attachment.session.agentName,
           undefined,
           attachment.session.workspaceDir,
@@ -162,7 +307,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           pendingPermissionBroadcast = undefined;
           try {
             await notifyPermissionConfigUpdates(
-              options.runtime,
+              runtime,
               client,
               sessions,
               pending,
@@ -249,10 +394,23 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     return true;
   };
 
+  // Writes the Runtime Session an attachment reserved at session/new (see reserved-session.ts).
+  const materializeSession = createRuntimeSessionMaterializer(runtime);
+
   registerTuiAcpExtensions({
     app,
-    runtime: options.runtime,
+    runtime,
     resolveSession: (sessionId) => sessions.get(sessionId)?.session,
+    isRuntimeSessionPending: (sessionId) => sessions.get(sessionId)?.pending !== undefined,
+    ensureRuntimeSession: async (sessionId) => {
+      if (!sessions.get(sessionId)?.pending) return;
+      // Same lane as set_config_option, so a concurrent model choice is not lost.
+      await runSessionLifecycle(sessionId, async (signal) => {
+        assertLifecycleActive(signal);
+        const attachment = sessions.get(sessionId);
+        if (attachment?.pending) await materializeSession(attachment);
+      });
+    },
     activateSession: (sessionId) => {
       activeAcpSessionId = sessionId;
     },
@@ -261,6 +419,14 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       const prompt = sessions.get(sessionId)?.activePrompt;
       return prompt && !prompt.controller.signal.aborted ? prompt.steerableTurnId : undefined;
     },
+    activePromptState: (sessionId) => {
+      const prompt = sessions.get(sessionId)?.activePrompt;
+      if (!prompt) return 'none';
+      if (prompt.controller.signal.aborted) return 'stopping';
+      return prompt.steerableTurnId ? 'steerable' : 'waiting';
+    },
+    isLastPromptTurn: (sessionId, turnId) =>
+      sessions.get(sessionId)?.lastPromptTurnIds?.has(turnId) === true,
   });
 
   const attachPersistedSession = async (
@@ -272,7 +438,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   ): Promise<AcpSession> => {
     assertLifecycleActive(signal);
     assertNoAdditionalDirectories(params.additionalDirectories);
-    await assertAuthenticated(options.runtime);
+    await assertAuthenticated(runtime);
     assertLifecycleActive(signal);
     for (
       let provisionalNewSession = provisionalNewSessions.get(params.sessionId);
@@ -299,16 +465,16 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         'A prompt is already active for this session.',
       );
     }
-    const session = await getPersistedSession(options.runtime, params.sessionId);
+    if (existing?.pending) {
+      // Loading the ID this process reserved writes the Session it names first.
+      await materializeSession(existing);
+      assertLifecycleActive(signal);
+    }
+    const session = await getPersistedSession(runtime, params.sessionId);
     assertLifecycleActive(signal);
     assertAcpSessionUsable(session);
     assertMatchingCwd(session, params.cwd);
-    await hydrateRuntimeAncestry(
-      options.runtime,
-      runtimeParentSessionIds,
-      session.sessionId,
-      signal,
-    );
+    await hydrateRuntimeAncestry(runtime, runtimeParentSessionIds, session.sessionId, signal);
     const mcpServers = mapClientMcpServers(params.mcpServers ?? []);
     try {
       await runSessionMcpMutation(params.sessionId, async (mcpSignal) => {
@@ -316,11 +482,11 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           assertLifecycleActive(signal);
           assertLifecycleActive(mcpSignal);
           onOverlayMutationStart?.(existing, session.sessionId);
-          await options.runtime.clearSessionMcpServers(session.sessionId);
+          await runtime.clearSessionMcpServers(session.sessionId);
           assertLifecycleActive(signal);
           assertLifecycleActive(mcpSignal);
           if (mcpServers.length > 0) {
-            await options.runtime.configureSessionMcpServers(session.sessionId, mcpServers);
+            await runtime.configureSessionMcpServers(session.sessionId, mcpServers);
             assertLifecycleActive(signal);
             assertLifecycleActive(mcpSignal);
           }
@@ -331,7 +497,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
             'ACP Session attachment invalidated by MCP overlay failure.',
             client,
           );
-          await options.runtime.clearSessionMcpServers(session.sessionId).catch(() => undefined);
+          await runtime.clearSessionMcpServers(session.sessionId).catch(() => undefined);
           throw error;
         }
       });
@@ -347,7 +513,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     const active = {
       session,
       mcpServers,
-      coordinator: new TuiRunCoordinator(options.runtime),
+      coordinator: new TuiRunCoordinator(runtime),
       attachmentController: new AbortController(),
     };
     onAttachmentPrepared?.(active);
@@ -360,16 +526,22 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     return active;
   };
 
-  app.onConnect((connection) => {
-    if (hasConnected) {
-      connection.close(new Error('MCode ACP supports exactly one Client connection per process.'));
-      return;
-    }
-    hasConnected = true;
-    activeConnection = connection;
+  /**
+   * Subscribes the connection to one Runtime's events and ends the previous subscription. A
+   * region switch replaces the Runtime, and the stopped Runtime never relays the new Runtime's
+   * permission or questionnaire requests. The new loop subscribes before the old one is
+   * aborted, both in the same synchronous step that publishes the Runtime to per-call methods,
+   * so no request routed to the new Runtime can run before its events are observed.
+   */
+  const watchRuntimeEvents = (connection: acp.AgentConnection, eventRuntime: TuiAcpRuntime) => {
+    if (runtimeEventLoop?.runtime === eventRuntime) return;
+    const previous = runtimeEventLoop;
+    const controller = new AbortController();
+    runtimeEventLoop = { runtime: eventRuntime, controller };
     void runTuiAcpInteractions({
-      runtime: options.runtime,
+      runtime: eventRuntime,
       connection,
+      signal: controller.signal,
       resolveSession: (runtimeSessionId) => {
         const resolved = resolveOwnedRuntimeSession(
           sessions,
@@ -397,7 +569,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       },
       createRuntimeEventProjections: (event) =>
         createRuntimeControlProjections({
-          runtime: options.runtime,
+          runtime: eventRuntime,
           client: connection.client,
           clientCapabilities,
           sessions,
@@ -434,11 +606,24 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         ];
       },
     });
+    // Its own schedulers close with it and cancel its unanswered interactions; the replacement
+    // loop above already has new ones.
+    previous?.controller.abort(new Error('ACP Runtime was replaced by a region switch.'));
+  };
+
+  app.onConnect((connection) => {
+    if (hasConnected) {
+      connection.close(new Error('MCode ACP supports exactly one Client connection per process.'));
+      return;
+    }
+    hasConnected = true;
+    activeConnection = connection;
+    watchRuntimeEvents(connection, activeRuntime);
   });
 
   app.onRequest(acp.methods.agent.initialize, ({ params }) => {
     clientCapabilities = params.clientCapabilities ?? {};
-    const extensionCapabilities = tuiAcpExtensionCapabilities(options.runtime);
+    const extensionCapabilities = tuiAcpExtensionCapabilities(runtime);
     const supportsTerminalAuth =
       clientCapabilities.auth?.terminal === true ||
       clientCapabilities._meta?.['terminal-auth'] === true;
@@ -462,18 +647,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           close: {},
         },
       },
-      ...(supportsTerminalAuth
-        ? {
-            authMethods: [
-              {
-                type: 'terminal' as const,
-                id: AUTH_METHOD_ID,
-                name: 'Sign in to MiniMax Code',
-                args: ['login'],
-              },
-            ],
-          }
-        : {}),
+      ...(supportsTerminalAuth ? { authMethods: [...AUTH_METHODS] } : {}),
       agentInfo: {
         name: 'minimax-code',
         title: 'MiniMax Code',
@@ -490,10 +664,37 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   });
 
   app.onRequest(acp.methods.agent.authenticate, async ({ params }) => {
-    if (params.methodId !== AUTH_METHOD_ID) {
+    const region = AUTH_METHOD_REGIONS.get(params.methodId);
+    if (!region) {
       throw acp.RequestError.invalidParams(undefined, 'Unknown authentication method.');
     }
-    await assertAuthenticated(options.runtime);
+    // Read before any switch: a missing key leaves the Runtime and its region untouched.
+    const apiKey = AUTH_API_KEY_METHOD_IDS.has(params.methodId) ? readAuthApiKey() : undefined;
+
+    if (activeRuntimeRegion !== region) {
+      if (!options.switchRegion) {
+        throw acp.RequestError.invalidParams(
+          undefined,
+          'Authentication region changed; restart the ACP process before continuing.',
+        );
+      }
+      activeRuntimeRegion = undefined;
+      // A failed switch throws here and leaves activeRuntime and its event loop untouched.
+      const switched = await options.switchRegion(region);
+      // Per-call methods reach the new Runtime through the proxy from here on; its event stream
+      // is subscribed in the same step. Before a connection exists, onConnect subscribes it.
+      activeRuntime = switched;
+      activeRuntimeRegion = region;
+      if (activeConnection) watchRuntimeEvents(activeConnection, switched);
+    }
+
+    if (apiKey) {
+      // Saved through the Runtime of the key's own region: the key only works against that API host.
+      await runtime.upsertMiniMaxApiKey({ apiKey, saveAndUse: true });
+      // Terminal login remembers its region in the login process; an API key has no such process.
+      options.rememberRegion?.(region);
+    }
+    await assertAuthenticated(runtime);
     return {};
   });
 
@@ -533,7 +734,8 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         'ACP Session creation was cancelled or failed.',
         context.client,
       );
-      cleanupPromise = options.runtime.deleteSession(session.sessionId);
+      // A reserved Session was never written to the Runtime.
+      cleanupPromise = Promise.resolve();
       return cleanupPromise;
     };
     let rejectCancelled!: (error: unknown) => void;
@@ -560,13 +762,11 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       try {
         assertLifecycleActive(context.signal);
         assertNoAdditionalDirectories(params.additionalDirectories);
-        await assertAuthenticated(options.runtime);
+        await assertAuthenticated(runtime);
         assertLifecycleActive(context.signal);
         const mcpServers = mapClientMcpServers(params.mcpServers);
-        session = await options.runtime.createSession({
-          workspaceDir: params.cwd,
-          ...(mcpServers.length > 0 ? { mcpServers } : {}),
-        });
+        // Reserve the identity only; materializeSession writes the Runtime Session on first use.
+        session = { sessionId: runtime.newSessionId(), workspaceDir: params.cwd };
         const provisionalToken = Symbol(session.sessionId);
         let resolveProvisional!: () => void;
         const provisionalSettled = new Promise<void>((settle) => {
@@ -580,11 +780,12 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         assertLifecycleActive(context.signal);
         attachment = {
           session,
+          pending: { workspaceDir: params.cwd },
           mcpServers,
-          coordinator: new TuiRunCoordinator(options.runtime),
+          coordinator: new TuiRunCoordinator(runtime),
           attachmentController: new AbortController(),
         };
-        const control = await getTuiAcpSessionControlState(options.runtime, session);
+        const control = await getTuiAcpSessionControlState(runtime, session, { persisted: false });
         assertLifecycleActive(context.signal);
         if (sessions.has(session.sessionId)) {
           throw acp.RequestError.invalidParams(
@@ -629,11 +830,11 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   });
 
   app.onRequest(acp.methods.agent.session.list, async ({ params }) => {
-    await assertAuthenticated(options.runtime);
+    await assertAuthenticated(runtime);
     if (params.cwd && !isAbsolute(params.cwd)) {
       throw acp.RequestError.invalidParams(undefined, 'Session list cwd must be absolute.');
     }
-    const page = await options.runtime.listSessionPage({
+    const page = await runtime.listSessionPage({
       includeArchived: true,
       ...(params.cwd ? { workspaceDir: params.cwd } : {}),
       ...(params.cursor ? { cursor: params.cursor } : {}),
@@ -655,9 +856,17 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     const operation = (async () => {
       const { params } = context;
       assertNoAdditionalDirectories(params.additionalDirectories);
-      await assertAuthenticated(options.runtime);
+      await assertAuthenticated(runtime);
       assertLifecycleActive(context.signal);
-      const source = await getPersistedSession(options.runtime, params.sessionId);
+      const reservedSource = sessions.get(params.sessionId);
+      if (reservedSource?.pending) {
+        await runSessionLifecycle(params.sessionId, async (signal) => {
+          assertLifecycleActive(signal);
+          await materializeSession(reservedSource);
+        });
+        assertLifecycleActive(context.signal);
+      }
+      const source = await getPersistedSession(runtime, params.sessionId);
       assertLifecycleActive(context.signal);
       assertAcpSessionUsable(source);
       assertMatchingCwd(source, params.cwd);
@@ -665,7 +874,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         params.mcpServers === undefined
           ? (sessions.get(source.sessionId)?.mcpServers ?? [])
           : mapClientMcpServers(params.mcpServers);
-      const forkOptions = await options.runtime.getSessionForkOptions(source.sessionId);
+      const forkOptions = await runtime.getSessionForkOptions(source.sessionId);
       assertLifecycleActive(context.signal);
       if (!forkOptions.canFork) {
         throw acp.RequestError.invalidParams(
@@ -673,7 +882,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           forkOptions.unavailableReason ?? 'Runtime rejected this Session fork.',
         );
       }
-      const result = await options.runtime.forkSession({
+      const result = await runtime.forkSession({
         sessionId: source.sessionId,
         clientRequestId: randomUUID(),
         useSuggestedTitle: true,
@@ -696,23 +905,20 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
             assertLifecycleActive(mutationSignal);
             if (existing) {
               existingOverlayTouched = true;
-              await options.runtime.clearSessionMcpServers(result.session.sessionId);
+              await runtime.clearSessionMcpServers(result.session.sessionId);
               assertLifecycleActive(mutationSignal);
             }
             if (mcpServers.length > 0) {
-              await options.runtime.configureSessionMcpServers(
-                result.session.sessionId,
-                mcpServers,
-              );
+              await runtime.configureSessionMcpServers(result.session.sessionId, mcpServers);
               assertLifecycleActive(mutationSignal);
             }
           });
-          const control = await getTuiAcpSessionControlState(options.runtime, result.session);
+          const control = await getTuiAcpSessionControlState(runtime, result.session);
           assertLifecycleActive(requestSignal);
           const active = {
             session: result.session,
             mcpServers,
-            coordinator: new TuiRunCoordinator(options.runtime),
+            coordinator: new TuiRunCoordinator(runtime),
             attachmentController: new AbortController(),
           };
           if (existing) {
@@ -725,7 +931,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         } catch (error) {
           if (!existing) {
             try {
-              await options.runtime.deleteSession(result.session.sessionId);
+              await runtime.deleteSession(result.session.sessionId);
             } catch {
               throw acp.RequestError.internalError(
                 undefined,
@@ -743,7 +949,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
             );
             if (detached) {
               void runSessionMcpMutation(result.session.sessionId, async () => {
-                await options.runtime.clearSessionMcpServers(result.session.sessionId);
+                await runtime.clearSessionMcpServers(result.session.sessionId);
               }).catch(() => undefined);
             }
           }
@@ -788,7 +994,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         if (!detached && !(cleanupStartedOverlay && overlayMutationStarted)) return;
         cleanupQueued = true;
         void runSessionMcpMutation(context.params.sessionId, async () => {
-          await options.runtime.clearSessionMcpServers(runtimeSessionId);
+          await runtime.clearSessionMcpServers(runtimeSessionId);
         }).catch(() => undefined);
       };
       const onAbort = () => invalidateAttachment('ACP Session load was cancelled.', true);
@@ -815,7 +1021,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
             runtimeSessionId = active.session.sessionId;
             const attachment = active;
             const messages = await loadCompleteHistory(
-              options.runtime,
+              runtime,
               attachment.session.sessionId,
               requestSignal,
             );
@@ -825,7 +1031,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
             );
             assertLifecycleActive(requestSignal);
             advertiseAvailableCommands(context.client, context.params.sessionId);
-            const control = await getTuiAcpSessionControlState(options.runtime, attachment.session);
+            const control = await getTuiAcpSessionControlState(runtime, attachment.session);
             assertLifecycleActive(requestSignal);
             return control;
           },
@@ -862,7 +1068,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         if (!detached && !(cleanupStartedOverlay && overlayMutationStarted)) return;
         cleanupQueued = true;
         void runSessionMcpMutation(context.params.sessionId, async () => {
-          await options.runtime.clearSessionMcpServers(runtimeSessionId);
+          await runtime.clearSessionMcpServers(runtimeSessionId);
         }).catch(() => undefined);
       };
       const onAbort = () => invalidateAttachment('ACP Session resume was cancelled.', true);
@@ -888,7 +1094,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
             );
             runtimeSessionId = active.session.sessionId;
             advertiseAvailableCommands(context.client, context.params.sessionId);
-            const control = await getTuiAcpSessionControlState(options.runtime, active.session);
+            const control = await getTuiAcpSessionControlState(runtime, active.session);
             assertLifecycleActive(requestSignal);
             return control;
           },
@@ -919,9 +1125,10 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       if (sessions.get(params.sessionId) === active) sessions.delete(params.sessionId);
     }
     clearDetachedClientState(params.sessionId, client, active);
-    if (active) {
+    // A reserved Session has no Runtime overlay; an in-flight creation removes itself on detach.
+    if (active && !active.pending) {
       void runSessionMcpMutation(params.sessionId, async () => {
-        await options.runtime.clearSessionMcpServers(active.session.sessionId);
+        await runtime.clearSessionMcpServers(active.session.sessionId);
       }).catch(() => undefined);
     }
     return {};
@@ -931,10 +1138,14 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     return runSessionLifecycle(params.sessionId, async (signal) => {
       assertLifecycleActive(signal);
       const active = requireAttachedSession(sessions, params.sessionId);
-      const refreshed = await options.runtime.getSession(active.session.sessionId);
+      const refreshed = active.pending
+        ? active.session
+        : await runtime.getSession(active.session.sessionId);
       assertLifecycleActive(signal);
       active.session = refreshed;
-      const state = await getTuiAcpSessionControlState(options.runtime, refreshed);
+      const state = await getTuiAcpSessionControlState(runtime, refreshed, {
+        persisted: !active.pending,
+      });
       assertLifecycleActive(signal);
       if (!state.modes.availableModes.some((mode) => mode.id === params.modeId)) {
         throw acp.RequestError.invalidParams(
@@ -976,7 +1187,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         await runPermissionMutation('permission-mode', async (mutationSignal) => {
           assertLifecycleActive(signal);
           assertLifecycleActive(mutationSignal);
-          await options.runtime.setPermissionMode(permissionMode);
+          await runtime.setPermissionMode(permissionMode);
         });
         schedulePermissionBroadcast(context.client, [...sessions.entries()]);
         assertLifecycleActive(signal);
@@ -993,12 +1204,18 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         await runSessionConfigMutation(params.sessionId, async (mutationSignal) => {
           assertLifecycleActive(signal);
           assertLifecycleActive(mutationSignal);
-          const models = await options.runtime.listModels(active.session.sessionId);
+          const models = await (active.pending
+            ? runtime.listModels()
+            : runtime.listModels(active.session.sessionId));
           assertLifecycleActive(signal);
           if (!isAdvertisedModelSelection(models, selection)) {
             throw acp.RequestError.invalidParams(undefined, 'Model selection is not advertised.');
           }
-          if (!(await options.runtime.selectSessionModel(selection, active.session.sessionId))) {
+          if (active.pending) {
+            bufferPendingModel(active, selection);
+            return;
+          }
+          if (!(await runtime.selectSessionModel(selection, active.session.sessionId))) {
             throw acp.RequestError.invalidParams(
               undefined,
               'Runtime rejected the model selection.',
@@ -1010,7 +1227,10 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         await runSessionConfigMutation(params.sessionId, async (mutationSignal) => {
           assertLifecycleActive(signal);
           assertLifecycleActive(mutationSignal);
-          const session = await options.runtime.getSession(active.session.sessionId);
+          const pendingRoster = active.pending ? await runtime.listModels() : undefined;
+          const session = pendingRoster
+            ? withRosterModel(active.session, pendingRoster)
+            : await runtime.getSession(active.session.sessionId);
           assertLifecycleActive(signal);
           if (!session.model?.providerId || !session.model.modelId) {
             throw acp.RequestError.invalidParams(
@@ -1018,7 +1238,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               'Select a Session model before changing thinking effort.',
             );
           }
-          const models = await options.runtime.listModels(session.sessionId);
+          const models = pendingRoster ?? (await runtime.listModels(session.sessionId));
           assertLifecycleActive(signal);
           const selectedModel = models.find(
             (model) =>
@@ -1032,17 +1252,17 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               `Thinking effort is not advertised for the selected model: ${params.value}`,
             );
           }
-          if (
-            !(await options.runtime.selectSessionModel(
-              {
-                providerId: session.model.providerId,
-                modelId: session.model.modelId,
-                ...(session.model.variant !== undefined ? { variant: session.model.variant } : {}),
-                thinking: { effort: params.value },
-              },
-              session.sessionId,
-            ))
-          ) {
+          const effortSelection: TuiModelSelection = {
+            providerId: session.model.providerId,
+            modelId: session.model.modelId,
+            ...(session.model.variant !== undefined ? { variant: session.model.variant } : {}),
+            thinking: { effort: params.value },
+          };
+          if (active.pending) {
+            bufferPendingModel(active, effortSelection);
+            return;
+          }
+          if (!(await runtime.selectSessionModel(effortSelection, session.sessionId))) {
             throw acp.RequestError.invalidParams(undefined, 'Runtime rejected thinking effort.');
           }
         });
@@ -1054,9 +1274,11 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         );
       }
 
-      active.session = await options.runtime.getSession(active.session.sessionId);
+      if (!active.pending) active.session = await runtime.getSession(active.session.sessionId);
       assertLifecycleActive(signal);
-      const control = await getTuiAcpSessionControlState(options.runtime, active.session);
+      const control = await getTuiAcpSessionControlState(runtime, active.session, {
+        persisted: !active.pending,
+      });
       assertLifecycleActive(signal);
       if (params.configId !== ACP_CONFIG_PERMISSION_MODE) {
         await context.client.notify(acp.methods.client.session.update, {
@@ -1093,9 +1315,41 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           'A prompt is already active for this session.',
         );
       }
+      if (active.pending) {
+        await materializeSession(active);
+        if (isCancelled()) return { cancelled: true as const };
+      }
+      if (active.lastPromptTurnIds) {
+        // The fence waits for whatever Turn the Runtime reports active on this Session: the
+        // Runtime does not say which entry started a Turn, so a late continuation of the last
+        // prompt and another entry's Turn on the same Runtime look alike. Only a Turn another
+        // MCode process runs is known not to be ours, and a Turn waiting for a decision cannot
+        // settle on its own; both fail fast instead of waiting.
+        const admissionWait = new AbortController();
+        promptAdmissionWaits.set(context.params.sessionId, admissionWait);
+        let wait: RuntimeTurnWait = 'unknown';
+        try {
+          wait = await waitForRuntimeTurnToSettle(
+            runtime,
+            active.session.sessionId,
+            AbortSignal.any([signal, context.signal, admissionWait.signal]),
+            promptAdmissionWait,
+          );
+        } catch {
+          // A failed activity read is fail-open here; the direct send path below
+          // still has a bounded local_session_busy retry.
+        } finally {
+          if (promptAdmissionWaits.get(context.params.sessionId) === admissionWait) {
+            promptAdmissionWaits.delete(context.params.sessionId);
+          }
+        }
+        if (isCancelled()) return { cancelled: true as const };
+        const admissionError = admissionWaitError(wait, promptAdmissionWait.maxWaitMs);
+        if (admissionError) throw admissionError;
+      }
 
       const command = await executeTuiAcpCommand({
-        runtime: options.runtime,
+        runtime,
         sessionId: active.session.sessionId,
         agentName: active.session.agentName,
         workspaceDir: active.session.workspaceDir,
@@ -1169,72 +1423,140 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     };
 
     let promptAttachments: TuiAcpPromptAttachments | undefined;
+    const continuationTurnIds: string[] = [];
     try {
       if (promptController.signal.aborted) return { stopReason: 'cancelled' };
       promptAttachments = await writeTuiAcpPromptAttachments(prompt);
       if (promptController.signal.aborted) return { stopReason: 'cancelled' };
-      const result = await executeTuiInteractiveTurn({
-        request: {
-          turnId,
-          session: Promise.resolve(active.session),
-          content: prompt.content,
-          ...(promptAttachments.attachments.length > 0
-            ? { attachments: promptAttachments.attachments }
-            : {}),
-          workspace: active.session.workspaceDir ?? process.cwd(),
-          version: options.version,
-          ...(submittedModeIntent ? { clientIntent: submittedModeIntent } : {}),
-        },
-        coordinator: active.coordinator,
-        isActive: () =>
-          !promptController.signal.aborted &&
-          sessions.get(context.params.sessionId) === active &&
-          active.activePrompt === activePrompt,
-        onSessionEvent,
-        onRunAccepted: () => {
-          modeIntentAccepted = true;
-          if (!promptController.signal.aborted && active.activePrompt === activePrompt) {
-            activePrompt.steerableTurnId = turnId;
-          }
-        },
-      });
+      const runStartedAt = Date.now();
+      const settle = async (stopReason: acp.StopReason): Promise<acp.StopReason> => {
+        if (stopReason !== 'end_turn') return stopReason;
+        return settleTuiAcpSession({
+          runtime,
+          sessionId: active.session.sessionId,
+          followedTurnIds: [turnId, ...continuationTurnIds],
+          continuation: activePrompt.continuation,
+          signal: promptController.signal,
+          settle: options.settle ?? {},
+          onSessionEvent,
+          onFollowTurn: (followedTurnId) => {
+            if (followedTurnId && !continuationTurnIds.includes(followedTurnId)) {
+              continuationTurnIds.push(followedTurnId);
+            }
+            if (!promptController.signal.aborted && active.activePrompt === activePrompt) {
+              activePrompt.steerableTurnId = followedTurnId;
+            }
+          },
+        });
+      };
+      const respond = (stopReason: acp.StopReason, outcome: TuiRunResult['outcome']) =>
+        createTuiAcpPromptResponse({
+          runtime,
+          sessionId: active.session.sessionId,
+          stopReason,
+          outcome,
+          continuationTurnIds,
+          durationMs: Date.now() - runStartedAt,
+        });
+      const onRunAccepted = () => {
+        modeIntentAccepted = true;
+        if (!promptController.signal.aborted && active.activePrompt === activePrompt) {
+          activePrompt.steerableTurnId = turnId;
+        }
+      };
+      let result: TuiRunResult;
+      let retryWait: RuntimeTurnWait | undefined;
+      for (let attempt = 0; ; attempt += 1) {
+        result = await executeTuiInteractiveTurn({
+          request: {
+            turnId,
+            session: Promise.resolve(active.session),
+            content: prompt.content,
+            ...(promptAttachments.attachments.length > 0
+              ? { attachments: promptAttachments.attachments }
+              : {}),
+            workspace: active.session.workspaceDir ?? process.cwd(),
+            version: options.version,
+            ...(submittedModeIntent ? { clientIntent: submittedModeIntent } : {}),
+          },
+          coordinator: active.coordinator,
+          isActive: () =>
+            !promptController.signal.aborted &&
+            sessions.get(context.params.sessionId) === active &&
+            active.activePrompt === activePrompt,
+          onSessionEvent,
+          onRunAccepted,
+        });
+        if (!isLocalSessionBusyResult(result) || attempt >= 1) break;
+        retryWait = await waitForRuntimeTurnToSettle(
+          runtime,
+          active.session.sessionId,
+          promptController.signal,
+          promptAdmissionWait,
+        );
+        if (promptController.signal.aborted || !retriesAfterBusyWait(retryWait)) break;
+      }
       activePrompt.steerableTurnId = undefined;
+      // session/cancel during the busy retry wait finds no coordinator run to stop, so the busy
+      // result of the rejected attempt is still here. The user cancelled: answer `cancelled`
+      // (nothing ran) instead of a retryable busy error that would make the Client resend it.
+      if (promptController.signal.aborted && isLocalSessionBusyResult(result)) {
+        await Promise.all(pendingUpdates);
+        return await respond('cancelled', result.outcome);
+      }
+      // The lock holder waits for a decision this Client cannot answer: say so instead of the
+      // retryable `runtime-busy` error, which would invite a resend into the same block.
+      if (retryWait === 'decision-blocked' && isLocalSessionBusyResult(result)) {
+        await Promise.all(pendingUpdates);
+        throw createTuiAcpSessionAwaitingDecisionError();
+      }
       if (isQuestionnaireContinuation(result)) {
         const stopReason = await followQuestionnaireContinuations({
-          runtime: options.runtime,
+          runtime,
           sessionId: active.session.sessionId,
           initialTurnId: turnId,
           signal: promptController.signal,
           continuation: activePrompt.continuation,
           onSessionEvent,
           onSteerableTurnChange: (continuationTurnId) => {
+            if (continuationTurnId && !continuationTurnIds.includes(continuationTurnId)) {
+              continuationTurnIds.push(continuationTurnId);
+            }
             if (!promptController.signal.aborted && active.activePrompt === activePrompt) {
               activePrompt.steerableTurnId = continuationTurnId;
             }
           },
         });
+        const settledStopReason = await settle(stopReason);
         await Promise.all(pendingUpdates);
-        return { stopReason };
+        return await respond(settledStopReason, result.outcome);
+      }
+      if (result.status === 'succeeded') {
+        const stopReason = await settle('end_turn');
+        await Promise.all(pendingUpdates);
+        return await respond(stopReason, result.outcome);
       }
       await Promise.all(pendingUpdates);
-      if (result.status === 'succeeded') return { stopReason: 'end_turn' };
-      if (result.status === 'cancelled') return { stopReason: 'cancelled' };
-      if (result.status === 'limit_exceeded') return { stopReason: 'max_turn_requests' };
+      if (result.status === 'cancelled') return await respond('cancelled', result.outcome);
+      if (result.status === 'limit_exceeded') {
+        return await respond('max_turn_requests', result.outcome);
+      }
       throw acp.RequestError.internalError(
-        undefined,
+        runFailureData(result),
         result.error
           ? `MiniMax Code Runtime failed: ${result.error}`
           : 'MiniMax Code Runtime failed.',
       );
     } finally {
       context.signal.removeEventListener('abort', cancel);
+      active.lastPromptTurnIds = new Set([turnId, ...continuationTurnIds]);
       if (active.activePrompt === activePrompt) active.activePrompt = undefined;
       if (modeIntentAccepted && active.pendingModeIntent === submittedModeIntent) {
         active.pendingModeIntent = undefined;
       }
       await promptAttachments?.dispose().catch(() => undefined);
       try {
-        const refreshed = await options.runtime.getSession(active.session.sessionId);
+        const refreshed = await runtime.getSession(active.session.sessionId);
         const isCurrent = () => sessions.get(context.params.sessionId) === active;
         if (isCurrent()) active.session = refreshed;
         const currentMode = refreshed.interactionMode === 'plan' ? ACP_MODE_PLAN : ACP_MODE_DEFAULT;
@@ -1245,7 +1567,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           });
         }
         await notifyUsageUpdate(
-          options.runtime,
+          runtime,
           context.client,
           context.params.sessionId,
           active.session.sessionId,
@@ -1261,6 +1583,8 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     const active = sessions.get(params.sessionId);
     if (!active && !runSessionLifecycle.has(params.sessionId)) return;
     promptCancelEpochs.set(params.sessionId, (promptCancelEpochs.get(params.sessionId) ?? 0) + 1);
+    // A Prompt still waiting for a Runtime Turn to settle has started nothing; end its wait.
+    promptAdmissionWaits.get(params.sessionId)?.abort(new Error('ACP session cancelled.'));
     if (!active?.activePrompt) {
       promptCancelLatches.add(params.sessionId);
       const clear = setImmediate(() => promptCancelLatches.delete(params.sessionId));
@@ -1499,7 +1823,9 @@ async function notifyPermissionConfigUpdates(
     await notifyWithDeadline(
       (async () => {
         if (sessions.get(sessionId) !== attached) return;
-        const control = await getTuiAcpSessionControlState(runtime, attached.session);
+        const control = await getTuiAcpSessionControlState(runtime, attached.session, {
+          persisted: !attached.pending,
+        });
         if (sessions.get(sessionId) !== attached) return;
         await client.notify(acp.methods.client.session.update, {
           sessionId,
@@ -1804,21 +2130,7 @@ async function replayHistory(
 ): Promise<void> {
   const projector = new TuiAcpUpdateProjector();
   for (const message of messages) {
-    const updates =
-      message.role === 'user'
-        ? [
-            ...buildTuiMessageParts(message).flatMap((part): acp.ContentBlock[] =>
-              part.type === 'text' ? [{ type: 'text', text: part.content }] : [],
-            ),
-            ...(await readTuiAcpHistoryImages(message.attachments)),
-          ].map(
-            (content): acp.SessionUpdate => ({
-              sessionUpdate: 'user_message_chunk',
-              ...(message.id ? { messageId: message.id } : {}),
-              content,
-            }),
-          )
-        : projector.project({ type: 'message', message });
+    const updates = await projectTuiAcpHistoryMessage(message, projector);
     for (const update of updates) {
       assertReplayCurrent(isCurrent);
       await client.notify(acp.methods.client.session.update, { sessionId, update });
@@ -2047,6 +2359,32 @@ function deletePlanAttachmentsForSession(
   }
 }
 
+function isLocalSessionBusyResult(result: TuiRunResult): boolean {
+  return (
+    result.status === 'failed' &&
+    (result.outcome.error?.code === 'local_session_busy' ||
+      result.error?.includes('local_session_busy') === true ||
+      result.error?.includes('Session already has an active Turn') === true)
+  );
+}
+
+/**
+ * Structured data for a failed prompt the Client can act on:
+ * - `local_session_busy`: a Turn still held the Session lock after the bounded retry; retryable.
+ * - `local_session_queue_paused`: a stop or failure paused the Session queue over pending items.
+ *   ACP never queues input itself, so another entry paused it; only that entry's Continue or
+ *   clear resumes direct sends, so retrying the same prompt does not help.
+ */
+function runFailureData(result: TuiRunResult): Record<string, unknown> | undefined {
+  if (isLocalSessionBusyResult(result)) {
+    return { code: 'local_session_busy', retryable: true, reason: 'runtime-busy' };
+  }
+  if (result.status === 'failed' && result.outcome.error?.code === 'local_session_queue_paused') {
+    return { code: 'local_session_queue_paused', retryable: false };
+  }
+  return undefined;
+}
+
 async function followQuestionnaireContinuations(options: {
   readonly runtime: TuiAcpRuntime;
   readonly sessionId: string;
@@ -2111,15 +2449,26 @@ function isQuestionnaireContinuation(result: TuiRunResult): boolean {
   );
 }
 
-function isSessionTurnTerminal(event: TuiStreamEvent): boolean {
-  if (event.type === 'done' || event.type === 'error') return true;
-  return (
-    event.type === 'session-status' &&
-    (event.status === 'finished' ||
-      event.status === 'error' ||
-      event.status === 'aborted' ||
-      event.status === 'interrupted')
-  );
+function currentAcpRegion(): MavisRegion {
+  return process.env.MAVIS_REGION === 'en' ? 'en' : 'cn';
+}
+
+/**
+ * Takes `MCODE_PROVIDER_API_KEY` out of the process environment and returns its trimmed value,
+ * or `undefined` when it is missing or blank. Only this variable is removed.
+ *
+ * The embedded Runtime runs model Bash commands as children of this process. Their environment
+ * is cleaned by `BASH_SUBPROCESS_SCRUB` only in CI or with `MAVIS_BASH_ENV_SANITIZE`; the
+ * interactive default is `off`, so a key left in `process.env` would be readable from any Bash
+ * command (`env`, `node -e`). The key is used from memory afterwards.
+ */
+export function takeAcpAuthApiKeyFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const value = env[AUTH_API_KEY_ENV];
+  if (value === undefined) return undefined;
+  delete env[AUTH_API_KEY_ENV];
+  return value.trim() || undefined;
 }
 
 async function assertAuthenticated(runtime: TuiAcpRuntime): Promise<void> {

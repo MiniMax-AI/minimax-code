@@ -62,6 +62,7 @@ interface LocalRuntimeProductHostOptions extends V1LocalRuntimeProductHostOption
    * interactive TUI opts in explicitly. Other owners keep the default `true`.
    */
   readonly promptSuggestionSurface?: boolean;
+  readonly partialStreamRecoverySurface?: boolean;
   getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
   promptConfigKey?: Uint8Array;
   /** Selects a complete package-local mode template and freezes prompt assets for this process. */

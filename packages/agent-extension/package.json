@@ -9,6 +9,18 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./output-limit-recovery": {
+      "types": "./src/output-limit-recovery.ts",
+      "import": "./dist/output-limit-recovery.js"
+    },
+    "./request-media": {
+      "types": "./src/request-media.ts",
+      "import": "./dist/request-media.js"
+    },
+    "./tool-output-budget": {
+      "types": "./src/tool-output-budget.ts",
+      "import": "./dist/tool-output-budget.js"
     }
   },
   "dependencies": {

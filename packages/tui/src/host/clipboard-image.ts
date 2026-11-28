@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { TuiAttachment } from '../application/invocation.js';
 import { MINIMAX_CODE_MAX_TOTAL_ATTACHMENT_BYTES } from '../application/attachment-policy.js';
+import { inferTuiAudioPdfMimeType } from '../application/audio-pdf-mime.js';
 import { inferTuiNativeVideoMimeType } from '../application/video-mime.js';
 
 export const MINIMAX_CODE_CLIPBOARD_IMAGE_MAX_BYTES = MINIMAX_CODE_MAX_TOTAL_ATTACHMENT_BYTES;
@@ -201,7 +202,7 @@ export async function readTuiClipboardImage(
   if (!hasImage) {
     throw new TuiClipboardImageError(
       'no-image',
-      'The system clipboard does not contain a supported image or copied video file.',
+      'The system clipboard does not contain a supported image or a copied video, audio, or PDF file.',
     );
   }
 
@@ -284,7 +285,8 @@ function readLinuxClipboardImage(
   environment: Readonly<Record<string, string | undefined>>,
 ): ClipboardImageBytes | undefined {
   if (environment.TERMUX_VERSION) return undefined;
-  const wayland = Boolean(environment.WAYLAND_DISPLAY) || environment.XDG_SESSION_TYPE === 'wayland';
+  const wayland =
+    Boolean(environment.WAYLAND_DISPLAY) || environment.XDG_SESSION_TYPE === 'wayland';
   const wsl = Boolean(environment.WSL_DISTRO_NAME || environment.WSLENV);
   if (wayland || wsl) {
     const waylandImage = readClipboardImageViaWlPaste(environment);
@@ -298,9 +300,7 @@ function readClipboardImageViaWlPaste(
 ): ClipboardImageBytes | undefined {
   const listed = runClipboardCommand('wl-paste', ['--list-types'], environment, true);
   if (!listed) return undefined;
-  const mimeType = selectPreferredClipboardImageMimeType(
-    listed.toString('utf8').split(/\r?\n/u),
-  );
+  const mimeType = selectPreferredClipboardImageMimeType(listed.toString('utf8').split(/\r?\n/u));
   if (!mimeType) return undefined;
   const bytes = runClipboardCommand(
     'wl-paste',
@@ -431,7 +431,9 @@ async function readWslClipboardImageViaPowerShell(
       async () => {
         const timeout = Math.ceil(deadline - performance.now());
         if (timeout <= 0) {
-          throw Object.assign(new Error('Windows clipboard reading timed out.'), { code: 'ETIMEDOUT' });
+          throw Object.assign(new Error('Windows clipboard reading timed out.'), {
+            code: 'ETIMEDOUT',
+          });
         }
         const result = (
           await executeFile(
@@ -664,7 +666,10 @@ async function resolveClipboardMediaFile(
 function inferClipboardMediaMimeType(fileName: string): string | undefined {
   const videoMimeType = inferTuiNativeVideoMimeType(fileName);
   if (videoMimeType) return videoMimeType;
-  return CLIPBOARD_IMAGE_MIME_BY_EXTENSION[extname(fileName).toLowerCase()];
+  return (
+    CLIPBOARD_IMAGE_MIME_BY_EXTENSION[extname(fileName).toLowerCase()] ??
+    inferTuiAudioPdfMimeType(fileName)
+  );
 }
 
 const CLIPBOARD_IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {

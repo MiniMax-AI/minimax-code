@@ -47,32 +47,10 @@ export type {
 
 // ── Deterministic safety registries (verbatim regex source of truth) ──
 export {
-  HARD_BLOCKED_REGISTRY,
-  SOFT_RISK_REGISTRY,
-  SUBCOMMAND_DANGEROUS_PATTERNS,
-  ALL_DANGEROUS_COMMAND_PATTERNS,
-  DESTRUCTIVE_STANDALONE_COMMANDS,
-  CROSS_PLATFORM_CODE_EXEC,
-  DANGEROUS_BASH_PATTERNS,
-  PIPE_TO_SHELL_PATTERN,
-  LOCAL_SCRIPT_INTERPRETERS_RE,
-  hardBlockedCategoryIsFinalDeny,
-  matchHardBlockedBash,
-  matchHardBlockedFsRead,
-  matchSecretReadForm,
-  allPipeToShellAreInlineLiteralC,
-  isDangerousBashPermission,
-  type HardBlockedMatch,
-  type HardBlockedCategory,
-  type SoftRiskCategory,
-  type ClassifierRule,
-  type ClassifierRuleValue,
-} from './classifier/dangerous-patterns.js';
-
-// ── Decision engine ──
-export { PermissionEngine } from './engine.js';
-export { registerDefaultCheckers } from './tools/index.js';
-export { unwrapCommandWrappers } from './tools/bash-wrapper-unwrap.js';
+  unwrapCommandWrappers,
+  unwrapBashCommandWrappers,
+  readBashInlineScript,
+} from './tools/bash-wrapper-unwrap.js';
 export { isRmCommand, parseRmTargets, splitCommand } from './tools/bash-permission.js';
 export { stripDataHeredocBodies } from './tools/bash-safety-scan.js';
 export { splitShellSourceSegments } from './tools/bash-split.js';
@@ -98,11 +76,27 @@ export {
 export type { CreatePermissionExecutionPlanInput } from './execution-plan.js';
 export { isKnownSafeCommand } from './tools/safe-command.js';
 export { isKnownSafePowerShellCommand } from './tools/safe-command.js';
-export { isSameResolvedPath } from './tools/path-identity.js';
+export { findGitSubcommand } from './tools/safe-command.js';
+export { shellTokenize } from './tools/shell-tokenize.js';
+export { isSameResolvedPath, reachesRootInOtherCase } from './tools/path-identity.js';
+export { READ_ONLY_TOOLS, TEMPLATE_SUFFIXES } from './tools/fs-permission.js';
+export { WRITE_TOOLS } from './tools/fs-input.js';
+export { resolveWriteTargetLocation, type WriteTargetLocation } from './tools/fs-input.js';
 export type { ToolPermissionChecker } from './engine.js';
 export { createToolPermissionContext } from './context.js';
 export { resolvePermissionPath } from './path-resolver.js';
 export { extractBashPathIntents } from './tools/path-capability.js';
+export { readBashCommand, gitBashCommandName } from './tools/bash-command.js';
+export { findHeredocBodies } from './tools/bash-split.js';
+export {
+  isShellCommentStart,
+  findShellCommentLineEnd,
+  readBashExpansion,
+} from './tools/bash-expansion.js';
+export {
+  commandHasExecutedHeredocBody,
+  commandHasShellScriptHeredocBody,
+} from './tools/bash-safety-scan.js';
 export type { PermissionPathResolutionContext } from './path-resolver.js';
 
 // ── Permission Core contract / reducer ──
@@ -129,6 +123,14 @@ export type {
   PermissionApprovalRequest,
   PermissionEvaluation,
 } from './permission-core.js';
+
+// ── MCP rule identity `(plugin, server, tool)` ──
+export {
+  MCP_ALLOW_NOT_INHERITED,
+  MCP_PLUGIN_RULE_PREFIX,
+  mcpPluginRuleKey,
+} from './mcp-rule-subject.js';
+export type { McpToolRuleSubject } from './mcp-rule-subject.js';
 
 export {
   adaptLegacyPermissionResult,
@@ -188,6 +190,7 @@ export { renderConversationContext } from './conversation-renderer.js';
 export type { RenderConversationContextInput } from './conversation-renderer.js';
 export type {
   CloudGatewayClient,
+  CloudClassifyFailureReason,
   CloudClassifyRequest,
   CloudClassifyVerdict,
 } from './cloud-gateway.js';
@@ -195,3 +198,19 @@ export { HttpCloudGatewayClient } from './http-cloud-gateway-client.js';
 export type { HttpCloudGatewayClientOptions } from './http-cloud-gateway-client.js';
 export { InMemoryCloudGatewayClient } from './in-memory-cloud-gateway-client.js';
 export type { InMemoryCloudGatewayClientOptions } from './in-memory-cloud-gateway-client.js';
+
+export { createDeferredPluginHookPermissionCapability } from './plugin-hook-permission-port.js';
+export type {
+  PluginHookPermissionUpdateDestination,
+  PluginHookPermissionUpdateMode,
+  PluginHookPermissionRuleValue,
+  PluginHookPermissionUpdate,
+  LocalPluginHookEffectivePermissions,
+  LocalPluginHookPermissionMutationInput,
+  LocalPluginHookPermissionCapability,
+} from './plugin-hook-permission-port.js';
+
+
+export { PermissionEngine } from './engine.js';
+export { registerDefaultCheckers } from './tools/index.js';
+export { matchHardBlockedBash } from './classifier/dangerous-patterns.js';

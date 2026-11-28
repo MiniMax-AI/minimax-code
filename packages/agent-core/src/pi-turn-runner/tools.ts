@@ -15,6 +15,8 @@ import {
 import { createBashEnvSpawnHook, resolveBashEnvPolicy } from '../bash-subprocess-env.js';
 import type { TSchema } from '@sinclair/typebox';
 import { isTurnTerminatingToolResultDetails } from '../tools/turn-termination.js';
+import { toolResultIsError } from '../tools/result-error.js';
+import { steerInterruptibleSignal } from '../tools/steer-interruption.js';
 import type { RuntimeTool, ToolExecutionContext, ToolResult } from '../tools/index.js';
 import type { RuntimeToolSource } from '../tools/types.js';
 import type { turnState } from './turn.js';
@@ -75,11 +77,14 @@ export function setToolHooks(agent: Agent, turn: turnState): void {
       .map((tool) => [tool.name, readRuntimeToolSource(tool)] as const)
       .filter((entry): entry is readonly [string, RuntimeToolSource] => entry[1] !== undefined),
   );
-  for (const tool of turn.input.toolConfig.ptcTools ?? []) {
+  for (const tool of [
+    ...(turn.input.toolConfig.ptcTools ?? []),
+    ...(turn.input.toolConfig.deferredTools ?? []),
+  ]) {
     if (tool.source === undefined) continue;
     const existing = sourceByToolName.get(tool.def.name);
     if (existing !== undefined && existing !== tool.source) {
-      throw new Error(`PiTurnRunner: conflicting source for PTC tool '${tool.def.name}'`);
+      throw new Error(`PiTurnRunner: conflicting source for hidden tool '${tool.def.name}'`);
     }
     if (existing !== undefined) continue;
     sourceByToolName.set(tool.def.name, tool.source);
@@ -182,14 +187,20 @@ export function newRuntimeTool<TCtx extends ToolExecutionContext>(
         toolCallId,
         ...(assistantMessageId ? { assistantMessageId } : {}),
       } as TCtx;
+      const steering = b.def.interruptOnSteer ? callCtx.userSteering : undefined;
+      const settled = steering ? new AbortController() : undefined;
+      const toolSignal =
+        steering && settled ? steerInterruptibleSignal(signal, steering, settled.signal) : signal;
       let result: ToolResult;
       try {
-        result = await b.impl.execute(callCtx, input, signal, onUpdate);
+        result = await b.impl.execute(callCtx, input, toolSignal, onUpdate);
       } catch (error) {
         // Pi keeps only the message of a thrown error; PTC may still need the
         // raw protocol error attached to it. The error propagates unchanged.
         observer?.onError(error);
         throw error;
+      } finally {
+        settled?.abort();
       }
       observer?.onResult(result);
       // `programmatic` is intentionally dropped here: model calls never carry it.
@@ -209,8 +220,7 @@ export function newRuntimeTool<TCtx extends ToolExecutionContext>(
  * executor can tell the tool's own error state from one a hook changed.
  */
 export function runtimeToolResultIsError(result: ToolResult): boolean {
-  const details = toolResultDetails(result.details, result.isError);
-  return details.is_error === true || details.ok === false;
+  return toolResultIsError(result);
 }
 
 function readRuntimeToolSource(tool: AgentTool): RuntimeToolSource | undefined {
@@ -276,7 +286,8 @@ function toolResultErrorPatch(context: AfterToolCallContext): AfterToolCallResul
   if (context.isError || !isRecord(context.result?.details)) {
     return undefined;
   }
-  return context.result.details.is_error === true || context.result.details.ok === false
+  // Pi reported no error: the details decide, by the rule every host shares.
+  return toolResultIsError({ details: context.result.details })
     ? { isError: true, isErrorOrigin: 'tool' }
     : undefined;
 }

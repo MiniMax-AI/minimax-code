@@ -16,9 +16,15 @@
  * the single source of truth here.
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import type { CoreToolFs } from '../core-tools/ports.js';
+import { physicalToolFs } from './physical-fs.js';
 import { extname } from 'node:path';
 
+import {
+  describeVideoContainerProblem,
+  findVideoContainerProblem,
+  type VideoContainerProblem,
+} from '@mavis/agent-core/pi-turn-runner';
 import type { ToolResult } from '@mavis/agent-core/tools';
 import { isSupportedNativeVideoMime } from './multimodal-attachments.js';
 
@@ -50,6 +56,8 @@ export interface ReadVideoOptions {
   readonly mimeType: string;
   readonly capabilities: ReadVideoCapabilities | undefined;
   readonly signal?: AbortSignal;
+  /** Filesystem port; defaults to physical-fs. */
+  readonly fs?: Pick<CoreToolFs, 'readFile' | 'stat'>;
 }
 
 /**
@@ -58,10 +66,22 @@ export interface ReadVideoOptions {
  * `inferReadVideoMimeType` and resolved `absolutePath` to a host-validated
  * path. Throws on filesystem errors (matches the pre-extraction cloud
  * behaviour).
+ *
+ * A file with a container problem (see `findVideoContainerProblem`: an MP4 an
+ * interrupted write left without its `moov` box, an index pointing outside
+ * the frames, bytes that are not a video at all, an empty file, no video
+ * track, an empty video track, no keyframe) is returned as text only, with
+ * what is wrong and what to do about it, for every model alike: the provider
+ * rejects such a video and the whole request with it, and once inlined it is
+ * replayed from history on every later request (reported incident,
+ * reported incident). The video rules that depend on the request (length,
+ * aspect ratio, frame sampling, pixel budget, videos per request) are left to
+ * the outbound guard, which checks them on every request.
  */
 export async function readVideoAsToolResult(opts: ReadVideoOptions): Promise<ToolResult> {
   if (opts.signal?.aborted) throw new Error('Operation aborted');
-  const info = await stat(opts.absolutePath);
+  const fs = opts.fs ?? physicalToolFs;
+  const info = await fs.stat(opts.absolutePath);
   if (opts.signal?.aborted) throw new Error('Operation aborted');
 
   const baseText = `Read video file [${opts.mimeType}]`;
@@ -98,8 +118,19 @@ export async function readVideoAsToolResult(opts: ReadVideoOptions): Promise<Too
     );
   }
 
-  const bytes = await readFile(opts.absolutePath);
+  const bytes = await fs.readFile(opts.absolutePath);
   if (opts.signal?.aborted) throw new Error('Operation aborted');
+  const problem = findVideoContainerProblem(bytes);
+  if (problem) {
+    return readVideoTextOnly(
+      opts.toolName,
+      `${baseText}\n[Video not loaded: ${describeVideoContainerProblem(problem)}.]`,
+      opts.mimeType,
+      info.size,
+      'invalid_container',
+      problem,
+    );
+  }
   return {
     tool_name: opts.toolName,
     text: baseText,
@@ -124,6 +155,7 @@ function readVideoTextOnly(
   mimeType: string,
   sizeBytes: number,
   reason: string,
+  containerProblem?: VideoContainerProblem,
 ): ToolResult {
   return {
     tool_name: toolName,
@@ -136,6 +168,7 @@ function readVideoTextOnly(
         size_bytes: sizeBytes,
         inline: false,
         reason,
+        ...(containerProblem ? { container_problem: containerProblem } : {}),
       },
     },
   };

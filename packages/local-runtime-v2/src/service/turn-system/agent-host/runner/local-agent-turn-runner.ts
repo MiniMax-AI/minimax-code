@@ -52,7 +52,7 @@ import {
 import { createDirectCallReminder, type DirectCallReminder } from './ptc/direct-call-reminder.js';
 
 export interface LocalPiTurnRunner {
-  runTurn(input: RunTurnInput<LocalRuntimeTurnToolContext>): Promise<void>;
+  runTurn(input: RunTurnInput<LocalRuntimeTurnToolContext>): Promise<unknown>;
 }
 
 export interface LocalAgentTurnRunnerOptions {

@@ -146,7 +146,7 @@ describe("TuiModelPicker", () => {
     const picker = new TuiModelPicker([], vi.fn(), vi.fn(), { onAddProvider });
 
     expect(stripAnsi(picker.render(90).join("\n"))).toContain(
-      "Add 3rd-party provider",
+      "Add provider…",
     );
     expect(stripAnsi(picker.render(90).join("\n"))).toContain(
       "No matching models",
@@ -270,7 +270,7 @@ describe("TuiModelPicker", () => {
     );
   });
 
-  it("keeps Think effort unchanged while left and right move the search cursor", () => {
+  it("toggles switchable thinking with left and right while a search query is active", () => {
     const onSelect = vi.fn();
     const picker = new TuiModelPicker(
       [
@@ -279,25 +279,32 @@ describe("TuiModelPicker", () => {
           modelId: "model-a",
           displayName: "Model A",
           selected: true,
-          effortOptions: ["low", "medium", "high"],
+          thinkingConfig: { mode: "switchable", defaultValue: "false" },
         },
       ],
       onSelect,
       vi.fn(),
-      {},
-      "low",
     );
 
     picker.handleInput("model");
-    expect(stripAnsi(picker.render(90).join("\n"))).toContain("[ low ]");
+    expect(stripAnsi(picker.render(90).join("\n"))).toContain("[ Off ]");
     picker.handleInput("\u001b[C");
-    expect(stripAnsi(picker.render(90).join("\n"))).toContain("[ low ]");
+    expect(stripAnsi(picker.render(90).join("\n"))).toContain("[ On ]");
+  });
 
-    picker.handleInput("\r");
-    expect(onSelect).toHaveBeenCalledWith(
-      expect.objectContaining({ modelId: "model-a" }),
-      "low",
+  it("keeps left and right as search cursor keys for models without reasoning controls", () => {
+    const picker = new TuiModelPicker(
+      [{ providerId: "provider", modelId: "model-a", displayName: "Model A", selected: true }],
+      vi.fn(),
+      vi.fn(),
     );
+
+    picker.handleInput("mdel");
+    picker.handleInput("\u001b[D");
+    picker.handleInput("\u001b[D");
+    picker.handleInput("\u001b[D");
+    picker.handleInput("o");
+    expect(stripAnsi(picker.render(90).join("\n"))).toContain("Search: model");
   });
 
   it("renders Desktop-owned models and returns the selected model", () => {

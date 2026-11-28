@@ -5,7 +5,7 @@ import { formatTuiKeybinding, type TuiKeybindingRegistry } from '../../shell/key
 import { resolveTuiSessionCacheMetrics } from '../../../application/session-cache-metrics.js';
 import type { TuiState } from '../../state/index.js';
 import type { TranscriptActivitySource } from '../../transcript/store.js';
-import type { TuiAccountStatus, TuiModel } from '../../../runtime/port.js';
+import type { TuiAccountStatus, TuiAdvisor, TuiModel } from '../../../runtime/port.js';
 import { tuiAccountNeedsLoginPrompt } from '../../../application/login-gate.js';
 import type { TuiPermissionModeSnapshot } from '../interaction/permission-mode-flow.js';
 import { isTuiDelegatedSession } from '../../../runtime/delegation.js';
@@ -18,6 +18,8 @@ import {
   type TuiSideConversationPresentation,
 } from '../../commands/side-session.js';
 import { LIGHTWEIGHT_SESSION_PURPOSE } from '@mavis/protocol/local';
+import { ADVISOR_CALL_TIMEOUT_MS, ADVISOR_LIMIT_HINT_MS } from '@mavis/shared/advisor-call';
+import { TUI_ADVISOR_TOOL_NAME } from '../../../runtime/stream-events.js';
 
 export interface ResolveTuiVisiblePresentationInput {
   readonly snapshot: TuiChatSnapshot;
@@ -45,6 +47,8 @@ export interface ResolveTuiVisiblePresentationInput {
   readonly selectedModel?: TuiModel;
   /** Session-scoped think effort; the roster never reports the chosen level. */
   readonly selectedEffort?: string;
+  /** The current Session's advisor, or the new-conversation default on welcome. */
+  readonly selectedAdvisor?: TuiAdvisor;
   readonly permissionMode?: TuiPermissionModeSnapshot;
   readonly planMode?: TuiPlanModeSnapshot;
   /** Present while a paired BTW side conversation exists; identifies the visible half. */
@@ -150,6 +154,14 @@ function resolveVisibleActivity(input: ResolveTuiVisiblePresentationInput): TuiA
     // Stopping already consumed the interrupt and refuses new guidance: offer neither.
     return { phase: 'stopping', runId };
   }
+  if (input.llmRetry?.waitingFor === 'network') {
+    return {
+      phase: 'retrying',
+      runId,
+      ...controls,
+      message: 'Network offline · the request resumes automatically once it is back',
+    };
+  }
   if (input.llmRetry) {
     const retryReason = input.llmRetry.error?.reason
       ? formatRetryReason(input.llmRetry.error.reason)
@@ -175,10 +187,33 @@ function resolveVisibleActivity(input: ResolveTuiVisiblePresentationInput): TuiA
   }
   if (runId) {
     return input.transcript.hasConcreteTurnActivity(runId)
-      ? { phase: 'running', runId, ...controls }
+      ? { phase: 'running', runId, ...controls, ...resolveAdvisorWait(input, runId) }
       : { phase: 'loading', runId, ...controls };
   }
   return { phase: 'idle' };
+}
+
+/**
+ * An advisor call streams nothing for up to the call limit, so the line names it, times this
+ * call instead of the Turn, and on the slow tail states the limit and how to cut it short.
+ */
+function resolveAdvisorWait(
+  input: ResolveTuiVisiblePresentationInput,
+  runId: string,
+): Pick<TuiActivityLineState, 'label' | 'stepStartedAtMs' | 'note'> {
+  const stepStartedAtMs = input.transcript.runningToolStartedAt(runId, TUI_ADVISOR_TOOL_NAME);
+  if (stepStartedAtMs === undefined) return {};
+  const modelId = input.selectedAdvisor?.modelId?.trim();
+  const limit = `max ${String(Math.round(ADVISOR_CALL_TIMEOUT_MS / 60_000))}min`;
+  return {
+    label: modelId ? `Consulting advisor · ${modelId}` : 'Consulting advisor',
+    stepStartedAtMs,
+    // A steer ends the call with a normal result; Esc stops the whole run, so it is not offered.
+    note: {
+      text: input.queueEnabled ? `${limit} · steering interrupts it` : limit,
+      afterMs: ADVISOR_LIMIT_HINT_MS,
+    },
+  };
 }
 
 function formatRetryDelay(delayMs: number): string {
@@ -351,6 +386,7 @@ function resolveStableShell(input: ResolveTuiVisiblePresentationInput): TuiShell
       ? (parentSession?.title ?? delegatedSession.parentSessionId)
       : undefined,
     ...resolveAccountShellState(input.snapshot.account, input.selectedModel, input.selectedEffort),
+    ...resolveAdvisorShellState(input.selectedAdvisor),
     sessionCount: input.snapshot.sessions.length,
     sessionCacheReadRatio: sessionCacheMetrics?.cacheReadRatio,
     contextUsage: input.snapshot.contextSnapshot?.contextUsage,
@@ -392,6 +428,11 @@ function resolveAccountShellState(
       : undefined,
     tokenPlanQuota: tokenPlan ? account.tokenPlanQuota : undefined,
   };
+}
+
+function resolveAdvisorShellState(advisor: TuiAdvisor | undefined): Partial<TuiShellState> {
+  if (!advisor?.enabled || !advisor.providerId || !advisor.modelId) return {};
+  return { advisor: `${advisor.providerId}/${advisor.modelId}` };
 }
 
 function resolveWelcomeAccountStatus(account: TuiAccountStatus | undefined): string {

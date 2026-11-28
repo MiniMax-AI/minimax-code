@@ -62,10 +62,18 @@ export async function resolvePluginDirectory(
 export async function readPluginTextFile(
   root: CanonicalPluginRoot,
   relativePath: string,
-  options: { portable?: boolean; rejectBom?: boolean } = {},
+  options: { portable?: boolean; rejectBom?: boolean; maxBytes?: number } = {},
 ): Promise<{ path: string; content: string }> {
+  const maxBytes = options.maxBytes ?? PLUGIN_PACKAGE_V1_LIMITS.maxFileBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('maxBytes must be a non-negative safe integer');
+  }
   const filePath = await resolvePluginFile(root, relativePath, options);
-  const bytes = await readStablePluginFile(filePath, relativePath);
+  const bytes = await readStablePluginFile(
+    filePath,
+    relativePath,
+    Math.min(maxBytes, PLUGIN_PACKAGE_V1_LIMITS.maxFileBytes),
+  );
   let content: string;
   try {
     content = UTF8_DECODER.decode(bytes);
@@ -78,7 +86,11 @@ export async function readPluginTextFile(
   return { path: filePath, content };
 }
 
-async function readStablePluginFile(filePath: string, relativePath: string): Promise<Buffer> {
+async function readStablePluginFile(
+  filePath: string,
+  relativePath: string,
+  maxBytes: number,
+): Promise<Buffer> {
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
   let handle: Awaited<ReturnType<typeof open>>;
   try {
@@ -88,7 +100,7 @@ async function readStablePluginFile(filePath: string, relativePath: string): Pro
   }
   try {
     const before = await handle.stat();
-    assertReadableFileSnapshot(before, relativePath);
+    assertReadableFileSnapshot(before, relativePath, maxBytes);
     const bytes = await readExactFile(handle, before.size, relativePath);
     const after = await handle.stat();
     if (!sameFileSnapshot(before, after)) {
@@ -103,6 +115,7 @@ async function readStablePluginFile(filePath: string, relativePath: string): Pro
 function assertReadableFileSnapshot(
   snapshot: Awaited<ReturnType<Awaited<ReturnType<typeof open>>['stat']>>,
   relativePath: string,
+  maxBytes: number,
 ): void {
   if (!snapshot.isFile()) {
     readerFail('PLUGIN_FILE_INVALID', `${relativePath} is not a regular file`);
@@ -110,7 +123,7 @@ function assertReadableFileSnapshot(
   if (!Number.isSafeInteger(snapshot.size) || snapshot.size < 0) {
     readerFail('PLUGIN_FILE_INVALID', `${relativePath} has an invalid size`);
   }
-  if (snapshot.size > PLUGIN_PACKAGE_V1_LIMITS.maxFileBytes) {
+  if (snapshot.size > maxBytes) {
     readerFail('PLUGIN_FILE_TOO_LARGE', `${relativePath} exceeds the file limit`);
   }
 }

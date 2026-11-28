@@ -6,6 +6,7 @@ import type {
   LocalBashEnvPolicySource,
   LocalSandboxBashOperationsFactory,
 } from '@mavis/agent-tools/desktop';
+import { nestedRuntimeGuardEnv } from '@mavis/shared/nested-runtime-guard';
 
 import { initializeLocalBackgroundBashExecutor } from '../background-bash/index.js';
 import type { DeferredLocalSandboxBashOperationsFactory } from './contracts.js';
@@ -129,10 +130,15 @@ async function executeObserved(
     wrapped = await wrapInvocation(input, signal);
     await input.onPreflightComplete?.();
     lease.trace.stage('exec.requested');
+    const baseEnv = wrapped?.env ?? options.env;
+    const childEnv =
+      lease.sandboxed && lease.filesystemMode === 'delete_guard'
+        ? { ...baseEnv, ...nestedRuntimeGuardEnv() }
+        : baseEnv;
     const result = await nativeOperations.exec(wrapped?.command ?? command, cwd, {
       ...options,
       signal,
-      env: wrapped?.env ?? options.env,
+      env: childEnv,
       onProcessEvent: processFacts.observe,
     });
     outcome = exitOutcome(result.exitCode);

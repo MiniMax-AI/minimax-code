@@ -1,4 +1,4 @@
-import type { MetricsClient } from '@mavis/shared/local-runtime-logging/metrics';
+import type { AllowedMetricName, MetricsClient } from '@mavis/shared/local-runtime-logging/metrics';
 import type { ObservabilityLogger } from '@mavis/shared/local-runtime-diagnostics';
 import { createMcpRuntimeLogger } from './logging.js';
 import { McpConnectionPool } from '@mavis/mcp/runtime/connection-pool';
@@ -8,16 +8,30 @@ import type {
   McpSettingsService,
   McpServerConfig,
   ConfiguredMcpServerInput,
+  LocalMcpServiceOptions,
 } from './contracts.js';
 import { LocalMcpService } from './runtime/local-mcp.service.js';
 import { resolveMatrixMcpStdioEntrypoint } from './runtime/builtin-matrix.js';
 import { LocalMcpPublicFacade } from './tools/public-facade.js';
+import type { GlobalEventInput } from '@mavis/shared/global-events';
+import type { McpAuthRequiredReason } from '@mavis/mcp';
+import type { McpAuthTarget, McpOAuthService } from './oauth/index.js';
+import { McpAuthService } from './auth/mcp-auth.service.js';
+import { publicAuthTarget } from './auth/bindings.js';
+import type { McpAuthFacade, PluginMcpAuthPort } from './auth/ports.js';
 
 export interface InitializedMcpService {
   readonly service: McpSettingsService;
   readonly runtime: LocalMcpService;
   readonly public: LocalMcpPublicFacade;
   readonly capability: McpRuntimeCapability;
+  /** Present when OAuth is wired; shared by DesktopService and the process-local TUI. */
+  readonly auth?: McpAuthFacade;
+  readonly oauth?: McpOAuthService;
+  /** Plugin discovery has no Session; it announces without Session or Turn. */
+  announcePluginAuthRequired(input: { target: McpAuthTarget; reason: McpAuthRequiredReason }): void;
+  /** Plugins initialize after MCP; returns the unbind function. */
+  bindPluginAuthPort(port: PluginMcpAuthPort): () => void;
   ready(): Promise<void>;
   close(): Promise<void>;
 }
@@ -32,6 +46,11 @@ export interface InitializeMcpServiceOptions {
   readonly diagnostics?: ObservabilityLogger;
   readonly metrics?: Pick<MetricsClient, 'counter' | 'histogram'>;
   readonly fetchImpl?: typeof fetch;
+  /** OAuth for remote user, project and plugin servers; the MCP owner closes it last. */
+  readonly oauth?: McpOAuthService;
+  readonly publishGlobalEvent?: (
+    event: GlobalEventInput<'mcp.auth_updated' | 'mcp.auth_required'>,
+  ) => void;
   /** Internal old-consumer binding; not a public host factory override. */
   readonly bindRuntime?: (capability: McpRuntimeCapability) => () => void;
 }
@@ -50,8 +69,9 @@ export function initializeMcpService(options: InitializeMcpServiceOptions): Init
           ...(metrics
             ? {
                 metrics: {
-                  incr: (name, tags) => metrics.counter(name, 1, tags),
-                  latency: (name, value, tags) => metrics.histogram(name, value, tags),
+                  incr: (name: AllowedMetricName, tags) => metrics.counter(name, 1, tags),
+                  latency: (name: AllowedMetricName, value, tags) =>
+                    metrics.histogram(name, value, tags),
                 },
               }
             : {}),
@@ -62,6 +82,7 @@ export function initializeMcpService(options: InitializeMcpServiceOptions): Init
   runtime = new LocalMcpService(() => options.dataDir, {
     ...(options.nowMs ? { nowMs: options.nowMs } : {}),
     ...(pool ? { connectionPool: pool } : {}),
+    ...authOptions(options, logger),
     builtinMatrix: {
       enabled: options.builtinMatrix && Boolean(resolveMatrixMcpStdioEntrypoint()),
       webSearchOnly: options.matrixWebSearchOnly,
@@ -69,14 +90,25 @@ export function initializeMcpService(options: InitializeMcpServiceOptions): Init
   });
   const service: McpSettingsService = {
     list: (keyword) => runtime.listConfiguredServers(keyword),
-    get: (name) => runtime.getConfiguredServer(name),
-    create: (name, config, enabled) =>
-      runtime.createConfiguredServer(name, mutableConfig(config), enabled),
-    update: (name, config) => runtime.updateConfiguredServer(name, mutableConfig(config)),
+    // Details report whether a confidential client secret is stored, never the secret.
+    get: async (name) => {
+      const detail = await runtime.getConfiguredServer(name);
+      return detail && runtime.serverAuth.withClientSecretState(detail);
+    },
+    create: async (name, config, enabled) =>
+      runtime.serverAuth.withClientSecretState(
+        await runtime.createConfiguredServer(name, mutableConfig(config), enabled),
+      ),
+    update: async (name, config) =>
+      runtime.serverAuth.withClientSecretState(
+        await runtime.updateConfiguredServer(name, mutableConfig(config)),
+      ),
     delete: (name) => runtime.deleteConfiguredServer(name),
     setEnabled: (name, enabled) => runtime.setConfiguredServerEnabled(name, enabled),
     test: (name) => runtime.testConfiguredServer(name),
   };
+  const { oauth, publishGlobalEvent: publish } = options;
+  const auth = createAuthService(options, runtime, logger);
   const capability: McpRuntimeCapability = runtime;
   const unbind = options.bindRuntime?.(capability);
   let closePromise: Promise<void> | undefined;
@@ -85,6 +117,13 @@ export function initializeMcpService(options: InitializeMcpServiceOptions): Init
     runtime,
     public: new LocalMcpPublicFacade(runtime),
     capability,
+    ...(auth && oauth ? { auth, oauth } : {}),
+    announcePluginAuthRequired: ({ target, reason }) =>
+      publish?.({
+        type: 'mcp.auth_required',
+        payload: { target: publicAuthTarget(target), reason },
+      }),
+    bindPluginAuthPort: (port) => auth?.bindPluginPort(port) ?? (() => undefined),
     // Reservations are built from the local configuration. Remote discovery remains lazy and bounded.
     ready: async () => {
       await runtime.listServers();
@@ -92,7 +131,9 @@ export function initializeMcpService(options: InitializeMcpServiceOptions): Init
     close: () => {
       closePromise ??= (async () => {
         unbind?.();
+        await auth?.close();
         await runtime.close();
+        await oauth?.close();
       })();
       return closePromise;
     },
@@ -116,6 +157,40 @@ function mutableConfig(config: McpServerConfig): ConfiguredMcpServerInput {
         transport: config.transport,
         url: config.url,
         ...(config.headers === undefined ? {} : { headers: { ...config.headers } }),
+        ...(config.oauth === undefined
+          ? {}
+          : {
+              oauth: {
+                ...config.oauth,
+                ...(config.oauth.scopes ? { scopes: [...config.oauth.scopes] } : {}),
+              },
+            }),
         ...common,
       };
+}
+
+function authOptions(
+  options: InitializeMcpServiceOptions,
+  logger: McpRuntimeLogger | undefined,
+): Pick<LocalMcpServiceOptions, 'oauth' | 'publishGlobalEvent' | 'logger'> {
+  return {
+    ...(options.oauth ? { oauth: options.oauth } : {}),
+    ...(options.publishGlobalEvent ? { publishGlobalEvent: options.publishGlobalEvent } : {}),
+    ...(logger ? { logger } : {}),
+  };
+}
+
+function createAuthService(
+  options: InitializeMcpServiceOptions,
+  runtime: LocalMcpService,
+  logger: McpRuntimeLogger | undefined,
+): McpAuthService | undefined {
+  const { oauth, publishGlobalEvent: publish } = options;
+  if (!oauth) return undefined;
+  return new McpAuthService({
+    oauth,
+    runtime: runtime.serverAuth,
+    ...(publish ? { publish } : {}),
+    ...(logger ? { logger } : {}),
+  });
 }

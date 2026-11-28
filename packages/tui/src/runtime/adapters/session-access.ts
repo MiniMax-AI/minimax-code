@@ -32,7 +32,12 @@ import {
   normalizeTuiRewindPreview,
   normalizeTuiRewindResult,
 } from './normalizers.js';
-import { normalizeTuiMessage, type TuiMessage } from '../stream-events.js';
+import {
+  isUndeliveredSideMessage,
+  normalizeTuiMessage,
+  type TuiMessage,
+} from '../stream-events.js';
+import { isSameWorkspacePath } from '../workspace-path.js';
 
 export class TuiSessionAccess {
   constructor(
@@ -41,12 +46,16 @@ export class TuiSessionAccess {
     private readonly onSessionDeleted?: (sessionId: string) => void | Promise<void>,
   ) {}
 
+  newSessionId(): string {
+    return this.cliService.newSessionId();
+  }
+
   async createSession(
     input: CreateTuiSessionInput,
     defaultModel?: TuiModelSelection,
   ): Promise<TuiSession> {
-    const response = await this.cliService.createSession({
-      name: this.defaultAgentName,
+    const request: Parameters<CliService['createSession']>[0] = {
+      name: input.agentName ?? this.defaultAgentName,
       workspaceDir: input.workspaceDir,
       ...(input.title ? { title: input.title } : {}),
       ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
@@ -70,7 +79,10 @@ export class TuiSessionAccess {
             },
           }
         : {}),
-    });
+    };
+    const response = input.sessionId
+      ? await this.cliService.createSession(request, {}, { sessionId: input.sessionId })
+      : await this.cliService.createSession(request);
     const session = normalizeRequiredSession(response.session, response.sessionId);
     if (input.mcpServers?.length) {
       await this.configureSessionMcpServers(session.sessionId, input.mcpServers);
@@ -129,13 +141,19 @@ export class TuiSessionAccess {
         : inputOrAgentName;
     const {
       allAgents = false,
+      anyAgent = false,
       agentName: requestedAgentName,
       workspaceDir,
       ...pageOptions
     } = input;
-    const agentName = requestedAgentName ?? this.defaultAgentName;
+    // `anyAgent` drops the Agent scope instead of defaulting it to this TUI's own
+    // Agent, which is what a purpose-scoped read needs: the Agent that owns the
+    // work is not knowable from here.
+    const agentName = anyAgent ? undefined : (requestedAgentName ?? this.defaultAgentName);
     const loadPage = (options: ListTuiSessionsOptions) =>
-      allAgents
+      // `getSessionTree` filters its roots by Agent name, so a cross-Agent read
+      // has to go through the flat Session list.
+      allAgents && agentName !== undefined
         ? this.listSessionTree(agentName, options)
         : this.listAgentSessions(agentName, options);
     if (!workspaceDir) return normalizeSessionPage(await loadPage(pageOptions));
@@ -306,10 +324,19 @@ export class TuiSessionAccess {
   }
 
   private async listAgentSessions(
-    agentName: string,
+    agentName: string | undefined,
     options: ListTuiSessionsOptions,
   ): Promise<{ sessions: SessionInfoView[]; hasMore: boolean; nextCursor?: string }> {
-    const response = await this.cliService.listSessions({ name: agentName, ...options });
+    // Omitting `name` is how the Runtime is asked for every Agent's Sessions: the
+    // query application forwards it verbatim and the repository drops the Agent
+    // predicate for a missing name, exactly as the cron purpose read relies on.
+    // The generated contract declares `name` as required, so the omission is
+    // stated once, here, rather than at each call site.
+    const request = {
+      ...(agentName ? { name: agentName } : {}),
+      ...options,
+    } as Parameters<CliService['listSessions']>[0];
+    const response = await this.cliService.listSessions(request);
     return {
       sessions: response.sessions ?? [],
       hasMore: response.hasMore === true,
@@ -346,7 +373,7 @@ function normalizeSessionPage(
 ): TuiSessionPage {
   const sessions = response.sessions
     .map(normalizeSessionInfoView)
-    .filter((session) => !workspaceDir || session.workspaceDir === workspaceDir);
+    .filter((session) => !workspaceDir || isSameWorkspacePath(session.workspaceDir, workspaceDir));
   return sessionPageFromResponse(sessions, response);
 }
 

@@ -26,13 +26,17 @@ import { shellTokenize } from './shell-tokenize.js';
 // ---------------------------------------------------------------------------
 
 const HEREDOC_PATTERN = /<<-?\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|<>]+))/;
-const STDIN_CODE_INTERPRETERS = new Set([
+/** Interpreters whose stdin payload is shell syntax. */
+const STDIN_SHELL_INTERPRETERS: ReadonlySet<string> = new Set([
   'bash',
   'sh',
   'zsh',
   'fish',
   'ksh',
   'dash',
+]);
+const STDIN_CODE_INTERPRETERS: ReadonlySet<string> = new Set([
+  ...STDIN_SHELL_INTERPRETERS,
   'node',
   'deno',
   'python',
@@ -79,13 +83,28 @@ export function getShellPermissionCheckSurface(command: string): string {
   );
 }
 
+/** A heredoc body runs as code: a shell script or another stdin interpreter's program. */
 export function commandHasExecutedHeredocBody(command: string): boolean {
+  return commandFeedsHeredocTo(command, STDIN_CODE_INTERPRETERS);
+}
+
+/**
+ * A heredoc body runs as a shell script. Use this, not
+ * {@link commandHasExecutedHeredocBody}, before parsing a body with shell
+ * grammar: a Python or Node program is not shell syntax, so `print(3>2)`
+ * there is a comparison, not a redirect to a file named `2)`.
+ */
+export function commandHasShellScriptHeredocBody(command: string): boolean {
+  return commandFeedsHeredocTo(command, STDIN_SHELL_INTERPRETERS);
+}
+
+function commandFeedsHeredocTo(command: string, interpreters: ReadonlySet<string>): boolean {
   if (!HEREDOC_PATTERN.test(command)) return false;
 
   return command
     .replace(/\r\n/g, '\n')
     .split('\n')
-    .some((line) => HEREDOC_PATTERN.test(line) && heredocBodyIsExecuted(line));
+    .some((line) => HEREDOC_PATTERN.test(line) && heredocBodyIsExecuted(line, interpreters));
 }
 
 /**
@@ -433,16 +452,22 @@ function containsExecutableExpansion(rawValue: string, quote: string): boolean {
   return false;
 }
 
-function heredocBodyIsExecuted(commandLine: string): boolean {
-  return hasUnquotedPipeToShell(commandLine) || startsWithShellInterpreter(commandLine);
+function heredocBodyIsExecuted(
+  commandLine: string,
+  interpreters: ReadonlySet<string> = STDIN_CODE_INTERPRETERS,
+): boolean {
+  return (
+    hasUnquotedPipeToInterpreter(commandLine, interpreters) ||
+    startsWithInterpreter(commandLine, interpreters)
+  );
 }
 
-function hasUnquotedPipeToShell(input: string): boolean {
+function hasUnquotedPipeToInterpreter(input: string, interpreters: ReadonlySet<string>): boolean {
   const pipeIndex = findUnquotedPipe(input);
   if (pipeIndex === -1) return false;
 
   const tokens = shellTokenize(input.slice(pipeIndex + 1).trim());
-  return isStdinCodeInterpreterToken(tokens[skipShellWrappers(tokens)]);
+  return isInterpreterToken(tokens[skipShellWrappers(tokens)], interpreters);
 }
 
 function hasUnquotedPipe(input: string): boolean {
@@ -547,10 +572,10 @@ function findUnquotedPipe(input: string): number {
   return -1;
 }
 
-function startsWithShellInterpreter(commandLine: string): boolean {
+function startsWithInterpreter(commandLine: string, interpreters: ReadonlySet<string>): boolean {
   const withoutHeredoc = commandLine.replace(HEREDOC_PATTERN, '');
   const tokens = shellTokenize(withoutHeredoc);
-  return isStdinCodeInterpreterToken(tokens[skipShellWrappers(tokens)]);
+  return isInterpreterToken(tokens[skipShellWrappers(tokens)], interpreters);
 }
 
 function skipShellWrappers(tokens: string[]): number {
@@ -566,9 +591,9 @@ function skipShellWrappers(tokens: string[]): number {
   return i;
 }
 
-function isStdinCodeInterpreterToken(token: string | undefined): boolean {
+function isInterpreterToken(token: string | undefined, interpreters: ReadonlySet<string>): boolean {
   const executable = token?.split('/').pop();
-  return executable ? STDIN_CODE_INTERPRETERS.has(executable) : false;
+  return executable ? interpreters.has(executable) : false;
 }
 
 // ---------------------------------------------------------------------------

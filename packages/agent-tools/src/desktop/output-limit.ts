@@ -5,6 +5,8 @@ export const DESKTOP_READ_TEXT_MAX_BYTES = 24 * 1024;
 export const DESKTOP_BASH_MAX_BYTES = 24 * 1024;
 // Leave room for exit/timing receipts and the readable output reference.
 export const DESKTOP_BASH_PREVIEW_BYTES = DESKTOP_BASH_MAX_BYTES - 2048;
+export const DESKTOP_BASH_MAX_OUTPUT_BYTES = 5 * 1024 * 1024 * 1024;
+export const DESKTOP_BASH_MAX_PENDING_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 /**
  * True for a tool call made from inside a run_code program (PTC). Agent Core
@@ -18,7 +20,7 @@ export const DESKTOP_BASH_PREVIEW_BYTES = DESKTOP_BASH_MAX_BYTES - 2048;
  * model, and that is cut at 64 KiB (local-runtime-v2 runner/ptc
  * run-code-tool.ts). So child calls skip these caps and the program gets the
  * whole result; with a cut copy it had to page the same data in many small
- * calls (one reported Session needed 92 reads of the same file). The size of a child
+ * calls (92 reads of one session). The size of a child
  * result is bounded by the PTC bridge instead (16 MiB per result,
  * local-runtime-v2 execution/ptc/contracts.ts). Without `parentToolCallId`
  * every tool keeps its caps, text and details unchanged.
@@ -49,7 +51,14 @@ export type DesktopOutputLimitStrategy = 'prefix_lines' | 'head_tail_lines';
 export type DesktopOutputOffsetUnit = 'line' | 'match' | 'file';
 
 export interface DesktopOutputContinuationHint {
-  tool: 'read' | 'grep' | 'glob' | 'mavis' | 'bash' | 'task_output';
+  /**
+   * The tool to call again. One of the desktop tools that truncate their own
+   * output, or the namespaced tool a mavis-backed call arrived through
+   * (`session_messages`, `agent_list`, …) — which is why this is not a closed
+   * union: the executor behind those tools is the mavis one, and it has to name
+   * the tool the model actually called.
+   */
+  tool: string;
   preserve_args: readonly string[];
   instruction: string;
 }
@@ -187,7 +196,7 @@ export function applyDesktopTextLimit(
   result: ToolResult,
   limited: DesktopOutputLimitResult,
 ): ToolResult {
-  if (!limited.truncation) return result;
+  if (!limited.truncation && limited.text === result.text) return result;
 
   let replaced = false;
   const content: ToolResultContent[] = [];
@@ -202,7 +211,7 @@ export function applyDesktopTextLimit(
   }
   if (!replaced) content.unshift({ type: 'text', text: limited.text });
 
-  const continuation = limited.truncation.continuation_hint
+  const continuation = limited.truncation?.continuation_hint
     ? createDesktopOutputContinuation({
         ...(limited.truncation.next_offset === undefined
           ? {}
@@ -220,7 +229,7 @@ export function applyDesktopTextLimit(
     content,
     details: {
       ...(result.details ?? {}),
-      desktop_output_truncation: limited.truncation,
+      ...(limited.truncation ? { desktop_output_truncation: limited.truncation } : {}),
       ...(continuation ? { desktop_output_continuation: continuation } : {}),
     },
   };
@@ -268,7 +277,9 @@ function buildLimitedResult(
 }
 
 function splitBodyLines(text: string): string[] {
-  const body = text.replace(/\n+$/, '');
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) end -= 1;
+  const body = text.slice(0, end);
   return body ? body.split('\n') : [];
 }
 
