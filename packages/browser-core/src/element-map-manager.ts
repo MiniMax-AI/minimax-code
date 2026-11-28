@@ -1,12 +1,12 @@
 /**
- * Element Map Manager. Maintains mappings of interactive page elements and generates dom_simple_map
- * for model understanding.
+ * Element Map Manager
+ * 维护页面可交互元素映射，生成 dom_simple_map 供模型理解
  *
- * Design:
- * 1. elementMap: Complete element information saved locally as JSON.
- * 2. simpleMap: Compact representation sent to the model via the message's <browserState> tag.
- * 3. Update elementMap after every browser action.
- * 4. Cache by URL path using LRU, up to a configurable maximum (default five).
+ * 设计思路：
+ * 1. elementMap: 完整的元素信息，保存到本地文件（JSON 格式）
+ * 2. simpleMap: 精简版，用于上报给模型（在 message 中通过 <browserState> 标签）
+ * 3. 每次浏览器动作后更新 elementMap
+ * 4. 按 URL path 维度缓存，最多维护指定个数（默认 5 个），使用 LRU 策略
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -17,73 +17,73 @@ import type { SemanticPageTree } from './browser-semantic-tree.js';
 import { DOMSerializer, type SerializerConfig } from './dom-serializer.js';
 
 /**
- * Simplified element information sent to the model.
- * Format: [index]type:text
- * Example: [0]btn:Submit [1]lnk:Home [2]txt:Search...
+ * 简化版元素信息（用于上报给模型）
+ * 格式: [index]type:text
+ * 例如: [0]btn:Submit [1]lnk:Home [2]txt:Search...
  */
 export interface SimpleElement {
-  /** Element index. */
+  /** 元素索引 */
   i: number;
-  /** Element type abbreviation. */
+  /** 元素类型缩写 */
   t: string;
-  /** Truncated element text. */
+  /** 元素文本（截断） */
   n: string;
-  /** Normalized coordinates [x, y]. */
+  /** 归一化坐标 [x, y] */
   p: [number, number];
 }
 
 /**
- * Simplified page state sent to the model.
+ * 简化版页面状态（用于上报给模型）
  */
 export interface SimpleBrowserState {
-  /** Current URL. */
+  /** 当前 URL */
   url: string;
-  /** Page title. */
+  /** 页面标题 */
   title: string;
-  /** Viewport dimensions [width, height]. */
+  /** 视口尺寸 [width, height] */
   viewport: [number, number];
-  /** Scroll position [x, y]. */
+  /** 滚动位置 [x, y] */
   scroll: [number, number];
-  /** Total page height. */
+  /** 页面总高度 */
   pageHeight: number;
-  /** Number of interactive elements. */
+  /** 可交互元素数量 */
   elementCount: number;
-  /** Simplified element list, limited to the viewport. */
+  /** 简化版元素列表（仅视口内） */
   elements: SimpleElement[];
-  /** Index of the currently focused element. */
+  /** 当前聚焦元素的索引 */
   focusedIndex?: number;
 }
 
 /**
- * Scroll information (following browser-use).
+ * 滚动信息（参考 browser-use）
  */
 export interface ScrollInfo {
-  /** Current Y scroll position. */
+  /** 当前滚动位置 Y */
   scrollY: number;
-  /** Current X scroll position. */
+  /** 当前滚动位置 X */
   scrollX: number;
-  /** Total page height. */
+  /** 页面总高度 */
   pageHeight: number;
-  /** Total page width. */
+  /** 页面总宽度 */
   pageWidth: number;
-  /** Viewport height. */
+  /** 视口高度 */
   viewportHeight: number;
-  /** Viewport width. */
+  /** 视口宽度 */
   viewportWidth: number;
-  /** Number of pages above. */
+  /** 上方还有多少页 */
   pagesAbove: number;
-  /** Number of pages below. */
+  /** 下方还有多少页 */
   pagesBelow: number;
-  /** Vertical scroll percentage. */
+  /** 垂直滚动百分比 */
   scrollPercentY: number;
-  /** Whether upward scrolling is possible. */
+  /** 是否可以向上滚动 */
   canScrollUp: boolean;
-  /** Whether downward scrolling is possible. */
+  /** 是否可以向下滚动 */
   canScrollDown: boolean;
 }
 
 /**
- * Page information.
+ * 页面信息
  */
 interface PageInfo {
   url: string;
@@ -96,7 +96,7 @@ interface PageInfo {
 }
 
 /**
- * Cache entry.
+ * 缓存条目
  */
 interface CacheEntry {
   urlPath: string;
@@ -108,21 +108,22 @@ interface CacheEntry {
 }
 
 /**
- * Element Map manager with LRU caching by URL path.
+ * Element Map 管理器
+ * 支持按 URL path 维度的 LRU 缓存
  */
 export class ElementMapManager {
-  /** URL path → cache entry. */
+  /** URL path -> 缓存条目 */
   private cache: Map<string, CacheEntry> = new Map();
-  /** Maximum cache entries. */
+  /** 最大缓存数量 */
   private maxCacheSize: number;
-  /** Cache directory. */
+  /** 缓存目录 */
   private cacheDir: string | null = null;
-  /** Currently active URL path. */
+  /** 当前活跃的 URL path */
   private currentUrlPath: string | null = null;
   /** Opaque refs for exactly one Browser Core snapshot generation. */
   private opaqueRefs = new Map<string, ElementRecord>();
 
-  /** Type mapping table. */
+  /** 类型映射表 */
   private static readonly TYPE_MAP: Record<string, string> = {
     button: 'btn',
     link: 'lnk',
@@ -144,40 +145,40 @@ export class ElementMapManager {
   }
 
   /**
-   * Set the cache directory.
+   * 设置缓存目录
    */
   setCacheDir(dir: string): void {
     this.cacheDir = dir;
   }
 
   /**
-   * Get the cache directory.
+   * 获取缓存目录
    */
   getCacheDir(): string | null {
     return this.cacheDir;
   }
 
   /**
-   * Extract the path from a URL for use as a cache key.
-   * Example: https://example.com/path/to/page?query=1 → example.com/path/to/page
+   * 从 URL 提取 path（用于缓存 key）
+   * 例如: https://example.com/path/to/page?query=1 -> example.com/path/to/page
    */
   private getUrlPath(url: string): string {
     try {
       const urlObj = new URL(url);
-      // Use host + pathname as the key, ignoring query and hash.
+      // 使用 host + pathname 作为 key（忽略 query 和 hash）
       return `${urlObj.host}${urlObj.pathname}`;
     } catch {
-      // Use the original URL if parsing fails.
+      // URL 解析失败，使用原始 URL
       return url;
     }
   }
 
   /**
-   * Generate a filename from the URL path's hash.
+   * 生成文件名（基于 URL path 的 hash）
    */
   private getFileName(urlPath: string): string {
     const hash = crypto.createHash('md5').update(urlPath).digest('hex').slice(0, 12);
-    // Use the domain as a prefix to aid debugging.
+    // 提取域名作为前缀，便于调试
     const domain = urlPath
       .split('/')[0]!
       .replace(/[^a-zA-Z0-9]/g, '_')
@@ -186,10 +187,10 @@ export class ElementMapManager {
   }
 
   /**
-   * Update the element map.
-   * @param elements List of interactive elements.
-   * @param pageInfo Page information.
-   * @param semanticTree Semantic understanding tree generated in the same scan as the element list.
+   * 更新元素映射
+   * @param elements 可交互元素列表
+   * @param pageInfo 页面信息
+   * @param semanticTree 与元素列表同一次扫描生成的语义理解树
    */
   async update(
     elements: InteractiveElement[],
@@ -199,17 +200,17 @@ export class ElementMapManager {
     const urlPath = this.getUrlPath(pageInfo.url);
     this.currentUrlPath = urlPath;
 
-    // Check for an existing cache entry.
+    // 检查是否已有缓存
     let entry = this.cache.get(urlPath);
 
     if (entry) {
-      // Update the existing cache entry.
+      // 更新现有缓存
       entry.elements = elements;
       entry.semanticTree = semanticTree;
       entry.pageInfo = pageInfo;
       entry.lastAccess = Date.now();
     } else {
-      // Create a new cache entry.
+      // 创建新缓存条目
       const fileName = this.getFileName(urlPath);
       const filePath = this.cacheDir ? path.join(this.cacheDir, fileName) : '';
 
@@ -222,7 +223,7 @@ export class ElementMapManager {
         lastAccess: Date.now(),
       };
 
-      // Check whether the cache is full and needs eviction.
+      // 检查缓存是否已满，需要淘汰
       if (this.cache.size >= this.maxCacheSize) {
         await this.evictLRU();
       }
@@ -230,14 +231,14 @@ export class ElementMapManager {
       this.cache.set(urlPath, entry);
     }
 
-    // Save to file.
+    // 保存到文件
     if (entry.filePath) {
       await this.saveToFile(entry);
     }
   }
 
   /**
-   * Evict the least recently used (LRU) cache entry.
+   * 淘汰最久未使用的缓存条目（LRU）
    */
   private async evictLRU(): Promise<void> {
     let oldestKey: string | null = null;
@@ -252,12 +253,12 @@ export class ElementMapManager {
 
     if (oldestKey) {
       const entry = this.cache.get(oldestKey);
-      // Delete the corresponding file.
+      // 删除对应的文件
       if (entry?.filePath) {
         try {
           await fs.promises.unlink(entry.filePath);
         } catch {
-          // Ignore missing files.
+          // 文件可能不存在，忽略
         }
       }
       this.cache.delete(oldestKey);
@@ -265,7 +266,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Save the element map to a file.
+   * 保存元素映射到文件
    */
   private async saveToFile(entry: CacheEntry): Promise<void> {
     if (!entry.filePath) return;
@@ -288,7 +289,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get the current page's complete element map.
+   * 获取当前页面的完整元素映射
    */
   getElementMap(): InteractiveElement[] {
     if (!this.currentUrlPath) return [];
@@ -303,13 +304,13 @@ export class ElementMapManager {
   }
 
   /**
-   * Get the element map for a specified URL.
+   * 获取指定 URL 的元素映射
    */
   getElementMapByUrl(url: string): InteractiveElement[] | null {
     const urlPath = this.getUrlPath(url);
     const entry = this.cache.get(urlPath);
     if (entry) {
-      // Update access time.
+      // 更新访问时间
       entry.lastAccess = Date.now();
       return entry.elements;
     }
@@ -317,7 +318,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get an element by index.
+   * 根据索引获取元素
    */
   getElementById(index: number): InteractiveElement | null {
     const elements = this.getElementMap();
@@ -325,7 +326,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get an element by selector.
+   * 根据选择器获取元素
    */
   getElementBySelector(selector: string): InteractiveElement | null {
     const elements = this.getElementMap();
@@ -333,7 +334,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get current page information.
+   * 获取当前页面信息
    */
   private getCurrentPageInfo(): PageInfo | null {
     if (!this.currentUrlPath) return null;
@@ -342,8 +343,8 @@ export class ElementMapManager {
   }
 
   /**
-   * Generate simplified browser state for the model, using an LLM-friendly format for understanding
-   * the page and planning the next action.
+   * 生成简化版浏览器状态（用于上报给模型）
+   * 格式设计为 LLM 友好，便于理解和规划下一步操作
    */
   getSimpleBrowserState(): SimpleBrowserState | null {
     const pageInfo = this.getCurrentPageInfo();
@@ -351,10 +352,10 @@ export class ElementMapManager {
 
     const elements = this.getElementMap();
 
-    // Return only elements in the viewport.
+    // 只返回视口内的元素
     const viewportElements = elements.filter((el) => el.isInViewport);
 
-    // Find the focused element's index.
+    // 查找聚焦元素的索引
     let focusedIndex: number | undefined;
     if (pageInfo.focusedElement) {
       const focusedEl = elements.find((el) => el.selector === pageInfo.focusedElement);
@@ -381,14 +382,14 @@ export class ElementMapManager {
   }
 
   /**
-   * Generate a dom_simple_map string for embedding in messages. Compact JSON contains only what the
-   * model needs to understand the page and plan actions; details such as exact positions and
-   * selectors remain in the local elementMap file.
+   * 生成 dom_simple_map 字符串（用于嵌入到消息中）
+   * 格式: 精简的 JSON，只包含模型理解页面和规划动作所需的最小信息
+   * 详细信息（如精确位置、selector）保存在本地 elementMap 文件中
    *
-   * Example output:
+   * 示例输出:
    * {"u":"https://example.com","t":"Example","v":[1200,800],"s":[0,100],"c":45,"e":[{"i":0,"t":"btn","n":"Submit"},{"i":1,"t":"lnk","n":"Home"}],"m":"/path/to/element-map.json"}
    *
-   * Fields:
+   * 字段说明:
    * - u: url
    * - t: title
    * - v: viewport [width, height]
@@ -396,15 +397,15 @@ export class ElementMapManager {
    * - c: total element count
    * - e: visible elements (i: index, t: type, n: name/text)
    * - f: focused element index (optional)
-   * - m: elementMap file path (the model may read this file for details)
+   * - m: elementMap file path (模型需要详细信息时可读取此文件)
    */
   generateSimpleMapString(): string {
     const state = this.getSimpleBrowserState();
     if (!state) return '';
 
-    // Compact format: retain only the minimum information needed for the model to understand the page.
-    // Do not send position (p) to the model; it references elements by index (i).
-    // Look up details in the local elementMap file during execution.
+    // 精简格式：只保留模型理解页面所需的最小信息
+    // 位置信息 (p) 不传给模型，模型通过 index (i) 引用元素
+    // 执行时从本地 elementMap 文件中查找详细信息
     const output: Record<string, unknown> = {
       u: state.url,
       t: state.title,
@@ -422,7 +423,7 @@ export class ElementMapManager {
       output.f = state.focusedIndex;
     }
 
-    // elementMap file path, available for the model to read selectors, exact positions, and other details.
+    // elementMap 文件路径，模型需要详细信息（如 selector、精确位置）时可读取
     const filePath = this.getCacheDir();
     if (filePath) {
       output.m = filePath;
@@ -432,7 +433,8 @@ export class ElementMapManager {
   }
 
   /**
-   * Generate <browserState> tag content for embedding in messages sent to the model.
+   * 生成 <browserState> 标签内容
+   * 用于嵌入到消息中上报给模型
    */
   generateBrowserStateTag(): string {
     const simpleMap = this.generateSimpleMapString();
@@ -442,11 +444,11 @@ export class ElementMapManager {
   }
 
   /**
-   * Generate optimized hierarchical text following browser-use. Apply paint-order and bounding-box
-   * filtering for compact output.
+   * 生成优化后的层级文本格式（参考 browser-use）
+   * 应用 Paint Order 和 Bounding Box 过滤，输出更精简
    *
-   * @param config Serialization configuration.
-   * @returns Browser state in hierarchical text format.
+   * @param config 序列化配置
+   * @returns 层级文本格式的浏览器状态
    */
   generateOptimizedBrowserState(config?: Partial<SerializerConfig>): string {
     const pageInfo = this.getCurrentPageInfo();
@@ -465,14 +467,15 @@ export class ElementMapManager {
   }
 
   /**
-   * Generate an optimized <browserState> tag using token-efficient hierarchical text, including the
-   * elementMap file path for the model to read details.
+   * 生成优化后的 <browserState> 标签
+   * 使用层级文本格式，更省 token
+   * 包含 elementMap 文件路径供模型读取详细信息
    */
   generateOptimizedBrowserStateTag(config?: Partial<SerializerConfig>): string {
     const text = this.generateOptimizedBrowserState(config);
     if (!text) return '';
 
-    // Add the elementMap file path.
+    // 添加 elementMap 文件路径
     const filePath = this.getCurrentFilePath();
     const mapLine = filePath ? `[Map] ${filePath}` : '';
 
@@ -480,7 +483,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get the current elementMap file path.
+   * 获取当前 elementMap 文件路径
    */
   private getCurrentFilePath(): string | null {
     if (!this.currentUrlPath) return null;
@@ -489,7 +492,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get an element by backendNodeId.
+   * 根据 backendNodeId 获取元素
    */
   getElementByBackendNodeId(backendNodeId: number): InteractiveElement | null {
     const elements = this.getElementMap();
@@ -515,14 +518,14 @@ export class ElementMapManager {
   }
 
   /**
-   * Clear all caches.
+   * 清空所有缓存
    */
   clear(): void {
-    // Delete all cache files.
+    // 删除所有缓存文件
     for (const entry of this.cache.values()) {
       if (entry.filePath) {
         fs.promises.unlink(entry.filePath).catch(() => {
-          // Ignore deletion errors.
+          // 忽略删除错误
         });
       }
     }
@@ -532,7 +535,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Clear the cache for a specified URL.
+   * 清空指定 URL 的缓存
    */
   clearByUrl(url: string): void {
     const urlPath = this.getUrlPath(url);
@@ -540,7 +543,7 @@ export class ElementMapManager {
     if (entry) {
       if (entry.filePath) {
         fs.promises.unlink(entry.filePath).catch(() => {
-          // Ignore deletion errors.
+          // 忽略删除错误
         });
       }
       this.cache.delete(urlPath);
@@ -551,7 +554,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Check whether a specified URL has a cache entry.
+   * 检查指定 URL 是否有缓存
    */
   hasCache(url: string): boolean {
     const urlPath = this.getUrlPath(url);
@@ -559,7 +562,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Check whether an update is needed because the URL changed or no cache exists.
+   * 检查是否需要更新（URL 变化或无缓存）
    */
   needsUpdate(currentUrl: string): boolean {
     const urlPath = this.getUrlPath(currentUrl);
@@ -567,7 +570,7 @@ export class ElementMapManager {
   }
 
   /**
-   * Get cache statistics.
+   * 获取缓存统计信息
    */
   getCacheStats(): { size: number; maxSize: number; urls: string[] } {
     return {
@@ -578,11 +581,11 @@ export class ElementMapManager {
   }
 
   /**
-   * Set the maximum number of cache entries.
+   * 设置最大缓存数量
    */
   setMaxCacheSize(size: number): void {
     this.maxCacheSize = size;
-    // Evict excess entries if the current cache exceeds the new maximum.
+    // 如果当前缓存超过新的最大值，淘汰多余的
     while (this.cache.size > this.maxCacheSize) {
       this.evictLRU();
     }

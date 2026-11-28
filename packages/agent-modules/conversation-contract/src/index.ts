@@ -1,40 +1,35 @@
 export type ConversationSource =
-  | "api"
-  | "cron"
-  | "task"
-  | "background-task"
-  | "team"
-  | "thread-goal"
-  | "questionnaire"
-  | "communication"
-  | "code_review"
-  | "greeting"
-  | "channel:wechat"
-  | "channel:feishu"
-  | "channel:telegram";
+  | 'api'
+  | 'cron'
+  | 'task'
+  | 'background-task'
+  | 'team'
+  | 'thread-goal'
+  | 'questionnaire'
+  | 'communication'
+  | 'code_review'
+  | 'greeting'
+  | 'channel:wechat'
+  | 'channel:feishu'
+  | 'channel:telegram'
+  | 'miniapp';
 
 export type ConversationSessionKind =
-  | "conversation"
-  | "task"
-  | "peek"
-  | "channel"
-  | "cron"
-  | "unknown";
+  | 'conversation'
+  | 'task'
+  | 'peek'
+  | 'channel'
+  | 'cron'
+  | 'unknown';
 
-export type ConversationSessionStatus =
-  | "idle"
-  | "started"
-  | "error"
-  | "aborted"
-  | "interrupted";
+export type ConversationSessionStatus = 'idle' | 'started' | 'error' | 'aborted' | 'interrupted';
 
 /**
  * Durable line marker written only after a historical Agent root is verified
  * against an adopted IM credential route. It lets Project queries surface the
  * one trusted legacy root without treating every Agent root as a project task.
  */
-export const TRUSTED_LEGACY_IM_ROOT_PURPOSE_MARKER =
-  "[mavis:trusted-legacy-im-root]";
+export const TRUSTED_LEGACY_IM_ROOT_PURPOSE_MARKER = '[mavis:trusted-legacy-im-root]';
 
 /** A user-selected model thinking configuration persisted with one Conversation. */
 export interface ConversationModelThinkingSelection {
@@ -69,38 +64,49 @@ export const SESSION_TITLE_MAX_UNICODE_LENGTH = 50;
 export function normalizeConversationSessionTitle(
   input: string | null | undefined,
 ): string | undefined {
-  if (typeof input !== "string") return undefined;
-  const title = input.replace(/\s+/gu, " ").trim();
-  return title && Array.from(title).length <= SESSION_TITLE_MAX_UNICODE_LENGTH
-    ? title
-    : undefined;
+  if (typeof input !== 'string') return undefined;
+  const title = input.replace(/\s+/gu, ' ').trim();
+  return title && Array.from(title).length <= SESSION_TITLE_MAX_UNICODE_LENGTH ? title : undefined;
 }
 
 export interface ConversationRunLocation {
-  readonly mode: "current" | "new-worktree" | "existing-worktree";
+  readonly mode: 'current' | 'new-worktree' | 'existing-worktree';
   readonly resolvedDir: string;
   readonly resolvedBranch?: string;
   readonly parentRepoDir?: string;
   readonly createdAt: number;
 }
 
+/**
+ * A worktree for a new Session to create or attach. The lifecycle resolves it
+ * against the workspace it chose for that Session, so the caller never names
+ * the repository a second time.
+ */
+export type ConversationRunLocationRequest =
+  | {
+      readonly mode: 'new-worktree';
+      readonly newWorktreeBranch?: string;
+      readonly newWorktreeBase?: string;
+    }
+  | { readonly mode: 'existing-worktree'; readonly worktreeDir: string };
+
 export interface ConversationSession {
   readonly sessionId: string;
   readonly agentName: string;
   readonly workspaceDir: string;
-  readonly runtime: "pi-agent" | "opencode";
-  readonly sessionType: "root" | "branch";
+  readonly runtime: 'pi-agent' | 'opencode';
+  readonly sessionType: 'root' | 'branch';
   readonly sessionKind: ConversationSessionKind;
   readonly archived: boolean;
   readonly status: ConversationSessionStatus;
   readonly isDefaultWorkspace?: boolean;
   readonly title?: string | null;
   readonly parentSessionId?: string | null;
-  readonly visibility?: "visible" | "hidden";
+  readonly visibility?: 'visible' | 'hidden';
   readonly purpose?: string;
   readonly originCronId?: string;
   readonly runLocation?: ConversationRunLocation;
-  readonly appMode?: "coding" | "work";
+  readonly appMode?: 'coding' | 'work';
   readonly errorMessage?: string;
   readonly errorCode?: number;
   readonly errorSource?: string;
@@ -110,6 +116,13 @@ export interface ConversationSession {
   readonly effectiveModelVariant?: string | null;
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   readonly scratchpadPath?: string;
+  /**
+   * Present only while this Session is an active SideChat; promotion or
+   * deletion removes the relation. Populated by `query.getSession`.
+   */
+  readonly sideChat?: { readonly mainSessionId: string };
+  /** Caller Session recorded by session_create. Absent for every other creator. */
+  readonly createdBySessionId?: string;
   readonly createdAtMs: number;
   readonly updatedAtMs: number;
 }
@@ -124,7 +137,7 @@ export interface ConversationSessionListOptions {
   readonly excludeSessionKinds?: readonly ConversationSessionKind[];
   readonly includePurposePrefix?: string;
   readonly excludePurposePrefix?: string;
-  readonly sessionType?: "root" | "branch";
+  readonly sessionType?: 'root' | 'branch';
   readonly search?: string;
   readonly cursor?: string;
   readonly offset?: number;
@@ -135,27 +148,34 @@ export interface ConversationSessionListOptions {
 export interface ConversationSessionCreateInput {
   readonly agentName: string;
   readonly workspaceDir?: string;
-  readonly sessionType?: "root" | "branch";
+  readonly sessionType?: 'root' | 'branch';
   readonly sessionKind?: ConversationSessionKind;
   readonly title?: string | null;
   readonly parentSessionId?: string | null;
-  readonly visibility?: "visible" | "hidden";
+  readonly visibility?: 'visible' | 'hidden';
   readonly purpose?: string;
   readonly originCronId?: string;
   readonly runLocation?: ConversationRunLocation;
-  readonly appMode?: "coding" | "work";
+  /** Worktree still to be created or attached; mutually exclusive with runLocation. */
+  readonly runLocationRequest?: ConversationRunLocationRequest;
+  readonly appMode?: 'coding' | 'work';
   readonly effectiveModel?: string | null;
   readonly effectiveModelVariant?: string | null;
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   /** Explicit sparse Task model request resolved atomically with the frozen Task Agent binding. */
   readonly taskModelSelection?: ConversationTaskModelSelection;
   readonly isDefaultWorkspace?: boolean;
-  readonly origin?: "user" | "root-repair";
+  readonly origin?: 'user' | 'root-repair';
   /**
    * Trusted Task-only Plugin Agent copied from the parent Turn's capability
    * lease. Request mappers never populate it; the Task host is the only writer.
    */
   readonly pluginAgentDefinition?: ConversationPluginAgentDefinition;
+  /**
+   * Caller Session that created this one through session_create. Only that path
+   * writes it; every other creator leaves it unset.
+   */
+  readonly createdBySessionId?: string;
 }
 
 /**
@@ -192,11 +212,11 @@ export interface ConversationPluginAgentDefinition {
 
 export interface ConversationSessionUpdate {
   readonly title?: string | null;
-  readonly visibility?: "visible" | "hidden";
+  readonly visibility?: 'visible' | 'hidden';
   readonly purpose?: string;
   readonly workspaceDir?: string;
   readonly isDefaultWorkspace?: boolean;
-  readonly sessionType?: "root" | "branch";
+  readonly sessionType?: 'root' | 'branch';
   readonly parentSessionId?: string | null;
   readonly archived?: boolean;
   readonly effectiveModel?: string | null;
@@ -213,9 +233,7 @@ export interface ConversationRootReplacement {
 
 export interface ConversationSessionQuery {
   getSession(sessionId: string): Promise<ConversationSession | undefined>;
-  listSessions(
-    options?: ConversationSessionListOptions,
-  ): Promise<ConversationSession[]>;
+  listSessions(options?: ConversationSessionListOptions): Promise<ConversationSession[]>;
   listMessages(
     sessionId: string,
     options?: { readonly limit?: number; readonly before?: string },
@@ -227,25 +245,18 @@ export interface ConversationSessionQuery {
 }
 
 export interface ConversationSessionLifecycle {
-  createSession(
-    input: ConversationSessionCreateInput,
-  ): Promise<ConversationSession>;
+  createSession(input: ConversationSessionCreateInput): Promise<ConversationSession>;
   createRootSession(input: {
     readonly agentName: string;
     readonly workspaceDir?: string;
   }): Promise<ConversationSession>;
-  replaceRootSession(
-    agentName: string,
-    sessionId: string,
-  ): Promise<ConversationRootReplacement>;
-  updateSession(
-    sessionId: string,
-    fields: ConversationSessionUpdate,
-  ): Promise<ConversationSession>;
+  replaceRootSession(agentName: string, sessionId: string): Promise<ConversationRootReplacement>;
+  updateSession(sessionId: string, fields: ConversationSessionUpdate): Promise<ConversationSession>;
   deleteSession(sessionId: string): Promise<void>;
 }
 
 export interface ConversationAttachment {
+  /** `file`, `image`, or `folder` (an asset library folder, which has no local source). */
   readonly type?: string;
   readonly filePath?: string;
   readonly fileName?: string;
@@ -253,6 +264,10 @@ export interface ConversationAttachment {
   readonly dataUrl?: string;
   readonly assetId?: string;
   readonly error?: string;
+  /** Asset library node; such an attachment is a reference only, with no local copy. */
+  readonly driveNodeId?: string;
+  readonly drivePath?: string;
+  readonly sizeBytes?: number;
 }
 
 export interface ConversationChannelContext {
@@ -266,6 +281,8 @@ export interface ConversationChannelContext {
   readonly contextToken?: string;
   readonly channel?: string;
   readonly channel_id?: string;
+  /** Immutable custom-Agent owner identity captured at inbound admission. */
+  readonly targetAgentId?: string;
 }
 
 export interface ConversationModelSelection {
@@ -284,10 +301,7 @@ export interface ConversationMessageInput {
   readonly displayContent?: string;
   readonly origin?: unknown;
   readonly channelContext?: ConversationChannelContext;
-  readonly quotedMessage?: {
-    readonly text: string;
-    readonly senderName?: string;
-  };
+  readonly quotedMessage?: { readonly text: string; readonly senderName?: string };
   readonly model?: ConversationModelSelection;
 }
 
@@ -320,10 +334,10 @@ export interface ConversationCommittedMessage {
  * claim that the observation is a filesystem security guarantee.
  */
 export type ConversationFileChangeObservation =
-  | "no_observed_change"
-  | "change_observed"
-  | "uncertain"
-  | "recording_failed";
+  | 'no_observed_change'
+  | 'change_observed'
+  | 'uncertain'
+  | 'recording_failed';
 
 export interface TurnFileChangeObservation {
   readonly fileChange: ConversationFileChangeObservation;
@@ -331,13 +345,23 @@ export interface TurnFileChangeObservation {
   readonly observationNotes: readonly string[];
 }
 
+/** One PTC script file the turn wrote to disk with `save_run_code_script`. */
+export interface TurnSavedPtcScript {
+  readonly path: string;
+  readonly scope: 'project' | 'user';
+  readonly description?: string;
+  readonly overwritten: boolean;
+}
+
 export interface TurnCommittedFacts {
   readonly fileChangeObservation?: TurnFileChangeObservation;
+  /** Recorded by the runtime; a subagent's task result reports them to its parent. */
+  readonly savedPtcScripts?: readonly TurnSavedPtcScript[];
 }
 
 export interface ConversationTurnResult {
   readonly turnId: string;
-  readonly status: "completed" | "aborted" | "failed";
+  readonly status: 'completed' | 'aborted' | 'failed';
   readonly messages: readonly ConversationCommittedMessage[];
   readonly workspaceDir?: string;
   readonly error?: string;
@@ -346,44 +370,48 @@ export interface ConversationTurnResult {
 
 export interface ConversationAcceptedTurn {
   readonly turnId: string;
-  readonly mode: "started" | "queued";
+  readonly mode: 'started' | 'queued';
   readonly queue?: {
     readonly itemId: string;
     readonly position: number;
     readonly ahead: number;
+    /** Admission already claimed the item into its own running Turn. */
+    readonly dispatched?: boolean;
   };
   readonly completion: Promise<ConversationTurnResult>;
 }
 
 export type ConversationTurnRejectionReason =
-  | "invalid-session"
-  | "active-turn"
-  | "compaction-active"
-  | "session-deleting"
-  | "session-mutating"
-  | "priority-blocked"
-  | "ingress-conflict"
+  | 'invalid-session'
+  | 'active-turn'
+  | 'compaction-active'
+  | 'session-deleting'
+  | 'session-mutating'
+  | 'priority-blocked'
+  | 'ingress-conflict'
   | `policy:${string}`
-  | "duplicate"
-  | "invalid-input"
-  | "active-model-override-unsupported"
-  | "delivery-closed";
+  | 'duplicate'
+  | 'invalid-input'
+  | 'active-model-override-unsupported'
+  | 'computer-use-requires-new-turn'
+  | 'delivery-closed'
+  | 'continuation-unavailable';
 
 export class ConversationTurnRejectedError extends Error {
-  readonly code = "CONVERSATION_TURN_REJECTED";
+  readonly code = 'CONVERSATION_TURN_REJECTED';
 
   constructor(
     readonly sessionId: string,
     readonly reason: ConversationTurnRejectionReason,
   ) {
     super(`Conversation Turn was rejected for ${sessionId}: ${reason}`);
-    this.name = "ConversationTurnRejectedError";
+    this.name = 'ConversationTurnRejectedError';
   }
 }
 
 export type ConversationDisplaySource =
   | ConversationSource
-  | "cron-report"
+  | 'cron-report'
   | (string & { readonly __conversationDisplaySourceBrand?: never });
 
 export interface ConversationDisplayProvenance {
@@ -397,7 +425,7 @@ export interface ConversationSubmitInput {
   readonly message: ConversationMessageInput;
   readonly allowQueue: boolean;
   /** Internal control-plane continuation that must precede already queued ordinary input. */
-  readonly queuePlacement?: "front";
+  readonly queuePlacement?: 'front';
   readonly clientRequestId?: string;
   readonly requestedTurnId?: string;
   readonly dedupeKey?: string;
@@ -411,7 +439,7 @@ export interface ConversationSubmitInput {
  */
 export interface ConversationResumeUserInput {
   readonly sessionId: string;
-  readonly source: "questionnaire";
+  readonly source: 'questionnaire';
   readonly requestId: string;
   /** Product owner whose suspended Turn this persisted reply continues. */
   readonly owner?: UserInputResumeOwner;
@@ -421,13 +449,13 @@ export interface ConversationResumeUserInput {
 }
 
 export interface UserInputResumeOwner {
-  readonly kind: "thread-goal";
+  readonly kind: 'thread-goal';
   readonly goalId: string;
 }
 
 export interface ConversationResumeUserInputResult {
   readonly turnId: string;
-  readonly mode: "started" | "duplicate";
+  readonly mode: 'started' | 'duplicate';
 }
 
 export interface ConversationSteerInput {
@@ -437,6 +465,8 @@ export interface ConversationSteerInput {
   readonly producerId: string;
   readonly idempotencyKey: string;
   readonly requestedTurnId?: string;
+  /** Optional chat summary committed only when this input activates a new Turn. */
+  readonly activationDisplayContent?: string;
   /**
    * Internal, opt-in admission hook for a producer that must verify the exact
    * Turn before its content is handed to the runtime. Ordinary steering does
@@ -449,11 +479,18 @@ export interface ConversationSteerInput {
    * batching producer uses them to answer which Turn carried each item.
    */
   readonly receiptAliases?: readonly string[];
+  /**
+   * For messages any Turn may run: a person typing into a running conversation,
+   * or a session send. When delivery loses a turn-switch race, the runtime
+   * enqueues the same message in the Session Queue and answers `mode: 'queued'`
+   * instead of rejecting. Producers bound to one exact Turn must leave it unset.
+   */
+  readonly raceFallback?: 'queue';
 }
 
 export interface ConversationSteerPreDelivery {
   accept(input: {
-    readonly mode: "activated" | "steered";
+    readonly mode: 'activated' | 'steered';
     readonly turnId: string;
   }): void | Promise<void>;
 }
@@ -462,16 +499,28 @@ export interface ConversationSteerPreDelivery {
  * `activated` means the steer had no Turn to join and started one instead, so
  * it owns a completion just like `submit`. `steered` and `duplicate` join an
  * existing Turn owned by another producer and only carry the admission ACK.
+ * `queued` only answers a `raceFallback: 'queue'` steer that lost a turn-switch
+ * race: the message now waits in the Session Queue as `queue.itemId` and runs
+ * later as `turnId`.
  */
 export type ConversationSteerResult =
   | {
       readonly turnId: string;
-      readonly mode: "steered" | "duplicate";
+      readonly mode: 'steered' | 'duplicate';
     }
   | {
       readonly turnId: string;
-      readonly mode: "activated";
+      readonly mode: 'activated';
       readonly completion: Promise<ConversationTurnResult>;
+    }
+  | {
+      readonly turnId: string;
+      readonly mode: 'queued';
+      readonly queue: {
+        readonly itemId: string;
+        readonly position: number;
+        readonly ahead: number;
+      };
     };
 
 export interface ConversationQueuedItem {
@@ -479,8 +528,10 @@ export interface ConversationQueuedItem {
   readonly sessionId: string;
   readonly agentName: string;
   readonly source: ConversationSource;
-  readonly status: "queued" | "claimed";
+  readonly status: 'queued' | 'claimed';
   readonly message: ConversationMessageInput;
+  /** Origins retained inside a combined queued message, for delivery deduplication. */
+  readonly batchOrigins?: readonly unknown[];
   readonly createdAt: number;
   readonly clientRequestId?: string;
   readonly dedupeKey?: string;
@@ -495,9 +546,7 @@ export interface ConversationQueueUpdate {
 
 export interface ConversationIngress {
   submit(input: ConversationSubmitInput): Promise<ConversationAcceptedTurn>;
-  resumeUserInput(
-    input: ConversationResumeUserInput,
-  ): Promise<ConversationResumeUserInputResult>;
+  resumeUserInput(input: ConversationResumeUserInput): Promise<ConversationResumeUserInputResult>;
   steer(input: ConversationSteerInput): Promise<ConversationSteerResult>;
   listQueued(sessionId: string): Promise<ConversationQueuedItem[]>;
   /**
@@ -513,23 +562,47 @@ export interface ConversationIngress {
     sessionId: string,
     itemId: string,
     update: ConversationQueueUpdate,
-  ): Promise<ConversationQueuedItem | "not_editable" | undefined>;
+  ): Promise<ConversationQueuedItem | 'not_editable' | undefined>;
   promoteQueuedSource(
     sessionId: string,
     itemId: string,
     source: ConversationSource,
-  ): Promise<ConversationQueuedItem | "not_editable" | undefined>;
+  ): Promise<ConversationQueuedItem | 'not_editable' | undefined>;
   cancelQueued(
     sessionId: string,
     itemId: string,
-  ): Promise<ConversationQueuedItem | "not_editable" | undefined>;
-  reorderQueued(
-    sessionId: string,
-    itemIds: readonly string[],
-  ): Promise<ConversationQueuedItem[]>;
+  ): Promise<ConversationQueuedItem | 'not_editable' | undefined>;
+  reorderQueued(sessionId: string, itemIds: readonly string[]): Promise<ConversationQueuedItem[]>;
   abort(sessionId: string, reason?: string, turnId?: string): Promise<boolean>;
+  /**
+   * Stops the current Turn and reports which case applied, so a caller can tell
+   * "nothing was running" from "the Turn is still closing". The reason picks the
+   * side effects exactly as for `abort`; unknown reasons stop only the Turn.
+   */
+  interruptTurn(input: ConversationInterruptInput): Promise<ConversationInterruptResult>;
   dispatchQueue(sessionId: string): Promise<void>;
 }
+
+export interface ConversationInterruptInput {
+  readonly sessionId: string;
+  readonly reason: string;
+  /** Stop only this Turn; a different running Turn yields `turn-mismatch`. */
+  readonly turnId?: string;
+  /**
+   * Who asks for the stop, when `reason` alone does not say (a tool stopping another
+   * Session with the user-stop side effects, for example). Diagnostics only: it is
+   * recorded beside the reason and never selects side effects.
+   */
+  readonly initiator?: string;
+}
+
+export type ConversationInterruptResult =
+  | { readonly status: 'aborted'; readonly turnId: string }
+  /** The abort signal was accepted, but the Turn has not finished closing yet. */
+  | { readonly status: 'abort-timeout'; readonly turnId: string }
+  | { readonly status: 'not-running' }
+  /** `turnId` named a Turn other than the one currently running. */
+  | { readonly status: 'turn-mismatch' };
 
 export interface ConversationCompactionInput {
   readonly sessionId: string;
@@ -553,9 +626,23 @@ export interface ConversationCompactionOutcome {
 }
 
 export interface ConversationMaintenance {
-  compact(
-    input: ConversationCompactionInput,
-  ): Promise<ConversationCompactionOutcome>;
+  compact(input: ConversationCompactionInput): Promise<ConversationCompactionOutcome>;
+}
+
+/** Executing Task children of one parent Session against its configured limit. */
+export interface ConversationTaskOccupancy {
+  readonly active: number;
+  readonly limit: number;
+  /** Diagnostics: the Task children counted in `active`, when the Runtime reports them. */
+  readonly activeChildSessionIds?: readonly string[];
+}
+
+export interface ConversationTaskConcurrency {
+  /**
+   * Point-in-time snapshot; Turn admission remains the only enforcement.
+   * Resolves undefined when the bound Runtime enforces no Task-child limit.
+   */
+  occupancy(parentSessionId: string): Promise<ConversationTaskOccupancy | undefined>;
 }
 
 export interface RuntimeConversation {
@@ -563,37 +650,34 @@ export interface RuntimeConversation {
   readonly lifecycle: ConversationSessionLifecycle;
   readonly ingress: ConversationIngress;
   readonly maintenance: ConversationMaintenance;
+  /** Optional capability; forwarding implementations must forward it too. */
+  readonly taskConcurrency?: ConversationTaskConcurrency;
 }
 
 export interface RuntimeConversationChannelView {
-  readonly query: Pick<ConversationSessionQuery, "getSession" | "listSessions">;
+  readonly query: Pick<ConversationSessionQuery, 'getSession' | 'listSessions'>;
   readonly lifecycle: Pick<
     ConversationSessionLifecycle,
-    "createSession" | "createRootSession" | "deleteSession"
+    'createSession' | 'createRootSession' | 'deleteSession'
   >;
-  readonly ingress: Pick<
-    ConversationIngress,
-    "submit" | "abort" | "dispatchQueue"
-  >;
-  readonly maintenance: Pick<ConversationMaintenance, "compact">;
+  readonly ingress: Pick<ConversationIngress, 'submit' | 'abort' | 'dispatchQueue'>;
+  readonly maintenance: Pick<ConversationMaintenance, 'compact'>;
 }
 
-export const RUNTIME_CONVERSATION_UNAVAILABLE_CODE =
-  "RUNTIME_CONVERSATION_UNAVAILABLE";
-export const RUNTIME_CONVERSATION_SHUTDOWN_CODE =
-  "RUNTIME_CONVERSATION_SHUTDOWN";
+export const RUNTIME_CONVERSATION_UNAVAILABLE_CODE = 'RUNTIME_CONVERSATION_UNAVAILABLE';
+export const RUNTIME_CONVERSATION_SHUTDOWN_CODE = 'RUNTIME_CONVERSATION_SHUTDOWN';
 
 export class RuntimeConversationUnavailableError extends Error {
   readonly code = RUNTIME_CONVERSATION_UNAVAILABLE_CODE;
   readonly originalError?: unknown;
 
   constructor(
-    message = "Runtime conversation is unavailable.",
+    message = 'Runtime conversation is unavailable.',
     options?: { readonly cause?: unknown },
   ) {
     super(message);
-    this.name = "RuntimeConversationUnavailableError";
-    if (options && "cause" in options) this.originalError = options.cause;
+    this.name = 'RuntimeConversationUnavailableError';
+    if (options && 'cause' in options) this.originalError = options.cause;
   }
 }
 
@@ -602,20 +686,17 @@ export class RuntimeConversationShutdownError extends Error {
   readonly originalError?: unknown;
 
   constructor(
-    message = "Runtime conversation is shutting down.",
+    message = 'Runtime conversation is shutting down.',
     options?: { readonly cause?: unknown },
   ) {
     super(message);
-    this.name = "RuntimeConversationShutdownError";
-    if (options && "cause" in options) this.originalError = options.cause;
+    this.name = 'RuntimeConversationShutdownError';
+    if (options && 'cause' in options) this.originalError = options.cause;
   }
 }
 
 export function isRuntimeConversationUnavailableError(error: unknown): boolean {
-  return hasRuntimeConversationCode(
-    error,
-    RUNTIME_CONVERSATION_UNAVAILABLE_CODE,
-  );
+  return hasRuntimeConversationCode(error, RUNTIME_CONVERSATION_UNAVAILABLE_CODE);
 }
 
 export function isRuntimeConversationShutdownError(error: unknown): boolean {
@@ -631,80 +712,60 @@ export class DeferredRuntimeConversation implements RuntimeConversation {
   private settled = false;
 
   readonly query: ConversationSessionQuery = {
-    getSession: (sessionId) =>
-      this.use((conversation) => conversation.query.getSession(sessionId)),
-    listSessions: (options) =>
-      this.use((conversation) => conversation.query.listSessions(options)),
+    getSession: (sessionId) => this.use((conversation) => conversation.query.getSession(sessionId)),
+    listSessions: (options) => this.use((conversation) => conversation.query.listSessions(options)),
     listMessages: (sessionId, options) =>
-      this.use((conversation) =>
-        conversation.query.listMessages(sessionId, options),
-      ),
+      this.use((conversation) => conversation.query.listMessages(sessionId, options)),
   };
 
   readonly lifecycle: ConversationSessionLifecycle = {
     createSession: (input) =>
       this.use((conversation) => conversation.lifecycle.createSession(input)),
     createRootSession: (input) =>
-      this.use((conversation) =>
-        conversation.lifecycle.createRootSession(input),
-      ),
+      this.use((conversation) => conversation.lifecycle.createRootSession(input)),
     replaceRootSession: (agentName, sessionId) =>
-      this.use((conversation) =>
-        conversation.lifecycle.replaceRootSession(agentName, sessionId),
-      ),
+      this.use((conversation) => conversation.lifecycle.replaceRootSession(agentName, sessionId)),
     updateSession: (sessionId, fields) =>
-      this.use((conversation) =>
-        conversation.lifecycle.updateSession(sessionId, fields),
-      ),
+      this.use((conversation) => conversation.lifecycle.updateSession(sessionId, fields)),
     deleteSession: (sessionId) =>
-      this.use((conversation) =>
-        conversation.lifecycle.deleteSession(sessionId),
-      ),
+      this.use((conversation) => conversation.lifecycle.deleteSession(sessionId)),
   };
 
   readonly ingress: ConversationIngress = {
-    submit: (input) =>
-      this.use((conversation) => conversation.ingress.submit(input)),
+    submit: (input) => this.use((conversation) => conversation.ingress.submit(input)),
     resumeUserInput: (input) =>
       this.use((conversation) => conversation.ingress.resumeUserInput(input)),
-    steer: (input) =>
-      this.use((conversation) => conversation.ingress.steer(input)),
+    steer: (input) => this.use((conversation) => conversation.ingress.steer(input)),
     listQueued: (sessionId) =>
       this.use((conversation) => conversation.ingress.listQueued(sessionId)),
     findQueuedByClientRequestId: (sessionId, clientRequestId) =>
       this.use((conversation) =>
-        conversation.ingress.findQueuedByClientRequestId(
-          sessionId,
-          clientRequestId,
-        ),
+        conversation.ingress.findQueuedByClientRequestId(sessionId, clientRequestId),
       ),
     updateQueued: (sessionId, itemId, update) =>
-      this.use((conversation) =>
-        conversation.ingress.updateQueued(sessionId, itemId, update),
-      ),
+      this.use((conversation) => conversation.ingress.updateQueued(sessionId, itemId, update)),
     promoteQueuedSource: (sessionId, itemId, source) =>
       this.use((conversation) =>
         conversation.ingress.promoteQueuedSource(sessionId, itemId, source),
       ),
     cancelQueued: (sessionId, itemId) =>
-      this.use((conversation) =>
-        conversation.ingress.cancelQueued(sessionId, itemId),
-      ),
+      this.use((conversation) => conversation.ingress.cancelQueued(sessionId, itemId)),
     reorderQueued: (sessionId, itemIds) =>
-      this.use((conversation) =>
-        conversation.ingress.reorderQueued(sessionId, itemIds),
-      ),
+      this.use((conversation) => conversation.ingress.reorderQueued(sessionId, itemIds)),
     abort: (sessionId, reason, turnId) =>
-      this.use((conversation) =>
-        conversation.ingress.abort(sessionId, reason, turnId),
-      ),
+      this.use((conversation) => conversation.ingress.abort(sessionId, reason, turnId)),
+    interruptTurn: (input) => this.use((conversation) => conversation.ingress.interruptTurn(input)),
     dispatchQueue: (sessionId) =>
       this.use((conversation) => conversation.ingress.dispatchQueue(sessionId)),
   };
 
   readonly maintenance: ConversationMaintenance = {
-    compact: (input) =>
-      this.use((conversation) => conversation.maintenance.compact(input)),
+    compact: (input) => this.use((conversation) => conversation.maintenance.compact(input)),
+  };
+
+  readonly taskConcurrency: ConversationTaskConcurrency = {
+    occupancy: (parentSessionId) =>
+      this.use(async (conversation) => conversation.taskConcurrency?.occupancy(parentSessionId)),
   };
 
   constructor() {
@@ -716,8 +777,7 @@ export class DeferredRuntimeConversation implements RuntimeConversation {
   }
 
   bind(conversation: RuntimeConversation): void {
-    if (this.settled)
-      throw new Error("Runtime conversation binding is already settled.");
+    if (this.settled) throw new Error('Runtime conversation binding is already settled.');
     this.settled = true;
     this.bound = conversation;
     this.resolveReady(conversation);
@@ -741,9 +801,7 @@ export class DeferredRuntimeConversation implements RuntimeConversation {
     }
   }
 
-  private async use<T>(
-    operation: (conversation: RuntimeConversation) => Promise<T>,
-  ): Promise<T> {
+  private async use<T>(operation: (conversation: RuntimeConversation) => Promise<T>): Promise<T> {
     if (this.terminalError) throw this.terminalError;
     const conversation = this.bound ?? (await this.readiness);
     if (this.terminalError) throw this.terminalError;
@@ -752,33 +810,21 @@ export class DeferredRuntimeConversation implements RuntimeConversation {
 }
 
 function normalizeUnavailableError(error: unknown): unknown {
-  if (
-    isRuntimeConversationUnavailableError(error) ||
-    isRuntimeConversationShutdownError(error)
-  ) {
+  if (isRuntimeConversationUnavailableError(error) || isRuntimeConversationShutdownError(error)) {
     return error;
   }
   const message = error instanceof Error ? error.message : String(error);
   return new RuntimeConversationUnavailableError(message, { cause: error });
 }
 
-function normalizeShutdownError(
-  error: unknown,
-): RuntimeConversationShutdownError {
+function normalizeShutdownError(error: unknown): RuntimeConversationShutdownError {
   if (error instanceof RuntimeConversationShutdownError) return error;
   const message = error instanceof Error ? error.message : undefined;
   return new RuntimeConversationShutdownError(message, { cause: error });
 }
 
 function hasRuntimeConversationCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    Reflect.get(error, "code") === code
-  );
+  return typeof error === 'object' && error !== null && Reflect.get(error, 'code') === code;
 }
 
-export type {
-  ProcessLocalContext,
-  ProcessLocalStreamResult,
-} from "./process-local.js";
+export * from './process-local.js';

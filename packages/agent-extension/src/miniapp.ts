@@ -10,6 +10,7 @@ import {
   projectMiniAppFailure,
   type MiniAppFailureDiagnostic,
   type MiniAppFailureReasonCode,
+  type MiniAppInspectDiagnostics,
 } from './miniapp-diagnostics.js';
 
 export type {
@@ -17,6 +18,7 @@ export type {
   MiniAppFailureReasonCode,
   MiniAppFailureRecovery,
   MiniAppFailureStage,
+  MiniAppInspectDiagnostics,
 } from './miniapp-diagnostics.js';
 
 const TARGET_ACTIONS = ['init', 'open', 'inspect', 'publish', 'restart', 'stop'] as const;
@@ -26,6 +28,13 @@ const PluginId = Type.String({
   maxLength: 80,
   pattern: '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$',
   description: 'Required for every Mini App action except list.',
+});
+const OpenPath = Type.String({
+  minLength: 1,
+  maxLength: 4096,
+  pattern: String.raw`^/(?!/)(?:[^\u0000-\u0020\u007f\\#%]|%[0-9a-fA-F]{2})*(?![\s\S])`,
+  description:
+    'Only for open. An origin-relative path, optionally including a query string, such as /items/42?tab=details. Omit to open the default surface. Must start with a single /; URLs, backslashes, ASCII whitespace and control characters, fragments, and malformed percent escapes are forbidden.',
 });
 const SourcePath = Type.String({
   minLength: 1,
@@ -45,17 +54,22 @@ const MiniAppProviderInputSchema = Type.Object(
       description: 'Mini App lifecycle action.',
     }),
     pluginId: Type.Optional(PluginId),
+    path: Type.Optional(OpenPath),
     sourcePath: Type.Optional(SourcePath),
   },
   {
     additionalProperties: false,
     description:
-      'pluginId is required for every Mini App action except list. sourcePath is accepted only for publish.',
+      'pluginId is required for every Mini App action except list. path is accepted only for open. sourcePath is accepted only for publish.',
   },
 );
 
 const MiniAppActionInputSchema = Type.Union([
   Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
+  Type.Object(
+    { action: Type.Literal('open'), pluginId: PluginId, path: Type.Optional(OpenPath) },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       action: Type.Literal('publish'),
@@ -64,7 +78,7 @@ const MiniAppActionInputSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
-  ...TARGET_ACTIONS.filter((action) => action !== 'publish').map((action) =>
+  ...TARGET_ACTIONS.filter((action) => action !== 'open' && action !== 'publish').map((action) =>
     Type.Object(
       { action: Type.Literal(action), pluginId: PluginId },
       { additionalProperties: false },
@@ -98,6 +112,24 @@ export interface MiniAppTargetResult {
   readonly miniApp: MiniAppSummary;
 }
 
+export interface MiniAppInspectResult extends MiniAppTargetResult {
+  readonly diagnostics: MiniAppInspectDiagnostics;
+  /**
+   * The Host memory manager's view: when the user last attended this Mini App (Unix ms), why
+   * it is protected from sleep right now, and when and why it last slept. Absent when the Host
+   * has no memory manager.
+   */
+  readonly memory?: {
+    readonly lastAttendedAtMs?: number;
+    readonly protection?: string;
+    readonly lastSleep?: {
+      readonly atMs: number;
+      readonly reason: string;
+      readonly unit: 'page' | 'app';
+    };
+  };
+}
+
 export type MiniAppRunningSummary = Omit<MiniAppSummary, 'runtime'> & {
   readonly runtime: {
     readonly kind: 'process';
@@ -120,6 +152,10 @@ export interface MiniAppTargetActionContext extends MiniAppActionContext {
   readonly pluginId: string;
 }
 
+export interface MiniAppOpenActionContext extends MiniAppTargetActionContext {
+  readonly path?: string;
+}
+
 export interface MiniAppPublishActionContext extends MiniAppTargetActionContext {
   readonly sourcePath?: string;
 }
@@ -130,9 +166,9 @@ export interface MiniAppLifecycle {
   list(input: MiniAppActionContext): Promise<MiniAppListResult>;
   /** Scaffolds or binds the deterministic package root in the current Session workspace for authoring. */
   init(input: MiniAppTargetActionContext): Promise<MiniAppInitResult>;
-  open(input: MiniAppTargetActionContext): Promise<MiniAppOpenResult>;
-  /** Returns the installed Mini App and runtime lifecycle summary, without reading its surface. */
-  inspect(input: MiniAppTargetActionContext): Promise<MiniAppTargetResult>;
+  open(input: MiniAppOpenActionContext): Promise<MiniAppOpenResult>;
+  /** Reads the current or latest run and bounded Host diagnostics without starting its runtime. */
+  inspect(input: MiniAppTargetActionContext): Promise<MiniAppInspectResult>;
   /** Accepts the specified finished package directory or current Session workspace package and starts its runtime. */
   publish(input: MiniAppPublishActionContext): Promise<MiniAppTargetResult>;
   /** Restarts an already installed Mini App runtime without adopting workspace changes. */
@@ -150,7 +186,6 @@ export type MiniAppLifecycleErrorCode =
   | 'PREPARATION_FAILED'
   | 'RUNTIME_FAILED'
   | 'OPEN_UNAVAILABLE'
-  | 'OPEN_FAILED'
   | 'INTERNAL_ERROR'
   | 'CANCELLED';
 
@@ -221,17 +256,25 @@ export function createMiniAppControlExtension(lifecycle: MiniAppLifecycle): Agen
     id: 'miniapp-control',
     description: 'Host-owned Mini App bootstrap and runtime lifecycle control.',
     init(api) {
-      api.registerTool((context) => (isMiniAppTurn(context) ? tool : null));
+      api.registerTool((context) => (exposesMiniAppControl(context) ? tool : null));
     },
   };
 }
 
+/**
+ * The model-facing `miniapp` definition. Hosts without a Mini App runtime reuse
+ * it for a refusal tool, so every surface lists the same name and schema.
+ */
+export const MINIAPP_TOOL_DEFINITION = {
+  name: 'miniapp',
+  description:
+    "Initialize, list, open, inspect, publish, restart, or stop a Mini App. Init scaffolds or binds the package root in the current Session workspace for authoring without publishing it. Open accepts an optional origin-relative path with a query string to select a page in the current Session's Mini App tab. Inspect returns the installed Mini App's source (official or local) and runtime state. Inspect reads the current or latest run and bounded Host diagnostics without starting the runtime; diagnostics are kept in Host memory and exclude business logs and raw stdout/stderr. Before editing an installed Mini App, inspect its source; official Plugin implementations do not support local editing or republishing. Use miniapp-creator for authoring and recovery guidance. Publish starts or replaces the runtime. Init is not required for a complete package directory. Restart restarts an installed runtime. Stop releases an installed runtime without deleting its Mini App package; use the Mini App Plugin's own Skills, MCP servers, and Connectors for business operations.",
+  schema: MiniAppProviderInputSchema,
+} as const;
+
 function createMiniAppTool(lifecycle: MiniAppLifecycle) {
   return defineRuntimeTool({
-    name: 'miniapp',
-    description:
-      "Initialize, list, open, inspect, publish, restart, or stop a Mini App. Init scaffolds or binds the package root in the current Session workspace for authoring without publishing it. Inspect returns the installed Mini App's source (official or local) and runtime state. Before editing an installed Mini App, inspect its source; official Plugin implementations do not support local editing or republishing. Use miniapp-creator for authoring and recovery guidance. Publish starts or replaces the runtime. Init is not required for a complete package directory. Restart restarts an installed runtime. Stop releases an installed runtime without deleting its Mini App package; use the Mini App Plugin's own Skills, MCP servers, and Connectors for business operations.",
-    schema: MiniAppProviderInputSchema,
+    ...MINIAPP_TOOL_DEFINITION,
     source: 'builtin',
     operationClassifier: {
       allowedValues: MINIAPP_ACTIONS,
@@ -245,16 +288,44 @@ function createMiniAppTool(lifecycle: MiniAppLifecycle) {
       }
       const input = rawInput as MiniAppInput;
       try {
-        const result = await dispatch(lifecycle, input, {
-          sessionId: context.sessionId,
-          turnId: context.turnId,
-          ...(signal ? { signal } : {}),
-        });
+        const result = await untilAborted(
+          dispatch(lifecycle, input, {
+            sessionId: context.sessionId,
+            turnId: context.turnId,
+            ...(signal ? { signal } : {}),
+          }),
+          signal,
+        );
         return successResult(input.action, result);
       } catch (error) {
         return errorResult(input.action, normalizeError(error, signal));
       }
     },
+  });
+}
+
+/**
+ * Ends the call as soon as the Turn is stopped. A Host step that has not reached its own
+ * cancellation check (a Mini App runtime that never answers) would otherwise hold the Turn
+ * open after the user pressed stop. The step keeps the same signal and settles on its own;
+ * its late outcome is dropped.
+ */
+function untilAborted<T>(operation: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
   });
 }
 
@@ -269,7 +340,10 @@ async function dispatch(
     case 'init':
       return lifecycle.init(target);
     case 'open':
-      return lifecycle.open(target);
+      return lifecycle.open({
+        ...target,
+        ...(input.path !== undefined ? { path: input.path } : {}),
+      });
     case 'inspect':
       return lifecycle.inspect(target);
     case 'publish':
@@ -373,7 +447,6 @@ const MINIAPP_PUBLIC_ERROR_MESSAGES: Readonly<Record<MiniAppLifecycleErrorCode, 
   PREPARATION_FAILED: 'Mini App preparation failed.',
   RUNTIME_FAILED: 'Mini App runtime failed.',
   OPEN_UNAVAILABLE: 'Mini App open is unavailable.',
-  OPEN_FAILED: 'Mini App could not be opened.',
   INTERNAL_ERROR: 'The Mini App host could not complete the action.',
   CANCELLED: 'The Mini App action was cancelled.',
 };
@@ -427,7 +500,10 @@ function readMiniAppAction(input: unknown): MiniAppReportedAction {
     : 'unknown';
 }
 
-function isMiniAppTurn(context: ModelContextAssemblyCtx): boolean {
+/** Interactive turns get the `miniapp` control tool, except inside a session a Mini App started. */
+function exposesMiniAppControl(context: ModelContextAssemblyCtx): boolean {
+  // Such a session must not init / publish / open Mini Apps (including itself).
+  if (context.sessionOrigin?.miniApp) return false;
   const config = readRecord(context.agentConfig);
   const profile = readRecord(config.agent_profile);
   return profile.surface === 'interactive';

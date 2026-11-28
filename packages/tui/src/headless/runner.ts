@@ -1,16 +1,16 @@
-import { resolve } from "node:path";
+import { resolve } from 'node:path';
 
-import type { TuiAttachment } from "../application/invocation.js";
-import { TuiRunCoordinator } from "../application/run-coordinator.js";
-import type { TuiTurnRunOutcome } from "../application/turn-run-outcome.js";
+import type { TuiAttachment } from '../application/invocation.js';
+import { TuiRunCoordinator, sessionModelReference } from '../application/run-coordinator.js';
+import type { TuiTurnRunOutcome } from '../application/turn-run-outcome.js';
+import { createTuiTurnId } from '../application/turn-id.js';
 import {
-  isTurnCompactionMessage,
-  responseUsageFromMessage,
-  sumResponseUsage,
-  upsertResponseUsage,
-} from "../application/response-usage.js";
-import { createTuiTurnId } from "../application/turn-id.js";
+  resolveTurnExecutionFacts,
+  resolveTurnModelFacts,
+  type TuiTurnExecutionFacts,
+} from '../application/turn-execution-facts.js';
 import type {
+  TuiAdvisorSelection,
   TuiConfigurationPort,
   TuiConversationPort,
   TuiActiveRunControlPort,
@@ -19,14 +19,13 @@ import type {
   TuiSession,
   TuiSessionPort,
   TuiSessionTurnPort,
-} from "../runtime/port.js";
-import type { TuiModel, TuiSessionUsageRow } from "../types/runtime-models.js";
+} from '../runtime/port.js';
 import {
   exitCodeForExecError,
   exitCodeForExecResult,
   MINIMAX_CODE_EXEC_EXIT_CODES,
   TuiExecError,
-} from "./exit-policy.js";
+} from './exit-policy.js';
 import {
   createHeadlessOutputEncoder,
   createNodeStreamWriter,
@@ -34,27 +33,18 @@ import {
   type TuiExecFormat,
   type TuiHeadlessOutputEncoder,
   type TuiOutputWrite,
-} from "./output.js";
-import type { TuiPermissionPolicy } from "./invocation.js";
-import { resolveHeadlessModelSelection, parseHeadlessModelOverride } from "./model-selection.js";
-import { TuiFailure } from "../failure.js";
-import {
-  formatTuiExecFailure,
-  formatTuiExecResultFailure,
-} from "./error-presentation.js";
-import { MINIMAX_CODE_DEFAULT_AGENT_NAME } from "../product-context.js";
-import { requireTuiAgentAccess } from "../application/login-gate.js";
-import { formatTuiActionFailure } from "../user-facing-failure.js";
-import { isTuiInternalSubagentSession } from "../runtime/delegation.js";
-import { ExecRunSupervisor, loadTurnHistory } from "./supervisor.js";
-import {
-  createExecResult,
-  validateExecOutput,
-  type ExecResult,
-  type ExecModelIdentity,
-  type ExecTokenUsage,
-} from "./contract.js";
-import { ExecEventProjector } from "./events.js";
+} from './output.js';
+import type { TuiPermissionPolicy } from './invocation.js';
+import { parseHeadlessModelOverride, resolveHeadlessModelSelection } from './model-selection.js';
+import { TuiFailure } from '../failure.js';
+import { formatTuiExecFailure, formatTuiExecResultFailure } from './error-presentation.js';
+import { MINIMAX_CODE_DEFAULT_AGENT_NAME } from '../product-context.js';
+import { requireTuiAgentAccess } from '../application/login-gate.js';
+import { formatTuiActionFailure } from '../user-facing-failure.js';
+import { isTuiInternalSubagentSession } from '../runtime/delegation.js';
+import { ExecRunSupervisor } from './supervisor.js';
+import { createExecResult, validateExecOutput, type ExecResult } from './contract.js';
+import { ExecEventProjector } from './events.js';
 import {
   createPassingReviewResult,
   parseTuiReviewResult,
@@ -62,11 +52,11 @@ import {
   reviewOutcomeFromOrigin,
   type ReviewResultV1,
   type TuiReviewOutcome,
-} from "../review/result.js";
-import type { TuiStreamEvent } from "../runtime/stream-events.js";
-import { ExecDiagnostics, outputSchemaHash } from "./diagnostics.js";
-import { waitForExecSettlement } from "./settlement.js";
-import { ExecProgress } from "./progress.js";
+} from '../review/result.js';
+import type { TuiStreamEvent } from '../runtime/stream-events.js';
+import { ExecDiagnostics, outputSchemaHash } from './diagnostics.js';
+import { waitForExecSettlement } from './settlement.js';
+import { ExecProgress } from './progress.js';
 
 export interface TuiExecInput {
   prompt: string;
@@ -76,6 +66,7 @@ export interface TuiExecInput {
   format?: TuiExecFormat;
   model?: string;
   effort?: string;
+  advisor?: TuiAdvisorSelection;
   sessionId?: string;
   continueSession?: boolean;
   permission?: TuiPermissionPolicy;
@@ -83,23 +74,27 @@ export interface TuiExecInput {
   maxSteps?: number;
   outputSchema?: Readonly<Record<string, unknown>>;
   outputLastMessagePath?: string;
-  reviewRequest?: { readonly scope: "local_changes" };
+  reviewRequest?: { readonly scope: 'local_changes' };
   diagnosticsDir?: string;
 }
 
 export type TuiHeadlessRuntime = Pick<
   TuiSessionPort,
-  "createSession" | "getSession" | "listSessionPage" | "listMessagePage"
+  'createSession' | 'getSession' | 'listSessionPage' | 'listMessagePage'
 > &
   TuiConversationPort &
   TuiSessionTurnPort &
   TuiActiveRunControlPort &
-  Pick<TuiInspectionPort, "getSessionUsage"> &
+  Pick<TuiInspectionPort, 'getSessionUsage'> &
+  Pick<TuiInteractionPort, 'getPendingQuestionnaire' | 'listPendingPermissions'> &
   Pick<
-    TuiInteractionPort,
-    "getPendingQuestionnaire" | "listPendingPermissions"
-  > &
-  Pick<TuiConfigurationPort, "getAccountStatus" | "listModels">;
+    TuiConfigurationPort,
+    | 'getAccountStatus'
+    | 'listModels'
+    | 'selectSessionAdvisor'
+    | 'getAdvisorEnabled'
+    | 'setAdvisorEnabled'
+  >;
 
 export interface TuiExecDependencies {
   runtime: TuiHeadlessRuntime;
@@ -107,7 +102,7 @@ export interface TuiExecDependencies {
   stderr?: TuiOutputWrite;
   shutdown: () => Promise<void | boolean>;
   signal?: AbortSignal;
-  processRef?: Pick<NodeJS.Process, "once" | "off">;
+  processRef?: Pick<NodeJS.Process, 'once' | 'off'>;
   createTurnId?: () => string;
   /** Overrides how long a stopped run waits for remaining output to drain. */
   stopOutputGraceMs?: number;
@@ -134,10 +129,7 @@ export async function runTuiExec(
     | {
         readonly encoder: TuiHeadlessOutputEncoder;
         result: ExecResult;
-        readonly lastMessage?: {
-          readonly filePath: string;
-          readonly answer: string;
-        };
+        readonly lastMessage?: { readonly filePath: string; readonly answer: string };
       }
     | undefined;
   const diagnostics: string[] = [];
@@ -147,9 +139,7 @@ export async function runTuiExec(
   let stoppedForRecovery = false;
   let originalAnswer: string | null | undefined;
   const progress = input.diagnosticsDir
-    ? new ExecProgress((event) =>
-        evidence?.record({ ...executionMetadata, ...event }),
-      )
+    ? new ExecProgress((event) => evidence?.record({ ...executionMetadata, ...event }))
     : undefined;
   const startedAt = Date.now();
   const stopOutput = createStopOutputRelease(
@@ -170,9 +160,7 @@ export async function runTuiExec(
         }
       : {}),
   });
-  let reviewTerminal:
-    | { readonly outcome: TuiReviewOutcome; readonly content: string }
-    | undefined;
+  let reviewTerminal: { readonly outcome: TuiReviewOutcome; readonly content: string } | undefined;
 
   let cancelled = dependencies.signal?.aborted ?? false;
   const cancel = () => {
@@ -182,13 +170,12 @@ export async function runTuiExec(
     void coordinator.abort();
   };
   const assertNotCancelled = () => {
-    if (cancelled)
-      throw new TuiExecError("cancelled", "Execution was cancelled.");
+    if (cancelled) throw new TuiExecError('cancelled', 'Execution was cancelled.');
   };
-  dependencies.signal?.addEventListener("abort", cancel, { once: true });
-  processRef.once("SIGINT", cancel);
-  processRef.once("SIGTERM", cancel);
-  processRef.once("SIGHUP", cancel);
+  dependencies.signal?.addEventListener('abort', cancel, { once: true });
+  processRef.once('SIGINT', cancel);
+  processRef.once('SIGTERM', cancel);
+  processRef.once('SIGHUP', cancel);
   try {
     assertNotCancelled();
     if (input.diagnosticsDir) {
@@ -199,15 +186,14 @@ export async function runTuiExec(
     }
     const loginModel = input.model ? parseHeadlessModelOverride(input.model) : undefined;
     await requireTuiAgentAccess(
-      dependencies.runtime, input.sessionId, undefined, undefined,
+      dependencies.runtime,
+      input.sessionId,
+      undefined,
+      undefined,
       loginModel ? { model: loginModel } : undefined,
     );
     assertNotCancelled();
-    const session = await resolveSession(
-      input,
-      dependencies.runtime,
-      assertNotCancelled,
-    );
+    const session = await resolveSession(input, dependencies.runtime, assertNotCancelled);
     assertNotCancelled();
     await assertSessionHasNoPendingInteraction(dependencies.runtime, session);
     assertNotCancelled();
@@ -217,7 +203,25 @@ export async function runTuiExec(
       session,
       runtime: dependencies.runtime,
     });
+    // The requested model is what this Run asked Runtime for: the resolved model
+    // selection (--model, including the --effort default) else the Session's model.
+    const requestedModel = model
+      ? {
+          providerId: model.providerId,
+          modelId: model.modelId,
+          ...(model.variant !== undefined ? { variant: model.variant } : {}),
+        }
+      : sessionModelReference(session);
     assertNotCancelled();
+    if (input.advisor) {
+      const notice = await applyHeadlessAdvisor(
+        dependencies.runtime,
+        input.advisor,
+        session.sessionId,
+      );
+      if (notice) diagnostics.push(notice);
+      assertNotCancelled();
+    }
     const turnId = createTurnId();
     const runId = `exec_${turnId}`;
     executionMetadata = {
@@ -229,27 +233,19 @@ export async function runTuiExec(
       schemaHash: outputSchemaHash(input.outputSchema),
     };
     evidence?.execution(executionMetadata);
-    evidence?.record({
-      kind: "execution_started",
-      sessionId: session.sessionId,
-      turnId,
+    evidence?.record({ kind: 'execution_started', sessionId: session.sessionId, turnId });
+    const encoder = createHeadlessOutputEncoder(input.format ?? 'text', stdout, {
+      ...(input.format === 'stream-json'
+        ? {
+            eventProjector: new ExecEventProjector({
+              runId,
+              sessionId: session.sessionId,
+              turnId,
+              resumed: Boolean(input.sessionId || input.continueSession),
+            }),
+          }
+        : {}),
     });
-    const encoder = createHeadlessOutputEncoder(
-      input.format ?? "text",
-      stdout,
-      {
-        ...(input.format === "stream-json"
-          ? {
-              eventProjector: new ExecEventProjector({
-                runId,
-                sessionId: session.sessionId,
-                turnId,
-                resumed: Boolean(input.sessionId || input.continueSession),
-              }),
-            }
-          : {}),
-      },
-    );
     const execution = await coordinator.execute(
       {
         turnId,
@@ -267,12 +263,8 @@ export async function runTuiExec(
         ...(input.timeoutMs !== undefined || input.maxSteps !== undefined
           ? {
               policy: {
-                ...(input.timeoutMs !== undefined
-                  ? { timeoutMs: input.timeoutMs }
-                  : {}),
-                ...(input.maxSteps !== undefined
-                  ? { maxSteps: input.maxSteps }
-                  : {}),
+                ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+                ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
                 requireAnswer: true,
               },
             }
@@ -280,33 +272,28 @@ export async function runTuiExec(
       },
       async (event) => {
         let reviewOutcome: TuiReviewOutcome | undefined;
-        if (event.type === "message") {
+        if (event.type === 'message') {
           reviewOutcome = reviewOutcomeFromOrigin(event.message.origin);
           if (reviewOutcome) {
             reviewTerminal = {
               outcome: reviewOutcome,
-              content: event.message.content ?? "",
+              content: event.message.content ?? '',
             };
           }
         }
         progress?.observe(event);
-        if (event.type === "session-status") {
-          evidence?.record({ kind: "session_status", status: event.status });
-        } else if (
-          event.type === "message" &&
-          event.message.role === "assistant"
-        ) {
+        if (event.type === 'session-status') {
+          evidence?.record({ kind: 'session_status', status: event.status });
+        } else if (event.type === 'message' && event.message.role === 'assistant') {
           evidence?.record({
-            kind: "assistant_completed",
+            kind: 'assistant_completed',
             messageId: event.message.id,
             finishReason: event.message.finishReason,
             requestDurationMs: event.message.usage?.requestDurationMs,
           });
         }
         try {
-          await encoder.event(
-            projectHeadlessReviewStreamEvent(event, reviewOutcome),
-          );
+          await encoder.event(projectHeadlessReviewStreamEvent(event, reviewOutcome));
         } catch (error) {
           streamOutputFailure ??= error;
           void coordinator.abort();
@@ -319,12 +306,12 @@ export async function runTuiExec(
     if (streamOutputFailure) throw streamOutputFailure;
     let outcome = toHeadlessOutcome(execution.outcome);
     let reviewResult: ReviewResultV1 | undefined;
-    if (input.reviewRequest && outcome.status === "succeeded") {
+    if (input.reviewRequest && outcome.status === 'succeeded') {
       const projected = projectHeadlessReviewResult(reviewTerminal);
-      if ("error" in projected) {
+      if ('error' in projected) {
         outcome = {
           ...outcome,
-          status: "failed",
+          status: 'failed',
           answer: null,
           error: projected.error,
         };
@@ -334,50 +321,64 @@ export async function runTuiExec(
     }
     originalAnswer = outcome.answer;
     const validation =
-      outcome.status === "succeeded"
+      outcome.status === 'succeeded'
         ? validateExecOutput(outcome.answer, input.outputSchema)
         : undefined;
-    const facts =
-      isMachineFormat(input.format) || evidence
-        ? await resolveExecutionFacts(
-            dependencies.runtime,
-            session.sessionId,
-            turnId,
-            outcome,
-          )
-        : {};
+    const needsExecutionFacts = isMachineFormat(input.format) || Boolean(evidence);
+    const facts: Partial<TuiTurnExecutionFacts> = needsExecutionFacts
+      ? await resolveTurnExecutionFacts(
+          dependencies.runtime,
+          session.sessionId,
+          turnId,
+          outcome,
+          requestedModel,
+        )
+      : {};
+    // The replacement notice is not a machine-format feature: a plain text Run
+    // reports it on stderr as well, so the default output format stays honest.
+    const modelReplacement =
+      facts.modelReplacement ??
+      (needsExecutionFacts || !requestedModel
+        ? undefined
+        : (
+            await resolveTurnModelFacts(
+              dependencies.runtime,
+              session.sessionId,
+              turnId,
+              outcome,
+              requestedModel,
+            )
+          ).modelReplacement);
+    if (modelReplacement) {
+      diagnostics.push(formatModelReplacementWarning(modelReplacement));
+    }
     const resultOptions = {
       runId,
       ...(validation ? { validation } : {}),
       ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
+      ...(facts.requestedModel ? { requestedModel: facts.requestedModel } : {}),
+      ...(modelReplacement ? { modelReplacement } : {}),
       ...(facts.model
         ? {
             model: {
               ...facts.model,
-              ...(input.outputSchema && outcome.status === "succeeded"
-                ? { structuredOutputMode: "native_strict" as const }
+              ...(input.outputSchema && outcome.status === 'succeeded'
+                ? { structuredOutputMode: 'native_strict' as const }
                 : {}),
             },
           }
         : {}),
       ...(facts.usage ? { usage: facts.usage } : {}),
-      ...("usageSource" in facts
-        ? {
-            usageSource: facts.usageSource,
-            usageIncomplete: facts.usageIncomplete,
-          }
+      ...(facts.usage ? { usageTotalIncludesCacheRead: true } : {}),
+      ...('usageSource' in facts
+        ? { usageSource: facts.usageSource, usageIncomplete: facts.usageIncomplete }
         : {}),
     };
     const execResult = createExecResult(outcome, resultOptions);
-    const result: ExecResult = reviewResult
-      ? { ...execResult, output: reviewResult }
-      : execResult;
-    if (evidence && result.status === "timeout") {
-      stoppedForRecovery = await waitForExecSettlement(
-        dependencies.runtime,
-        session.sessionId,
-      );
-      evidence.record({ kind: "stop_confirmed", stopped: stoppedForRecovery });
+    const result: ExecResult = reviewResult ? { ...execResult, output: reviewResult } : execResult;
+    if (evidence && result.status === 'timeout') {
+      stoppedForRecovery = await waitForExecSettlement(dependencies.runtime, session.sessionId);
+      evidence.record({ kind: 'stop_confirmed', stopped: stoppedForRecovery });
     }
     executionMetadata = {
       ...executionMetadata,
@@ -385,42 +386,33 @@ export async function runTuiExec(
       status: result.status,
       durationMs: result.durationMs,
     };
-    if (result.status !== "succeeded") {
+    if (result.status !== 'succeeded') {
       evidence?.failure(outcome.answer, {
         ...progress?.summary(),
         ...answerSelection,
         error: result.error,
         status: result.status,
-        ...(validation && !validation.ok
-          ? { validationKind: validation.kind }
-          : {}),
+        ...(validation && !validation.ok ? { validationKind: validation.kind } : {}),
       });
     }
     terminal = {
       encoder,
       result,
-      ...(result.status === "succeeded" && input.outputLastMessagePath
+      ...(result.status === 'succeeded' && input.outputLastMessagePath
         ? {
             lastMessage: {
               filePath: input.outputLastMessagePath,
-              answer: reviewResult
-                ? renderReviewResultText(reviewResult)
-                : (outcome.answer ?? ""),
+              answer: reviewResult ? renderReviewResultText(reviewResult) : (outcome.answer ?? ''),
             },
           }
         : {}),
     };
   } catch (error) {
     const normalized = normalizeRunError(error);
-    evidence?.failure(undefined, {
-      error: { message: normalized.message },
-      phase: "execution",
-    });
+    evidence?.failure(undefined, { error: { message: normalized.message }, phase: 'execution' });
     exitCode = exitCodeForExecError(normalized);
     if (exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe) {
-      diagnostics.push(
-        `mcode exec failed: ${formatTuiExecFailure(normalized)}\n`,
-      );
+      diagnostics.push(`mcode exec failed: ${formatTuiExecFailure(normalized)}\n`);
     }
   } finally {
     // Signal listeners stay attached until final output finishes, so a signal
@@ -429,12 +421,11 @@ export async function runTuiExec(
     let shutdownFailurePublished = false;
     try {
       const shutdownFailed = await dependencies.shutdown();
-      if (shutdownFailed === true)
-        shutdownFailure = "Runtime shutdown did not complete cleanly.";
+      if (shutdownFailed === true) shutdownFailure = 'Runtime shutdown did not complete cleanly.';
     } catch (error) {
       shutdownFailure = formatTuiActionFailure(error, {
-        summary: "mcode exec shutdown failed.",
-        nextStep: "Verify no process is still running.",
+        summary: 'mcode exec shutdown failed.',
+        nextStep: 'Verify no process is still running.',
       });
     }
 
@@ -448,15 +439,15 @@ export async function runTuiExec(
     );
 
     if (terminal) {
-      if (shutdownFailure && terminal.result.status === "succeeded") {
+      if (shutdownFailure && terminal.result.status === 'succeeded') {
         terminal.result = internalFailureResult(
           terminal.result,
-          "RUNTIME_SHUTDOWN_FAILED",
+          'RUNTIME_SHUTDOWN_FAILED',
           shutdownFailure,
         );
         shutdownFailurePublished = true;
       }
-      if (terminal.result.status === "succeeded" && terminal.lastMessage) {
+      if (terminal.result.status === 'succeeded' && terminal.lastMessage) {
         try {
           await writeHeadlessLastMessage(
             terminal.lastMessage.filePath,
@@ -465,15 +456,15 @@ export async function runTuiExec(
         } catch (error) {
           terminal.result = internalFailureResult(
             terminal.result,
-            "OUTPUT_LAST_MESSAGE_WRITE_FAILED",
+            'OUTPUT_LAST_MESSAGE_WRITE_FAILED',
             error instanceof Error ? error.message : String(error),
           );
         }
       }
       try {
         if (
-          terminal.result.status !== "succeeded" &&
-          terminal.result.error?.category === "internal"
+          terminal.result.status !== 'succeeded' &&
+          terminal.result.error?.category === 'internal'
         ) {
           evidence?.failure(originalAnswer, {
             ...answerSelection,
@@ -487,7 +478,7 @@ export async function runTuiExec(
           await untilOutputReleased(terminal.encoder.result(terminal.result), stopOutput.signal);
         }
         exitCode = exitCodeForExecResult(terminal.result);
-        if (terminal.result.status !== "succeeded") {
+        if (terminal.result.status !== 'succeeded') {
           diagnostics.push(
             `mcode exec ${terminal.result.status}: ${formatTuiExecResultFailure(terminal.result)}\n`,
           );
@@ -496,19 +487,13 @@ export async function runTuiExec(
         const normalized = normalizeRunError(error);
         exitCode = exitCodeForExecError(normalized);
         if (exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe) {
-          diagnostics.push(
-            `mcode exec failed: ${formatTuiExecFailure(normalized)}\n`,
-          );
+          diagnostics.push(`mcode exec failed: ${formatTuiExecFailure(normalized)}\n`);
         }
       }
-    } else if (
-      shutdownFailure &&
-      exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe
-    ) {
+    } else if (shutdownFailure && exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe) {
       exitCode = MINIMAX_CODE_EXEC_EXIT_CODES.internal;
     }
-    if (shutdownFailure && !shutdownFailurePublished)
-      diagnostics.push(`${shutdownFailure}\n`);
+    if (shutdownFailure && !shutdownFailurePublished) diagnostics.push(`${shutdownFailure}\n`);
     evidence?.execution({
       ...executionMetadata,
       endedAt: Date.now(),
@@ -516,7 +501,7 @@ export async function runTuiExec(
       exitCode,
     });
     evidence?.record({
-      kind: "execution_finished",
+      kind: 'execution_finished',
       ...executionMetadata,
       exitCode,
       shutdownComplete: !shutdownFailure,
@@ -533,62 +518,56 @@ export async function runTuiExec(
     });
     if (exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe) {
       for (const diagnostic of diagnostics) {
-        const delivered = await untilOutputReleased(
-          writeDiagnostic(stderr, diagnostic),
-          stopOutput.signal,
-        );
-        if (!delivered) break;
+        if (!(await untilOutputReleased(writeDiagnostic(stderr, diagnostic), stopOutput.signal))) {
+          break;
+        }
       }
     }
     stopOutput.dispose();
-    dependencies.signal?.removeEventListener("abort", cancel);
-    processRef.off("SIGINT", cancel);
-    processRef.off("SIGTERM", cancel);
-    processRef.off("SIGHUP", cancel);
+    dependencies.signal?.removeEventListener('abort', cancel);
+    processRef.off('SIGINT', cancel);
+    processRef.off('SIGTERM', cancel);
+    processRef.off('SIGHUP', cancel);
   }
   return exitCode;
 }
 
 function projectHeadlessReviewResult(
-  terminal:
-    | { readonly outcome: TuiReviewOutcome; readonly content: string }
-    | undefined,
+  terminal: { readonly outcome: TuiReviewOutcome; readonly content: string } | undefined,
 ):
   | { readonly result: ReviewResultV1 }
-  | { readonly error: NonNullable<TuiTurnRunOutcome["error"]> } {
+  | { readonly error: NonNullable<TuiTurnRunOutcome['error']> } {
   if (!terminal) {
     return {
       error: {
-        category: "runtime",
-        code: "REVIEW_RESULT_MISSING",
-        message: "Runtime completed without a validated code review result.",
+        category: 'runtime',
+        code: 'REVIEW_RESULT_MISSING',
+        message: 'Runtime completed without a validated code review result.',
         retryable: true,
       },
     };
   }
-  if (terminal.outcome === "failed") {
+  if (terminal.outcome === 'failed') {
     return {
       error: {
-        category: "runtime",
-        code: "REVIEW_RESULT_INVALID",
-        message:
-          terminal.content.trim() ||
-          "Runtime rejected an invalid code review result.",
+        category: 'runtime',
+        code: 'REVIEW_RESULT_INVALID',
+        message: terminal.content.trim() || 'Runtime rejected an invalid code review result.',
         retryable: true,
       },
     };
   }
   const result =
-    terminal.outcome === "pass"
+    terminal.outcome === 'pass'
       ? createPassingReviewResult(terminal.content)
       : parseTuiReviewResult(terminal.content);
   return result
     ? { result }
     : {
         error: {
-          category: "runtime",
-          code: "REVIEW_RESULT_INVALID",
-          message: "Runtime returned an invalid code review result.",
+          category: 'runtime',
+          code: 'REVIEW_RESULT_INVALID',
+          message: 'Runtime returned an invalid code review result.',
           retryable: true,
         },
       };
@@ -598,42 +577,37 @@ function projectHeadlessReviewStreamEvent(
   event: TuiStreamEvent,
   outcome: TuiReviewOutcome | undefined,
 ): TuiStreamEvent {
-  if (event.type !== "message" || outcome !== "needs_changes") return event;
-  const result = parseTuiReviewResult(event.message.content ?? "");
+  if (event.type !== 'message' || outcome !== 'needs_changes') return event;
+  const result = parseTuiReviewResult(event.message.content ?? '');
   return {
     ...event,
     message: {
       ...event.message,
       content: result
         ? renderReviewResultText(result)
-        : "Runtime returned an invalid code review result.",
+        : 'Runtime returned an invalid code review result.',
     },
   };
 }
 
-function internalFailureResult(
-  result: ExecResult,
-  code: string,
-  message: string,
-): ExecResult {
+function internalFailureResult(result: ExecResult, code: string, message: string): ExecResult {
   return {
     ...result,
-    status: "failed",
+    status: 'failed',
     output: undefined,
-    error: { category: "internal", code, message, retryable: false },
+    error: { category: 'internal', code, message, retryable: false },
   };
 }
 
 function toHeadlessOutcome(outcome: TuiTurnRunOutcome): TuiTurnRunOutcome {
-  if (outcome.status !== "awaiting-user-continuation") return outcome;
+  if (outcome.status !== 'awaiting-user-continuation') return outcome;
   return {
     ...outcome,
-    status: "failed",
+    status: 'failed',
     error: {
-      category: "runtime",
-      code: "INTERACTION_NOT_AVAILABLE",
-      message:
-        "The Runtime requested user interaction from a non-interactive Exec host.",
+      category: 'runtime',
+      code: 'INTERACTION_NOT_AVAILABLE',
+      message: 'The Runtime requested user interaction from a non-interactive Exec host.',
       retryable: false,
     },
   };
@@ -652,231 +626,81 @@ async function assertSessionHasNoPendingInteraction(
     (permission) => permission.sessionId === session.sessionId,
   );
   if (!questionnaire && !pendingPermission) return;
-  const interaction = questionnaire
-    ? "a pending questionnaire"
-    : "a pending permission request";
+  const interaction = questionnaire ? 'a pending questionnaire' : 'a pending permission request';
   throw new TuiExecError(
-    "runtime",
+    'runtime',
     `Session ${session.sessionId} has ${interaction} and requires an interactive host. Continue it in the TUI or ACP.`,
   );
 }
 
-function isMachineFormat(format: TuiExecFormat | undefined): boolean {
-  return format === "json" || format === "stream-json";
-}
-
-async function resolveExecutionFacts(
+/**
+ * `--advisor` writes only this Session's advisor, after every other check so a rejected Run
+ * leaves an existing Session as it was. A selection Runtime refuses is a configuration error.
+ * A model is an explicit choice to use the advisor, so it also turns the global switch on when
+ * it is off; the returned notice says so on stderr.
+ */
+async function applyHeadlessAdvisor(
   runtime: TuiHeadlessRuntime,
+  selection: TuiAdvisorSelection,
   sessionId: string,
-  turnId: string,
-  outcome: TuiTurnRunOutcome,
-): Promise<
-  Pick<ExecResult, "model" | "usage" | "usageSource" | "usageIncomplete">
-> {
-  // Diagnostics must not hold the terminal result open when an inspection RPC stalls.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1_000);
-  const [usage, models, history] = await Promise.all([
-    readExecutionFact(
-      () => runtime.getSessionUsage(sessionId),
-      undefined,
-      controller.signal,
-    ),
-    readExecutionFact(
-      () => runtime.listModels(sessionId),
-      [],
-      controller.signal,
-    ),
-    readExecutionFact(
-      () => loadTurnHistory(runtime, sessionId, turnId, controller.signal),
-      undefined,
-      controller.signal,
-    ),
-  ]).finally(() => clearTimeout(timer));
-  const rows = usage?.rows?.filter((row) => row.turnId === turnId) ?? [];
-  const actualModel = [...rows]
-    .reverse()
-    .find((row) => row.model?.trim())
-    ?.model?.trim();
-  const fallbackModel = outcome.model
-    ? `${outcome.model.providerId}/${outcome.model.modelId}`
-    : undefined;
-  const selectedModel = models.find((candidate) => candidate.selected === true);
-  const selectedReference = selectedModel
-    ? `${selectedModel.providerId}/${selectedModel.modelId}`
-    : undefined;
-  const model = resolveModelIdentity(
-    actualModel ?? fallbackModel ?? selectedReference,
-    models,
-    outcome.model?.variant,
-  );
-  const responses = [...(outcome.usageResponses ?? [])];
-  const historyIds = new Set<string>();
-  for (const message of history?.messages ?? []) {
-    const response = responseUsageFromMessage(message, turnId);
-    if (!response) continue;
-    if (response.messageId) historyIds.add(response.messageId);
-    // Unidentified history cannot be reconciled against stream delivery safely.
-    if (response.messageId) upsertResponseUsage(responses, response);
-  }
-  const responseSummary = sumResponseUsage(responses);
-  const responseUsage = toExecTokenUsage(
-    responseSummary.usage ?? outcome.usage,
-  );
-  const tokenUsage = responseUsage ?? sumUsageRows(rows);
-  const usageIncomplete =
-    outcome.status !== "succeeded" ||
-    outcome.usageIncomplete === true ||
-    !history?.complete ||
-    history.messages.some((message) =>
-      isTurnCompactionMessage(message, turnId),
-    ) ||
-    responseSummary.usageIncomplete ||
-    (responseUsage !== undefined && responseUsage.totalTokens === undefined) ||
-    responses.length === 0 ||
-    responses.some(
-      (response) =>
-        !response.messageId ||
-        !historyIds.has(response.messageId) ||
-        !toExecTokenUsage(response.usage) ||
-        response.usageIncomplete,
-    ) ||
-    (history?.messages.some((message) => {
-      const response = responseUsageFromMessage(message, turnId);
-      return response !== undefined && !response.messageId;
-    }) ??
-      false);
-  return {
-    ...(model ? { model } : {}),
-    ...(tokenUsage ? { usage: tokenUsage } : {}),
-    usageSource: responseUsage
-      ? "completed_responses"
-      : tokenUsage
-        ? "analytics_fallback"
-        : "unavailable",
-    usageIncomplete: !responseUsage || usageIncomplete,
-  };
-}
-
-function readExecutionFact<T>(
-  read: () => Promise<T>,
-  fallback: T,
-  signal: AbortSignal,
-): Promise<T> {
-  return new Promise((resolveFact) => {
-    const finish = (value: T) => {
-      signal.removeEventListener("abort", abort);
-      resolveFact(value);
-    };
-    const abort = () => finish(fallback);
-    signal.addEventListener("abort", abort, { once: true });
-    if (signal.aborted) return abort();
-    void Promise.resolve()
-      .then(read)
-      .then(finish, () => finish(fallback));
-  });
-}
-
-function resolveModelIdentity(
-  reference: string | undefined,
-  models: readonly TuiModel[],
-  requestedVariant: string | undefined,
-): ExecModelIdentity | undefined {
-  const separator = reference?.indexOf("/") ?? -1;
-  if (!reference || separator <= 0 || separator === reference.length - 1)
-    return undefined;
-  const providerId = reference.slice(0, separator);
-  const modelId = reference.slice(separator + 1);
-  const catalog = models.find(
-    (candidate) =>
-      candidate.providerId === providerId && candidate.modelId === modelId,
-  );
-  return {
-    providerId,
-    modelId,
-    ...(catalog?.variant !== undefined
-      ? { variant: catalog.variant }
-      : requestedVariant !== undefined
-        ? { variant: requestedVariant }
-        : {}),
-    ...(catalog?.providerSource
-      ? { providerSource: catalog.providerSource }
-      : {}),
-    ...(catalog?.providerKind ? { providerKind: catalog.providerKind } : {}),
-    ...(catalog?.apiFormat ? { protocol: catalog.apiFormat } : {}),
-  };
-}
-
-function sumUsageRows(
-  rows: readonly TuiSessionUsageRow[],
-): ExecTokenUsage | undefined {
-  // Analytics has row identity, not response identity: it is only a partial fallback.
-  const identified = new Map<number, TuiSessionUsageRow>();
-  const anonymous: TuiSessionUsageRow[] = [];
-  for (const row of rows) {
-    if (row.id === undefined) anonymous.push(row);
-    else identified.set(row.id, row);
-  }
-  const uniqueRows = [...identified.values(), ...anonymous];
-  const usage = {
-    ...sumUsageField(uniqueRows, "inputTokens"),
-    ...sumUsageField(uniqueRows, "outputTokens"),
-    ...sumUsageField(uniqueRows, "reasoningTokens"),
-    ...sumUsageField(uniqueRows, "cacheReadTokens"),
-    ...sumUsageField(uniqueRows, "cacheWriteTokens"),
-  };
-  return toExecTokenUsage(usage);
-}
-
-function toExecTokenUsage(
-  value: ExecTokenUsage | undefined,
-): ExecTokenUsage | undefined {
-  if (!value) return undefined;
-  const usage = { ...value };
-  delete usage.totalTokens;
-  const input = usage.inputTokens;
-  const output = usage.outputTokens;
-  const total = (input ?? 0) + (output ?? 0);
-  return Object.keys(usage).length === 0
-    ? undefined
-    : {
-        ...usage,
-        ...((input !== undefined || output !== undefined) &&
-        Number.isFinite(total)
-          ? { totalTokens: total }
-          : {}),
-      };
-}
-
-function sumUsageField(
-  rows: readonly TuiSessionUsageRow[],
-  key: keyof ExecTokenUsage,
-): Partial<ExecTokenUsage> {
-  const values = rows
-    .map((row) => row[key as keyof TuiSessionUsageRow])
-    .filter(
-      (value): value is number =>
-        typeof value === "number" && Number.isFinite(value) && value >= 0,
+): Promise<string | undefined> {
+  const requested = selection.enabled ? `${selection.providerId}/${selection.modelId}` : 'off';
+  if (!runtime.selectSessionAdvisor) {
+    throw new TuiExecError(
+      'config',
+      `--advisor ${requested} cannot be applied: this Runtime has no advisor.`,
     );
-  const sum = values.reduce((accumulated, value) => accumulated + value, 0);
-  return values.length > 0 && Number.isFinite(sum) ? { [key]: sum } : {};
+  }
+  try {
+    await runtime.selectSessionAdvisor(selection, sessionId);
+    if (!selection.enabled || (await runtime.getAdvisorEnabled?.()) !== false) return undefined;
+    await runtime.setAdvisorEnabled?.(true);
+  } catch (error) {
+    throw new TuiExecError(
+      'config',
+      `--advisor ${requested} could not be applied: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return 'Notice: --advisor turned the advisor on for all sessions (advisor.enabled in config.yaml); turn it off in Settings or with /advisor off.';
+}
+
+function formatModelReplacementWarning(
+  replacement: NonNullable<TuiTurnExecutionFacts['modelReplacement']>,
+): string {
+  return (
+    `Warning: requested model ${formatModelReference(replacement.requestedModel)} was replaced with ` +
+    `${formatModelReference(replacement.actualModel)} by tier ${replacement.tier} ` +
+    `(${replacement.reason}).\n`
+  );
+}
+
+function formatModelReference(model: {
+  readonly providerId: string;
+  readonly modelId: string;
+}): string {
+  return `${model.providerId}/${model.modelId}`;
+}
+
+function isMachineFormat(format: TuiExecFormat | undefined): boolean {
+  return format === 'json' || format === 'stream-json';
 }
 
 function normalizeRunError(error: unknown): TuiExecError {
   if (error instanceof TuiExecError) return error;
   if (error instanceof TuiFailure) {
     const kind =
-      error.category === "config" ||
-      error.category === "invocation" ||
-      error.category === "cancelled" ||
-      error.category === "brokenPipe" ||
-      error.category === "internal"
+      error.category === 'config' ||
+      error.category === 'invocation' ||
+      error.category === 'cancelled' ||
+      error.category === 'brokenPipe' ||
+      error.category === 'internal'
         ? error.category
-        : "runtime";
+        : 'runtime';
     return new TuiExecError(kind, error.message, { cause: error });
   }
   const message = error instanceof Error ? error.message : String(error);
-  return new TuiExecError("runtime", message, { cause: error });
+  return new TuiExecError('runtime', message, { cause: error });
 }
 
 async function resolveSession(
@@ -897,7 +721,7 @@ async function resolveSession(
     );
     if (!session) {
       throw new TuiExecError(
-        "runtime",
+        'runtime',
         `No active Session exists for workspace ${input.workspaceDir}; omit --continue to start a new Session.`,
         { retryable: false },
       );
@@ -939,29 +763,25 @@ async function findLatestWorkspaceSession(
 
 function assertSessionUsable(session: TuiSession, workspaceDir: string): void {
   if (isTuiInternalSubagentSession(session)) {
-    throw new TuiExecError(
-      "invocation",
-      "Sub-agent Sessions are internal and cannot be opened.",
-    );
+    throw new TuiExecError('invocation', 'Sub-agent Sessions are internal and cannot be opened.');
   }
   if (session.archived) {
     throw new TuiExecError(
-      "runtime",
+      'runtime',
       `Session ${session.sessionId} is archived; unarchive it in MCode or start a new Session.`,
       { retryable: false },
     );
   }
   if (!session.workspaceDir) {
     throw new TuiExecError(
-      "runtime",
+      'runtime',
       `Session ${session.sessionId} has no recorded workspace and cannot be continued.`,
       { retryable: false },
     );
   }
   if (!sameWorkspace(session.workspaceDir, workspaceDir)) {
-    // Retrying cannot succeed: a Session only continues in the workspace it was created in.
     throw new TuiExecError(
-      "runtime",
+      'runtime',
       `Session ${session.sessionId} belongs to workspace ${session.workspaceDir}, not --cwd ${workspaceDir}; rerun with --cwd ${session.workspaceDir}.`,
       { retryable: false },
     );
@@ -971,15 +791,12 @@ function assertSessionUsable(session: TuiSession, workspaceDir: string): void {
 function sameWorkspace(left: string, right: string): boolean {
   const normalizedLeft = resolve(left);
   const normalizedRight = resolve(right);
-  return process.platform === "win32"
+  return process.platform === 'win32'
     ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
     : normalizedLeft === normalizedRight;
 }
 
-async function writeDiagnostic(
-  write: TuiOutputWrite,
-  value: string,
-): Promise<void> {
+async function writeDiagnostic(write: TuiOutputWrite, value: string): Promise<void> {
   try {
     await write(value);
   } catch {
@@ -1043,10 +860,8 @@ function untilOutputReleased(work: Promise<unknown>, signal: AbortSignal): Promi
 }
 
 function summarizePrompt(prompt: string, attachmentCount: number): string {
-  const normalized = prompt.replace(/\s+/g, " ").trim();
+  const normalized = prompt.replace(/\s+/g, ' ').trim();
   if (!normalized)
-    return attachmentCount === 1
-      ? "Attachment run"
-      : `${attachmentCount} attachments`;
+    return attachmentCount === 1 ? 'Attachment run' : `${attachmentCount} attachments`;
   return normalized.length <= 80 ? normalized : `${normalized.slice(0, 77)}...`;
 }

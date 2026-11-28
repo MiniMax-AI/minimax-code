@@ -1,15 +1,15 @@
 /**
- * Builtin tool definitions: (name, description, schema) for the six LLM-facing tools.
+ * Builtin tool 定义 —— LLM 面向的 6 个工具的 (name, description, schema)。
  *
- * Schema fields mirror the read / write / edit / bash / grep schemas in
- * `@earendil-works/pi-coding-agent`, ensuring identical LLM-visible argument shapes for pi builtins
- * and host implementations. `find` / `ls` are excluded: neither is exposed to the LLM anywhere in
- * the system (use grep / glob instead). `glob` has no same-named pi builtin, but corresponds to pi
- * find (listing files by glob pattern).
+ * Schema 字段镜像 `@earendil-works/pi-coding-agent` 中 read / write / edit /
+ * bash / grep 的对应 schema,这样无论用 pi builtin 还是 host 实现,LLM 看到的
+ * 工具入参形状都一致。`find` / `ls` 不在此列 —— 整个体系不暴露这两个工具给
+ * LLM(用 grep / glob 替代)。`glob` 没有 pi 同名 builtin,但对标 pi find
+ * (按 glob 模式列文件)。
  *
- * `read / write / edit / bash` share names with pi builtins. During assembly, PiTurnRunner
- * automatically falls back to native pi `createXxxTool(cwd)` (local fs) when they are not
- * explicitly bound; `grep / glob` have no fallback and must be registered explicitly.
+ * `read / write / edit / bash` 这四个跟 pi builtin 同名,PiTurnRunner 在
+ * 装配阶段会自动 fallback 到 pi 原生 `createXxxTool(cwd)`(走本地 fs)当
+ * 它们没有被显式绑定;`grep / glob` 没有 fallback,必须显式注册。
  */
 
 import { Type, type Static } from '@sinclair/typebox';
@@ -167,19 +167,18 @@ export type GlobToolInput = Static<typeof GlobToolDef.schema>;
 // ─── todowrite ──────────────────────────────────────────────────────────
 
 /**
- * `todowrite`: Session-scoped TODO list tool with the same name and shape as Pi / OpenCode /
- * reference CLI `todowrite` / `TodoWrite` (status/priority use strings, not enums). The full
- * description (When-to-Use / state machine) comes directly from OpenCode `todowrite.txt` to align
- * expected model behavior with OSS models.
+ * `todowrite` —— session-scoped TODO list 工具,与 Pi runtime /
+ * reference CLI 的 `todowrite` / `TodoWrite` 保持兼容 (status/priority
+ * 用 string 不用 enum)。
  *
- * Both paths (`daemon → ui` and `cloud-runtime → archon-server → archon-biz → ui`) render through
- * the `packages/ui` branch for `MsgType.SystemEvent` + `eventType:'todo_updated'`. Each
- * implementation constructs the event:
- * - cloud-runtime `CloudTodoWriteTool`: Injects a `stream.resp` RuntimeEvent (RespData with
- *   SystemEvent) through turn-event-context during tool execution, and calls `updateTodoState` to
- *   update SR state.
- * - Local daemon path: `framework-adapter/todo-extractor` extracts todos from tool_call args;
- *   `ResponseBroadcaster.emitTodoUpdated` synthesizes and injects SSE.
+ * 两条链路 (`daemon → ui` 与 `cloud-runtime → archon-server → archon-biz →
+ * ui`) 共用 `packages/ui` 的 `MsgType.SystemEvent` + `eventType:'todo_updated'`
+ * 分支渲染。实现端各自负责构造该事件:
+ *   - cloud-runtime `CloudTodoWriteTool`:在 tool execute 内通过
+ *     turn-event-context 注入一条 `stream.resp` RuntimeEvent(payload 是
+ *     RespData with SystemEvent),同时调 `updateTodoState` 喂 SR 状态。
+ *   - daemon 本地链路:`framework-adapter/todo-extractor` 从 tool_call args
+ *     抽 todos,`ResponseBroadcaster.emitTodoUpdated` 合成 SSE 注入。
  */
 export const TodoWriteToolDef = {
   name: 'todowrite',
@@ -206,10 +205,9 @@ export type TodoWriteToolInput = Static<typeof TodoWriteToolDef.schema>;
 // ─── task ───────────────────────────────────────────────────────────────
 
 /**
- * `task` —— Pi / OpenCode / reference-CLI-compatible sub-agent delegation tool.
- * Description follows the upstream OpenCode task-tool shape, but omits
- * unsupported background/resume/task_id guidance because cloud-runtime only
- * supports synchronous one-shot sub-agent calls in this phase.
+ * `task` —— Pi runtime / reference-CLI-compatible sub-agent delegation tool.
+ * The local runtime supports synchronous one-shot sub-agent calls in this phase,
+ * so the description omits background/resume/task_id guidance.
  *
  * Schema is exactly 3 required string fields, matching legacy local runtime's runtime
  * shape after stripping background/model overrides:

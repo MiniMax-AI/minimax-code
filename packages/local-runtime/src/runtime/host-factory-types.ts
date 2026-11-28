@@ -86,6 +86,7 @@ export interface LocalRuntimeProductHostOptions {
   configUpdater?: (body: Record<string, unknown>) => Promise<LocalConfigUpdateResult>;
   /** Live remote policy whose default fills `promptSuggestion.enabled` when the user has not chosen. */
   readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
+  readonly partialStreamRecoverySurface?: boolean;
   hostDiagnosticsProvider?: LocalHostDiagnosticsProvider;
   skillRegistryDiagnostics?: LocalRuntimeApiHostOptions['skillRegistryDiagnostics'];
   skillEnabledState?: LocalRuntimeApiHostOptions['skillEnabledState'];

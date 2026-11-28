@@ -16,6 +16,11 @@ interface HydrateTuiHistoryOptions {
   now: () => number;
 }
 
+const DISPLAY_ONLY_SYSTEM_EVENTS: ReadonlySet<string> = new Set([
+  'subagent.execution',
+  'subagent.execution.recovery',
+]);
+
 export function hydrateTuiHistory(options: HydrateTuiHistoryOptions): void {
   const { messages, transcript, toolProjection, todoProjection, userProjection, now } = options;
   messages.forEach((message, index) => {
@@ -26,6 +31,9 @@ export function hydrateTuiHistory(options: HydrateTuiHistoryOptions): void {
       message.role === 'system' || message.role === 'unknown'
         ? parseDurableSystemEvent(message.content)
         : undefined;
+    // Parent timeline facts and child recovery markers for GUI lifecycle rows; the TUI
+    // shows the Task calls themselves, so the durable JSON must not become reply text.
+    if (systemEvent && DISPLAY_ONLY_SYSTEM_EVENTS.has(systemEvent.eventType)) return;
     if (systemEvent?.eventType === 'todo_updated') {
       todoProjection.apply(turnId, systemEvent.data);
       return;

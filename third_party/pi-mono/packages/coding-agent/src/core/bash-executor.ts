@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { stripAnsi } from "../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
+import { createShellOutputDecoder } from "./tools/shell-encoding.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
@@ -73,13 +74,19 @@ export async function executeBashWithOperations(
 		}
 	};
 
-	const decoder = new TextDecoder();
+	const decoder = createShellOutputDecoder();
 
 	const onData = (data: Buffer) => {
 		totalBytes += data.length;
+		appendText(decoder.write(data));
+	};
 
+	const flushDecoder = () => appendText(decoder.end());
+
+	const appendText = (decoded: string) => {
+		if (decoded.length === 0) return;
 		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
-		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
+		const text = sanitizeBinaryOutput(stripAnsi(decoded)).replace(/\r/g, "");
 
 		// Start writing to temp file if exceeds threshold
 		if (totalBytes > DEFAULT_MAX_BYTES) {
@@ -109,6 +116,7 @@ export async function executeBashWithOperations(
 			onData,
 			signal: options?.signal,
 		});
+		flushDecoder();
 
 		const fullOutput = outputChunks.join("");
 		const truncationResult = truncateTail(fullOutput);
@@ -130,6 +138,7 @@ export async function executeBashWithOperations(
 	} catch (err) {
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
+			flushDecoder();
 			const fullOutput = outputChunks.join("");
 			const truncationResult = truncateTail(fullOutput);
 			if (truncationResult.truncated) {

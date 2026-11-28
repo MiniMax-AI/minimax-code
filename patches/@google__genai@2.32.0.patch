@@ -1,0 +1,125 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index dab778d361cd90f87c8ae674ca52a982c11196b1..e57822425cc8b32f5c222ec86ca592c602d81166 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -24045,7 +24045,9 @@ class StreamContinuation {
+         if (chunk.promptFeedback !== undefined && chunk.promptFeedback !== null) {
+             hop.hasPromptFeedback = true;
+         }
+-        if (chunk.usageMetadata) {
++        if (chunk.usageMetadata &&
++            (chunk.usageMetadata.promptTokenCount !== undefined ||
++                chunk.usageMetadata.totalTokenCount !== undefined)) {
+             if (this.accumulatedUsageAcrossHops) {
+                 const mergedUsage = mergeUsageMetadata(this.accumulatedUsageAcrossHops, chunk.usageMetadata);
+                 chunk = Object.assign(new GenerateContentResponse(), chunk, {
+@@ -24074,7 +24076,8 @@ class StreamContinuation {
+                 !isResumableFinishReason(firstCandidate.finishReason)) {
+                 hop.token = undefined;
+             }
+-            clearIntermediateFinishReason(chunk, this.enableContinuation, hop.token);
++            const resumableToken = !hop.hasPromptFeedback && hop.token !== hop.startToken ? hop.token : undefined;
++            clearIntermediateFinishReason(chunk, this.enableContinuation, resumableToken);
+         }
+         return chunk;
+     }
+diff --git a/dist/index.mjs b/dist/index.mjs
+index d871bdfbd14bb2e671a29885e4c4f1e0b6889b94..3bd2fecc34e97ddc2c99e741e3c349d84773bfc1 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -24043,7 +24043,9 @@ class StreamContinuation {
+         if (chunk.promptFeedback !== undefined && chunk.promptFeedback !== null) {
+             hop.hasPromptFeedback = true;
+         }
+-        if (chunk.usageMetadata) {
++        if (chunk.usageMetadata &&
++            (chunk.usageMetadata.promptTokenCount !== undefined ||
++                chunk.usageMetadata.totalTokenCount !== undefined)) {
+             if (this.accumulatedUsageAcrossHops) {
+                 const mergedUsage = mergeUsageMetadata(this.accumulatedUsageAcrossHops, chunk.usageMetadata);
+                 chunk = Object.assign(new GenerateContentResponse(), chunk, {
+@@ -24072,7 +24074,8 @@ class StreamContinuation {
+                 !isResumableFinishReason(firstCandidate.finishReason)) {
+                 hop.token = undefined;
+             }
+-            clearIntermediateFinishReason(chunk, this.enableContinuation, hop.token);
++            const resumableToken = !hop.hasPromptFeedback && hop.token !== hop.startToken ? hop.token : undefined;
++            clearIntermediateFinishReason(chunk, this.enableContinuation, resumableToken);
+         }
+         return chunk;
+     }
+diff --git a/dist/node/index.cjs b/dist/node/index.cjs
+index 869de5ce631c9252664ca4c7eab8d77dab51f1a6..609b2c589de4d3d5e9f50c87a27ffa120f86a13d 100644
+--- a/dist/node/index.cjs
++++ b/dist/node/index.cjs
+@@ -15527,7 +15527,9 @@ let StreamContinuation$1 = class StreamContinuation {
+         if (chunk.promptFeedback !== undefined && chunk.promptFeedback !== null) {
+             hop.hasPromptFeedback = true;
+         }
+-        if (chunk.usageMetadata) {
++        if (chunk.usageMetadata &&
++            (chunk.usageMetadata.promptTokenCount !== undefined ||
++                chunk.usageMetadata.totalTokenCount !== undefined)) {
+             if (this.accumulatedUsageAcrossHops) {
+                 const mergedUsage = mergeUsageMetadata(this.accumulatedUsageAcrossHops, chunk.usageMetadata);
+                 chunk = Object.assign(new GenerateContentResponse(), chunk, {
+@@ -15556,7 +15558,8 @@ let StreamContinuation$1 = class StreamContinuation {
+                 !isResumableFinishReason(firstCandidate.finishReason)) {
+                 hop.token = undefined;
+             }
+-            clearIntermediateFinishReason(chunk, this.enableContinuation, hop.token);
++            const resumableToken = !hop.hasPromptFeedback && hop.token !== hop.startToken ? hop.token : undefined;
++            clearIntermediateFinishReason(chunk, this.enableContinuation, resumableToken);
+         }
+         return chunk;
+     }
+diff --git a/dist/node/index.mjs b/dist/node/index.mjs
+index 38d63efcc34b3c5cb379a38d50851e69ab26fed6..27911ecb49ea8363c4a4b25f4f8d5c5bafabe745 100644
+--- a/dist/node/index.mjs
++++ b/dist/node/index.mjs
+@@ -15505,7 +15505,9 @@ let StreamContinuation$1 = class StreamContinuation {
+         if (chunk.promptFeedback !== undefined && chunk.promptFeedback !== null) {
+             hop.hasPromptFeedback = true;
+         }
+-        if (chunk.usageMetadata) {
++        if (chunk.usageMetadata &&
++            (chunk.usageMetadata.promptTokenCount !== undefined ||
++                chunk.usageMetadata.totalTokenCount !== undefined)) {
+             if (this.accumulatedUsageAcrossHops) {
+                 const mergedUsage = mergeUsageMetadata(this.accumulatedUsageAcrossHops, chunk.usageMetadata);
+                 chunk = Object.assign(new GenerateContentResponse(), chunk, {
+@@ -15534,7 +15536,8 @@ let StreamContinuation$1 = class StreamContinuation {
+                 !isResumableFinishReason(firstCandidate.finishReason)) {
+                 hop.token = undefined;
+             }
+-            clearIntermediateFinishReason(chunk, this.enableContinuation, hop.token);
++            const resumableToken = !hop.hasPromptFeedback && hop.token !== hop.startToken ? hop.token : undefined;
++            clearIntermediateFinishReason(chunk, this.enableContinuation, resumableToken);
+         }
+         return chunk;
+     }
+diff --git a/dist/web/index.mjs b/dist/web/index.mjs
+index e4f7dd60585091d8bb3720262135582b31f00b81..ec917ad951da7a00361a9ec2ad1eae0e8bd6b47b 100644
+--- a/dist/web/index.mjs
++++ b/dist/web/index.mjs
+@@ -15497,7 +15497,9 @@ let StreamContinuation$1 = class StreamContinuation {
+         if (chunk.promptFeedback !== undefined && chunk.promptFeedback !== null) {
+             hop.hasPromptFeedback = true;
+         }
+-        if (chunk.usageMetadata) {
++        if (chunk.usageMetadata &&
++            (chunk.usageMetadata.promptTokenCount !== undefined ||
++                chunk.usageMetadata.totalTokenCount !== undefined)) {
+             if (this.accumulatedUsageAcrossHops) {
+                 const mergedUsage = mergeUsageMetadata(this.accumulatedUsageAcrossHops, chunk.usageMetadata);
+                 chunk = Object.assign(new GenerateContentResponse(), chunk, {
+@@ -15526,7 +15528,8 @@ let StreamContinuation$1 = class StreamContinuation {
+                 !isResumableFinishReason(firstCandidate.finishReason)) {
+                 hop.token = undefined;
+             }
+-            clearIntermediateFinishReason(chunk, this.enableContinuation, hop.token);
++            const resumableToken = !hop.hasPromptFeedback && hop.token !== hop.startToken ? hop.token : undefined;
++            clearIntermediateFinishReason(chunk, this.enableContinuation, resumableToken);
+         }
+         return chunk;
+     }

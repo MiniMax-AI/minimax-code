@@ -1,9 +1,9 @@
 import { toRuntimeTool } from '@mavis/agent-core/tools';
 import type { LocalBashEnvPolicySource } from './permission-execution.js';
 
-import { LocalAskUserTool } from './local-ask-user.js';
-import { LocalFeatureEnableTool } from './local-feature-enable.js';
-import { LocalBashTool, LocalEditTool, LocalReadTool, LocalWriteTool } from './local-pi-tools.js';
+import { LocalAskUserTool } from '../ask-user/local-ask-user.js';
+import { LocalFeatureEnableTool } from '../ask-user/local-feature-enable.js';
+import { LocalBashTool, LocalEditTool, LocalReadTool, LocalWriteTool, type WriteGuardCheckObserver } from './local-pi-tools.js';
 import type { LocalHostTrashRuntime } from './host-trash-executor.js';
 import { LocalGlobTool } from './local-glob.js';
 import { LocalGrepTool } from './local-grep.js';
@@ -45,9 +45,12 @@ import type {
 
 export * from './builtin-defs.js';
 export * from './canonical-tool-policy.js';
-export * from './local-ask-user.js';
-export * from './local-feature-enable.js';
+export * from '../ask-user/local-ask-user.js';
+export * from '../ask-user/local-feature-enable.js';
 export * from './local-browser.js';
+export * from './local-browser-observe.js';
+export * from './local-browser-program.js';
+export * from './desktop-tool-result.js';
 export * from './local-pi-tools.js';
 export * from './ptc-result-projection.js';
 export * from './local-bash-result.js';
@@ -70,6 +73,11 @@ export * from './local-code-review.js';
 export * from './local-task-control.js';
 export * from './local-task.js';
 export * from './local-task-append.js';
+export * from './saved-ptc-scripts.js';
+export * from './ptc-script-roots.js';
+export * from './ptc-script-save.js';
+export * from './ptc-script-catalog.js';
+export * from './ptc-script-text.js';
 export * from './task-verification.js';
 export * from './local-todowrite.js';
 export * from './local-webfetch.js';
@@ -90,10 +98,11 @@ export {
   isDefaultBroadFileExcluded,
   isDefaultScanNoisePath,
 } from '../shared/rg-scan-policy.js';
-export { isSensitiveSearchPath } from './local-sensitive.js';
+export { isSensitiveSearchPath, isSensitiveSearchRoot } from './local-sensitive.js';
 
 export interface LocalToolRegistryDeps {
   workspaceRoot: string;
+  writeGuardCheckObserver?: WriteGuardCheckObserver;
   skillReader?: LocalSkillReader;
   todoEventSink?: LocalTodoEventSink;
   askUserAdapter?: LocalAskUserAdapter;
@@ -125,7 +134,7 @@ export interface LocalToolRegistryDeps {
 export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string, LocalRuntimeTool> {
   const tools: LocalRuntimeTool[] = [
     toRuntimeTool(new LocalReadTool(deps.workspaceRoot)),
-    toRuntimeTool(new LocalWriteTool(deps.workspaceRoot)),
+    toRuntimeTool(new LocalWriteTool(deps.workspaceRoot, deps.writeGuardCheckObserver)),
     toRuntimeTool(new LocalEditTool(deps.workspaceRoot)),
     toRuntimeTool(
       new LocalBashTool(
@@ -207,5 +216,7 @@ export {
 } from './cloud-session-reader.js';
 export {
   DESKTOP_BASH_PREVIEW_BYTES,
+  DESKTOP_BASH_MAX_OUTPUT_BYTES,
+  DESKTOP_BASH_MAX_PENDING_OUTPUT_BYTES,
   PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
 } from './output-limit.js';

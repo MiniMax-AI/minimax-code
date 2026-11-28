@@ -474,6 +474,43 @@ describe("openai-completions tool_choice", () => {
 		expect(response.errorMessage).toBe("Stream ended without finish_reason");
 	});
 
+	it("continues the open tool call for fragments with neither index nor id (Gemini compat)", async () => {
+		const chunk = (toolCall: Record<string, unknown>, finish: string | null = null) => ({
+			id: "chatcmpl-gemini",
+			choices: [{ delta: { tool_calls: [toolCall] }, finish_reason: finish }],
+		});
+		mockState.chunks = [
+			chunk({ id: "call_a", type: "function", function: { name: "read", arguments: '{"path":' } }),
+			chunk({ function: { arguments: '"a.md"}' } }),
+			chunk({ id: "call_b", type: "function", function: { name: "read", arguments: '{"path":"b.md"}' } }),
+			{
+				id: "chatcmpl-gemini",
+				choices: [{ delta: {}, finish_reason: "tool_calls" }],
+				usage: {
+					prompt_tokens: 1,
+					completion_tokens: 1,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+			},
+		];
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const tool: Tool = { name: "read", description: "Read", parameters: Type.Object({ path: Type.String() }) };
+		const response = await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "read both", timestamp: Date.now() }], tools: [tool] },
+			{ apiKey: "test" },
+		).result();
+		expect(response.stopReason).toBe("toolUse");
+		expect(response.content.map((block) => (block.type === "toolCall" ? [block.id, block.arguments] : null))).toEqual(
+			[
+				["call_a", { path: "a.md" }],
+				["call_b", { path: "b.md" }],
+			],
+		);
+	});
+
 	it("coalesces tool call deltas by stable index when provider mutates ids mid-stream", async () => {
 		mockState.chunks = [
 			{

@@ -5,19 +5,20 @@ import type {
   CliService,
   ConversationSteerInput,
   ConversationSteerResult,
-} from "@mavis/local-runtime-v2/cli-service";
-import { MINIMAX_CODE_DEFAULT_AGENT_NAME } from "../product-context.js";
-import { TuiEventAccess } from "./adapters/event-access.js";
-import { TuiRuntimeAccessContext } from "./adapters/access-context.js";
-import { TuiWorkspaceAccess } from "./adapters/workspace-access.js";
-import { TuiSessionAccess } from "./adapters/session-access.js";
-import { TuiProductAccess } from "./adapters/product-access.js";
-import { TuiInteractionAccess } from "./adapters/interaction-access.js";
-import { TuiDelegationAccess } from "./adapters/delegation-access.js";
-import { TuiConversationAccess } from "./adapters/conversation-access.js";
-import { TuiPluginAccess } from "./adapters/plugin-access.js";
-import { TuiGoalAccess } from "./adapters/goal-access.js";
-import type { TuiMessage, TuiStreamEvent } from "./stream-events.js";
+  GetSessionActivityResp,
+} from '@mavis/local-runtime-v2/cli-service';
+import { MINIMAX_CODE_DEFAULT_AGENT_NAME } from '../product-context.js';
+import { TuiEventAccess } from './adapters/event-access.js';
+import { TuiRuntimeAccessContext } from './adapters/access-context.js';
+import { TuiWorkspaceAccess } from './adapters/workspace-access.js';
+import { TuiSessionAccess } from './adapters/session-access.js';
+import { TuiProductAccess } from './adapters/product-access.js';
+import { TuiInteractionAccess } from './adapters/interaction-access.js';
+import { TuiDelegationAccess } from './adapters/delegation-access.js';
+import { TuiConversationAccess } from './adapters/conversation-access.js';
+import { TuiPluginAccess } from './adapters/plugin-access.js';
+import { TuiGoalAccess } from './adapters/goal-access.js';
+import type { TuiMessage, TuiStreamEvent } from './stream-events.js';
 import type {
   CreateTuiSessionInput,
   EnqueueTuiMessageOptions,
@@ -27,11 +28,14 @@ import type {
   TuiAccountStatus,
   TuiAccountStatusOptions,
   TuiActiveRunSnapshot,
+  TuiAdvisor,
+  TuiAdvisorSelection,
   TuiBackgroundTask,
   TuiPtcSetting,
   TuiBackgroundTaskListOptions,
   TuiCompactionResult,
   TuiDelegationSnapshot,
+  TuiDelegationStopOptions,
   TuiDelegationStopReceipt,
   TuiFeedbackPreview,
   TuiFeedbackSubmitOptions,
@@ -39,6 +43,12 @@ import type {
   TuiEditMessageInput,
   TuiEditMessageResult,
   TuiInstructionSource,
+  TuiMcpAuthClearResult,
+  TuiMcpAuthOutcome,
+  TuiMcpAuthScope,
+  TuiMcpAuthStartResult,
+  TuiMcpAuthStateView,
+  TuiMcpAuthTarget,
   TuiMcpServer,
   TuiProjectMcpPreview,
   TuiMessagePage,
@@ -107,6 +117,11 @@ export interface TuiRuntimeAdapterOptions {
    * Runtime only sees the overridden value. Required with `ptcLaunchOverride`.
    */
   readSavedPtc?: () => boolean;
+  /**
+   * Applies a permission mode change inside this process instead of writing the
+   * profile config. Set only for Runtimes whose permission mode is process-scoped.
+   */
+  writeProcessPermissionMode?: (mode: TuiPermissionMode) => Promise<TuiPermissionMode>;
   tokenPlanAccountStatusGetter?: (options?: {
     readonly forceRefresh?: boolean;
   }) => Promise<TuiTokenPlanAccountStatus>;
@@ -151,11 +166,11 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   private readonly contextMode: McodeContextMode;
   private readonly ptcLaunchOverride: boolean;
   private readonly readSavedPtc: (() => boolean) | undefined;
+  private readonly writeProcessPermissionMode: TuiRuntimeAdapterOptions['writeProcessPermissionMode'];
 
   constructor(cliService: CliService, options: TuiRuntimeAdapterOptions = {}) {
     this.cliService = cliService;
-    const defaultAgentName =
-      options.defaultAgentName ?? MINIMAX_CODE_DEFAULT_AGENT_NAME;
+    const defaultAgentName = options.defaultAgentName ?? MINIMAX_CODE_DEFAULT_AGENT_NAME;
     this.tokenPlanAccountStatusGetter = options.tokenPlanAccountStatusGetter;
     this.synchronizeAuth = options.synchronizeAuth;
     this.accountIdentityGetter = options.accountIdentityGetter;
@@ -165,6 +180,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     this.contextMode = options.contextMode ?? "standard";
     this.ptcLaunchOverride = options.ptcLaunchOverride === true;
     this.readSavedPtc = options.readSavedPtc;
+    this.writeProcessPermissionMode = options.writeProcessPermissionMode;
     this.conversationAccess = new TuiConversationAccess(cliService);
     this.pluginAccess = new TuiPluginAccess(cliService);
     this.context = new TuiRuntimeAccessContext({
@@ -191,6 +207,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     );
     this.eventAccess = new TuiEventAccess(cliService, options.observability);
     this.delegationAccess = new TuiDelegationAccess({
+      defaultAgentName,
       listSessionPage: (input) => this.sessionAccess.listSessionPage(input),
       abortSession: (req) => this.abortSession(req),
     });
@@ -208,8 +225,27 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     return this.conversationAccess.abortSession(req);
   }
 
+  markNextPluginHookSessionStart(sessionId: string, source: 'clear'): void {
+    this.cliService.pluginHookSessions?.markNextSessionStart(sessionId, source);
+  }
+
+  async abortPluginHookSessionTurn(
+    sessionId: string,
+    _abortSession?: (executionSessionId: string) => Promise<unknown>,
+  ): Promise<void> {
+    await this.cliService.pluginHookSessions?.abortSessionTurn(sessionId);
+  }
+
+  async endPluginHookSession(sessionId: string, reason: 'clear' | 'resume_other'): Promise<void> {
+    await this.cliService.pluginHookSessions?.endSession(sessionId, reason);
+  }
+
   steer(input: ConversationSteerInput): Promise<ConversationSteerResult> {
     return this.conversationAccess.steer(input);
+  }
+
+  newSessionId(): string {
+    return this.sessionAccess.newSessionId();
   }
 
   async createSession(input: CreateTuiSessionInput): Promise<TuiSession> {
@@ -482,6 +518,7 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     return this.productAccess.getPermissionMode();
   }
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode> {
+    if (this.writeProcessPermissionMode) return this.writeProcessPermissionMode(mode);
     return this.productAccess.setPermissionMode(mode);
   }
 
@@ -526,9 +563,25 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   ): Promise<boolean> {
     return this.productAccess.setModelFavorite(model, favorite);
   }
+  getAdvisor(sessionId?: string): Promise<TuiAdvisor> {
+    return this.productAccess.getAdvisor(sessionId);
+  }
+  selectAdvisor(selection: TuiAdvisorSelection, sessionId?: string): Promise<TuiAdvisor> {
+    return this.productAccess.selectAdvisor(selection, sessionId);
+  }
+  selectSessionAdvisor(selection: TuiAdvisorSelection, sessionId: string): Promise<TuiAdvisor> {
+    return this.productAccess.selectSessionAdvisor(selection, sessionId);
+  }
+  getAdvisorEnabled(): Promise<boolean | undefined> {
+    return this.productAccess.getAdvisorEnabled();
+  }
+  setAdvisorEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.productAccess.setAdvisorEnabled(enabled);
+  }
   listUserModelProviders() {
     return this.productAccess.listUserModelProviders();
   }
+
   listProviderPresets() {
     return this.productAccess.listProviderPresets();
   }
@@ -599,12 +652,9 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     sessionId: string,
     agentName?: string,
     customInstructions?: string,
+    reason?: string,
   ): Promise<TuiCompactionResult> {
-    return this.productAccess.requestCompaction(
-      sessionId,
-      agentName,
-      customInstructions,
-    );
+    return this.productAccess.requestCompaction(sessionId, agentName, customInstructions, reason);
   }
   getContextSnapshot(sessionId: string) {
     return this.productAccess.getContextSnapshot(sessionId);
@@ -630,9 +680,28 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   ): Promise<TuiMcpServer[]> {
     return this.productAccess.listMcpServers(keyword, sessionId);
   }
-  listInstalledPlugins(
-    input?: Parameters<TuiPluginAccess["listInstalledPlugins"]>[0],
-  ) {
+  listMcpAuthStates(scope?: TuiMcpAuthScope): Promise<TuiMcpAuthStateView[]> {
+    return this.productAccess.listMcpAuthStates(scope);
+  }
+  startMcpAuth(
+    target: TuiMcpAuthTarget,
+    options?: { readonly force?: boolean },
+  ): Promise<TuiMcpAuthStartResult> {
+    return this.productAccess.startMcpAuth(target, options);
+  }
+  cancelMcpAuth(attemptId: string): Promise<boolean> {
+    return this.productAccess.cancelMcpAuth(attemptId);
+  }
+  completeMcpAuth(attemptId: string, callbackUrl: string): Promise<TuiMcpAuthOutcome> {
+    return this.productAccess.completeMcpAuth(attemptId, callbackUrl);
+  }
+  clearMcpAuth(target: TuiMcpAuthTarget): Promise<TuiMcpAuthClearResult> {
+    return this.productAccess.clearMcpAuth(target);
+  }
+  setMcpUserClientSecret(serverName: string, secret: string | undefined): Promise<boolean> {
+    return this.productAccess.setMcpUserClientSecret(serverName, secret);
+  }
+  listInstalledPlugins(input?: Parameters<TuiPluginAccess['listInstalledPlugins']>[0]) {
     return this.pluginAccess.listInstalledPlugins(input);
   }
   listMarketplacePlugins(
@@ -767,6 +836,10 @@ export class TuiRuntimeAdapter implements TuiRuntime {
     return this.delegationAccess.getSnapshot(rootSessionId);
   }
 
+  getSessionActivity(rootSessionId: string): Promise<GetSessionActivityResp> {
+    return this.cliService.getSessionActivity({ id: rootSessionId });
+  }
+
   async listBackgroundTasks(
     ownerSessionId: string,
     options: TuiBackgroundTaskListOptions = {},
@@ -845,8 +918,11 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       }));
   }
 
-  stopDelegation(rootSessionId: string): Promise<TuiDelegationStopReceipt> {
-    return this.delegationAccess.stop(rootSessionId);
+  stopDelegation(
+    rootSessionId: string,
+    options?: TuiDelegationStopOptions,
+  ): Promise<TuiDelegationStopReceipt> {
+    return this.delegationAccess.stop(rootSessionId, options);
   }
 }
 

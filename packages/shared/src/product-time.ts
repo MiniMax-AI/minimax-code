@@ -5,6 +5,20 @@ const FOUR_DAYS_MS = 4 * DAY_MS;
 const RECENT_CALENDAR_DAYS = 7;
 
 const EN_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+const EN_MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+] as const;
 const ZH_WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const;
 
 const DEFAULT_TIME_ZONE = (() => {
@@ -20,15 +34,19 @@ const formatterCache = new Map<string, Intl.DateTimeFormat>();
 export type ProductTimePreset =
   | 'social-precise'
   | 'social-compact'
+  | 'message-divider'
   | 'community-relative'
+  | 'task-relative'
   | 'common-precise'
   | 'common-date'
   | 'audit-datetime'
-  | 'audit-date';
+  | 'audit-date'
+  | 'share-version-date'
+  | 'subscription-date';
 
 export interface ProductTimeOptions {
   preset: ProductTimePreset;
-  /** Runtime locale. Chinese locales use year-first hyphenated dates; others use English rules. */
+  /** Runtime locale. Chinese locales use Chinese date labels; others use English rules. */
   locale?: string;
   /** Injectable clock for deterministic rendering and tests. Defaults to Date.now(). */
   nowMs?: number;
@@ -185,6 +203,40 @@ function formatCommunityTime(
   return formatDate(timestamp, locale, !sameYear);
 }
 
+function formatTaskTime(
+  timestampMs: number,
+  nowMs: number,
+  timestamp: ZonedDateParts,
+  now: ZonedDateParts,
+  locale: ProductTimeLocale,
+): string {
+  if (timestampMs > nowMs) return formatDate(timestamp, locale, timestamp.year !== now.year);
+
+  const elapsedMs = nowMs - timestampMs;
+  if (elapsedMs < MINUTE_MS) return locale === 'zh' ? '刚刚' : 'Now';
+  if (elapsedMs < HOUR_MS) {
+    const minutes = Math.floor(elapsedMs / MINUTE_MS);
+    return locale === 'zh' ? `${minutes}分钟前` : `${minutes}m ago`;
+  }
+  if (elapsedMs < DAY_MS) {
+    const hours = Math.floor(elapsedMs / HOUR_MS);
+    return locale === 'zh' ? `${hours}小时前` : `${hours}h ago`;
+  }
+
+  const days = Math.floor(elapsedMs / DAY_MS);
+  if (days < 7) return locale === 'zh' ? `${days}天前` : `${days}d ago`;
+  if (days < 30) {
+    const weeks = Math.floor(days / 7);
+    return locale === 'zh' ? `${weeks}周前` : `${weeks}w ago`;
+  }
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    return locale === 'zh' ? `${months}个月前` : `${months}mo ago`;
+  }
+  const years = Math.floor(days / 365);
+  return locale === 'zh' ? `${years}年前` : `${years}y ago`;
+}
+
 /**
  * Project-wide UI timestamp calculator.
  *
@@ -211,8 +263,21 @@ export function formatProductTime(
       return formatSocialTime(timestampMs, nowMs, timestamp, now, locale, true);
     case 'social-compact':
       return formatSocialTime(timestampMs, nowMs, timestamp, now, locale, false);
+    case 'message-divider': {
+      // A divider is rendered once and stays, so it never uses "Now" or weekday-only dates.
+      if (isSameDay(timestamp, now)) {
+        return formatTime(timestamp);
+      }
+      if (calendarDayIndex(now) - calendarDayIndex(timestamp) === 1) {
+        const yesterday = locale === 'zh' ? '昨天' : 'Yesterday';
+        return `${yesterday} ${formatTime(timestamp)}`;
+      }
+      return formatDateTime(timestamp, locale, !sameYear);
+    }
     case 'community-relative':
       return formatCommunityTime(timestampMs, nowMs, timestamp, now, locale);
+    case 'task-relative':
+      return formatTaskTime(timestampMs, nowMs, timestamp, now, locale);
     case 'common-precise':
       return isSameDay(timestamp, now)
         ? formatTime(timestamp)
@@ -223,7 +288,13 @@ export function formatProductTime(
         : formatDate(timestamp, locale, !sameYear);
     case 'audit-datetime':
       return formatDateTime(timestamp, locale, true);
+    case 'share-version-date':
+      return `${String(timestamp.year).slice(-2)}.${String(timestamp.month).padStart(2, '0')}.${String(timestamp.day).padStart(2, '0')}`;
     case 'audit-date':
       return formatDate(timestamp, locale, true);
+    case 'subscription-date':
+      return locale === 'zh'
+        ? `${timestamp.year}年${timestamp.month}月${timestamp.day}日`
+        : `${EN_MONTHS[timestamp.month - 1]} ${timestamp.day}, ${timestamp.year}`;
   }
 }

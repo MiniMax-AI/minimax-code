@@ -1,28 +1,23 @@
 /**
- * Registry: Internal state and assembly implementation for agent-runtime.
+ * Registry —— agent-runtime 内部状态与装配实现。
  *
- * Three phases:
- * 1. Construction: `initExtensions` runs each `ext.init(ownerApi)`, providing an owner-scoped
- *   `ExtensionAPI` facade. Every `pi.registerXxx / pi.on` verifies the registry is `initializing`
- *   and the active owner matches the facade owner. All-success transitions to `ready`; any failure
- *   permanently transitions to `failed`, preventing reentrancy, concurrent init, and leaked partial
- *   contributions.
- * 2. Assembly: `assembleTurn(ctx)` iterates `LoadedExtension` entries (skipping disabled ones) and
- *   combines tools / prompt / reminder / hook contributions into `AssemblyResult`. The registry
- *   computes raw `reminders[]` separately from prompt contributor output. Prompt contributors
- *   receive only `TurnAssemblyCtx`; they cannot read the not-yet-generated `AssemblyResult` or
- *   reminders.
- * 3. Execution: The host invokes handlers (`PiTurnRunner` / turn lifecycle); the registry is not
- *   involved.
+ * 三阶段：
+ *   1. 构造：`initExtensions` 逐个跑 `ext.init(ownerApi)`，每个 extension 拿到
+ *      owner-scoped `ExtensionAPI` facade。每次 `pi.registerXxx / pi.on` 同时校验 registry
+ *      处于 `initializing` 且 active owner 与 facade owner 一致；全部成功后进入 `ready`，
+ *      任一失败则永久进入 `failed`，从而防止重入、并发 init 与半初始化贡献泄漏。
+ *   2. 装配：`assembleTurn(ctx)` 遍历 `LoadedExtension`（跳过 disabled），把 tools /
+ *      prompt / reminder / hook 合并成 `AssemblyResult`。registry 分别计算 raw
+ *      `reminders[]` 与 prompt contributor 输出；prompt contributor 只接收
+ *      `TurnAssemblyCtx`，不能读取尚未生成的 `AssemblyResult` 或 reminders。
+ *   3. 运行：Handler 由 host 触发（`PiTurnRunner` / turn lifecycle），registry 不参与。
  *
- * Concurrency semantics (v1.0):
- * - `assembleTurn` synchronously snapshots all extension enabled states before its first await.
- *   `setEnabled` during assembly affects only the next assembly, so one `AssemblyResult` never
- *   mixes old and new states.
- * - Disabling during a handler call lets that call finish; gating applies on the next invocation,
- *   outside agent-runtime's awareness.
- * - Each `assembleTurn` creates independent hook wrapper closures (including ctx), isolating
- *   concurrent calls.
+ * 并发语义（v1.0）：
+ *   - `assembleTurn` 在第一次 await 前同步快照全部 extension 的 enabled 状态；in-flight
+ *     装配期间的 `setEnabled` 只影响下一次装配，单个 `AssemblyResult` 不会混用新旧状态。
+ *   - Handler 触发时 disable：现调用会跑完，下次触发才 gate；agent-runtime 层面不感知。
+ *   - `assembleTurn` 每次调用生成独立的 hook wrapper closure（含 ctx），并发调用互不
+ *     污染。
  */
 
 import type { RuntimeTool, ToolExecutionContext } from '@mavis/agent-core/tools';
@@ -116,12 +111,12 @@ function contributionStats(loaded: LoadedExtension): ExtensionContributionStats 
 }
 
 /**
- * Mapping from PiTurnHooks fields (agent-core names) to SPI event names. Drives hook-array merging
- * from a table to avoid five scattered edits.
+ * PiTurnHooks 字段（agent-core 命名）与 SPI event 名的对照表。
+ * 用于表驱动合并 hook 数组，避免 5 处重复 shotgun edit。
  *
- * `on_step_end` maps to `onStepEndHook`. agent-core's `newTurn` still reads the deprecated per-step
- * compatibility slot `onTurnEndHook`; agent-runtime only writes the new field with explicit step
- * semantics to avoid duplicate handler execution.
+ * `on_step_end` 映射到 `onStepEndHook`。deprecated per-step compatibility slot
+ * `onTurnEndHook` 由 agent-core `newTurn` 兼容读入；
+ * agent-runtime 只写 step 语义明确的新字段，避免同一 handler 被重复执行。
  */
 const HOOK_MAPPINGS = [
   { pi: 'onLlmCallPreparedHook', event: 'on_llm_call_prepared', adapter: 'context' },
@@ -144,8 +139,8 @@ export class Registry {
   private readonly sessionOverrides = new Map<string, Map<string, boolean>>();
 
   /**
-   * Per-profile params merged from `ProfileOverlay.param`, passed once by `createAgentRuntime`.
-   * Extensions read them through `pi.params` during `init` (document §4.4 line 281).
+   * Per-profile params merged from `ProfileOverlay.param`——由 `createAgentRuntime`
+   * 传入，一次固化。Extension 在 `init` 里通过 `pi.params` 读取（文档 §4.4 line 281）。
    */
   readonly params: Readonly<Record<string, unknown>>;
 
@@ -355,8 +350,8 @@ export class Registry {
       beforeToolCallHook: [],
       afterToolCallHook: [],
       onHistoryChangedHook: [],
-      // Use `onStepEndHook` with explicit step semantics. During this migration window, agent-core's `newTurn`
-      // still reads legacy `onTurnEndHook`; agent-runtime only writes the new field.
+      // 使用 step 语义明确的 `onStepEndHook`。agent-core `newTurn` 在当前迁移窗口
+      // 仍兼容读取 legacy `onTurnEndHook`；agent-runtime 只写新字段。
       onStepEndHook: [],
     };
     const turnStartHandlers: TurnStartHandler[] = [];
@@ -390,8 +385,8 @@ export class Registry {
         }
       }
 
-      // Merge pi step-level hooks via a table to avoid five scattered edits (review Standards S-4).
-      // PiTurnHooks fields have different types whose intersection is never; narrow through a helper.
+      // 表驱动合并 pi step-level hooks，避免 5 处 shotgun edit（review Standards S-4）。
+      // PiTurnHooks 各字段类型不同、intersection 为 never，走 helper 收窄类型。
       for (const mapping of HOOK_MAPPINGS) {
         const source = loaded.hookHandlers[mapping.event];
         if (source.length === 0) continue;
@@ -407,9 +402,9 @@ export class Registry {
       turnEndHandlers.push(...loaded.hookHandlers.turn_end);
     }
 
-    // Sort reminders by descending priority, then insertion order (Array.prototype.sort
-    // is stable in ES2019+). The registry only provides independent emissions; prompt
-    // contributors cannot read this list. The host decides how to render / inject it.
+    // 排序 reminders：priority 高的在前；相等则按插入顺序（Array.prototype.sort
+    // 在 ES2019+ 保证 stable）。registry 只提供独立 emission 列表；prompt
+    // contributors 无法读取该列表，具体渲染 / 注入策略由 host 决定。
     reminders.sort((a, b) => (b.reminder.priority ?? 0) - (a.reminder.priority ?? 0));
 
     const userPromptPrefix = userPrefixes.join('\n\n');
@@ -487,10 +482,10 @@ function collectSeedToolNames(tools: readonly RuntimeTool[]): Set<string> {
 
 // ─── Hook wrappers ────────────────────────────────────────────────────
 //
-// PiTurnRunner's hook signature (input) contains only pi payloads, without TurnAssemblyCtx.
-// SPI handlers take (event, ctx); capture ctx during assembly to restore pi's single-argument signature.
-// `wrapWithCtx` is the only adapter. Forward return values too, preserving `undefined` for
-// `before_llm_call` short-circuit semantics.
+// PiTurnRunner 的 hook 签名 (input) 只有 pi 层的 payload，没有 TurnAssemblyCtx。
+// SPI 的 handler 签名是 (event, ctx) —— assemble 时把 ctx 闭包进去还原 pi 单参签名。
+// `wrapWithCtx` 是唯一的适配器；返回值也一并透传，`undefined` 保留（`before_llm_call`
+// 的 short-circuit 语义要用到）。
 
 type HandlerWithCtx<E = unknown, R = unknown> = (event: E, ctx: TurnAssemblyCtx) => R | Promise<R>;
 

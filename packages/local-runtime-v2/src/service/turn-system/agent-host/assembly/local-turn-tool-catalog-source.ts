@@ -2,6 +2,7 @@ import type { RuntimeTool } from '@mavis/agent-core/tools';
 import type { ModelContextAssemblyCtx } from '@mavis/agent-runtime';
 import type { IModelCapabilities } from '@mavis/protocol';
 import type { ResolvedAgentCapabilities } from '@mavis/config';
+import type { ResolvedAdvisorModel } from '../../../model-system/index.js';
 import type { LocalTurnAgentProfileFacts } from './local-turn-tool-catalog.js';
 import type { AgentHostTurnCapabilityView } from './turn-capability-lifecycle.js';
 
@@ -34,6 +35,7 @@ export interface LocalTurnToolCatalogBuildInput {
   readonly agentProfile?: LocalTurnAgentProfileFacts;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
   readonly ptcEnabled?: boolean;
+  readonly advisorBound?: boolean;
 }
 
 export function createLocalTurnToolCatalogInput(
@@ -56,6 +58,7 @@ export function createLocalTurnToolCatalogInput(
     ...(context.userInput ? { userText: context.userInput.text } : {}),
     // The Session mode alone: the prompt prefix must not change with what started the Turn.
     ...(context.agentConfig.ptc_enabled === true ? { ptcEnabled: true } : {}),
+    ...(readAdvisorBinding(context.agentConfig.advisor) ? { advisorBound: true } : {}),
     ...(modelCapabilities ? { modelCapabilities } : {}),
     ...(agentProfile ? { agentProfile } : {}),
     ...(desktopCapabilities ? { desktopCapabilities } : {}),
@@ -84,7 +87,7 @@ function readBuiltinCapabilities(
     : undefined;
 }
 
-function readAgentProfile(
+export function readAgentProfile(
   config: Readonly<Record<string, unknown>>,
 ): LocalTurnAgentProfileFacts | undefined {
   const ceiling = readRecord(config.capability_ceiling);
@@ -231,9 +234,33 @@ function toCapabilityCeiling(
 }
 
 function readRecord(value: unknown): Readonly<Record<string, unknown>> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Readonly<Record<string, unknown>>)
-    : {};
+  return isRecord(value) ? value : {};
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function readAdvisorBinding(value: unknown): ResolvedAdvisorModel | undefined {
+  if (!isRecord(value)) return undefined;
+  const { providerId, modelId, effort, contextWindow, maxOutputTokens } = value;
+  if (!isNonEmptyString(providerId) || !isNonEmptyString(modelId)) return undefined;
+  if (!isPositiveNumber(contextWindow) || !isPositiveNumber(maxOutputTokens)) return undefined;
+  return {
+    providerId,
+    modelId,
+    ...(isNonEmptyString(effort) ? { effort } : {}),
+    contextWindow,
+    maxOutputTokens,
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function readResolvedModel(model: Readonly<Record<string, unknown>>): {

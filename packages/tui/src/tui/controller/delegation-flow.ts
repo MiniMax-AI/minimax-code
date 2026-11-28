@@ -22,6 +22,32 @@ import { TuiTurnProjection } from './projection/turn-projection.js';
 const MAX_PARENT_DEPTH = 32;
 const CHILD_HISTORY_LIMIT = 200;
 const BACKGROUND_TASK_POLL_MS = 1_000;
+/**
+ * How often a settled root re-reads its delegated members. Automation holds the
+ * terminal state while any of them is unsettled, so a lost lifecycle event must
+ * not be able to strand the run: the snapshot is authoritative and cheap enough
+ * to re-read on this cadence.
+ */
+const MEMBER_SETTLE_POLL_MS = 3_000;
+/**
+ * How long after its own settle the root still adopts a parentless branch. A
+ * coordinator hands work over and reports to the user in the same breath, so the
+ * dispatched Session can be created as the assigner's Turn is already settling.
+ */
+const DISPATCH_ADOPT_GRACE_MS = 120_000;
+/**
+ * How many extra reads an interaction from a still-unknown Session gets, and how
+ * long to wait between them. The Runtime records a dispatched Task in its task
+ * graph slightly after that Task's Session starts, so the first snapshot can miss
+ * a child that is already asking the user something. A question that is dropped
+ * here is dropped for good: nothing re-delivers the event, and only the current
+ * Session is re-read on recovery. Bounded so an unrelated Session cannot make the
+ * event loop spin.
+ */
+const INTERACTION_ADOPT_RETRIES = 3;
+const INTERACTION_ADOPT_RETRY_MS = 400;
+/** Server-side maximum for one page; a Task's deliveries are read in a single shot. */
+const DELIVERED_FILES_PAGE_LIMIT = 200;
 
 type AgentTeamRuntime = TuiDelegationPort &
   TuiBackgroundTaskCapability &
@@ -73,9 +99,11 @@ export class TuiDelegationFlow {
   private backgroundTaskPollInFlight = false;
   private backgroundTaskTerminalPollPending = false;
   private backgroundTaskRequestSequence = 0;
+  private memberSettlePollAtMs = 0;
   /** Every root Task the Runtime lists, sub-Agent Tasks included. */
   private backgroundTasks: readonly TuiBackgroundTask[] = [];
   private rootRunActive = false;
+  private rootSettledAtMs: number | undefined;
   /**
    * Request sequence a successful Task list must exceed before a settled root Turn may report
    * zero background Tasks: a command yielded just before settle may postdate the last list.
@@ -100,10 +128,16 @@ export class TuiDelegationFlow {
    * its root notification settled, so a finished child never reads as done before a parent Turn
    * has taken the report. From then on the parent Turn's own state carries the wait.
    */
-  agentCounts(): { readonly active: number; readonly total: number } {
+  agentCounts(): {
+    readonly active: number;
+    readonly total: number;
+    readonly waiting: number;
+  } {
     const current = this.options.currentSession();
     const snapshot = this.projection.snapshot();
-    if (!current || snapshot.rootSessionId !== current.sessionId) return { active: 0, total: 0 };
+    if (!current || snapshot.rootSessionId !== current.sessionId) {
+      return { active: 0, total: 0, waiting: 0 };
+    }
     const activeKeys = new Set(
       snapshot.members
         .filter(
@@ -112,6 +146,13 @@ export class TuiDelegationFlow {
             member.status === 'running' ||
             member.status === 'waiting',
         )
+        .map((member) => member.sessionId),
+    );
+    // Reported apart from `active` because a blocked member is a stall, not progress:
+    // an automation driver has to tell "still working" from "needs a human".
+    const waitingKeys = new Set(
+      snapshot.members
+        .filter((member) => member.status === 'waiting')
         .map((member) => member.sessionId),
     );
     for (const task of this.backgroundTasks) {
@@ -124,6 +165,7 @@ export class TuiDelegationFlow {
     return {
       active: activeKeys.size,
       total: snapshot.summary.total,
+      waiting: waitingKeys.size,
     };
   }
 
@@ -375,13 +417,17 @@ export class TuiDelegationFlow {
       this.rootSessionId = current.sessionId;
     }
     if (event.sessionId === this.rootSessionId) {
-      if (event.type === 'session.start') this.rootRunActive = true;
+      if (event.type === 'session.start') {
+        this.rootRunActive = true;
+        this.rootSettledAtMs = undefined;
+      }
       if (
         event.type === 'session.finish' ||
         event.type === 'session.error' ||
         event.type === 'session.abort'
       ) {
         this.rootRunActive = false;
+        this.rootSettledAtMs = Date.now();
         this.backgroundTaskTerminalPollPending = true;
         if (this.options.runtime.listBackgroundTasks) {
           this.backgroundTaskListBarrier = this.backgroundTaskRequestSequence;
@@ -389,18 +435,18 @@ export class TuiDelegationFlow {
       }
       this.scheduleBackgroundTaskPoll(current.sessionId);
     }
-    if (
-      event.type === 'session.created' &&
-      (event.parentSessionId === current.sessionId ||
+    if (event.type === 'session.created' && event.sessionType === 'branch') {
+      const knownParent =
+        event.parentSessionId === current.sessionId ||
         event.parentSessionId === this.rootSessionId ||
-        (event.parentSessionId !== undefined && this.memberIds.has(event.parentSessionId))) &&
-      event.sessionType === 'branch' &&
-      event.sessionKind === 'task'
-    ) {
-      await this.refresh();
-      return;
+        (event.parentSessionId !== undefined && this.memberIds.has(event.parentSessionId));
+      if (event.sessionKind === 'task' && knownParent) {
+        await this.refresh();
+        return;
+      }
     }
-    if (!event.sessionId || !this.memberIds.has(event.sessionId)) return;
+    if (!event.sessionId) return;
+    if (!this.memberIds.has(event.sessionId)) return;
     if (event.type === 'permission.ask') {
       this.projection.markWaiting(event.sessionId, 'Waiting for approval', event.timestampMs);
       this.publishProjection();
@@ -429,6 +475,13 @@ export class TuiDelegationFlow {
     ) {
       await this.refresh();
     }
+  }
+
+  private withinDispatchAdoptGrace(): boolean {
+    return (
+      this.rootSettledAtMs !== undefined &&
+      Date.now() - this.rootSettledAtMs <= DISPATCH_ADOPT_GRACE_MS
+    );
   }
 
   private reconcileWatchers(
@@ -576,6 +629,15 @@ export class TuiDelegationFlow {
     this.watcherRetryTimer = undefined;
   }
 
+  /** Resolves true when the flow stopped while waiting, so the caller gives up. */
+  private waitBeforeInteractionAdoptRetry(): Promise<boolean> {
+    if (this.stopped) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(this.stopped), INTERACTION_ADOPT_RETRY_MS);
+      timer.unref?.();
+    });
+  }
+
   private publishProjection(): void {
     this.options.onAgentTeamChanged?.(this.projection.snapshot());
     this.options.onBackgroundTasksChanged?.(this.rootBackgroundTasks());
@@ -633,7 +695,8 @@ export class TuiDelegationFlow {
       (!this.rootRunActive &&
         !hasPendingBackgroundTaskAttention(this.backgroundTasks) &&
         !this.backgroundTaskTerminalPollPending &&
-        this.backgroundTaskListBarrier === undefined) ||
+        this.backgroundTaskListBarrier === undefined &&
+        true) ||
       !this.options.runtime.listBackgroundTasks
     ) {
       return;
@@ -651,9 +714,11 @@ export class TuiDelegationFlow {
     this.backgroundTaskPollInFlight = true;
     this.backgroundTaskTerminalPollPending = false;
     try {
-      if (await this.refreshBackgroundTasks(rootSessionId, ownerSessionId)) {
-        this.publishProjection();
-      }
+      const backgroundTasksChanged = await this.refreshBackgroundTasks(
+        rootSessionId,
+        ownerSessionId,
+      );
+      if (backgroundTasksChanged) this.publishProjection();
     } finally {
       this.backgroundTaskPollInFlight = false;
       this.scheduleBackgroundTaskPoll(ownerSessionId);
@@ -714,6 +779,7 @@ export class TuiDelegationFlow {
     this.memberIds = new Set();
     this.backgroundTasks = [];
     this.rootRunActive = false;
+    this.rootSettledAtMs = undefined;
     this.backgroundTaskListBarrier = undefined;
     this.clearWatcherRetry();
     this.clearBackgroundTaskPoll();

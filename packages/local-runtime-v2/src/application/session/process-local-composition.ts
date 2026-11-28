@@ -21,9 +21,13 @@ export function composeProcessLocalApplication(input: {
   readonly sessionReports?: ProcessLocalApplicationOptions['sessionReports'];
   readonly instructions?: ProcessLocalApplicationOptions['instructions'];
   readonly mcp: ProcessLocalApplicationOptions['peripherals']['mcp'];
+  readonly mcpAuth?: ReturnType<typeof createProcessLocalApplication>['mcpAuth'];
+  readonly pluginHookSessions?: ReturnType<
+    typeof createProcessLocalApplication
+  >['pluginHookSessions'];
   readonly modelProvider: ProcessLocalApplicationOptions['modelProvider'];
 }): ReturnType<typeof createProcessLocalApplication> {
-  return createProcessLocalApplication({
+  const application = createProcessLocalApplication({
     eventBus: input.eventBus,
     usageCommits: input.usageCommits,
     skills: {
@@ -39,4 +43,9 @@ export function composeProcessLocalApplication(input: {
     peripherals: { ...input.compatibility.peripherals, mcp: input.mcp },
     modelProvider: input.modelProvider,
   });
+  return {
+    ...application,
+    ...(input.mcpAuth ? { mcpAuth: input.mcpAuth } : {}),
+    ...(input.pluginHookSessions ? { pluginHookSessions: input.pluginHookSessions } : {}),
+  };
 }

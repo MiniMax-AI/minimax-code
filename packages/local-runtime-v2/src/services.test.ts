@@ -581,19 +581,32 @@ vi.mock("./service/plugin-system/index.js", async (importOriginal) => ({
   },
 }));
 
-vi.mock("./service/mcp/index.js", () => ({
-  initializeMcpService: (options: Record<string, unknown>) => {
+vi.mock("./service/mcp/index.js", () => {
+  const init = (options: Record<string, unknown>) => {
     mocked.events.push("mcp:create");
     return {
       service: mocked.mcpSettings,
       runtime: mocked.mcp,
       public: mocked.mcp,
+      announcePluginAuthRequired: vi.fn(),
+      bindPluginAuthPort: () => () => undefined,
       ready: async () => mocked.events.push("mcp:ready"),
       close: async () => mocked.events.push("mcp:close"),
       options,
     };
-  },
-}));
+  };
+  return {
+    initializeMcpService: init,
+    initializeMcpServiceWithOAuth: init,
+    mcpDeliveryServices: (mcp: { service: unknown; runtime: unknown }) => ({
+      mcp: mcp.service,
+      mcpRuntime: mcp.runtime,
+    }),
+    pluginMcpAuthDependencies: (mcp: { announcePluginAuthRequired: unknown }) => ({
+      publishAuthRequired: mcp.announcePluginAuthRequired,
+    }),
+  };
+});
 
 vi.mock("./service/miniapp/initialize.js", async (importOriginal) => {
   const actual =

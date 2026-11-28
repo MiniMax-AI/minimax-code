@@ -8,6 +8,7 @@ import type {
 } from '../runtime/port.js';
 import type { TuiMessage, TuiStreamEvent } from '../runtime/stream-events.js';
 import type { TuiRunRuntime } from '../application/run-coordinator.js';
+import { loadTurnHistory } from '../application/turn-execution-facts.js';
 
 export type ExecRunSupervisorRuntime = TuiConversationPort &
   TuiSessionTurnPort &
@@ -220,31 +221,6 @@ export class ExecRunSupervisor {
       terminal: false,
     };
   }
-}
-
-export async function loadTurnHistory(
-  runtime: Pick<TuiSessionPort, 'listMessagePage'>,
-  sessionId: string,
-  turnId: string,
-  signal?: AbortSignal,
-): Promise<{ messages: TuiMessage[]; complete: boolean }> {
-  const pages: TuiMessage[][] = [];
-  const seenCursors = new Set<string>();
-  let before: string | undefined;
-  for (let pageCount = 0; pageCount < 100; pageCount += 1) {
-    signal?.throwIfAborted();
-    const page = await runtime.listMessagePage(sessionId, {
-      limit: 200,
-      ...(before ? { before } : {}),
-    });
-    signal?.throwIfAborted();
-    pages.unshift(page.messages.filter((message) => message.turnId === turnId));
-    if (!page.hasMore) return { messages: pages.flat(), complete: true };
-    if (!page.nextCursor || seenCursors.has(page.nextCursor)) break;
-    seenCursors.add(page.nextCursor);
-    before = page.nextCursor;
-  }
-  return { messages: pages.flat(), complete: false };
 }
 
 function rememberMessage(state: StreamState, event: TuiStreamEvent): void {

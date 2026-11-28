@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { LocalMcpServerConfig } from '../contracts.js';
 import { LocalMcpSettingsError } from '../errors.js';
@@ -12,9 +12,14 @@ import { assertStoredMcpServerConfig, replacementFileMode } from './settings-con
 export interface LocalMcpFile extends Record<string, unknown> {
   mcpServers: Record<string, LocalMcpServerConfig>;
 }
+/**
+ * The legacy `auth` field is accepted and ignored: it never reaches the normalized
+ * configuration, so the next write strips it (plan §6.1).
+ */
 export async function readLocalMcpFile(
   filePath: string,
   failClosed = false,
+  onLegacyAuthIgnored?: () => void,
 ): Promise<LocalMcpFile> {
   let lastReadFile: LocalMcpFile;
   try {
@@ -25,7 +30,11 @@ export async function readLocalMcpFile(
       return lastReadFile;
     }
     const root = parsed as Record<string, unknown>;
-    const { normalized, retiredLegacyServer } = normalizeDocument(root, failClosed);
+    const { normalized, retiredLegacyServer } = normalizeDocument(
+      root,
+      failClosed,
+      onLegacyAuthIgnored,
+    );
     lastReadFile = { ...root, mcpServers: normalized };
     if (retiredLegacyServer) {
       // Retirement is best-effort: a failed cleanup must not discard readable servers.
@@ -83,7 +92,11 @@ export async function writeLocalMcpFile(filePath: string, file: LocalMcpFile): P
   }
 }
 
-function normalizeDocument(root: Record<string, unknown>, failClosed: boolean) {
+function normalizeDocument(
+  root: Record<string, unknown>,
+  failClosed: boolean,
+  onLegacyAuthIgnored: (() => void) | undefined,
+) {
   const rawServers = root['mcpServers'];
   const servers = readRecord(rawServers);
   if (failClosed && rawServers !== undefined && !servers) {
@@ -93,8 +106,9 @@ function normalizeDocument(root: Record<string, unknown>, failClosed: boolean) {
   const normalizedNames = new Set<string>();
   let retiredLegacyServer = false;
   for (const [name, config] of Object.entries(servers ?? {})) {
-    const rawConfig = validateEntry(config, failClosed);
-    if (!rawConfig) continue;
+    const validConfig = validateEntry(config, failClosed);
+    if (!validConfig) continue;
+    const rawConfig = withoutLegacyAuth(validConfig, onLegacyAuthIgnored);
     const serverName = normalizeServerName(name);
     if (failClosed && normalizedNames.has(serverName))
       throw new SyntaxError('MCP server names must remain unique after normalization.');
@@ -112,6 +126,15 @@ function normalizeDocument(root: Record<string, unknown>, failClosed: boolean) {
 
   return { normalized, retiredLegacyServer };
 }
+
+function withoutLegacyAuth(
+  config: Record<string, unknown>,
+  onIgnored: (() => void) | undefined,
+): Record<string, unknown> {
+  const { auth, ...rest } = config;
+  if (auth !== undefined) onIgnored?.();
+  return rest;
+}
 function validateEntry(config: unknown, failClosed: boolean) {
   const rawConfig = readRecord(config);
   if (!rawConfig) {
@@ -127,4 +150,23 @@ function isRetiredServer(name: string, config: LocalMcpServerConfig): boolean {
     isRetiredLegacyCuMcpServerConfig(name, config) ||
     (name === 'nd' && config.builtin === true)
   );
+}
+
+/** The ignored legacy `auth` field is stripped from every server on write (plan §6.1). */
+export async function writeLocalMcpRawDocument(
+  filePath: string,
+  document: Record<string, unknown>,
+): Promise<void> {
+  const servers = readRecord(document['mcpServers']) ?? {};
+  const stripped = {
+    ...document,
+    mcpServers: Object.fromEntries(
+      Object.entries(servers).map(([name, config]) => {
+        const record = readRecord(config);
+        return [name, record ? withoutLegacyAuth(record, undefined) : config];
+      }),
+    ),
+  };
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(stripped, null, 2)}\n`, 'utf8');
 }

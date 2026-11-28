@@ -15,11 +15,23 @@ import {
 
 interface ProjectSnapshot {
   document: ProjectMcpDocument;
+  sessionId: string;
+  /** Caller-visible workspace spelling; `document.root` is its realpath. */
+  workspaceRoot: string;
   servers: Record<string, LocalMcpServerConfig>;
   keys: Map<string, string>;
   statuses: Map<string, { status: 'available' | 'error'; error?: string }>;
   active: boolean;
   abort: AbortController;
+}
+
+/** Where a project server comes from; OAuth namespaces it by the workspace realpath. */
+export interface ProjectMcpAuthSource {
+  serverName: string;
+  sessionId: string;
+  workspaceRoot: string;
+  realRoot: string;
+  configPath: string;
 }
 
 /** Caller serializes resolve/clear with the MCP owner's mutation queue. */
@@ -42,6 +54,8 @@ export class ProjectMcpRuntime {
     await this.clearSnapshot(context.sessionId);
     const snapshot: ProjectSnapshot = {
       document,
+      sessionId: context.sessionId,
+      workspaceRoot: context.workspaceRoot,
       servers: Object.create(null),
       keys: new Map(),
       statuses: new Map(),
@@ -110,6 +124,19 @@ export class ProjectMcpRuntime {
         workspaceRoot: snapshot.document.root,
         ...(config.timeout ? { timeout: config.timeout } : {}),
       },
+    };
+  }
+
+  authSource(config: LocalMcpServerConfig): ProjectMcpAuthSource | undefined {
+    const binding = this.bindings.get(config);
+    if (!binding) return undefined;
+    const { snapshot, name } = binding;
+    return {
+      serverName: name,
+      sessionId: snapshot.sessionId,
+      workspaceRoot: snapshot.workspaceRoot,
+      realRoot: snapshot.document.root,
+      configPath: snapshot.document.path,
     };
   }
 

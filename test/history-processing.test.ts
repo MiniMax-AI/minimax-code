@@ -779,7 +779,7 @@ describe('bounded token count reuse', () => {
     const encode = vi.fn((text: string) => [...text]);
     const estimator = new BpeTokenEstimator(encode);
     estimator.estimateTextTokens('old');
-    for (let i = 0; i < 2048; i++) estimator.estimateTextTokens(`text ${i}`);
+    for (let i = 0; i < 32_768; i++) estimator.estimateTextTokens(`text ${i}`);
     encode.mockClear();
     estimator.estimateTextTokens('old');
     expect(encode).toHaveBeenCalledTimes(1);
@@ -1144,9 +1144,7 @@ describe('owned decoded history rows', () => {
         if (index % 7 === 0 && rows[0]) rows[0] = row(`edited-${index}`, '\udc00中🙂');
         rows.push(row(String(index), `body-${index}:中文🙂\ud800`.repeat(100)));
         await writeFile(path, encode(rows));
-        const records = index % 2 === 0
-          ? await reader.readActiveStrict()
-          : (await reader.readActiveWithBytes()).records;
+        const records = await reader.readActiveStrict();
         const revision = `sha256:${createHash('sha256')
           .update(canonicalJson(rows.map(decodeCanonicalHistoryEnvelope)), 'utf8')
           .digest('hex')}`;

@@ -181,7 +181,8 @@ jobs:
           if npm view "@minimax-ai/code-acp@$VERSION" version >/dev/null 2>&1; then
             echo "already published"; exit 0
           fi
-          npm pkg set version="$VERSION" "dependencies.@minimax-ai/code=$VERSION"
+          npm pkg set version="$VERSION"
+          npm pkg delete dependencies optionalDependencies
           tag=latest; [[ "$VERSION" == *-* ]] && tag=next
           npm publish --access public --provenance --tag "$tag"
         env:

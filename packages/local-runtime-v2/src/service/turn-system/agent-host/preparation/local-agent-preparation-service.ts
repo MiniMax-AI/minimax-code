@@ -1,10 +1,16 @@
 import type { IAgentConfig } from '@mavis/protocol';
 
 import type { SessionRecord } from '../../../session-system/index.js';
-import type {
-  LocalModelResolverLike,
-  LocalModelResolveInput,
+import {
+  readAdvisorSelection,
+  type LocalModelResolverLike,
+  type LocalModelResolveInput,
 } from '../../../model-system/index.js';
+import {
+  ADVISOR_TOOL_NAME,
+  isLocalTurnBuiltinToolAllowed,
+} from '../assembly/local-turn-tool-catalog.js';
+import { readAgentProfile } from '../assembly/local-turn-tool-catalog-source.js';
 import type {
   AgentExecutionSnapshot,
   ContextCompactionPreparationInput,
@@ -23,6 +29,7 @@ import type { SessionModelRepairCapability } from './config/session-model-select
 export interface LocalAgentPreparationServiceOptions {
   readonly configBuilder: LocalAgentConfigBuilder;
   readonly modelResolver: LocalModelResolverLike;
+  readonly logger?: { warn(fields: Readonly<Record<string, unknown>>, message: string): void };
 }
 
 /**
@@ -99,20 +106,50 @@ export class LocalAgentPreparationService
   }): Promise<LocalTurnPreparation> {
     const built = await this.options.configBuilder.buildPrepared(input);
     const builtAgentConfig = built.agentConfig;
+    const agentConfig = Object.freeze({ ...builtAgentConfig });
+    const advisor = this.bindAdvisor(input, agentConfig);
     const llm = await this.resolveModel({
       sessionId: input.session.sessionId,
       turnId: input.turnId,
       agentConfig: builtAgentConfig,
     });
     return {
-      agentConfig: Object.freeze({ ...builtAgentConfig }),
+      agentConfig,
       llm,
       outputRevisionInstruction: built.outputRevisionInstruction,
       ...(built.retryContinuationPrompt
         ? { retryContinuationPrompt: built.retryContinuationPrompt }
         : {}),
       ...(built.promptRead ? { promptRead: built.promptRead } : {}),
+      ...(advisor ? { advisor } : {}),
     };
+  }
+
+  private bindAdvisor(
+    input: { readonly session: SessionRecord; readonly turnId: string },
+    agentConfig: Parameters<typeof readAgentProfile>[0],
+  ): ReturnType<typeof readAdvisorSelection>['advisor'] {
+    const stored = input.session.advisor;
+    if (!stored?.enabled) return undefined;
+    if (!isLocalTurnBuiltinToolAllowed(ADVISOR_TOOL_NAME, readAgentProfile(agentConfig))) {
+      return undefined;
+    }
+    const read = readAdvisorSelection(this.options.configBuilder.readRuntimeConfig(), stored);
+    if (read.dropped.length > 0 || read.failure) {
+      this.options.logger?.warn(
+        {
+          session_id: input.session.sessionId,
+          turn_id: input.turnId,
+          advisor_model: read.selection.model,
+          ...(read.dropped.length > 0 ? { dropped: read.dropped } : {}),
+          ...(read.failure ? { code: read.failure.code, reason: read.failure.message } : {}),
+        },
+        read.failure
+          ? '[advisor] the stored advisor model cannot be used; this Turn runs without the advisor'
+          : '[advisor] the stored advisor settings no longer apply; this Turn uses the model defaults',
+      );
+    }
+    return read.advisor;
   }
 }
 

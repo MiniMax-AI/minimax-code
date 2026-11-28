@@ -30,7 +30,9 @@
  * ----------------------
  * {@link BpeTokenEstimator} uses gpt-tokenizer's `o200k_base` (GPT-4o BPE) for
  * bounded word runs and a UTF-8 byte upper bound for oversized word runs or
- * tokenizer failures. o200k_base is not the provider tokenizer, but for MiniMax /
+ * tokenizer failures. Long whitespace and symbol runs are counted in bounded
+ * segments, because gpt-tokenizer merges one pre-tokenizer piece in quadratic
+ * time. o200k_base is not the provider tokenizer, but for MiniMax /
  * Messages-compatible endpoints it consistently over-estimates a touch (safe:
  * earlier trigger), which is the direction we want when capacity
  * miscalculation means a hard 4xx.
@@ -96,26 +98,95 @@ const VISUAL_TOKEN_STAND_IN = 4_800;
 export type EncodeFn = (text: string) => number[] | Uint32Array;
 
 const MAX_EXACT_TOKENIZER_CHARS = 4_096;
-const UNICODE_LETTER_OR_NUMBER = /[\p{L}\p{N}]/u;
+/**
+ * Longest whitespace or symbol run sent to one tokenizer call. o200k keeps such
+ * a run in a single pre-tokenizer piece and gpt-tokenizer merges a piece in
+ * quadratic time: 32k repeated `⭐` took 4.4s, and model output looping on
+ * `⭐` or U+3000 blocked the event loop for over a minute per request.
+ */
+const MAX_EXACT_SYMBOL_RUN_CHARS = 256;
 
-function hasOversizedAlphanumericRun(text: string): boolean {
+const CHAR_CLASS_SPACE = 1;
+const CHAR_CLASS_LETTER = 2;
+const CHAR_CLASS_NUMBER = 3;
+const CHAR_CLASS_MARK = 4;
+const CHAR_CLASS_SYMBOL = 5;
+
+const WHITESPACE = /\s/u;
+const UNICODE_LETTER = /\p{L}/u;
+const UNICODE_NUMBER = /\p{N}/u;
+const UNICODE_MARK = /\p{M}/u;
+
+let bmpCharClasses: Uint8Array | undefined;
+
+function classifyCharacter(character: string): number {
+  const codePoint = character.codePointAt(0) ?? 0;
+  if (codePoint > 0xffff) return classifyUnicodeCharacter(character);
+  bmpCharClasses ??= new Uint8Array(0x1_0000);
+  const cached = bmpCharClasses[codePoint] ?? 0;
+  if (cached !== 0) return cached;
+  const charClass = classifyUnicodeCharacter(character);
+  bmpCharClasses[codePoint] = charClass;
+  return charClass;
+}
+
+function classifyUnicodeCharacter(character: string): number {
+  if (WHITESPACE.test(character)) return CHAR_CLASS_SPACE;
+  if (UNICODE_LETTER.test(character)) return CHAR_CLASS_LETTER;
+  if (UNICODE_NUMBER.test(character)) return CHAR_CLASS_NUMBER;
+  if (UNICODE_MARK.test(character)) return CHAR_CLASS_MARK;
+  return CHAR_CLASS_SYMBOL;
+}
+
+/** A combining mark extends a letter or symbol piece and otherwise starts a letter piece. */
+function pieceClassOf(charClass: number, previousPieceClass: number): number {
+  if (charClass !== CHAR_CLASS_MARK) return charClass;
+  return previousPieceClass === CHAR_CLASS_SYMBOL ? CHAR_CLASS_SYMBOL : CHAR_CLASS_LETTER;
+}
+
+/** o200k splits numbers into pieces of at most three digits, so their runs never need a cut. */
+function maxRunLength(pieceClass: number): number {
+  if (pieceClass === CHAR_CLASS_NUMBER) return Number.POSITIVE_INFINITY;
+  if (pieceClass === CHAR_CLASS_LETTER) return MAX_EXACT_TOKENIZER_CHARS;
+  return MAX_EXACT_SYMBOL_RUN_CHARS;
+}
+
+/**
+ * Splits `text` at code-point boundaries so that no o200k pre-tokenizer piece
+ * in a segment outgrows a bounded length. Runs follow the o200k piece classes:
+ * whitespace, letters, numbers and everything else. Text without an oversized
+ * run comes back as one segment, so its count is unchanged.
+ *
+ * Returns `undefined` for the legacy byte-bound case: a run of letters and
+ * numbers longer than {@link MAX_EXACT_TOKENIZER_CHARS} code points.
+ */
+function splitIntoBoundedRuns(text: string): string[] | undefined {
+  const segments: string[] = [];
+  let segmentStart = 0;
+  let offset = 0;
+  let alphanumericRunLength = 0;
+  let pieceClass = 0;
   let runLength = 0;
   for (const character of text) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    const isLetterOrNumber =
-      codePoint <= 0x7f
-        ? (codePoint >= 0x30 && codePoint <= 0x39) ||
-          (codePoint >= 0x41 && codePoint <= 0x5a) ||
-          (codePoint >= 0x61 && codePoint <= 0x7a)
-        : UNICODE_LETTER_OR_NUMBER.test(character);
-    if (!isLetterOrNumber) {
-      runLength = 0;
-      continue;
+    const charClass = classifyCharacter(character);
+    if (charClass === CHAR_CLASS_LETTER || charClass === CHAR_CLASS_NUMBER) {
+      alphanumericRunLength += 1;
+      if (alphanumericRunLength > MAX_EXACT_TOKENIZER_CHARS) return undefined;
+    } else {
+      alphanumericRunLength = 0;
     }
-    runLength += 1;
-    if (runLength > MAX_EXACT_TOKENIZER_CHARS) return true;
+    const nextPieceClass = pieceClassOf(charClass, pieceClass);
+    runLength = nextPieceClass === pieceClass ? runLength + 1 : 1;
+    pieceClass = nextPieceClass;
+    if (runLength > maxRunLength(pieceClass)) {
+      segments.push(text.slice(segmentStart, offset));
+      segmentStart = offset;
+      runLength = 1;
+    }
+    offset += character.length;
   }
-  return false;
+  segments.push(text.slice(segmentStart));
+  return segments;
 }
 
 function estimateTextTokensUpperBound(text: string): number {
@@ -140,8 +211,13 @@ function calculateContextTokens(usage: {
   cacheRead: number;
   cacheWrite: number;
   totalTokens: number;
+  contextTokens?: number;
 }): number {
-  return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  return (
+    usage.contextTokens ||
+    usage.totalTokens ||
+    usage.input + usage.output + usage.cacheRead + usage.cacheWrite
+  );
 }
 
 interface AssistantUsageRef {
@@ -150,6 +226,7 @@ interface AssistantUsageRef {
   cacheRead: number;
   cacheWrite: number;
   totalTokens: number;
+  contextTokens?: number;
 }
 
 function getAssistantUsage(message: AgentMessage): AssistantUsageRef | undefined {
@@ -201,13 +278,39 @@ function getLastAssistantUsageInfo(
 }
 
 const MAX_INLINE_CACHE_KEY_UNITS = 256;
-const MAX_CACHED_TEXT_ENTRIES = 2_048;
+/**
+ * The cloud runtime decodes stored history into fresh objects on every run, so
+ * whole-history counts across runs reuse only this content-keyed cache. A cron
+ * session held ~6.9k distinct texts: at 2_048 entries one pass evicted
+ * everything it had counted and every later pass re-ran BPE over the whole
+ * history. Keys are at most 261 UTF-16 units (inline text or a sha256 hex), so
+ * the unit budget keeps the map to a few MB.
+ */
+const MAX_CACHED_TEXT_ENTRIES = 32_768;
+const MAX_CACHED_TEXT_KEY_UNITS = 2_097_152;
+
+interface TextCount {
+  tokens: number;
+  /** `false` when the tokenizer failed and the byte bound stands in for this call only. */
+  reusable: boolean;
+}
+
+interface OwnedTextCount {
+  text: string;
+  tokens: number;
+}
 
 export class BpeTokenEstimator implements TokenEstimator {
   private readonly countExactTokens: (text: string) => number;
   // Bounded content keys survive detached histories without retaining long
   // message bodies. Hash UTF-16 units so lone surrogates stay distinct.
   private readonly textTokens = new Map<string, number>();
+  private cachedTextKeyUnits = 0;
+  // Whole-history passes over the same objects (checkpoint candidates, the
+  // compaction trigger, usage) skip hashing and outlive LRU eviction while the
+  // message is alive. The entry holds the block's own string and is compared on
+  // read, so in-place edits are recounted.
+  private readonly ownedTextTokens = new WeakMap<object, OwnedTextCount>();
 
   /**
    * @param encoder Override the default o200k_base tokenizer. Tests inject
@@ -228,7 +331,11 @@ export class BpeTokenEstimator implements TokenEstimator {
   }
 
   estimateTextTokens(text: string): number {
-    if (!text) return 0;
+    return this.countText(text).tokens;
+  }
+
+  private countText(text: string): TextCount {
+    if (!text) return { tokens: 0, reusable: true };
     const key =
       text.length <= MAX_INLINE_CACHE_KEY_UNITS
         ? `text:${text}`
@@ -237,23 +344,61 @@ export class BpeTokenEstimator implements TokenEstimator {
     if (cached !== undefined) {
       this.textTokens.delete(key);
       this.textTokens.set(key, cached);
-      return cached;
+      return { tokens: cached, reusable: true };
     }
+    let tokens: number | undefined;
     try {
-      if (text.length > MAX_EXACT_TOKENIZER_CHARS && hasOversizedAlphanumericRun(text)) {
-        return estimateTextTokensUpperBound(text);
-      }
-      const tokens = this.countExactTokens(text);
-      if (!Number.isFinite(tokens) || tokens < 0) return estimateTextTokensUpperBound(text);
-      if (this.textTokens.size >= MAX_CACHED_TEXT_ENTRIES) {
-        const oldest = this.textTokens.keys().next().value;
-        if (oldest !== undefined) this.textTokens.delete(oldest);
-      }
-      this.textTokens.set(key, tokens);
-      return tokens;
+      tokens = this.countBoundedExactTokens(text);
     } catch {
-      return estimateTextTokensUpperBound(text);
+      return { tokens: estimateTextTokensUpperBound(text), reusable: false };
     }
+    if (tokens === undefined) {
+      // An oversized letter run deterministically takes the byte bound.
+      tokens = estimateTextTokensUpperBound(text);
+    } else if (!Number.isFinite(tokens) || tokens < 0) {
+      return { tokens: estimateTextTokensUpperBound(text), reusable: false };
+    }
+    this.rememberText(key, tokens);
+    return { tokens, reusable: true };
+  }
+
+  private rememberText(key: string, tokens: number): void {
+    while (
+      this.textTokens.size > 0 &&
+      (this.textTokens.size >= MAX_CACHED_TEXT_ENTRIES ||
+        this.cachedTextKeyUnits + key.length > MAX_CACHED_TEXT_KEY_UNITS)
+    ) {
+      const oldest = this.textTokens.keys().next().value;
+      if (oldest === undefined) break;
+      this.textTokens.delete(oldest);
+      this.cachedTextKeyUnits -= oldest.length;
+    }
+    this.textTokens.set(key, tokens);
+    this.cachedTextKeyUnits += key.length;
+  }
+
+  /** Counts the one text field of `owner` (a content block, or a message with string content). */
+  private estimateOwnedText(owner: object, text: string): number {
+    const owned = this.ownedTextTokens.get(owner);
+    if (owned !== undefined && owned.text === text) return owned.tokens;
+    const count = this.countText(text);
+    if (count.reusable) this.ownedTextTokens.set(owner, { text, tokens: count.tokens });
+    else this.ownedTextTokens.delete(owner);
+    return count.tokens;
+  }
+
+  /** `undefined` selects the UTF-8 byte upper bound. */
+  private countBoundedExactTokens(text: string): number | undefined {
+    if (text.length <= MAX_EXACT_SYMBOL_RUN_CHARS) return this.countExactTokens(text);
+    const segments = splitIntoBoundedRuns(text);
+    if (!segments) return undefined;
+    let tokens = 0;
+    for (const segment of segments) {
+      const segmentTokens = this.countExactTokens(segment);
+      if (!Number.isFinite(segmentTokens) || segmentTokens < 0) return undefined;
+      tokens += segmentTokens;
+    }
+    return tokens;
   }
 
   estimateVisualTokens(): number {
@@ -266,11 +411,11 @@ export class BpeTokenEstimator implements TokenEstimator {
       case 'user': {
         const content = (message as Extract<AgentMessage, { role: 'user' }>).content;
         if (typeof content === 'string') {
-          tokens += this.estimateTextTokens(content);
+          tokens += this.estimateOwnedText(message, content);
         } else if (Array.isArray(content)) {
           for (const block of content) {
             if (block.type === 'text' && block.text) {
-              tokens += this.estimateTextTokens(block.text);
+              tokens += this.estimateOwnedText(block, block.text);
             } else if (isVisualContentBlock(block)) {
               tokens += this.estimateVisualTokens();
             }
@@ -282,9 +427,9 @@ export class BpeTokenEstimator implements TokenEstimator {
         const assistant = message as Extract<AgentMessage, { role: 'assistant' }>;
         for (const block of assistant.content) {
           if (block.type === 'text') {
-            tokens += this.estimateTextTokens(block.text);
+            tokens += this.estimateOwnedText(block, block.text);
           } else if (block.type === 'thinking') {
-            tokens += this.estimateTextTokens((block as { thinking: string }).thinking);
+            tokens += this.estimateOwnedText(block, (block as { thinking: string }).thinking);
           } else if (block.type === 'toolCall') {
             tokens += this.estimateTextTokens(block.name);
             tokens += this.estimateTextTokens(safeJsonStringify(block.arguments));
@@ -300,11 +445,11 @@ export class BpeTokenEstimator implements TokenEstimator {
           }
         ).content;
         if (typeof content === 'string') {
-          tokens += this.estimateTextTokens(content);
+          tokens += this.estimateOwnedText(message, content);
         } else if (Array.isArray(content)) {
           for (const block of content) {
             if (block.type === 'text' && typeof block.text === 'string') {
-              tokens += this.estimateTextTokens(block.text);
+              tokens += this.estimateOwnedText(block, block.text);
             } else if (isVisualContentBlock(block)) {
               tokens += this.estimateVisualTokens();
             }
@@ -324,7 +469,7 @@ export class BpeTokenEstimator implements TokenEstimator {
       case 'branchSummary':
       case 'compactionSummary': {
         const m = message as AgentMessage & { summary?: string };
-        tokens += this.estimateTextTokens(m.summary ?? '');
+        tokens += this.estimateOwnedText(message, m.summary ?? '');
         return tokens;
       }
     }

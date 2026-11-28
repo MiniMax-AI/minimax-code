@@ -3,7 +3,6 @@ import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
 
 import {
-  archivedImageText,
   boundRequestMedia,
   isRequestMediaRejection,
   omittedRequestImageText,
@@ -129,10 +128,17 @@ describe('isRequestMediaRejection', () => {
       'At least one of the image dimensions exceed max allowed size for many-image requests',
       '400 image dimensions exceed max allowed size: 8000 pixels',
       '400 {"error":{"message":"gateway error 413 occurred"}}',
+      '400 Failed to buffer the request body: length limit exceeded',
+      '400 Request payload size exceeds the limit: 20971520 bytes.',
+      // Overflow wording Pi's isContextOverflow does not know.
+      '400 <400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 202745]',
+      '{"error":{"code":"1261","message":"Prompt exceeds max length"}}',
+      'Unable to submit request because the input token count is 32825 but model only supports up to 32768.',
     ]) {
       expect(isRequestMediaRejection(rejection(text)), text).toBe(true);
     }
     expect(isRequestMediaRejection(rejection('rate limit exceeded'))).toBe(false);
+    expect(isRequestMediaRejection(rejection('Range of max_tokens should be [1, 8192]'))).toBe(false);
     expect(isRequestMediaRejection(rejection('4130 tokens left'))).toBe(false);
   });
 
@@ -150,6 +156,5 @@ describe('isRequestMediaRejection', () => {
 describe('placeholder text', () => {
   it('asks for a new capture when no file is known', () => {
     expect(omittedRequestImageText(undefined)).toContain('Capture it again');
-    expect(archivedImageText('/a.png')).toContain('File: /a.png');
   });
 });

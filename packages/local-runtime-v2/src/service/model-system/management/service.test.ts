@@ -40,7 +40,9 @@ interface Harness {
 
 function makeHarness(
   initial?: Partial<LocalRuntimeConfig>,
-  options: { implicitCustomProviderThinking?: boolean } = {},
+  options: {
+    implicitCustomProviderThinking?: boolean;
+  } = {},
 ): Harness {
   const config: LocalRuntimeConfig = {
     dataDir,
@@ -76,8 +78,9 @@ function makeHarness(
   const cache = new LocalModelCache(() => dataDir);
   const service = new LocalModelProviderService({
     configGetter: () => config,
-    updateByokConfig: (mutate) => {
-      const update = configUpdateTail.then(async () => {
+    updateByokConfig: (mutate, beforeCommit) => {
+      const update = (async () => {
+        await configUpdateTail;
         const draft: LocalByokConfigDraft = {
           minimax_api: config.minimax_api ? { ...config.minimax_api } : undefined,
           custom_provider: nextRawCustomProviders
@@ -96,13 +99,14 @@ function makeHarness(
           configWriteError = undefined;
           throw error;
         }
+        beforeCommit?.();
         config.minimax_api = draft.minimax_api as LocalRuntimeConfig['minimax_api'];
         config.custom_provider = draft.custom_provider as LocalRuntimeConfig['custom_provider'];
         config.minimaxModelSource = draft.minimaxModelSource;
         config.defaultModel = draft.defaultModel;
         config.defaultModelVariant = draft.defaultModelVariant;
         return { config };
-      });
+      })();
       configUpdateTail = update.then(
         () => undefined,
         () => undefined,
@@ -700,11 +704,32 @@ describe('MiniMax api key response', () => {
       headers: { 'OpenAI-Organization': 'org-test' },
       effort: 'max',
       outputLimit: 16_384,
+      sessionId: expect.any(String),
     });
     expect(h.testCalls[0]?.key).toMatch(/^custom_provider:responses\/gpt-5\.2@sha256:/u);
     expect(
       h.cache.load().model_status['custom_provider:responses/gpt-5.2']?.config_fingerprint,
     ).toMatch(/^sha256:/u);
+  });
+
+  it('passes Gemini model IDs and efforts verbatim to connectivity tests without local restrictions', async () => {
+    const h = makeHarness();
+    const gemini = {
+      name: 'Gemini Gateway',
+      baseUrl: 'https://gateway.example.com/v1beta',
+      apiKey: CUSTOM_KEY,
+      apiFormat: 'google-generative-ai',
+      models: [{ modelId: 'google/gemini-4-carbon', effortOptions: ['minimal', 'xhigh'] }],
+    };
+
+    const outcome = await h.service.testUserModelCandidate(gemini, 'google/gemini-4-carbon');
+    expect(outcome.ok).toBe(true);
+    expect(
+      h.testCalls.map(({ target }) => ({ modelId: target.modelId, effort: target.effort })),
+    ).toEqual([
+      { modelId: 'google/gemini-4-carbon', effort: 'minimal' },
+      { modelId: 'google/gemini-4-carbon', effort: 'xhigh' },
+    ]);
   });
 });
 
@@ -778,18 +803,26 @@ describe('custom provider API key reveal', () => {
   });
 });
 
-describe('custom providers', () => {
+function registerCustomProviderDiscoveryTests(): void {
   it('discovers a new provider with its draft key before any model or configuration is saved', async () => {
     const h = makeHarness({});
     const before = JSON.stringify(h.config);
     h.setDiscoverResult({ ok: true, models: [{ modelId: 'new-model' }] });
-    await expect(h.service.discoverUserModelsCandidate({
-      name: 'Draft gateway', baseUrl: 'https://draft.example/v1',
-      apiKey: 'synthetic-draft-key', apiFormat: 'openai-completions',
-    })).resolves.toEqual([{ modelId: 'new-model' }]);
-    expect(h.discoverCalls).toEqual([expect.objectContaining({
-      baseUrl: 'https://draft.example/v1', apiKey: 'synthetic-draft-key', api: 'openai-completions',
-    })]);
+    await expect(
+      h.service.discoverUserModelsCandidate({
+        name: 'Draft gateway',
+        baseUrl: 'https://draft.example/v1',
+        apiKey: 'synthetic-draft-key',
+        apiFormat: 'openai-completions',
+      }),
+    ).resolves.toEqual([{ modelId: 'new-model' }]);
+    expect(h.discoverCalls).toEqual([
+      expect.objectContaining({
+        baseUrl: 'https://draft.example/v1',
+        apiKey: 'synthetic-draft-key',
+        api: 'openai-completions',
+      }),
+    ]);
     expect(JSON.stringify(h.config)).toBe(before);
     expect(h.testCalls).toEqual([]);
   });
@@ -844,6 +877,7 @@ describe('custom providers', () => {
       headers: { 'X-Candidate': 'two' },
       effort: 'xhigh',
       outputLimit: 16_384,
+      sessionId: expect.any(String),
     });
     expect(h.discoverCalls).toEqual([
       {
@@ -857,7 +891,9 @@ describe('custom providers', () => {
     expect(h.cache.load().model_status).toEqual({});
     expect(h.cache.load().provider_status).toEqual({});
   });
+}
 
+function registerCustomProviderThinkEffortTests(): void {
   it('tests every configured Think Effort option for a draft model', async () => {
     const h = makeHarness();
 
@@ -910,7 +946,7 @@ describe('custom providers', () => {
         lastErrorMessage: 'Think Effort "off": disabled rejected',
       },
     });
-    expect(h.testCalls.map((call) => call.target.effort)).toEqual(['on', 'off']);
+    expect(h.testCalls.map((call) => call.target.effort)).toEqual(['off', 'on']);
   });
 
   it('probes a custom MiniMax-M3 with the default output limit when none is configured', async () => {
@@ -965,7 +1001,7 @@ describe('custom providers', () => {
         lastErrorMessage: 'Think Effort "high": HTTP 400',
       },
     });
-    expect(h.testCalls.map((call) => call.target.effort)).toEqual(['low', 'high', 'max', 'xhigh']);
+    expect(h.testCalls.map((call) => call.target.effort)).toEqual(['low', 'high', 'xhigh', 'max']);
     expect(h.config.custom_provider).toBeUndefined();
     expect(h.cache.load().model_status).toEqual({});
   });
@@ -994,6 +1030,11 @@ describe('custom providers', () => {
       state: 'available',
     });
   });
+}
+
+describe('custom providers', () => {
+  registerCustomProviderDiscoveryTests();
+  registerCustomProviderThinkEffortTests();
 });
 
 describe('custom provider candidate persistence implicit thinking default', () => {
@@ -1093,1539 +1134,30 @@ describe('custom provider candidate persistence', () => {
       });
     },
   );
+});
 
-  it('saves every preset model without testing or switching the active model', async () => {
+describe('custom provider import admission', () => {
+  it('rechecks process-local admission inside the config save transaction', async () => {
     const h = makeHarness();
-
-    const outcome = await h.service.saveUserModelProviderCandidate({
+    let admitted = true;
+    const beforeCommit = vi.fn(() => {
+      if (!admitted) throw new Error('Import cancelled');
+    });
+    const saving = h.service.saveUserModelProviderCandidate({
       candidate: {
-        name: 'Preset Provider',
-        baseUrl: 'https://api.example.com/v1',
+        name: 'Import',
+        baseUrl: 'https://fixture.example/v1',
         apiKey: CUSTOM_KEY,
         apiFormat: 'openai-completions',
-        models: [
-          { modelId: 'preset-model-a', displayName: 'Preset Model A' },
-          { modelId: 'preset-model-b', displayName: 'Preset Model B' },
-        ],
-      },
-      saveAndUse: false,
-      skipConnectionTest: true,
-    });
-
-    expect(outcome).toMatchObject({ ok: true, skippedTest: true });
-    expect(outcome.provider?.models).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ modelId: 'preset-model-a' }),
-        expect.objectContaining({ modelId: 'preset-model-b' }),
-      ]),
-    );
-    expect(h.testCalls).toEqual([]);
-    expect(h.selectModel).not.toHaveBeenCalled();
-    expect(h.config.defaultModel).toBe('minimax/MiniMax-M3');
-  });
-
-  it('saves an untested candidate without selecting it when skipConnectionTest is true', async () => {
-    const h = makeHarness();
-
-    const outcome = await h.service.saveUserModelProviderCandidate({
-      candidate: {
-        name: 'Untested Provider',
-        baseUrl: 'https://api.example.com/v1',
-        apiKey: CUSTOM_KEY,
-        apiFormat: 'openai-responses',
-        models: [
-          {
-            modelId: 'untested-model',
-            configurationSource: 'discovered',
-            effortOptions: ['low', 'high'],
-          },
-        ],
-      },
-      modelId: 'untested-model',
-      saveAndUse: true,
-      skipConnectionTest: true,
-    });
-
-    expect(outcome).toMatchObject({ ok: true, skippedTest: true });
-    expect(outcome.status).toBeUndefined();
-    expect(h.testCalls).toEqual([]);
-    expect(h.config.defaultModel).toBe('minimax/MiniMax-M3');
-    const savedProviderKey = outcome.provider?.providerId.replace('custom_provider:', '');
-    expect(savedProviderKey).toBeTruthy();
-    expect(
-      savedProviderKey
-        ? h.config.custom_provider?.[savedProviderKey]?.models?.['untested-model']
-        : undefined,
-    ).toMatchObject({ configuration_source: 'discovered' });
-    expect(outcome.provider?.models[0]).toMatchObject({
-      modelId: 'untested-model',
-      configurationSource: 'discovered',
-    });
-    expect(h.cache.load().model_status).toEqual({});
-  });
-
-  it('saves an edited provider with no models when the connection test is skipped', async () => {
-    const h = makeHarness({
-      defaultModel: 'custom_provider:work/removed-model',
-      defaultModelVariant: 'max',
-      custom_provider: {
-        work: {
-          name: 'Work',
-          api: 'openai-responses',
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com/v1' },
-          models: { 'removed-model': {} },
-        },
-      },
-    });
-    const revision = h.service.listUserProviders()[0]?.configRevision;
-    if (!revision) throw new Error('missing provider revision');
-
-    const outcome = await h.service.saveUserModelProviderCandidate({
-      candidate: {
-        providerId: 'custom_provider:work',
-        expectedRevision: revision,
-        name: 'Work',
-        baseUrl: 'https://api.example.com/v1',
-        apiFormat: 'openai-responses',
-        models: [],
+        models: [{ modelId: 'fixture-model' }],
       },
       skipConnectionTest: true,
-    });
-
-    expect(outcome).toMatchObject({ ok: true, skippedTest: true });
-    expect(outcome.provider?.models).toEqual([]);
-    expect(h.config.custom_provider?.work?.models).toEqual({});
-    expect(h.testCalls).toEqual([]);
-    expect(h.config.defaultModel).toBe('minimax/MiniMax-M3.1-Flash');
-    expect(h.config.defaultModelVariant).toBeUndefined();
-  });
-
-  it('atomically saves a tested edit candidate and preserves retained model fields', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          name: 'Work',
-          kind: 'custom',
-          api: 'openai-responses',
-          npm: '@sdk/custom',
-          enabled: true,
-          options: {
-            apiKey: CUSTOM_KEY,
-            baseURL: 'https://saved.example/v1',
-            headers: { 'X-Saved': 'one', 'X-Remove': 'old' },
-            requestTimeout: 1234,
-          },
-          models: {
-            'm-1': {
-              name: 'Primary',
-              attachment: true,
-              headers: { 'X-Model': 'primary' },
-              capabilities: { support_files_api: true },
-              variants: { thinking: { thinking: { type: 'adaptive' } } },
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['low', 'medium', 'high'] },
-            },
-            'm-2': { name: 'Removed' },
-          },
-        },
-      },
-    });
-    const revision = h.service.listUserProviders()[0]?.configRevision;
-    if (!revision) throw new Error('missing provider revision');
-
-    const outcome = await h.service.saveUserModelProviderCandidate({
-      candidate: {
-        providerId: 'custom_provider:work',
-        expectedRevision: revision,
-        name: 'Renamed',
-        baseUrl: 'https://candidate.example/v1',
-        apiFormat: 'openai-responses',
-        headers: { 'X-New': 'two' },
-        removeHeaders: ['x-remove'],
-        models: [
-          {
-            modelId: 'm-1',
-            displayName: 'Primary v2',
-            enabled: true,
-            limit: { context: 120_000, output: 16_000 },
-            effortOptions: ['low', 'medium', 'high'],
-          },
-          { modelId: 'm-3', displayName: 'Added', enabled: false },
-        ],
-      },
-      modelId: 'm-1',
-      saveAndUse: true,
-    });
-
-    expect(outcome).toMatchObject({ ok: true, status: { state: 'available' } });
-    expect(h.testCalls[0]?.target).toMatchObject({
-      api: 'openai-responses',
-      modelId: 'm-1',
-    });
-    expect(outcome.provider?.configRevision).toMatch(/^sha256:/u);
-    expect(outcome.provider?.configRevision).not.toBe(revision);
-    expect(h.config.defaultModel).toBe('custom_provider:work/m-1');
-    expect(h.selectModel).not.toHaveBeenCalled();
-    expect(h.config.custom_provider?.work).toMatchObject({
-      name: 'Renamed',
-      options: {
-        apiKey: CUSTOM_KEY,
-        baseURL: 'https://candidate.example/v1',
-        headers: { 'X-Saved': 'one', 'X-New': 'two' },
-        requestTimeout: 1234,
-      },
-    });
-    expect(h.config.custom_provider?.work).not.toHaveProperty('npm');
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toMatchObject({
-      name: 'Primary v2',
-      enabled: true,
-      attachment: true,
-      headers: { 'X-Model': 'primary' },
-      capabilities: { support_files_api: true },
-      variants: { thinking: { thinking: { type: 'adaptive' } } },
-      limit: { context: 120_000, output: 16_000 },
-      thinking: { effortOptions: ['low', 'medium', 'high'] },
-    });
-    expect(h.config.custom_provider?.work?.models?.['m-2']).toBeUndefined();
-    expect(h.config.custom_provider?.work?.models?.['m-3']).toEqual({
-      name: 'Added',
-      enabled: false,
-    });
-    expect(Object.keys(h.config.custom_provider?.work?.models ?? {})).toEqual(['m-1', 'm-3']);
-    expect(() => h.service.assertModelSelectable('custom_provider:work', 'm-1')).not.toThrow();
-  });
-});
-
-describe('custom provider legacy candidates', () => {
-  it('saves an edit candidate when raw YAML has a normalized legacy Think Effort', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          name: 'Work',
-          api: 'openai-responses',
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://saved.example' },
-          models: {
-            'm-1': {
-              name: 'Saved model',
-              thinking: { effortOptions: ['high'] },
-            },
-          },
-        },
-      },
-    });
-    const revision = h.service.listUserProviders()[0]?.configRevision;
-    if (!revision) throw new Error('missing provider revision');
-
-    // The config reader upgrades legacy `thinking.effort` to `effortOptions`.
-    // A candidate revision must be compared with that normalized config, or a
-    // normal save is incorrectly rejected as CONFIG_CHANGED.
-    h.setNextRawCustomProviders({
-      work: {
-        name: 'Work',
-        api: 'openai-responses',
-        options: { apiKey: CUSTOM_KEY, baseURL: 'https://saved.example' },
-        models: { 'm-1': { name: 'Saved model', thinking: { effort: 'high' } } },
-      },
-    });
-
-    await expect(
-      h.service.saveUserModelProviderCandidate({
-        candidate: {
-          providerId: 'custom_provider:work',
-          expectedRevision: revision,
-          name: 'Work',
-          baseUrl: 'https://saved.example',
-          apiFormat: 'openai-responses',
-          models: [
-            {
-              modelId: 'm-1',
-              displayName: 'Saved model',
-              effortOptions: ['high'],
-            },
-          ],
-        },
-        modelId: 'm-1',
-        saveAndUse: true,
-      }),
-    ).resolves.toMatchObject({ ok: true, status: { state: 'available' } });
-    expect(h.config.custom_provider?.work?.models?.['m-1']?.thinking).toEqual({
-      effortOptions: ['high'],
-    });
-  });
-
-  it('leaves provider, default model, and cache unchanged when candidate persistence fails', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          name: 'Work',
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://saved.example' },
-          models: { 'm-1': {} },
-        },
-      },
-    });
-    const revision = h.service.listUserProviders()[0]?.configRevision;
-    if (!revision) throw new Error('missing provider revision');
-    const before = JSON.stringify(h.config);
-    h.failNextConfigWrite(new Error('config disk full'));
-
-    await expect(
-      h.service.saveUserModelProviderCandidate({
-        candidate: {
-          providerId: 'custom_provider:work',
-          expectedRevision: revision,
-          name: 'Candidate',
-          baseUrl: 'https://candidate.example',
-          models: [{ modelId: 'm-1' }],
-        },
-        modelId: 'm-1',
-        saveAndUse: true,
-      }),
-    ).rejects.toThrow('config disk full');
-
-    expect(JSON.stringify(h.config)).toBe(before);
-    expect(h.cache.load().model_status).toEqual({});
-  });
-
-  it('rejects an edit candidate when its opaque revision is stale', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://saved.example' },
-          models: { 'm-1': {} },
-        },
-      },
-    });
-
-    await expect(
-      h.service.testUserModelCandidate(
-        {
-          providerId: 'custom_provider:work',
-          expectedRevision: 'sha256:stale',
-          baseUrl: 'https://candidate.example',
-          models: [{ modelId: 'm-1' }],
-        },
-        'm-1',
-      ),
-    ).rejects.toMatchObject({ code: 'CONFIG_CHANGED', status: 409 });
-    expect(h.testCalls).toHaveLength(0);
-  });
-
-  it('tests a parameter patch before saving it and preserves the full model config', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          name: 'Work',
-          kind: 'custom',
-          api: 'openai-responses',
-          npm: '@ai-sdk/anthropic',
-          enabled: true,
-          options: {
-            apiKey: CUSTOM_KEY,
-            baseURL: 'https://api.example.com/v1',
-            headers: { 'X-Tenant': 'one' },
-          },
-          models: {
-            'm-1': {
-              name: 'Primary',
-              attachment: true,
-              reasoning: true,
-              tool_call: true,
-              temperature: false,
-              modalities: { input: ['text', 'image'], output: ['text'] },
-              headers: { 'X-Model': 'primary' },
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['low', 'medium', 'high'] },
-            },
-            'm-2': { name: 'Secondary', limit: { context: 64_000, output: 4_000 } },
-          },
-        },
-      },
-    });
-
-    const outcome = await h.service.updateUserModelParameters({
-      providerId: 'custom_provider:work',
-      modelId: 'm-1',
-      contextLimit: 120_000,
-      maxOutputTokens: 16_000,
-      expectedContextLimit: 100_000,
-      expectedMaxOutputTokens: 8_000,
-    });
-
-    expect(outcome.ok).toBe(true);
-    expect(h.testCalls).toHaveLength(1);
-    expect(h.testCalls[0]?.target).toMatchObject({
-      api: 'openai-responses',
-      baseUrl: 'https://api.example.com/v1',
-      modelId: 'm-1',
-      headers: { 'X-Tenant': 'one', 'X-Model': 'primary' },
-    });
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toEqual({
-      name: 'Primary',
-      attachment: true,
-      reasoning: true,
-      tool_call: true,
-      temperature: false,
-      modalities: { input: ['text', 'image'], output: ['text'] },
-      headers: { 'X-Model': 'primary' },
-      limit: { context: 120_000, output: 16_000 },
-      thinking: { effortOptions: ['low', 'medium', 'high'] },
-    });
-    expect(h.config.custom_provider?.work?.models?.['m-2']).toEqual({
-      name: 'Secondary',
-      limit: { context: 64_000, output: 4_000 },
-    });
-    expect(h.config.custom_provider?.work).not.toHaveProperty('npm');
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toMatchObject({
-      state: 'available',
-      config_fingerprint: expect.stringMatching(/^sha256:/u),
-    });
-    expect(() => h.service.assertModelSelectable('custom_provider:work', 'm-1')).not.toThrow();
-    expect(h.service.listUserProviders()[0]?.models[0]?.status).toMatchObject({
-      state: 'available',
-    });
-    const activeModel = h.config.custom_provider?.work?.models?.['m-1'];
-    if (!activeModel?.headers) throw new Error('invalid custom model test fixture');
-    activeModel.headers['X-Model'] = 'changed';
-    expect(h.service.listUserProviders()[0]?.models[0]?.status).toBeUndefined();
-  });
-});
-
-describe('custom provider model parameters', () => {
-  it('updates model limits without changing configured effort options', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: {
-            'm-1': {
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['low', 'high'] },
-            },
-          },
-        },
-      },
-    });
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 100_000,
-        expectedMaxOutputTokens: 8_000,
-      }),
-    ).resolves.toMatchObject({ ok: true });
-    expect(h.config.custom_provider?.work?.models?.['m-1']?.thinking).toEqual({
-      effortOptions: ['low', 'high'],
-    });
-  });
-
-  it('keeps the active model config unchanged when the candidate test fails', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: {
-            'm-1': {
-              name: 'Primary',
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['high'] },
-            },
-          },
-        },
-      },
-    });
-    h.setTestResult({
-      ok: false,
-      errorCode: 'model_not_found',
-      errorMessage: 'Model rejected',
-    });
-
-    const outcome = await h.service.updateUserModelParameters({
-      providerId: 'custom_provider:work',
-      modelId: 'm-1',
-      contextLimit: 120_000,
-      maxOutputTokens: 16_000,
-      expectedContextLimit: 100_000,
-      expectedMaxOutputTokens: 8_000,
-    });
-
-    expect(outcome).toMatchObject({
-      ok: false,
-      status: { state: 'failed', lastErrorCode: 'model_not_found' },
-    });
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toEqual({
-      name: 'Primary',
-      limit: { context: 100_000, output: 8_000 },
-      thinking: { effortOptions: ['high'] },
-    });
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toBeUndefined();
-  });
-
-  it('rejects stale model parameters before testing the candidate', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: {
-            'm-1': {
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['high'] },
-            },
-          },
-        },
-      },
-    });
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 90_000,
-        expectedMaxOutputTokens: 8_000,
-      }),
-    ).rejects.toMatchObject({ code: 'CONFIG_CHANGED', status: 409 });
-    expect(h.testCalls).toHaveLength(0);
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toMatchObject({
-      limit: { context: 100_000, output: 8_000 },
-      thinking: { effortOptions: ['high'] },
-    });
-  });
-
-  it('allows the first parameter update when a historical model has no limits or effort', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: { 'm-1': { name: 'Historical' } },
-        },
-      },
-    });
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 0,
-        expectedMaxOutputTokens: 0,
-      }),
-    ).resolves.toMatchObject({ ok: true, status: { state: 'available' } });
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toMatchObject({
-      name: 'Historical',
-      limit: { context: 120_000, output: 16_000 },
-    });
-  });
-
-  it('commits only one of two concurrent patches based on the same model snapshot', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: {
-            'm-1': {
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['high'] },
-            },
-          },
-        },
-      },
-    });
-    const expected = {
-      providerId: 'custom_provider:work',
-      modelId: 'm-1',
-      expectedContextLimit: 100_000,
-      expectedMaxOutputTokens: 8_000,
-    } as const;
-
-    const [first, second] = await Promise.allSettled([
-      h.service.updateUserModelParameters({
-        ...expected,
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-      }),
-      h.service.updateUserModelParameters({
-        ...expected,
-        contextLimit: 140_000,
-        maxOutputTokens: 20_000,
-      }),
-    ]);
-
-    expect(first).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-    expect(second).toMatchObject({
-      status: 'rejected',
-      reason: { code: 'CONFIG_CHANGED', status: 409 },
-    });
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toMatchObject({
-      limit: { context: 120_000, output: 16_000 },
-      thinking: { effortOptions: ['high'] },
-    });
-  });
-});
-
-describe('custom provider candidate rollback', () => {
-  it('keeps the active model config unchanged when cache persistence fails', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: {
-            'm-1': {
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['high'] },
-            },
-          },
-        },
-      },
-    });
-    vi.spyOn(h.cache, 'replaceModelStatus').mockRejectedValueOnce(new Error('cache disk full'));
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 100_000,
-        expectedMaxOutputTokens: 8_000,
-      }),
-    ).rejects.toMatchObject({ code: 'CACHE_WRITE_FAILED', status: 500 });
-    expect(h.testCalls).toHaveLength(1);
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toMatchObject({
-      limit: { context: 100_000, output: 8_000 },
-      thinking: { effortOptions: ['high'] },
-    });
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toBeUndefined();
-  });
-
-  it('restores the previous model status when the config write fails', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: {
-            'm-1': {
-              limit: { context: 100_000, output: 8_000 },
-              thinking: { effortOptions: ['high'] },
-            },
-          },
-        },
-      },
-    });
-    await h.service.testModel('custom_provider:work', 'm-1');
-    const previousStatus = h.cache.load().model_status['custom_provider:work/m-1'];
-    h.failNextConfigWrite(new Error('config disk full'));
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 100_000,
-        expectedMaxOutputTokens: 8_000,
-      }),
-    ).rejects.toThrow('config disk full');
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toMatchObject({
-      limit: { context: 100_000, output: 8_000 },
-      thinking: { effortOptions: ['high'] },
-    });
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toEqual(previousStatus);
-    expect(() => h.service.assertModelSelectable('custom_provider:work', 'm-1')).not.toThrow();
-  });
-
-  it('removes the candidate model status after a first config write fails', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: { 'm-1': {} },
-        },
-      },
-    });
-    h.failNextConfigWrite(new Error('config disk full'));
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 0,
-        expectedMaxOutputTokens: 0,
-      }),
-    ).rejects.toThrow('config disk full');
-    expect(h.config.custom_provider?.work?.models?.['m-1']).toEqual({});
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toBeUndefined();
-  });
-
-  it('rejects a tested patch when the provider changes during the request', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          enabled: true,
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: { 'm-1': { limit: { context: 100_000, output: 8_000 } } },
-        },
-      },
-    });
-    h.setTestHandler(async () => {
-      const provider = h.config.custom_provider?.work;
-      if (!provider?.options) throw new Error('invalid custom provider test fixture');
-      provider.options.baseURL = 'https://changed.example.com';
-      return { ok: true };
-    });
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 120_000,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 100_000,
-        expectedMaxOutputTokens: 8_000,
-      }),
-    ).rejects.toMatchObject({ code: 'CONFIG_CHANGED', status: 409 });
-    expect(h.config.custom_provider?.work?.options?.baseURL).toBe('https://changed.example.com');
-    expect(h.config.custom_provider?.work?.models?.['m-1']?.limit).toEqual({
-      context: 100_000,
-      output: 8_000,
-    });
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toBeUndefined();
-  });
-
-  it('validates model parameter patches before running connectivity tests', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com' },
-          models: { 'm-1': {} },
-        },
-      },
-    });
-
-    await expect(
-      h.service.updateUserModelParameters({
-        providerId: 'custom_provider:work',
-        modelId: 'm-1',
-        contextLimit: 0,
-        maxOutputTokens: 16_000,
-        expectedContextLimit: 0,
-        expectedMaxOutputTokens: 0,
-      }),
-    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR', status: 400 });
-    expect(h.testCalls).toHaveLength(0);
-  });
-});
-
-describe('custom provider creation and duplication', () => {
-  it('create generates a provider key from the display name', async () => {
-    const h = makeHarness(undefined, { implicitCustomProviderThinking: true });
-    const provider = await h.service.createUserProvider({
-      name: 'OpenAI Work',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: CUSTOM_KEY,
-      apiFormat: 'openai-completions',
-      models: [
-        { modelId: 'gpt-4.1', displayName: 'GPT-4.1', limit: { context: 128_000, output: 16_000 } },
-      ],
-    });
-    expect(provider.providerId).toBe('custom_provider:openai-work');
-    expect(provider.kind).toBe('custom');
-    expect(provider.enabled).toBe(true);
-    expect(provider.apiFormat).toBe('openai-completions');
-    expect(provider.hasApiKey).toBe(true);
-    expect(provider.maskedApiKey).toContain('****');
-    expect(provider.maskedApiKey).not.toBe(CUSTOM_KEY);
-    expect(provider).not.toHaveProperty('rawApiKey');
-    expect(JSON.stringify(provider)).not.toContain(CUSTOM_KEY);
-    expect(h.config.custom_provider?.['openai-work']?.options?.apiKey).toBe(CUSTOM_KEY);
-    expect(h.config.custom_provider?.['openai-work']?.models?.['gpt-4.1']?.limit).toEqual({
-      context: 128_000,
-      output: 16_000,
-    });
-    expect(h.config.custom_provider?.['openai-work']?.models?.['gpt-4.1']).toMatchObject({
-      reasoning: true,
-      thinking_config: { mode: 'switchable', default_value: 'true' },
-    });
-    expect(h.config.custom_provider?.['openai-work']?.models?.['gpt-4.1']).not.toHaveProperty(
-      'thinking',
-    );
-  });
-
-  it('duplicates the complete provider config under a new identity without copying runtime state', async () => {
-    const h = makeHarness();
-    const source = await h.service.createUserProvider({
-      name: 'OpenAI Work',
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: CUSTOM_KEY,
-      apiFormat: 'openai-responses',
-      headers: { 'X-Tenant': 'tenant-a', Authorization: 'Bearer custom' },
-      models: [
-        {
-          modelId: 'gpt-5.6',
-          displayName: 'GPT-5.6',
-          limit: { context: 256_000, output: 128_000 },
-          effortOptions: ['low', 'xhigh', 'max'],
-        },
-      ],
-    });
-    const sourceConfig = h.config.custom_provider?.['openai-work'];
-    if (!sourceConfig) throw new Error('missing source provider fixture');
-    sourceConfig.npm = '@ai-sdk/openai';
-    h.config.defaultModel = `${source.providerId}/gpt-5.6`;
-    await h.cache.setModelStatus(`${source.providerId}/gpt-5.6`, {
-      state: 'available',
-      config_fingerprint: 'source-fingerprint',
-    });
-
-    const duplicate = await h.service.duplicateUserProvider({
-      providerId: source.providerId,
-      name: 'OpenAI Work Copy',
-    });
-
-    expect(duplicate).toMatchObject({
-      providerId: 'custom_provider:openai-work-copy',
-      name: 'OpenAI Work Copy',
-      apiFormat: 'openai-responses',
-      hasApiKey: true,
-      headerNames: ['Authorization', 'X-Tenant'],
-      models: [
-        {
-          modelId: 'gpt-5.6',
-          contextLimit: 256_000,
-          maxOutputTokens: 128_000,
-          effortOptions: ['low', 'xhigh', 'max'],
-        },
-      ],
-    });
-    expect(duplicate.models[0]?.status).toBeUndefined();
-    expect(h.config.defaultModel).toBe('custom_provider:openai-work/gpt-5.6');
-
-    const originalConfig = h.config.custom_provider?.['openai-work'];
-    const duplicateConfig = h.config.custom_provider?.['openai-work-copy'];
-    if (!originalConfig) throw new Error('missing original provider fixture');
-    const expectedDuplicateConfig = { ...originalConfig, name: 'OpenAI Work Copy' };
-    delete expectedDuplicateConfig.npm;
-    expect(duplicateConfig).toEqual(expectedDuplicateConfig);
-    expect(duplicateConfig).not.toHaveProperty('npm');
-    expect(duplicateConfig).not.toBe(originalConfig);
-    expect(duplicateConfig?.options).not.toBe(originalConfig?.options);
-    expect(duplicateConfig?.models).not.toBe(originalConfig?.models);
-    expect(duplicateConfig?.options?.apiKey).toBe(CUSTOM_KEY);
-    expect(h.cache.load().model_status['custom_provider:openai-work-copy/gpt-5.6']).toBeUndefined();
-
-    const secondDuplicate = await h.service.duplicateUserProvider({
-      providerId: source.providerId,
-      name: 'OpenAI Work Copy',
-    });
-    expect(secondDuplicate).toMatchObject({
-      providerId: 'custom_provider:openai-work-copy-2',
-      name: 'OpenAI Work Copy 2',
-    });
-  });
-
-  it('duplicates a provider when a retired sibling survives as a null config entry', async () => {
-    const h = makeHarness();
-    const source = await h.service.createUserProvider({
-      name: 'appintheloop',
-      baseUrl: 'https://api.example.com/v1',
-      apiKey: CUSTOM_KEY,
-      apiFormat: 'openai-completions',
-      models: [{ modelId: 'demo-model-1', displayName: 'demo-model-1' }],
-    });
-
-    // A retired provider can survive in a real config as `oaii-oauth: null`.
-    // Walking the tree must not dereference it.
-    (h.config.custom_provider as Record<string, unknown>)['oaii-oauth'] = null;
-
-    const duplicate = await h.service.duplicateUserProvider({
-      providerId: source.providerId,
-      name: 'appintheloop 副本',
-    });
-    expect(duplicate.name).toBe('appintheloop 副本');
-    expect(duplicate.providerId).not.toBe(source.providerId);
-  });
-
-  it('rejects duplicating an unknown provider', async () => {
-    const h = makeHarness();
-    await expect(
-      h.service.duplicateUserProvider({
-        providerId: 'custom_provider:missing',
-        name: 'Missing Copy',
-      }),
-    ).rejects.toMatchObject({ status: 404, code: 'PROVIDER_NOT_FOUND' });
-  });
-
-  it('create rejects invalid api keys and empty base url', async () => {
-    const h = makeHarness();
-    await expect(
-      h.service.createUserProvider({ name: 'X', baseUrl: 'https://x', apiKey: 'a****b' }),
-    ).rejects.toBeInstanceOf(LocalModelProviderError);
-    await expect(
-      h.service.createUserProvider({ name: 'X', baseUrl: '  ', apiKey: CUSTOM_KEY }),
-    ).rejects.toBeInstanceOf(LocalModelProviderError);
-  });
-
-  it('rejects an unsupported model configuration source', async () => {
-    const h = makeHarness();
-
-    await expect(
-      h.service.createUserProvider({
-        name: 'X',
-        baseUrl: 'https://x.example.com',
-        apiKey: CUSTOM_KEY,
-        models: [{ modelId: 'm-1', configurationSource: 'catalog' }],
-      }),
-    ).rejects.toMatchObject({ status: 400, code: 'VALIDATION_ERROR' });
-  });
-});
-
-describe('custom provider thinking configuration', () => {
-  it('stores user-defined effort choices without enum validation', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'X',
-      baseUrl: 'https://x.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [
-        {
-          modelId: 'm-1',
-          effortOptions: [' low ', 'light', 'low', 'turbo'],
-        },
-      ],
-    });
-
-    expect(h.config.custom_provider?.x?.models?.['m-1']?.thinking).toEqual({
-      effortOptions: ['low', 'light', 'turbo'],
-    });
-    expect(h.service.listUserProviders()[0]?.models[0]).toMatchObject({
-      effortOptions: ['low', 'light', 'turbo'],
-    });
-  });
-
-  it('stores and returns only the configured Think Effort choices', async () => {
-    const h = makeHarness();
-    const provider = await h.service.createUserProvider({
-      name: 'Configured effort',
-      baseUrl: 'https://configured-effort.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [
-        {
-          modelId: 'm-1',
-          effortOptions: ['low', 'xhigh', 'max'],
-        },
-      ],
-    });
-
-    const providerKey = provider.providerId.replace('custom_provider:', '');
-    expect(h.config.custom_provider?.[providerKey]?.models?.['m-1']?.thinking).toEqual({
-      effortOptions: ['low', 'xhigh', 'max'],
-    });
-    expect(h.service.listUserProviders()[0]?.models[0]).toMatchObject({
-      effortOptions: ['low', 'xhigh', 'max'],
-    });
-  });
-
-  it('clears a historical configuration default when the effort list is saved', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Historical default',
-      baseUrl: 'https://historical-default.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1', effortOptions: ['low', 'high'] }],
-    });
-    const thinking = h.config.custom_provider?.['historical-default']?.models?.['m-1']?.thinking;
-    if (!thinking) throw new Error('Expected a saved thinking configuration');
-    (thinking as Record<string, unknown>).defaultEffort = 'high';
-
-    await h.service.updateUserProvider({
-      providerId: 'custom_provider:historical-default',
-      models: [{ modelId: 'm-1', effortOptions: ['low', 'high', 'max'] }],
-    });
-
-    expect(h.config.custom_provider?.['historical-default']?.models?.['m-1']?.thinking).toEqual({
-      effortOptions: ['low', 'high', 'max'],
-    });
-  });
-
-  it('stores MiniMax-M3 Think Effort choices like every other custom model', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'MiniMax Work',
-      baseUrl: 'https://api.minimax.example.com/messages',
-      apiKey: CUSTOM_KEY,
-      apiFormat: 'anthropic-messages',
-      models: [
-        {
-          modelId: 'MiniMax-M3',
-          effortOptions: ['off', 'on'],
-        },
-      ],
-    });
-
-    expect(h.config.custom_provider?.['minimax-work']?.models?.['MiniMax-M3']).toMatchObject({
-      reasoning: true,
-      thinking: { effortOptions: ['off', 'on'] },
-    });
-    expect(h.config.custom_provider?.['minimax-work']?.models?.['MiniMax-M3']).not.toHaveProperty(
-      'thinking_config',
-    );
-    expect(h.config.custom_provider?.['minimax-work']?.models?.['MiniMax-M3']).not.toHaveProperty(
-      'variants',
-    );
-    expect(h.service.listUserProviders()[0]?.models[0]).toMatchObject({
-      modelId: 'MiniMax-M3',
-      effortOptions: ['off', 'on'],
-    });
-  });
-
-  it('rejects non-positive model limits before writing the provider', async () => {
-    const h = makeHarness();
-    await expect(
-      h.service.createUserProvider({
-        name: 'X',
-        baseUrl: 'https://x.example.com',
-        apiKey: CUSTOM_KEY,
-        models: [{ modelId: 'm-1', limit: { context: 0, output: -1 } }],
-      }),
-    ).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+      beforeCommit,
+    });
+    admitted = false;
+    await expect(saving).rejects.toThrow('Import cancelled');
+    expect(beforeCommit).toHaveBeenCalled();
     expect(h.config.custom_provider).toBeUndefined();
-  });
-
-  it('create with chinese name generates provider-<hex> key', async () => {
-    const h = makeHarness();
-    const provider = await h.service.createUserProvider({
-      name: '我的服务',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-    });
-    expect(provider.providerId).toBe('custom_provider:provider-a1b2c3');
-    expect(provider.name).toBe('我的服务');
-  });
-
-  it('activates the first configured model after its current fingerprint passes', async () => {
-    const h = makeHarness();
-    const provider = await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1' }, { modelId: 'm-2' }],
-    });
-    await h.service.testModel(provider.providerId, 'm-1');
-    await h.service.updateUserProvider({
-      providerId: provider.providerId,
-      saveAndUse: true,
-    });
-    expect(h.selectModel).toHaveBeenCalledWith('custom_provider:work/m-1');
-  });
-
-  it('update keeps the provider key immutable when name changes', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-    });
-    const updated = await h.service.updateUserProvider({
-      providerId: 'custom_provider:work',
-      name: 'Renamed Provider',
-    });
-    expect(updated.providerId).toBe('custom_provider:work');
-    expect(updated.name).toBe('Renamed Provider');
-    expect(h.config.custom_provider?.work).toBeDefined();
-    expect(h.config.custom_provider?.['renamed-provider']).toBeUndefined();
-  });
-
-  it('update preserves capabilities for retained models and defaults newly added models', async () => {
-    const h = makeHarness(undefined, { implicitCustomProviderThinking: true });
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'kept' }, { modelId: 'removed' }],
-    });
-    const kept = h.config.custom_provider?.work?.models?.kept;
-    if (!kept) throw new Error('expected retained model fixture');
-    kept.thinking_config = { mode: 'switchable', default_value: 'false' };
-    kept.limit = { context: 96_000, output: 12_000 };
-    kept.variants = {
-      thinking: { thinking: { type: 'adaptive' } },
-      'none-thinking': { thinking: { type: 'disabled' } },
-    };
-
-    await h.service.updateUserProvider({
-      providerId: 'custom_provider:work',
-      models: [{ modelId: 'kept' }, { modelId: 'added' }],
-    });
-
-    expect(h.config.custom_provider?.work?.models?.kept).toMatchObject({
-      reasoning: true,
-      thinking_config: { mode: 'switchable', default_value: 'false' },
-      limit: { context: 96_000, output: 12_000 },
-      variants: {
-        thinking: { thinking: { type: 'adaptive' } },
-        'none-thinking': { thinking: { type: 'disabled' } },
-      },
-    });
-    expect(h.config.custom_provider?.work?.models?.added).toMatchObject({
-      reasoning: true,
-      thinking_config: { mode: 'switchable', default_value: 'true' },
-    });
-    expect(h.config.custom_provider?.work?.models?.removed).toBeUndefined();
-  });
-
-  it('update honors an explicit reasoning opt-out for an existing model', async () => {
-    const h = makeHarness(undefined, { implicitCustomProviderThinking: true });
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'plain' }],
-    });
-
-    await h.service.updateUserProvider({
-      providerId: 'custom_provider:work',
-      models: [{ modelId: 'plain', reasoning: false }],
-    });
-
-    expect(h.config.custom_provider?.work?.models?.plain).toMatchObject({ reasoning: false });
-    expect(h.config.custom_provider?.work?.models?.plain).not.toHaveProperty('thinking_config');
-  });
-});
-
-describe('custom provider default model recovery', () => {
-  it('resets the global default when an update removes its model', async () => {
-    const h = makeHarness({
-      defaultModel: 'custom_provider:work/removed',
-      defaultModelVariant: 'max',
-      custom_provider: {
-        work: {
-          name: 'Work',
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com/v1' },
-          models: { kept: {}, removed: {} },
-        },
-      },
-    });
-
-    await h.service.updateUserProvider({
-      providerId: 'custom_provider:work',
-      models: [{ modelId: 'kept' }],
-    });
-
-    expect(h.config.defaultModel).toBe('minimax/MiniMax-M3.1-Flash');
-    expect(h.config.defaultModelVariant).toBeUndefined();
-  });
-});
-
-describe('custom provider updates', () => {
-  it('keeps legacy provider persistence unchanged without the TUI policy', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Legacy',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'plain' }],
-    });
-
-    expect(h.config.custom_provider?.legacy?.models?.plain).toEqual({});
-  });
-
-  it('persists model reorder requests and preserves retained model fields', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          name: 'Work',
-          api: 'openai-responses',
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com/v1' },
-          models: {
-            'm-a': {
-              name: 'Model A',
-              enabled: false,
-              attachment: true,
-              limit: { context: 128_000, output: 16_000 },
-              thinking: { effortOptions: ['low', 'high'] },
-            },
-            'm-b': { name: 'Model B' },
-            'm-c': { name: 'Model C', enabled: true },
-          },
-        },
-      },
-    });
-
-    const updated = await h.service.updateUserProvider({
-      providerId: 'custom_provider:work',
-      models: [{ modelId: 'm-c' }, { modelId: 'm-a' }, { modelId: 'm-b' }],
-    });
-
-    expect(Object.keys(h.config.custom_provider?.work?.models ?? {})).toEqual([
-      'm-c',
-      'm-a',
-      'm-b',
-    ]);
-    expect(updated.models.map((model) => model.modelId)).toEqual(['m-c', 'm-a', 'm-b']);
-    expect(h.config.custom_provider?.work?.models?.['m-a']).toEqual({
-      name: 'Model A',
-      enabled: false,
-      attachment: true,
-      limit: { context: 128_000, output: 16_000 },
-      thinking: { effortOptions: ['low', 'high'] },
-    });
-  });
-
-  it('removes legacy npm metadata when a custom provider is edited', async () => {
-    const h = makeHarness({
-      custom_provider: {
-        work: {
-          name: 'Work',
-          npm: '@ai-sdk/anthropic',
-          api: 'anthropic-messages',
-          options: { apiKey: CUSTOM_KEY, baseURL: 'https://api.example.com/v1' },
-          models: { 'm-1': { limit: { context: 128_000, output: 16_000 } } },
-        },
-      },
-    });
-
-    await h.service.updateUserProvider({ providerId: 'custom_provider:work', name: 'Renamed' });
-
-    expect(h.config.custom_provider?.work).toMatchObject({ name: 'Renamed' });
-    expect(h.config.custom_provider?.work).not.toHaveProperty('npm');
-  });
-
-  it('update api_key tri-state: absent keeps, empty clears, masked rejects', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-    });
-
-    await h.service.updateUserProvider({ providerId: 'work', name: 'Still Work' });
-    expect(h.config.custom_provider?.work?.options?.apiKey).toBe(CUSTOM_KEY);
-
-    await expect(
-      h.service.updateUserProvider({ providerId: 'work', apiKey: 'sk-c****efgh' }),
-    ).rejects.toBeInstanceOf(LocalModelProviderError);
-    expect(h.config.custom_provider?.work?.options?.apiKey).toBe(CUSTOM_KEY);
-
-    const cleared = await h.service.updateUserProvider({ providerId: 'work', apiKey: '' });
-    expect(h.config.custom_provider?.work?.options?.apiKey).toBeUndefined();
-    expect(cleared.hasApiKey).toBe(false);
-
-    await h.service.updateUserProvider({ providerId: 'work', apiKey: 'sk-new-key-987654321' });
-    expect(h.config.custom_provider?.work?.options?.apiKey).toBe('sk-new-key-987654321');
-  });
-
-  it('patches and removes write-only headers case-insensitively', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      headers: { 'X-Tenant': 'one', 'X-Trace': 'keep' },
-      models: [{ modelId: 'm-1' }],
-    });
-
-    const provider = await h.service.updateUserProvider({
-      providerId: 'work',
-      headers: { 'x-tenant': 'two', 'X-New': 'new' },
-      removeHeaders: ['x-trace'],
-    });
-
-    expect(h.config.custom_provider?.work?.options?.headers).toEqual({
-      'x-tenant': 'two',
-      'X-New': 'new',
-    });
-    expect(provider.headerNames).toEqual(['X-New', 'x-tenant']);
-    expect(JSON.stringify(provider)).not.toContain('two');
-  });
-
-  it('allows activation after a tested model configuration changes', async () => {
-    const h = makeHarness();
-    const provider = await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1', limit: { context: 128_000 } }],
-    });
-    await h.service.testModel(provider.providerId, 'm-1');
-    await h.service.updateUserProvider({
-      providerId: provider.providerId,
-      models: [{ modelId: 'm-1', limit: { context: 256_000 } }],
-    });
-
-    await expect(
-      h.service.updateUserProvider({ providerId: provider.providerId, saveAndUse: true }),
-    ).resolves.toMatchObject({ providerId: provider.providerId });
-    expect(h.selectModel).toHaveBeenCalledWith('custom_provider:work/m-1');
-  });
-});
-
-describe('custom provider deletion', () => {
-  it('update unknown provider yields 404', async () => {
-    const h = makeHarness();
-    await expect(
-      h.service.updateUserProvider({ providerId: 'custom_provider:nope', name: 'x' }),
-    ).rejects.toMatchObject({ status: 404 });
-  });
-
-  it('delete removes the provider and prunes cache even when default model points at it', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1' }],
-    });
-    h.config.defaultModel = 'custom_provider:work/m-1';
-    h.config.defaultModelVariant = 'max';
-    expect(h.config.defaultModel).toBe('custom_provider:work/m-1');
-    await h.cache.setProviderStatus('custom_provider:work', { state: 'available' });
-
-    await h.service.deleteUserProvider({ providerId: 'custom_provider:work' });
-    expect(h.config.custom_provider?.work).toBeUndefined();
-    expect(h.cache.load().provider_status['custom_provider:work']).toBeUndefined();
-    expect(h.config.defaultModel).toBe('minimax/MiniMax-M3.1-Flash');
-    expect(h.config.defaultModelVariant).toBeUndefined();
-  });
-
-  it('delete unknown provider yields 404', async () => {
-    const h = makeHarness();
-    await expect(
-      h.service.deleteUserProvider({ providerId: 'custom_provider:nope' }),
-    ).rejects.toMatchObject({ status: 404 });
-  });
-});
-
-describe('provider listings', () => {
-  it('uses the active API catalog and context overrides in both model lists', () => {
-    const h = makeHarness({
-      minimaxModelSource: 'minimax_api_key',
-      minimax_api: { apiKey: RAW_KEY, modelContextLimits: { 'MiniMax-M3': 1_000_000 } },
-      provider: {
-        minimax: {
-          options: { authMode: 'managed-login' },
-          models: {
-            'remote-only': { name: 'Remote Only' },
-            'MiniMax-M3': {
-              limit: { context: 512_000, output: 128_000 },
-              contextWindowOptions: [512_000, 1_000_000],
-            },
-          },
-        },
-      },
-    });
-    const provider = h.service
-      .listEffectiveProviders()
-      .find((item) => item.providerId === 'minimax');
-    const listed = listLocalRuntimeModels(h.config).filter((item) => item.providerId === 'minimax');
-
-    expect(provider?.models.map((model) => model.modelId)).toEqual(
-      listed.map((model) => model.modelId),
-    );
-    expect(provider?.models.some((model) => model.modelId === 'remote-only')).toBe(true);
-    expect(provider?.models.find((model) => model.modelId === 'MiniMax-M3')).toMatchObject({
-      contextLimit: 1_000_000,
-      contextWindowOptions: [512_000, 1_000_000],
-    });
-  });
-
-  it('lists builtin and custom providers, excludes disabled custom providers', async () => {
-    const h = makeHarness();
-    await h.service.upsertMinimaxApiKey({ apiKey: RAW_KEY });
-    await h.service.createUserProvider({
-      name: 'On',
-      baseUrl: 'https://on.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-on' }],
-    });
-    await h.service.createUserProvider({
-      name: 'Off',
-      baseUrl: 'https://off.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-off' }],
-    });
-    await h.service.updateUserProvider({ providerId: 'off', enabled: false });
-
-    const effective = h.service.listEffectiveProviders();
-    const ids = effective.map((p) => p.providerId);
-    expect(ids).toContain('minimax');
-    expect(ids).toContain('custom_provider:on');
-    expect(ids).not.toContain('custom_provider:off');
-    // minimax_api is no longer listed as a separate provider — source routing
-    // is handled by the resolver at inference time.
-    expect(ids).not.toContain('minimax_api');
-
-    const minimax = effective.find((p) => p.providerId === 'minimax');
-    expect(minimax?.source).toBe('provider');
-    expect(minimax?.kind).toBe('minimax-managed');
-
-    // user list still shows disabled providers with their config retained
-    const user = h.service.listUserProviders();
-    expect(user.map((p) => p.providerId).sort()).toEqual([
-      'custom_provider:off',
-      'custom_provider:on',
-    ]);
-    expect(user.find((p) => p.providerId === 'custom_provider:off')?.enabled).toBe(false);
-  });
-
-  it('hides minimax_api when no key is saved', () => {
-    const h = makeHarness();
-    const ids = h.service.listEffectiveProviders().map((p) => p.providerId);
-    expect(ids).not.toContain('minimax_api');
-  });
-
-  it('returns only masked keys in listings', async () => {
-    const h = makeHarness();
-    await h.service.upsertMinimaxApiKey({ apiKey: RAW_KEY });
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-    });
-    const effective = h.service.listEffectiveProviders();
-    const user = h.service.listUserProviders();
-    const status = h.service.getMinimaxApiKeyStatus();
-
-    for (const provider of [...effective, ...user]) {
-      if (provider.hasApiKey) {
-        expect(provider.maskedApiKey).toContain('****');
-        expect(provider).not.toHaveProperty('rawApiKey');
-      }
-    }
-    const customProvider = user.find((p) => p.providerId === 'custom_provider:work');
-    expect(customProvider?.maskedApiKey).not.toBe(CUSTOM_KEY);
-    expect(customProvider).not.toHaveProperty('rawApiKey');
-    expect(status).not.toHaveProperty('rawApiKey');
-    expect(status.maskedApiKey).not.toBe(RAW_KEY);
-  });
-
-  it('surfaces cache status on listed providers', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1' }],
-    });
-    h.setTestResult({
-      ok: false,
-      errorCode: 'unauthorized',
-      errorMessage: 'Authentication failed (HTTP 401)',
-    });
-    await h.service.testProvider('custom_provider:work');
-
-    const provider = h.service
-      .listUserProviders()
-      .find((p) => p.providerId === 'custom_provider:work');
-    expect(provider?.status).toMatchObject({ state: 'failed', lastErrorCode: 'unauthorized' });
-  });
-
-  it('drops a listed provider status after the tested configuration changes', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1' }],
-    });
-    await h.service.testProvider('custom_provider:work');
-    expect(
-      h.service.listUserProviders().find((p) => p.providerId === 'custom_provider:work')?.status,
-    ).toMatchObject({ state: 'available' });
-
-    await h.service.updateUserProvider({
-      providerId: 'custom_provider:work',
-      baseUrl: 'https://rotated.example.com',
-    });
-
-    // The cached verdict belongs to the previous base_url; keeping it would
-    // report the new endpoint as verified without ever contacting it.
-    expect(
-      h.service.listUserProviders().find((p) => p.providerId === 'custom_provider:work')?.status,
-    ).toBeUndefined();
-  });
-});
-
-describe('connection tests', () => {
-  it('tests a custom provider with its first model and records success in cache', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com/v1',
-      apiKey: CUSTOM_KEY,
-      apiFormat: 'openai-completions',
-      models: [{ modelId: 'm-1', effortOptions: ['low'] }, { modelId: 'm-2' }],
-    });
-
-    const result = await h.service.testProvider('custom_provider:work');
-    expect(result.ok).toBe(true);
-    expect(h.testCalls[0]?.key).toMatch(/^custom_provider:work@sha256:/u);
-    expect(h.testCalls[0]?.target).toMatchObject({
-      api: 'openai-completions',
-      baseUrl: 'https://api.example.com/v1',
-      apiKey: CUSTOM_KEY,
-      modelId: 'm-1',
-    });
-    expect(h.cache.load().provider_status['custom_provider:work']).toMatchObject({
-      state: 'available',
-      last_tested_at: 1_750_000_000_000,
-    });
-  });
-
-  it('records failures with normalized error codes in the model cache', async () => {
-    const h = makeHarness();
-    await h.service.createUserProvider({
-      name: 'Work',
-      baseUrl: 'https://api.example.com',
-      apiKey: CUSTOM_KEY,
-      models: [{ modelId: 'm-1' }],
-    });
-    h.setTestResult({
-      ok: false,
-      errorCode: 'unauthorized',
-      errorMessage: 'Authentication failed (HTTP 401)',
-    });
-
-    const result = await h.service.testModel('custom_provider:work', 'm-1');
-    expect(result.ok).toBe(false);
-    expect(result.status).toMatchObject({ state: 'failed', lastErrorCode: 'unauthorized' });
-    expect(h.cache.load().model_status['custom_provider:work/m-1']).toMatchObject({
-      state: 'failed',
-      last_error_code: 'unauthorized',
-    });
-  });
-
-  it('tests the minimax_api provider against the derived base url and models', async () => {
-    const h = makeHarness();
-    await h.service.upsertMinimaxApiKey({ apiKey: RAW_KEY });
-    await h.service.testProvider('minimax_api');
-    expect(h.testCalls[0]?.target).toMatchObject({
-      api: 'anthropic-messages',
-      baseUrl: MINIMAX_API_DEFAULT_BASE_URL,
-      apiKey: RAW_KEY,
-      modelId: 'MiniMax-M3',
-    });
-    expect(h.testCalls.map((call) => call.target.minimaxM3ThinkingMode)).toEqual(['on', 'off']);
-  });
-
-  it('rejects testing providers without a key or unknown providers', async () => {
-    const h = makeHarness();
-    await expect(h.service.testProvider('minimax_api')).rejects.toMatchObject({ status: 400 });
-    await expect(h.service.testProvider('custom_provider:nope')).rejects.toMatchObject({
-      status: 404,
-    });
+    expect(h.testCalls).toEqual([]);
   });
 });

@@ -18,6 +18,7 @@ import type {
   Tool,
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
+import type { NormalizedLLMError } from '@mavis/shared/llm-error-classifier';
 import type { PiEventWriter } from './types.js';
 
 export type PiBeforeLlmCallPhase = 'initial' | 'iteration';
@@ -28,6 +29,14 @@ export interface PiLlmCallRecovery {
   readonly errorMessage: string;
   /** Request view the provider rejected, before any hook of the repeated call. */
   readonly requestMessages: readonly AgentMessage[];
+  /** Host data a turn-failure hook attached to the recovery it asked for. */
+  readonly detail?: unknown;
+  /**
+   * The repeated call sends `requestMessages` as they were sent, without
+   * running any beforeLlmCall hook. Set only when the failed call had a
+   * prepared request to repeat.
+   */
+  readonly replay?: boolean;
 }
 
 export interface PiBeforeLlmCallHookInput {
@@ -35,7 +44,7 @@ export interface PiBeforeLlmCallHookInput {
   turnId: string;
   phase: PiBeforeLlmCallPhase;
   /**
-   * Set when this call repeats a provider request that an afterLlmCall hook
+   * Set when this call repeats a call an afterLlmCall or turn-failure hook
    * recovered from; the failed response is already gone from `messages`.
    */
   recovery?: PiLlmCallRecovery;
@@ -53,10 +62,10 @@ export interface PiBeforeLlmCallHookInput {
   /** Host-composed auxiliary provider stream (for example auto compaction). */
   streamFn?: StreamFn;
   /**
-   * The onPayload transform chain applied before this turn's actual provider request (e.g.
-   * local-runtime's video patcher / openplatform thinking patcher). Hooks performing
-   * payload-sensitive operations such as token counting must apply it to their constructed body
-   * first; otherwise, the counted payload differs from the request actually sent.
+   * 本轮真实 provider 请求发出前应用的 onPayload transform 链（例如
+   * local-runtime 的 video patcher / openplatform thinking patcher）。
+   * hook 若要对 provider payload 做 token 计数等同形操作，必须先把它
+   * 应用到自建 body 上，否则计数对象与实际发出的请求不同形。
    */
   payloadTransform?: SimpleStreamOptions['onPayload'];
   /** Provider payload transform for hook-owned auxiliary LLM calls. */
@@ -171,7 +180,18 @@ export interface PiLlmCallPreparedHookInput {
   readonly signal?: AbortSignal;
 }
 
-export type PiOnLlmCallPreparedHook = (input: PiLlmCallPreparedHookInput) => Promise<void> | void;
+/**
+ * What an observer of a prepared main request may ask for: `onPayload` sees
+ * the provider body of each attempt once the request's own payload transform
+ * has run. It observes only; its failures never reach the request.
+ */
+export interface PiLlmCallPreparedObservation {
+  readonly onPayload?: (payload: unknown) => void;
+}
+
+export type PiOnLlmCallPreparedHook = (
+  input: PiLlmCallPreparedHookInput,
+) => Promise<PiLlmCallPreparedObservation | void> | PiLlmCallPreparedObservation | void;
 
 export interface PiAfterLlmCallHookInput {
   sessionId: string;
@@ -193,17 +213,30 @@ export type PiAfterLlmCallHookDecision =
    * message delta. Both downstream paths therefore observe the replacement
    * text, never the original assistant text.
    *
-   * The runner removes every existing text block and appends one replacement
-   * text block. It preserves every non-text block in order, including pending
-   * toolCall blocks. Pi selects those preserved tool calls after listeners
-   * settle, so replaceText changes only the delivered text; it does not block
-   * tool execution.
+   * The runner puts one replacement text block where the first existing text
+   * block was and drops the other text blocks. A response without text gets
+   * the replacement in front of its first toolCall block, or at the end when
+   * it has none. Every non-text block keeps its order, including pending
+   * toolCall blocks; the message is persisted and resent as is, so the text
+   * never moves behind a tool call. A response whose only text block already
+   * holds the replacement text is left unchanged.
+   *
+   * Pi selects the preserved tool calls after listeners settle, so
+   * replaceText changes only the delivered text; it does not block tool
+   * execution.
    *
    * Use retry or fail to reject a response and prevent its pending tool calls
    * from causing side effects. Use the tool hooks for per-tool control.
    */
   | { type: 'replaceText'; text: string }
   | { type: 'retry'; reason: string; prompt: string }
+  /**
+   * Keeps a final assistant response (one without tool calls) and asks the
+   * model once more with `prompt` as a user message, so the Turn continues
+   * instead of ending. Ignored for a response with tool calls or an error
+   * response. The hook decides how often it asks; the runner never repeats it.
+   */
+  | { type: 'followUp'; reason: string; prompt: string }
   /**
    * Drops a provider error response and repeats the same provider request
    * once per LLM call. Only honoured for `stopReason: 'error'`; the repeated
@@ -217,6 +250,60 @@ export type PiAfterLlmCallHookDecision =
 export type PiAfterLlmCallHook = (
   input: PiAfterLlmCallHookInput,
 ) => Promise<PiAfterLlmCallHookDecision | undefined> | PiAfterLlmCallHookDecision | undefined;
+
+/** Why a Turn is about to end as failed. */
+export type PiTurnFailure =
+  /** The provider (or the host while preparing the call) reported an error response. */
+  | {
+      readonly kind: 'provider_error';
+      readonly errorMessage: string;
+      /** The transport's classification of the final attempt, when it observed one. */
+      readonly normalized?: NormalizedLLMError;
+    }
+  /** An afterLlmCall hook rejected the response with `fail`. */
+  | { readonly kind: 'response_rejected'; readonly reason: string }
+  /** An afterLlmCall hook threw. */
+  | { readonly kind: 'hook_error'; readonly errorMessage: string };
+
+export interface PiTurnFailureHookInput {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly failure: PiTurnFailure;
+  /** The failed response; its tool calls never run. */
+  readonly message: AssistantMessage;
+  /** Request view of the failed call; absent when the call failed before one was prepared. */
+  readonly requestMessages?: readonly AgentMessage[];
+  readonly signal?: AbortSignal;
+  /**
+   * False when a `recover` would be refused: the Turn's history could not be
+   * delivered, or its turn-failure recoveries are used up. `restore` still applies.
+   */
+  readonly recoverable: boolean;
+}
+
+export type PiTurnFailureHookDecision =
+  /** Leave the failure to the next hook, or let the Turn fail. */
+  | { type: 'continue' }
+  /**
+   * Drop the failed response and repeat the call. The repeated call's
+   * beforeLlmCall input carries `recovery` with `reason` and `detail`; with
+   * `replay`, the failed request is sent again as it was, without hooks.
+   */
+  | { type: 'recover'; reason: string; detail?: unknown; replay?: boolean }
+  /**
+   * End the Turn with the failure the latest `recover` replaced, instead of
+   * this one: the repeated call failed for a reason of the host's own.
+   */
+  | { type: 'restore' };
+
+/**
+ * Consulted once when the Turn is about to end as failed: after every
+ * afterLlmCall recovery is spent, never for a stopped Turn. Other sessions
+ * register none and keep their failure semantics.
+ */
+export type PiTurnFailureHook = (
+  input: PiTurnFailureHookInput,
+) => Promise<PiTurnFailureHookDecision | undefined> | PiTurnFailureHookDecision | undefined;
 
 /** blockedBy is trusted admission provenance, observed in this step only. */
 export type PiBeforeToolCallHook = (
@@ -247,6 +334,18 @@ export interface PiHistoryChangedHookInput {
   previousMessages?: AgentMessage[];
   /** Replacement metadata, only populated for `replaceMessages`. */
   metadata?: PiBeforeLlmCallReplaceMetadata;
+  /**
+   * `messageDelta` only: the display `msg_id` the event stream carried for an
+   * assistant message of {@link messages}, by its index there. Present only
+   * when at least one assistant message has one; a message whose id
+   * allocation failed, or that ended aborted, has none.
+   */
+  assistantMessageIds?: readonly PiAssistantMessageId[];
+}
+
+export interface PiAssistantMessageId {
+  readonly index: number;
+  readonly messageId: string;
 }
 
 export type PiOnHistoryChangedHook = (input: PiHistoryChangedHookInput) => Promise<void> | void;
@@ -286,6 +385,7 @@ export interface PiTurnHooks {
   /** Best-effort observers of actual logical main-agent provider calls. */
   onLlmCallPreparedHook?: readonly PiOnLlmCallPreparedHook[];
   afterLlmCallHook?: readonly PiAfterLlmCallHook[];
+  turnFailureHook?: readonly PiTurnFailureHook[];
   beforeToolCallHook?: readonly PiBeforeToolCallHook[];
   onToolExecutionStartHook?: readonly PiToolExecutionStartHook[];
   afterToolCallHook?: readonly PiAfterToolCallHook[];

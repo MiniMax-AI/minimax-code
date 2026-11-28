@@ -7,7 +7,10 @@ import type {
 } from '@mavis/config';
 import type { PromptReadScope } from '@mavis/agent-runtime';
 import type { InputSafetyDecision } from '../../../content-safety/index.js';
-import type { LocalResolvedModelConfig } from '../../../model-system/index.js';
+import type {
+  LocalResolvedModelConfig,
+  ResolvedAdvisorModel,
+} from '../../../model-system/index.js';
 import type {
   SessionRecord,
   TaskSessionBinding,
@@ -268,6 +271,7 @@ export interface LocalTurnPreparation {
   /** Replaces the persisted retry fallback only for this model call. */
   readonly retryContinuationPrompt?: string;
   readonly promptRead?: PromptReadScope;
+  readonly advisor?: ResolvedAdvisorModel;
 }
 
 export interface LocalTurnPreparationInput<

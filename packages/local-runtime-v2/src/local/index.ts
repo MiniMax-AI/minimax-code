@@ -8,9 +8,18 @@ export {
   PermissionReply,
   QuestionnaireSelectionMode,
   QuestionnaireStatus,
+  SessionActivityKind,
+  SessionActivityState,
   SessionTypeView,
   InstalledPluginSource,
 } from "@mavis/protocol/local";
+export type {
+  McpAuthStartResult,
+  McpAuthState,
+  McpAuthStateView,
+  McpAuthTarget,
+  McpAuthTestResult,
+} from "../application/session/process-local-application-contract.js";
 export type {
   ConversationSteerInput,
   ConversationSteerResult,
@@ -36,6 +45,8 @@ export type {
   GetPendingQuestionnaireResult as GetPendingQuestionnaireResp,
   GetQueueItemInput as GetQueueItemReq,
   GetQueueItemResult as GetQueueItemResp,
+  GetSessionActivityInput as GetSessionActivityReq,
+  GetSessionActivityResult as GetSessionActivityResp,
   GetSessionUsageInput as GetSessionUsageReq,
   GetSessionUsageResult as GetSessionUsageResp,
   ListQueueMessagesInput as ListQueueMessagesReq,

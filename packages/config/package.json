@@ -23,6 +23,21 @@
       "types": "./src/sandbox-settings.ts",
       "import": "./dist/sandbox-settings.js",
       "default": "./dist/sandbox-settings.js"
+    },
+    "./model-availability": {
+      "types": "./src/model-availability.ts",
+      "import": "./dist/model-availability.js",
+      "default": "./dist/model-availability.js"
+    },
+    "./worktree-config": {
+      "types": "./src/worktree-config.ts",
+      "import": "./dist/worktree-config.js",
+      "default": "./dist/worktree-config.js"
+    },
+    "./ptc-default-config": {
+      "types": "./src/ptc-default-config.ts",
+      "import": "./dist/ptc-default-config.js",
+      "default": "./dist/ptc-default-config.js"
     }
   },
   "dependencies": {

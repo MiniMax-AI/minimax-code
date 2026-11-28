@@ -1,4 +1,4 @@
-import type { AskQuestionnaireRequest } from "./questionnaire.js";
+import type { AskQuestionnaireRequest, AskQuestionnaireState } from "./questionnaire.js";
 import type { SessionLLMRetryEventPayload } from "./llm-retry-event.js";
 
 // Contract admission rules: ./global-events/README.md
@@ -26,6 +26,7 @@ export const GLOBAL_EVENT_TYPES = [
   "permission.resolved",
   "config.permission_mode.changed",
   "config.browser_use_tooling.changed",
+  "questionnaire.state",
   "questionnaire.ask",
   "questionnaire.dismiss",
   "questionnaire.superseded",
@@ -40,6 +41,10 @@ export const GLOBAL_EVENT_TYPES = [
   "thread_goal.cleared",
   "thread_goal.objective_updated_steering",
   "workspace.git.changed",
+  "subagent.execution",
+  "mcp.auth_updated",
+  "mcp.auth_required",
+  "content.review.slow",
 ] as const satisfies readonly (keyof GlobalEventPayloadMap)[];
 
 export type GlobalEventType = keyof GlobalEventPayloadMap;
@@ -51,6 +56,32 @@ export interface CompactionTokenUsage {
   cacheWriteTokens: number;
   totalTokens: number;
   incomplete: boolean;
+}
+
+export interface CompactionEventDisplay {
+  display?: false;
+}
+
+export type GlobalMcpAuthState =
+  | "unknown"
+  | "not_required"
+  | "static"
+  | "needs_auth"
+  | "authorizing"
+  | "authorized"
+  | "needs_reauth"
+  | "failed";
+
+export type GlobalMcpAuthAttemptOutcome = "authorized" | "failed" | "cancelled" | "expired";
+
+export interface GlobalMcpAuthTarget {
+  kind: "user" | "project" | "plugin";
+  serverName: string;
+  pluginName?: string;
+  pluginMarketplace?: string;
+  pluginSource?: string;
+  sessionId?: string;
+  workspaceRoot?: string;
 }
 
 /** Correlated event name + payload emitted by backend product-event producers. */
@@ -77,6 +108,9 @@ type SessionTerminalPayload<
   agentName: string;
   turnId: string;
   status: Status;
+  goalId?: string;
+  waitingForUser?: boolean;
+  hasNextStepCard?: true;
   taskId?: string;
   source?: SessionTerminalSource;
   date?: string;
@@ -93,8 +127,10 @@ export type GlobalThreadGoalStatusReason =
   | "complete(user_requested)"
   | "paused(user_requested)"
   | "paused(retracted)"
+  | "paused(message_undelivered)"
   | "paused(infra_retryable)"
   | "paused(accounting_unavailable)"
+  | "paused(questionnaire_failed)"
   | "paused(verifier_unavailable)"
   | "paused(route_unavailable)"
   | "paused(verifier_timeout)"
@@ -239,6 +275,7 @@ export type GlobalEventPayloadMap = {
     variant?: string | null;
     thinking?: { effort?: string } | null;
     contextLimit?: number | null;
+    replacedFrom?: { providerId: string; modelId: string; reason?: "unavailable" };
   };
   "session.interaction_mode.changed": {
     sessionId: string;
@@ -291,7 +328,7 @@ export type GlobalEventPayloadMap = {
     errorSource?: string;
     error?: string;
   };
-  "session.compaction.started": { sessionId: string; compactionId: string };
+  "session.compaction.started": { sessionId: string; compactionId: string } & CompactionEventDisplay;
   "session.compaction.completed": {
     sessionId: string;
     compactionId: string;
@@ -300,12 +337,12 @@ export type GlobalEventPayloadMap = {
     tokensBefore: number;
     tokensAfter: number;
     tokenUsage?: CompactionTokenUsage;
-  };
+  } & CompactionEventDisplay;
   "session.compaction.failed": {
     sessionId: string;
     compactionId: string;
     tokenUsage?: CompactionTokenUsage;
-  };
+  } & CompactionEventDisplay;
   "session.llm_retry": SessionLLMRetryEventPayload;
   "permission.ask": {
     requestId: string;
@@ -341,6 +378,12 @@ export type GlobalEventPayloadMap = {
       | "off";
   };
   "config.browser_use_tooling.changed": { browserUseTooling: boolean };
+  "questionnaire.state": {
+    requestId: string;
+    sessionId: string;
+    agentName?: string;
+    state: AskQuestionnaireState;
+  };
   "questionnaire.ask": {
     requestId: string;
     sessionId: string;
@@ -389,7 +432,8 @@ export type GlobalEventPayloadMap = {
   };
   "content.retry.exceeded": {
     sessionId: string;
-    variant: "content" | "network" | "auth";
+    turnId?: string;
+    variant: "content" | "network" | "auth" | "reply";
     lastUserMsgId?: string;
   };
   "rotation.completed": {
@@ -413,6 +457,33 @@ export type GlobalEventPayloadMap = {
     kind: "workspace" | "repository";
     reason: "watcher" | "watcher-error" | "mutation" | "manual";
   };
+  "subagent.execution": {
+    eventType: "subagent.execution";
+    sessionId: string;
+    msgId: string;
+    timestamp: number;
+    parent_session_id: string;
+    child_session_id: string;
+    turn_id: string;
+    agent_name: string;
+    agent_display_name?: string;
+    status: "started" | "completed" | "failed" | "aborted" | "interrupted";
+  };
+  "mcp.auth_updated": {
+    target: GlobalMcpAuthTarget;
+    authState: GlobalMcpAuthState;
+    reason?: string;
+    attemptId?: string;
+    attemptOutcome?: GlobalMcpAuthAttemptOutcome;
+    errorCode?: string;
+  };
+  "mcp.auth_required": {
+    target: GlobalMcpAuthTarget;
+    reason: "auth_required" | "insufficient_scope" | "reauth_required";
+    sessionId?: string;
+    turnId?: string;
+  };
+  "content.review.slow": { sessionId: string; turnId: string; cleared?: boolean };
 };
 
 type AssertNever<Value extends never> = Value;
@@ -487,4 +558,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+export type GlobalEventPublisher = (event: GlobalEventInput) => void;
+
+export function publishBestEffort(
+  publisher: GlobalEventPublisher,
+  event: GlobalEventInput,
+  onFailure?: (event: GlobalEventInput, error: unknown) => void,
+): void {
+  try {
+    publisher(event);
+  } catch (error) {
+    try {
+      onFailure?.(event, error);
+    } catch {
+      // A committed business result remains primary.
+    }
+  }
 }

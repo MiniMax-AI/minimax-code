@@ -26,15 +26,20 @@ export interface TuiAgentStatusLineInput {
   readonly requestId?: string;
   readonly activeAgents?: number;
   readonly totalAgents?: number;
+  /** Delegated Sessions blocked on a user decision; always a subset of `activeAgents`. */
+  readonly waitingAgents?: number;
   /** Root-session background Tasks whose result has not settled into a durable root Turn. */
   readonly backgroundTasks?: number;
 }
 
-/**
- * Produces the bounded opaque token used by the terminal status protocol.
- * Pollers only need a stable value that changes between turns; exposing the
- * full Runtime UUID would make the marker wider than supported terminals.
- */
+/** Formats raw Runtime `session`/`turn` IDs for the status line, collapsing internal whitespace to `_`. */
+export function resolveTuiRawIdField(id: string | undefined): string {
+  const value = id?.trim();
+  if (!value) return 'none';
+  return value.replace(/\s+/gu, '_');
+}
+
+/** Formats the 6-character opaque `request` token so pollers can detect changes without full IDs. */
 export function resolveTuiAgentRef(id: string | undefined): string {
   const value = id?.trim();
   if (!value) return 'none';
@@ -47,12 +52,19 @@ export function resolveTuiAgentRef(id: string | undefined): string {
   return ((hash >>> 0) % TUI_AGENT_REF_MODULUS).toString(36).padStart(6, '0');
 }
 
+/** `waiting=` is opt-in via `MCODE_TUI_STATUS_WAITING_FIELD=1` so existing line-matching pollers remain compatible. */
+export function tuiStatusWaitingFieldEnabled(): boolean {
+  return process.env.MCODE_TUI_STATUS_WAITING_FIELD === '1';
+}
+
 export function formatTuiAgentStatusLine(input: TuiAgentStatusLineInput): string {
   const totalAgents = boundedAgentCount(input.totalAgents);
   const activeAgents = Math.min(boundedAgentCount(input.activeAgents), totalAgents);
-  return `${TUI_STATUS_MARKER} seq=${input.seq} state=${input.status} session=${resolveTuiAgentRef(
+  const waitingAgents = Math.min(boundedAgentCount(input.waitingAgents), activeAgents);
+  const waitingField = tuiStatusWaitingFieldEnabled() ? ` waiting=${waitingAgents}` : '';
+  return `${TUI_STATUS_MARKER} seq=${input.seq} state=${input.status} session=${resolveTuiRawIdField(
     input.sessionId,
-  )} turn=${resolveTuiAgentRef(input.turnId)} request=${resolveTuiAgentRef(input.requestId)} agents=${activeAgents}/${totalAgents} background=${boundedAgentCount(input.backgroundTasks)}`;
+  )} turn=${resolveTuiRawIdField(input.turnId)} request=${resolveTuiAgentRef(input.requestId)} agents=${activeAgents}/${totalAgents}${waitingField} background=${boundedAgentCount(input.backgroundTasks)}`;
 }
 
 function boundedAgentCount(value: number | undefined): number {

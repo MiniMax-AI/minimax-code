@@ -111,7 +111,7 @@ describe('runtime-allocated workspace grant', () => {
  * Contract between the runtime's grant sources and the real permission
  * engine: every path the runtime hands the Agent inside its private data
  * directory is readable with the resolved grant, and nothing next to it is.
- * MCT-202610-A2VA9DM3: the default Session workspace and an attachment were
+ * the default Session workspace and an attachment were
  * refused, the ask could not be auto-approved, and the turn waited for hours.
  */
 describe('runtime-handed paths with the real permission engine', () => {

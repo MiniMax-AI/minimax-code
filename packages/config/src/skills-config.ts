@@ -15,9 +15,12 @@
  *     across sources. The visible skill roster still keeps only the priority
  *     winner.
  *   - `sources`: per-source-kind `{ enabled, priority }`. Higher priority
- *     wins on name collision. Only the externally-discoverable sources are
- *     surfaced — Mavis-internal sources (`builtin-*`, `agent-*`, `user-mavis`)
- *     are not user-configurable here (handled by the SkillStore directly).
+ *     wins on name collision between external sources. External sources always
+ *     rank below MCode's own global skills directory (`<dataDir>/skills`), so
+ *     no configured priority can shadow a same-named global skill. Only the
+ *     externally-discoverable sources are surfaced — Mavis-internal sources
+ *     (`builtin-*`, `agent-*`, `user-mavis`) are not user-configurable here
+ *     (handled by the SkillStore directly).
  */
 
 const EXTERNAL_SOURCE_KINDS = [
@@ -57,6 +60,13 @@ export interface SkillsExternalConfig {
 
 export interface SkillsConfig {
   external: SkillsExternalConfig;
+  /**
+   * Freeze `<available_skills>` for a context window (session start or a committed
+   * compaction until the next compaction); later changes reach the model as a
+   * skill-availability update. `false` rolls back to a fresh catalog every Turn;
+   * absent means on.
+   */
+  freezeCatalog?: boolean;
 }
 
 export const DEFAULT_SKILLS_CONFIG: SkillsConfig = {
@@ -73,6 +83,7 @@ export const DEFAULT_SKILLS_CONFIG: SkillsConfig = {
       'user-agents': { enabled: true, priority: 30 },
     },
   },
+  freezeCatalog: true,
 };
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -128,7 +139,15 @@ export function parseSkillsConfig(raw: Record<string, unknown>): SkillsConfig {
           : defaults.external.duplicateWarn,
       sources,
     },
+    freezeCatalog: parseBoolean(skillsObj.freezeCatalog, defaults.freezeCatalog ?? true),
   };
+}
+
+/** `config.skills.*` overrides may arrive as YAML strings ("false"). */
+function parseBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true' || value === 'false') return value === 'true';
+  return fallback;
 }
 
 export const EXTERNAL_SOURCE_KIND_LIST = EXTERNAL_SOURCE_KINDS;

@@ -1,12 +1,12 @@
 /**
- * `createAgentRuntime`: Entry factory for agent-runtime. The host passes `{ base, additions,
- * overlays, profile }` and receives an `AgentRuntime` exposing `assembleTurn / setEnabled /
- * listExtensions / disposeSession`.
+ * `createAgentRuntime` —— agent-runtime 的入口工厂。
+ * Host 传 `{ base, additions, overlays, profile }`，返回一个 `AgentRuntime`（含
+ * `assembleTurn / setEnabled / listExtensions / disposeSession`）。
  *
- * Implementation: `Registry` holds assembly state and implements `AgentRuntime`. Each extension's
- * `init` receives an independent owner-scoped `ExtensionAPI` facade, which can register
- * contributions only during that owner's init window. The factory narrows the return type to
- * `AgentRuntime`, so the host does not receive SPI methods such as `registerTool`.
+ * 实现：`Registry` 持有装配状态并实现 `AgentRuntime`。每个 extension `init`
+ * 收到独立的 owner-scoped `ExtensionAPI` facade；该 facade 只能在对应 owner 的
+ * init 窗口注册贡献。工厂返回时按 `AgentRuntime` 收窄类型，host 不会拿到
+ * `registerTool` 等 SPI 方法。
  */
 
 import { Registry } from './registry.js';
@@ -24,6 +24,6 @@ export async function createAgentRuntime(opts: RuntimeOptions): Promise<AgentRun
   const params: Readonly<Record<string, unknown>> = overlay?.param ?? {};
   const registry = new Registry(params);
   await registry.initExtensions(extensions);
-  // Narrow the return type to AgentRuntime; owner-scoped ExtensionAPI exists only during init.
+  // 返回类型收窄到 AgentRuntime；owner-scoped ExtensionAPI 只在 init 期间存在。
   return registry;
 }

@@ -1,15 +1,17 @@
+import { readOptionalString } from '../../../infra/conversation/model-selection.js';
 import { ThinkingLevel } from '@mavis/protocol';
 import { modelRefForModel, type ManagedModelParameterSnapshot } from '../resolution/model-ref.js';
 import type {
-  ConversationModelThinkingBudgets,
   ConversationModelThinkingSelection,
   ConversationModelSelection,
 } from '@mavis/conversation-contract';
 import {
   DEFAULT_MODEL_PRESETS,
+  deliveredDefaultModelId,
   getRuntimePresetKey,
   isLegacyManagedMinimaxProvider,
-  resolveModelAvailability,
+  listRouteModelIds,
+  resolveModelReplacement,
 } from '@mavis/config';
 import { LocalModelProviderError, type LocalRuntimeConfig } from '../contracts.js';
 import { parseProviderId, parseSourceQualifiedModelKey } from '../resolution/model-key.js';
@@ -22,7 +24,13 @@ export function isLegacyMinimaxProvider(config: LocalRuntimeConfig, providerId: 
   return isLegacyManagedMinimaxProvider(providerId, provider?.options?.baseURL);
 }
 
-/** Resolves a retired managed alias without changing unrelated custom providers. */
+/**
+ * Resolves a retired managed alias without changing unrelated custom providers.
+ * The first candidate `minimax` lists wins: the same model, the configured
+ * default, then the delivered default and the first-run default. Never throws:
+ * with nothing listed the alias maps to the same model on `minimax` for the
+ * upstream to decide.
+ */
 export function resolveLegacyMinimaxModel(
   config: LocalRuntimeConfig,
   selection: { readonly providerId: string; readonly modelId: string },
@@ -30,132 +38,40 @@ export function resolveLegacyMinimaxModel(
   if (!isLegacyMinimaxProvider(config, selection.providerId)) return undefined;
   const preset = getRuntimePresetKey();
   const configured = parseSourceQualifiedModelKey(config.defaultModel);
-  const officialDefault = parseSourceQualifiedModelKey(DEFAULT_MODEL_PRESETS[preset].defaultModel);
-  const candidates = [
-    { providerId: 'minimax', modelId: selection.modelId },
-    ...(configured &&
+  const firstRun = parseSourceQualifiedModelKey(DEFAULT_MODEL_PRESETS[preset].defaultModel);
+  const listed = listRouteModelIds(config, 'minimax', preset);
+  const modelId = [
+    selection.modelId,
+    configured &&
     (configured.providerId === 'minimax' || isLegacyMinimaxProvider(config, configured.providerId))
-      ? [{ providerId: 'minimax', modelId: configured.modelId }]
-      : []),
-    ...(officialDefault
-      ? [{ providerId: officialDefault.providerId, modelId: officialDefault.modelId }]
-      : []),
-  ];
-  const replacement = candidates.find(
-    (candidate) =>
-      resolveModelAvailability({
-        config,
-        ...candidate,
-        preset,
-        source: 'explicit_request',
-      }).available,
-  );
-  if (replacement) return replacement;
-  throw new LocalModelProviderError(
-    400,
-    'The legacy MiniMax model has no available official replacement. Select an available official model.',
-    'MODEL_NOT_AVAILABLE_FOR_ROUTE',
-  );
-}
-
-export type LocalModelThinkingBudgets = ConversationModelThinkingBudgets;
-export type LocalModelThinkingSelection = ConversationModelThinkingSelection;
-
-export interface LocalModelOverride {
-  provider_id?: string;
-  model_id?: string;
-  variant?: string;
-  reasoning?: boolean;
-  thinking?: LocalModelThinkingSelection;
-}
-
-export const SELECTED_THINKING_EFFORT_CAPABILITY = 'selected_thinking_effort';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function readOptionalString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim();
-  return normalized || undefined;
-}
-
-function readThinkingBudgets(value: unknown): LocalModelThinkingBudgets | undefined {
-  if (!isRecord(value)) return undefined;
-  const budgets: {
-    minimal?: number | string;
-    low?: number | string;
-    medium?: number | string;
-    high?: number | string;
-  } = {};
-  for (const key of ['minimal', 'low', 'medium', 'high'] as const) {
-    const raw = value[key];
-    if (typeof raw === 'number' || typeof raw === 'string') budgets[key] = raw;
-  }
-  return Object.keys(budgets).length > 0 ? budgets : undefined;
+      ? configured.modelId
+      : undefined,
+    deliveredDefaultModelId(config.provider?.minimax),
+    firstRun?.modelId,
+  ].find((candidate): candidate is string => candidate !== undefined && listed.includes(candidate));
+  return { providerId: 'minimax', modelId: modelId ?? selection.modelId };
 }
 
 /**
- * Preserve an explicitly supplied empty object: callers use `{}` to clear a
- * previous session selection without changing the selected model.
+ * A saved Agent-level model that its official
+ * route no longer lists falls back to the same provider's delivered default,
+ * never to the Runtime default of another provider. `undefined` means the
+ * saved model is used as stored.
  */
-export function readLocalModelThinkingSelection(
-  value: unknown,
-): LocalModelThinkingSelection | undefined {
-  if (!isRecord(value)) return undefined;
-  const effort = readOptionalString(value.effort);
-  const offBehavior = readOptionalString(value.off_behavior ?? value.offBehavior);
-  const budgets = readThinkingBudgets(value.budgets);
-  return {
-    ...(effort ? { effort } : {}),
-    ...(offBehavior ? { off_behavior: offBehavior } : {}),
-    ...(budgets ? { budgets } : {}),
-  };
+export function resolveSavedAgentModelReplacement(
+  config: LocalRuntimeConfig,
+  selection: { readonly providerId: string; readonly modelId: string },
+): { readonly providerId: string; readonly modelId: string } | undefined {
+  const outcome = resolveModelReplacement({
+    config,
+    providerId: selection.providerId,
+    modelId: selection.modelId,
+    preset: getRuntimePresetKey(),
+  });
+  return outcome.kind === 'replaced' ? outcome.model : undefined;
 }
 
-/** Session storage uses null for an explicit clear instead of persisting an empty object. */
-export function readPersistedLocalModelThinkingSelection(
-  value: unknown,
-): LocalModelThinkingSelection | null {
-  const selection = readLocalModelThinkingSelection(value);
-  return selection && Object.keys(selection).length > 0 ? selection : null;
-}
-
-export function readLocalModelOverride(value: unknown): LocalModelOverride | undefined {
-  if (!isRecord(value)) return undefined;
-  const override = readLocalModelOverrideFields(value);
-  if (Object.prototype.hasOwnProperty.call(value, 'thinking')) return override;
-  return Object.keys(override).length > 0 ? override : undefined;
-}
-
-function readLocalModelOverrideFields(value: Record<string, unknown>): LocalModelOverride {
-  return {
-    ...readLocalModelIdentityFields(value),
-    ...readLocalModelBehaviorFields(value),
-  };
-}
-
-function readLocalModelIdentityFields(value: Record<string, unknown>): LocalModelOverride {
-  const providerId = readOptionalString(value.provider_id ?? value.providerId);
-  const modelId = readOptionalString(value.model_id ?? value.modelId);
-  return {
-    ...(providerId ? { provider_id: providerId } : {}),
-    ...(modelId ? { model_id: modelId } : {}),
-  };
-}
-
-function readLocalModelBehaviorFields(value: Record<string, unknown>): LocalModelOverride {
-  const variant = typeof value.variant === 'string' ? value.variant : undefined;
-  const reasoning = typeof value.reasoning === 'boolean' ? value.reasoning : undefined;
-  const hasThinking = Object.prototype.hasOwnProperty.call(value, 'thinking');
-  const thinking = hasThinking ? readLocalModelThinkingSelection(value.thinking) : undefined;
-  return {
-    ...(variant !== undefined ? { variant } : {}),
-    ...(reasoning !== undefined ? { reasoning } : {}),
-    ...(thinking !== undefined ? { thinking } : {}),
-  };
-}
+export const SELECTED_THINKING_EFFORT_CAPABILITY = 'selected_thinking_effort';
 
 export function readSelectedThinkingEffort(
   capabilities: Record<string, unknown> | undefined,
@@ -248,22 +164,26 @@ function resolveCreateThinking(
 /** Resolves explicit create input before any Session record is written. */
 export function resolveRequestedSessionModel(
   config: LocalRuntimeConfig,
-  requested: ConversationModelSelection,
+  input: ConversationModelSelection,
 ): ConversationModelSelection {
   const fallback = parseSourceQualifiedModelKey(config.defaultModel);
-  const providerId = requested.providerId?.trim() || fallback?.providerId;
-  const modelId = requested.modelId?.trim() || fallback?.modelId;
-  if (!providerId || !modelId)
+  const requestedProviderId = input.providerId?.trim() || fallback?.providerId;
+  const requestedModelId = input.modelId?.trim() || fallback?.modelId;
+  if (!requestedProviderId || !requestedModelId)
     throw new LocalModelProviderError(400, 'Model selection is incomplete', 'VALIDATION_ERROR');
-  const availability = resolveModelAvailability({
+  // A retired official model is replaced (its parameters do not carry over);
+  // anything else is created as requested and the upstream decides.
+  const outcome = resolveModelReplacement({
     config,
-    providerId,
-    modelId,
+    providerId: requestedProviderId,
+    modelId: requestedModelId,
     preset: getRuntimePresetKey(),
-    source: 'explicit_request',
+    fallbacks: [fallback],
   });
-  if (!availability.available)
-    throw new LocalModelProviderError(400, availability.message, availability.code);
+  const replaced = outcome.kind === 'replaced';
+  const providerId = replaced ? outcome.model.providerId : requestedProviderId;
+  const modelId = replaced ? outcome.model.modelId : requestedModelId;
+  const requested: ConversationModelSelection = replaced ? { providerId, modelId } : input;
   const thinking = resolveCreateThinking(config, requested, providerId, modelId);
   const resolved = freezeManagedQueueModel(
     config,
@@ -297,10 +217,14 @@ export function freezeManagedQueueModel(
   const saved = queueSessionModel(session, frozenModel);
   const inherited = inheritedQueueSelection(config, session, saved);
   const selection = requested ?? inherited;
-  const provider = selection.provider_id ?? inherited.provider_id;
+  const requestedProvider = selection.provider_id ?? inherited.provider_id;
   const modelId = selection.model_id ?? inherited.model_id ?? '';
-  if (provider !== 'minimax' || config.minimaxModelSource === 'minimax_api_key') return requested;
-  const model = availableManagedQueueModel(config, modelId);
+  // Only a listed managed model is frozen at admission. Anything else (another
+  // route, or a model the catalog no longer lists) is left to Turn preparation,
+  // which applies the replacement rule and repairs the Session.
+  const model = listedManagedQueueModel(config, requestedProvider, modelId);
+  if (!model) return requested;
+  const provider = MANAGED_QUEUE_PROVIDER_ID;
   if (!requested && saved && !saved.parameterSnapshot) {
     return freezeLegacyQueueSelection(provider, modelId, model, selection);
   }
@@ -320,16 +244,17 @@ function queueSessionModel(session: SessionSelection, frozenModel?: FrozenQueueS
   return savedSessionModel(session, frozenModel);
 }
 
-function availableManagedQueueModel(config: LocalRuntimeConfig, modelId: string) {
+const MANAGED_QUEUE_PROVIDER_ID = 'minimax';
+
+function listedManagedQueueModel(
+  config: LocalRuntimeConfig,
+  provider: string | undefined,
+  modelId: string,
+) {
+  if (provider !== MANAGED_QUEUE_PROVIDER_ID || config.minimaxModelSource === 'minimax_api_key')
+    return undefined;
   const model = config.provider?.minimax?.models?.[modelId];
-  if (!modelId || !model || model.enabled === false) {
-    throw new LocalModelProviderError(
-      400,
-      'Selected managed model is unavailable',
-      'VALIDATION_ERROR',
-    );
-  }
-  return model;
+  return modelId && model && model.enabled !== false ? model : undefined;
 }
 
 function freezeLegacyQueueSelection(
@@ -411,3 +336,10 @@ function inheritedQueueSelection(
     thinking: parameters.effectiveModelThinking ?? undefined,
   };
 }
+
+export type { LocalModelThinkingBudgets } from '../../../infra/conversation/model-selection.js';
+export type { LocalModelThinkingSelection } from '../../../infra/conversation/model-selection.js';
+export type { LocalModelOverride } from '../../../infra/conversation/model-selection.js';
+export { readLocalModelThinkingSelection } from '../../../infra/conversation/model-selection.js';
+export { readPersistedLocalModelThinkingSelection } from '../../../infra/conversation/model-selection.js';
+export { readLocalModelOverride } from '../../../infra/conversation/model-selection.js';

@@ -157,6 +157,10 @@ export function transformMessages<TApi extends Api>(
 	const result: Message[] = [];
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
+	// Tool call IDs of skipped (errored/aborted) assistant messages. Their tool
+	// results are skipped too: replaying a tool result whose tool call is gone is
+	// an orphan the API rejects (Anthropic: "unexpected tool_use_id").
+	const skippedToolCallIds = new Set<string>();
 	const insertSyntheticToolResults = () => {
 		if (pendingToolCalls.length > 0) {
 			for (const tc of pendingToolCalls) {
@@ -190,11 +194,15 @@ export function transformMessages<TApi extends Api>(
 			// - The model should retry from the last valid state
 			const assistantMsg = msg as AssistantMessage;
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+				for (const block of assistantMsg.content) {
+					if (block.type === "toolCall") skippedToolCallIds.add(block.id);
+				}
 				continue;
 			}
 
 			// Track tool calls from this assistant message
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
+			for (const tc of toolCalls) skippedToolCallIds.delete(tc.id);
 			if (toolCalls.length > 0) {
 				pendingToolCalls = toolCalls;
 				existingToolResultIds = new Set();
@@ -202,6 +210,7 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			if (skippedToolCallIds.has(msg.toolCallId)) continue;
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {

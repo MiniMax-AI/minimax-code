@@ -279,6 +279,92 @@ export interface TuiMcpServer {
   configJson?: string;
 }
 
+/** Runtime-owned MCP OAuth state; independent from the server's connection status. */
+export type TuiMcpAuthState =
+  | 'unknown'
+  | 'not_required'
+  | 'static'
+  | 'needs_auth'
+  | 'authorizing'
+  | 'authorized'
+  | 'needs_reauth'
+  | 'failed';
+
+/** Identifies one remote MCP server by its credential source. */
+export type TuiMcpAuthTarget =
+  | { kind: 'user'; serverName: string }
+  | { kind: 'project'; serverName: string; sessionId: string; workspaceRoot: string }
+  | {
+      kind: 'plugin';
+      serverName: string;
+      pluginName: string;
+      pluginMarketplace: string;
+      pluginSource: string;
+    };
+
+/** How one authorization attempt ended. */
+export type TuiMcpAuthAttemptOutcome = 'authorized' | 'failed' | 'cancelled' | 'expired';
+
+export interface TuiMcpAuthStateView {
+  target: TuiMcpAuthTarget;
+  authState: TuiMcpAuthState;
+  reason?: string;
+  missingScopes?: string[];
+  /** Unix ms. */
+  expiresAt?: number;
+  serverOrigin?: string;
+  issuer?: string;
+  /** The attempt in progress. */
+  attemptId?: string;
+  /**
+   * The most recent finished attempt. A failed reauthorization keeps the previous token, so
+   * `authState` alone cannot tell whether a given attempt succeeded.
+   */
+  lastAttemptId?: string;
+  lastAttemptOutcome?: TuiMcpAuthAttemptOutcome;
+  lastAttemptErrorCode?: string;
+}
+
+/** Shown before the browser opens for project and non-official Plugin sources. */
+export interface TuiMcpAuthConfirmation {
+  sourceLabel: string;
+  serverOrigin: string;
+  issuer: string;
+  clientId: string;
+  authorizationHost?: string;
+}
+
+export type TuiMcpAuthStartResult =
+  | {
+      status: 'pending';
+      attemptId: string;
+      authUrl: string;
+      requiresConfirmation: boolean;
+      confirmation?: TuiMcpAuthConfirmation;
+    }
+  | { status: 'already_authorized' }
+  | { status: 'unsupported'; errorCode: string }
+  | { status: 'failed'; errorCode: string };
+
+export interface TuiMcpAuthOutcome {
+  state: TuiMcpAuthStateView;
+  errorCode?: string;
+}
+
+export interface TuiMcpAuthClearResult {
+  state: TuiMcpAuthStateView;
+  revoked: boolean;
+}
+
+/**
+ * Project servers are listed only with a scope. A Session id alone resolves its workspace;
+ * `mcode mcp --project` passes a synthetic Session id with the directory's realpath.
+ */
+export interface TuiMcpAuthScope {
+  sessionId?: string;
+  workspaceRoot?: string;
+}
+
 export interface TuiQueueReceipt {
   itemId?: string;
   status?: string;

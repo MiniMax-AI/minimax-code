@@ -18,6 +18,8 @@ import {
   LocalRunLocationError,
   SESSION_KINDS,
   SessionServiceError,
+  createRuntimeSessionId,
+  isRuntimeSessionId,
   readLocalRunLocationInput,
   type DomainSessionCreateInput,
   type MaintenanceMutationLane,
@@ -185,29 +187,53 @@ export class SessionLifecycleEventProjector implements SessionFactSink {
 }
 
 /** Owns generated lifecycle mapping and the required fenced deletion workflow. */
+export interface SessionCreateOptions {
+  readonly sessionId?: string;
+}
+
 export class SessionLifecycleApplication {
   constructor(private readonly options: SessionLifecycleApplicationOptions) {}
+
+  newSessionId(): string {
+    return createRuntimeSessionId();
+  }
 
   async createSession(
     context: ApplicationContext,
     req: CreateSessionReq,
+    options: SessionCreateOptions = {},
   ): Promise<CreateSessionResp> {
-    return this.createSessionWithWorkspaceIdentity(context, req);
+    return this.createSessionWithWorkspaceIdentity(context, req, undefined, options);
   }
 
   async createExplicitWorkspaceSession(
     context: ApplicationContext,
     req: CreateSessionReq,
+    options: SessionCreateOptions = {},
   ): Promise<CreateSessionResp> {
-    return this.createSessionWithWorkspaceIdentity(context, req, false);
+    return this.createSessionWithWorkspaceIdentity(context, req, false, options);
   }
 
   private async createSessionWithWorkspaceIdentity(
     _context: ApplicationContext,
     req: CreateSessionReq,
     isDefaultWorkspace?: boolean,
+    options: SessionCreateOptions = {},
   ): Promise<CreateSessionResp> {
     rejectUnsupportedProjectId(req);
+    const reservedSessionId = options.sessionId;
+    if (reservedSessionId !== undefined) {
+      if (!isRuntimeSessionId(reservedSessionId)) {
+        throw new AppError(400, "VALIDATION_ERROR", "Reserved Session ID has an invalid format");
+      }
+      if (isBtwSideSessionRequest(req)) {
+        throw new AppError(
+          400,
+          "VALIDATION_ERROR",
+          "BTW side sessions cannot use a reserved Session ID",
+        );
+      }
+    }
     return this.countBuiltinCommand("new", () =>
       this.withSessionLifecycle("create", async () => {
         const created = await this.invoke(async () => {
@@ -230,6 +256,7 @@ export class SessionLifecycleApplication {
           const input = toCreateInput(req);
           return this.options.lifecycle.createSession({
             ...input,
+            ...whenDefined("sessionId", reservedSessionId),
             ...whenDefined("isDefaultWorkspace", isDefaultWorkspace),
             agentName: await this.options.resolveAgentWriteTarget(
               input.agentName,

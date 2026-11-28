@@ -1,5 +1,9 @@
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';
 
+import {
+  isSkillUnavailableInWindow,
+  renderSkillUnavailableMessage,
+} from '../skill-catalog-window/index.js';
 import { LocalSkillToolDef, type LocalSkillToolInput } from './builtin-defs.js';
 import type { LocalRuntimeToolContext, LocalSkillReader } from './types.js';
 
@@ -20,12 +24,23 @@ export class LocalSkillTool implements ToolImpl<
     const skill = await this.reader.readSkill(name, ctx.agentName, signal);
     if (signal?.aborted) throw new Error('Operation aborted');
     if (!skill) {
-      const text = `Local skill not found: ${name}`;
+      // A Skill this window listed or announced and that is gone now: say so plainly.
+      const unavailable = isSkillUnavailableInWindow(ctx.sessionId, name);
+      const text = unavailable
+        ? renderSkillUnavailableMessage(name)
+        : `Local skill not found: ${name}`;
       return {
         tool_name: LocalSkillToolDef.name,
         text,
         content: [{ type: 'text', text }],
-        details: { kind: 'skill', skill: name, found: false, readable: false, owner: 'desktop' },
+        details: {
+          kind: 'skill',
+          skill: name,
+          found: false,
+          readable: false,
+          owner: 'desktop',
+          ...(unavailable ? { unavailable: true } : {}),
+        },
       };
     }
     ctx.loadedSkills?.add(name);

@@ -37,6 +37,7 @@ export interface LocalAgentModelOverride {
   readonly variant?: string;
   readonly reasoning?: boolean;
   readonly contextLimit?: number;
+  readonly frozen?: true;
   readonly thinking?: NonNullable<SessionRecord['effectiveModelThinking']>;
 }
 

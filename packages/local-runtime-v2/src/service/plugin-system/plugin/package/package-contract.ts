@@ -1,9 +1,15 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { open, opendir } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, opendir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
+import { isRetryableWindowsFileError } from '@mavis/shared';
+
+import { logger } from '../../../../infra/logging/logger.js';
+import { KeyedOperationQueue } from '../../../../infra/util/keyed-operation-queue.js';
+import { PluginSystemError } from '../../errors.js';
 import { isMiniAppRuntimePayloadExcludedPath, isPathCoveredByRoots } from './miniapp/path.js';
 
 export const PLUGIN_PACKAGE_V1_LIMITS = {
@@ -39,11 +45,31 @@ type PluginContractEntryKind =
   | 'device'
   | 'special';
 
-type PluginPackagePathPolicy = 'minimax-portable' | 'agent-plugin' | 'unrestricted';
+export type PluginPackagePathPolicy = 'minimax-portable' | 'agent-plugin' | 'unrestricted';
+
+/** File and package byte limits; defaults to `PLUGIN_PACKAGE_V1_LIMITS`. */
+export interface PluginPackageSizeLimits {
+  readonly maxFileBytes: number;
+  readonly maxTotalBytes: number;
+}
+
+const DEFAULT_SIZE_LIMITS: PluginPackageSizeLimits = {
+  maxFileBytes: PLUGIN_PACKAGE_V1_LIMITS.maxFileBytes,
+  maxTotalBytes: PLUGIN_PACKAGE_V1_LIMITS.maxTotalBytes,
+};
 
 export interface PluginPackageDigestOptions {
   readonly pathPolicy?: PluginPackagePathPolicy;
+  readonly sizeLimits?: PluginPackageSizeLimits;
   readonly rejectHardlinks?: boolean;
+  /**
+   * Apply the Windows segment rules (`<>:"|?*`, trailing `.`/space, reserved
+   * device names) to `agent-plugin` paths on every host, not only on win32.
+   * Work Share packages must install on every recipient platform.
+   */
+  readonly enforceWindowsNames?: boolean;
+  /** Skips a root-relative POSIX path (and everything below it) before it is inspected. */
+  readonly exclude?: (relativePath: string) => boolean;
 }
 
 export interface MiniAppArtifactRoots {
@@ -60,6 +86,7 @@ export interface MiniAppPackageDigests {
 
 export interface MiniAppPackageDigestOptions {
   readonly includeOrdinaryContentDigest?: boolean;
+  readonly sizeLimits?: PluginPackageSizeLimits;
   readonly rejectHardlinks?: boolean;
 }
 
@@ -101,15 +128,19 @@ export function validatePluginPortablePath(relativePath: string): void {
  * Agent Plugins only require package paths to remain inside the Plugin root.
  * Keep the MiniMax marketplace's stricter cross-platform naming contract separate
  * so standards-compliant GitHub Plugins may contain ordinary names such as
- * `docs/(redirects)/guide.md` or non-ASCII assets.
+ * `docs/(redirects)/guide.md` or non-ASCII assets. Windows segment rules apply
+ * on win32 hosts, or on every host with `enforceWindowsNames` (Work Share,
+ * mirrored by archon_server `digest.PathPolicyAgentPlugin`).
  */
-function validateAgentPluginPath(relativePath: string): void {
+function validateAgentPluginPath(relativePath: string, enforceWindowsNames: boolean): void {
   assertContainedPathShape(relativePath);
   const segments = relativePath.split('/');
   if (segments.length > PLUGIN_PACKAGE_V1_LIMITS.maxPathSegments) {
     fail('PATH_TOO_DEEP', `${JSON.stringify(relativePath)} has too many segments`);
   }
-  for (const segment of segments) assertContainedPathSegment(segment, relativePath);
+  for (const segment of segments) {
+    assertContainedPathSegment(segment, relativePath, enforceWindowsNames);
+  }
 }
 
 function assertPortablePathShape(relativePath: string): void {
@@ -177,14 +208,18 @@ function assertContainedPathShape(relativePath: string): void {
   }
 }
 
-function assertContainedPathSegment(segment: string, relativePath: string): void {
+function assertContainedPathSegment(
+  segment: string,
+  relativePath: string,
+  enforceWindowsNames: boolean,
+): void {
   if (!segment || segment === '.' || segment === '..') {
     fail('PATH_TRAVERSAL', `${JSON.stringify(relativePath)} has an empty/dot segment`);
   }
   if (Buffer.byteLength(segment, 'utf8') > PLUGIN_PACKAGE_V1_LIMITS.maxSegmentBytes) {
     fail('SEGMENT_TOO_LONG', `${JSON.stringify(segment)} exceeds the segment limit`);
   }
-  if (process.platform !== 'win32') return;
+  if (!enforceWindowsNames && process.platform !== 'win32') return;
   if (/[<>:"|?*]/u.test(segment) || /[. ]$/u.test(segment)) {
     fail('HOST_PATH_UNSUPPORTED', `${JSON.stringify(segment)} is not supported on Windows`);
   }
@@ -198,7 +233,13 @@ export function computePluginContentDigest(
   entries: readonly PluginContractEntry[],
   options: PluginPackageDigestOptions = {},
 ): PluginContentDigestResult {
-  const files = validateEntries(entries, true, options.pathPolicy ?? 'minimax-portable');
+  const pathRules = resolvePathRules(options);
+  const files = validateEntries(
+    entries,
+    true,
+    pathRules,
+    options.sizeLimits ?? DEFAULT_SIZE_LIMITS,
+  );
   for (const file of files) {
     if ((file.compression ?? 'store') !== 'store') {
       fail('UNSUPPORTED_COMPRESSION', `${JSON.stringify(file.path)} is not STORE`);
@@ -227,16 +268,19 @@ export async function computePluginDirectoryDigest(
   root: string,
   options: PluginPackageDigestOptions = {},
 ): Promise<Omit<PluginContentDigestResult, 'files'>> {
-  const pathPolicy = options.pathPolicy ?? 'minimax-portable';
+  const pathRules = resolvePathRules(options);
+  const sizeLimits = options.sizeLimits ?? DEFAULT_SIZE_LIMITS;
   const entries: PluginContractEntry[] = [];
   await collectDirectoryEntries(root, '', entries, {
     entryCount: 0,
     fileCount: 0,
     totalBytes: 0,
-    pathPolicy,
+    pathRules,
+    sizeLimits,
     rejectHardlinks: options.rejectHardlinks === true,
+    ...(options.exclude ? { skip: options.exclude } : {}),
   });
-  const files = validateEntries(entries, false, pathPolicy);
+  const files = validateEntries(entries, false, pathRules, sizeLimits);
   const hash = createContentHash(files.length);
   let totalBytes = 0;
   for (const file of files) {
@@ -253,6 +297,33 @@ export async function computePluginDirectoryDigest(
     fileCount: files.length,
     totalBytes,
   };
+}
+
+/**
+ * Collects the validated, digest-ordered regular files of a package directory.
+ * `skip` runs before any lstat, so skipped trees (e.g. `node_modules`) may hold
+ * symlinks or special files without failing the collection.
+ */
+export async function collectPluginPackageFiles(
+  root: string,
+  options: {
+    readonly pathPolicy: PluginPackagePathPolicy;
+    readonly enforceWindowsNames?: boolean;
+    readonly skip?: (relativePath: string) => boolean;
+  },
+): Promise<readonly PluginContractEntry[]> {
+  const pathRules = resolvePathRules(options);
+  const entries: PluginContractEntry[] = [];
+  await collectDirectoryEntries(root, '', entries, {
+    entryCount: 0,
+    fileCount: 0,
+    totalBytes: 0,
+    pathRules,
+    sizeLimits: DEFAULT_SIZE_LIMITS,
+    rejectHardlinks: true,
+    ...(options.skip ? { skip: options.skip } : {}),
+  });
+  return validateEntries(entries, false, pathRules, DEFAULT_SIZE_LIMITS);
 }
 
 export async function computeMiniAppPackageDigests(
@@ -313,12 +384,15 @@ async function collectMiniAppFiles(
   options: MiniAppPackageDigestOptions = {},
 ): Promise<PluginContractEntry[]> {
   const entries: PluginContractEntry[] = [];
+  const pathRules = resolvePathRules({ pathPolicy: 'minimax-portable' });
   const artifactRoots = [...artifacts.client, ...artifacts.node];
+  const sizeLimits = options.sizeLimits ?? DEFAULT_SIZE_LIMITS;
   await collectDirectoryEntries(root, '', entries, {
     entryCount: 0,
     fileCount: 0,
     totalBytes: 0,
-    pathPolicy: 'minimax-portable',
+    pathRules,
+    sizeLimits,
     rejectHardlinks: options.rejectHardlinks === true,
     skip: (relativePath) => {
       if (!isMiniAppRuntimePayloadExcludedPath(relativePath)) return false;
@@ -331,7 +405,7 @@ async function collectMiniAppFiles(
       return options.includeOrdinaryContentDigest !== true;
     },
   });
-  return validateEntries(entries, false, 'minimax-portable');
+  return validateEntries(entries, false, pathRules, sizeLimits);
 }
 
 export function pluginDigestCacheKey(contentDigest: string): string {
@@ -340,21 +414,333 @@ export function pluginDigestCacheKey(contentDigest: string): string {
   return `sha256-tree-v1-${match[1]}`;
 }
 
+export interface MaterializeContentAddressedDirectoryInput {
+  /** Holds the `<cacheKey>` directories and the staging directories. */
+  readonly parent: string;
+  /** `mkdtemp` prefix of the staging directory inside `parent`. */
+  readonly stagingPrefix: string;
+  /** Known up front: an equal existing directory is reused before `populate` runs. */
+  readonly expectedDigest?: string;
+  readonly digestOptions?: PluginPackageDigestOptions;
+  /** Fills the (empty, existing) staging directory. */
+  populate(stagingRoot: string): Promise<void>;
+  /** The staged tree does not match `expectedDigest`. */
+  mismatchError?(): Error;
+  /** Runs after the staged tree is verified, right before it is published. */
+  beforePublish?(): void;
+  /**
+   * Whether an existing `<cacheKey>` directory holds the digest; `false` replaces it. Defaults to
+   * a real directory whose digest (with `digestOptions`) is equal; any error counts as `false`.
+   */
+  holds?(root: string, contentDigest: string): Promise<boolean>;
+}
+
+export interface MaterializedContentAddressedDirectory {
+  readonly cacheKey: string;
+  readonly root: string;
+  readonly contentDigest: string;
+  readonly reused: boolean;
+}
+
+// Same-process publishers serialize by root; cross-process safety relies only on
+// atomic rename and verification after a collision, not on this promise chain.
+const publications = new KeyedOperationQueue();
+const WINDOWS_CACHE_RETRIES = 4;
+const WINDOWS_CACHE_RETRY_DELAY_MS = 50;
+
+/**
+ * Publishes `<parent>/<cacheKey>` content-addressed: staging → verify digest → rename. An
+ * existing directory with the same digest is reused, also when a concurrent writer published it
+ * first. A persistent Windows file lock may prevent staging cleanup.
+ */
+export async function materializeContentAddressedDirectory(
+  input: MaterializeContentAddressedDirectoryInput,
+): Promise<MaterializedContentAddressedDirectory> {
+  const holds =
+    input.holds ??
+    ((root: string, contentDigest: string) =>
+      holdsDirectoryDigest(root, contentDigest, input.digestOptions));
+  await mkdir(input.parent, { recursive: true });
+  const materialize = () => materializeStagedDirectory(input, holds);
+  if (input.expectedDigest === undefined) return materialize();
+  const root = path.resolve(input.parent, pluginDigestCacheKey(input.expectedDigest));
+  return publications.run(root, materialize);
+}
+
+async function materializeStagedDirectory(
+  input: MaterializeContentAddressedDirectoryInput,
+  holds: (root: string, contentDigest: string) => Promise<boolean>,
+): Promise<MaterializedContentAddressedDirectory> {
+  if (input.expectedDigest !== undefined) {
+    const cacheKey = pluginDigestCacheKey(input.expectedDigest);
+    const root = path.join(input.parent, cacheKey);
+    if (await holds(root, input.expectedDigest)) {
+      return { cacheKey, root, contentDigest: input.expectedDigest, reused: true };
+    }
+  }
+  const staging = await mkdtemp(path.join(input.parent, input.stagingPrefix));
+  try {
+    await input.populate(staging);
+    const { contentDigest } = await computePluginDirectoryDigest(staging, input.digestOptions);
+    if (input.expectedDigest !== undefined && contentDigest !== input.expectedDigest) {
+      throw input.mismatchError?.() ?? new Error('staged content does not match its digest');
+    }
+    const cacheKey = pluginDigestCacheKey(contentDigest);
+    const root = path.join(input.parent, cacheKey);
+    const publish = async () => {
+      input.beforePublish?.();
+      // Known up front, the existing directory was checked before populating.
+      const reused =
+        (input.expectedDigest === undefined && (await holds(root, contentDigest))) ||
+        (await publishStaged(
+          staging,
+          root,
+          (candidateRoot) => holds(candidateRoot, contentDigest),
+          input.beforePublish,
+        ));
+      return { cacheKey, root, contentDigest, reused };
+    };
+    return await (input.expectedDigest === undefined
+      ? publications.run(path.resolve(root), publish)
+      : publish());
+  } finally {
+    await removeStagingDirectory(staging);
+  }
+}
+
+/** Renames staging into place; `true` when a concurrent writer of the same content won. */
+async function publishStaged(
+  staging: string,
+  root: string,
+  holds: (candidateRoot: string) => Promise<boolean>,
+  beforeRetry?: () => void,
+): Promise<boolean> {
+  const move = () => renameStagedDirectory(staging, root, beforeRetry);
+  try {
+    await move();
+    return false;
+  } catch (error) {
+    if (!isPublicationCollision(error) && !isRetryableWindowsFileError(error)) throw error;
+    if (await holds(root)) return true;
+    if (!isPublicationCollision(error)) throw error;
+  }
+  const aside = `${root}.corrupt-${randomUUID()}`;
+  try {
+    await rename(root, aside);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return renameOrReuse(move, root, holds);
+  }
+  if (await holdsQuarantinedDirectory(aside, holds)) {
+    // A cross-process winner may have replaced the damaged root before quarantine.
+    // Putting it back leaves a transient ENOENT for readers, as the pre-refactor rm
+    // path did; profile-level dataDir isolation makes same-root cross-process writes rare.
+    await restoreQuarantinedDirectory(aside, root, holds);
+    await rm(aside, { recursive: true, force: true });
+    return true;
+  }
+  try {
+    return await renameOrReuse(move, root, holds);
+  } finally {
+    await rm(aside, { recursive: true, force: true });
+  }
+}
+
+async function renameStagedDirectory(
+  staging: string,
+  root: string,
+  beforeRetry?: () => void,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await rename(staging, root);
+    } catch (error) {
+      if (!isRetryableWindowsFileError(error)) throw error;
+      // An existing destination must go through digest verification and collision recovery.
+      if (await canStatDestination(root)) throw error;
+      const exhausted = attempt >= WINDOWS_CACHE_RETRIES;
+      logger.warn(
+        {
+          cacheKey: path.basename(root),
+          code: (error as NodeJS.ErrnoException).code,
+          attempt: attempt + 1,
+          outcome: exhausted ? 'exhausted' : 'retrying',
+        },
+        '[plugin-cache] Windows denied staged directory publication',
+      );
+      if (exhausted) {
+        throw new PluginSystemError('PLUGIN_CACHE_BUSY', 'Plugin cache is in use', {
+          cause: error,
+        });
+      }
+      await delay(WINDOWS_CACHE_RETRY_DELAY_MS * (attempt + 1));
+      beforeRetry?.();
+    }
+  }
+}
+
+async function canStatDestination(root: string): Promise<boolean> {
+  try {
+    await lstat(root);
+    return true;
+  } catch (error) {
+    // A locked lookup uses the same retry budget as the rename.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || isRetryableWindowsFileError(error))
+      return false;
+    throw error;
+  }
+}
+
+async function removeStagingDirectory(staging: string): Promise<void> {
+  const onWindows = process.platform === 'win32';
+  try {
+    await rm(staging, {
+      recursive: true,
+      force: true,
+      maxRetries: onWindows ? WINDOWS_CACHE_RETRIES : 0,
+      retryDelay: WINDOWS_CACHE_RETRY_DELAY_MS,
+    });
+  } catch (error) {
+    // Preserve the publication outcome if a Windows handle still blocks staging cleanup.
+    const { code } = error as NodeJS.ErrnoException;
+    if (!isRetryableWindowsFileError(error) && !(onWindows && code === 'ENOTEMPTY')) throw error;
+    logger.warn(
+      { staging: path.basename(staging), code },
+      '[plugin-cache] Windows retained a locked staging directory after cleanup retries',
+    );
+  }
+}
+
+async function renameOrReuse(
+  move: () => Promise<void>,
+  root: string,
+  holds: (candidateRoot: string) => Promise<boolean>,
+): Promise<boolean> {
+  try {
+    await move();
+    return false;
+  } catch (error) {
+    if (!isPublicationCollision(error) && !isRetryableWindowsFileError(error)) throw error;
+    if (await holds(root)) return true;
+    throw error;
+  }
+}
+
+async function holdsQuarantinedDirectory(
+  root: string,
+  holds: (candidateRoot: string) => Promise<boolean>,
+): Promise<boolean> {
+  try {
+    return await holds(root);
+  } catch {
+    // Once quarantined, an unverifiable entry is damaged and must be cleaned up.
+    return false;
+  }
+}
+
+async function restoreQuarantinedDirectory(
+  aside: string,
+  root: string,
+  holds: (candidateRoot: string) => Promise<boolean>,
+): Promise<void> {
+  const displaced = `${root}.corrupt-${randomUUID()}`;
+  let removeDisplaced = true;
+  let restorationFailure: Error | undefined;
+  try {
+    try {
+      await renameOrReuse(() => rename(aside, root), root, holds);
+      return;
+    } catch (error) {
+      if (!isPublicationCollision(error)) throw error;
+    }
+    // One bounded retry: move the invalid interloper out before restoring the winner.
+    try {
+      await rename(root, displaced);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    // The interloper could itself have been replaced by another valid winner.
+    removeDisplaced = !(await holdsQuarantinedDirectory(displaced, holds));
+    await renameOrReuse(() => rename(aside, root), root, holds);
+    removeDisplaced = true;
+  } catch (error) {
+    const retained = removeDisplaced ? aside : `${aside}, ${displaced}`;
+    restorationFailure = new Error(
+      `could not restore valid quarantined directory; retained at ${retained}`,
+      { cause: error },
+    );
+  } finally {
+    if (removeDisplaced) await cleanupDisplacedDirectory(displaced, aside, restorationFailure);
+  }
+  if (restorationFailure) throw restorationFailure;
+}
+
+async function cleanupDisplacedDirectory(
+  displaced: string,
+  aside: string,
+  restorationFailure: Error | undefined,
+): Promise<void> {
+  try {
+    await rm(displaced, { recursive: true, force: true });
+  } catch (cleanupFailure) {
+    const retained = [displaced];
+    try {
+      await lstat(aside);
+      retained.unshift(aside);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') retained.unshift(aside);
+    }
+    throw new Error(
+      `${restorationFailure?.message ?? 'quarantine restoration completed'}; cleanup failed; retained at ${retained.join(', ')}`,
+      {
+        cause: restorationFailure
+          ? new AggregateError([restorationFailure, cleanupFailure])
+          : cleanupFailure,
+      },
+    );
+  }
+}
+
+function isPublicationCollision(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return (
+    code === 'EEXIST' ||
+    code === 'ENOTEMPTY' ||
+    code === 'ENOTDIR' ||
+    (code === 'EPERM' && process.platform === 'win32')
+  );
+}
+
+async function holdsDirectoryDigest(
+  root: string,
+  contentDigest: string,
+  options: PluginPackageDigestOptions | undefined,
+): Promise<boolean> {
+  try {
+    const stat = await lstat(root);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    return (await computePluginDirectoryDigest(root, options)).contentDigest === contentDigest;
+  } catch {
+    return false;
+  }
+}
+
 function validateEntries(
   entries: readonly PluginContractEntry[],
   requireContent: boolean,
-  pathPolicy: PluginPackagePathPolicy,
+  pathRules: PathRules,
+  sizeLimits: PluginPackageSizeLimits,
 ): PluginContractEntry[] {
   if (entries.length > PLUGIN_PACKAGE_V1_LIMITS.maxArchiveEntries) {
     fail('TOO_MANY_ENTRIES', `${entries.length} entries exceed the limit`);
   }
   const state = createEntryValidationState();
-  for (const entry of entries) validateEntry(entry, state, pathPolicy);
+  for (const entry of entries) validateEntry(entry, state, pathRules, sizeLimits);
 
   if (state.files.length > PLUGIN_PACKAGE_V1_LIMITS.maxFiles) {
     fail('TOO_MANY_FILES', `${state.files.length} files exceed the limit`);
   }
-  if (state.totalBytes > PLUGIN_PACKAGE_V1_LIMITS.maxTotalBytes) {
+  if (state.totalBytes > sizeLimits.maxTotalBytes) {
     fail('TOTAL_SIZE_LIMIT', `${state.totalBytes} bytes exceed the package limit`);
   }
   assertNoPathTypeConflicts(state.kindsByPath);
@@ -387,9 +773,10 @@ function createEntryValidationState(): EntryValidationState {
 function validateEntry(
   entry: PluginContractEntry,
   state: EntryValidationState,
-  pathPolicy: PluginPackagePathPolicy,
+  pathRules: PathRules,
+  sizeLimits: PluginPackageSizeLimits,
 ): void {
-  validatePackagePath(entry.path, pathPolicy);
+  validatePackagePath(entry.path, pathRules);
   if (state.exactPaths.has(entry.path)) fail('DUPLICATE_PATH', `duplicate ${entry.path}`);
   state.exactPaths.add(entry.path);
   registerPortablePrefixes(entry.path, state.portablePrefixes);
@@ -397,7 +784,7 @@ function validateEntry(
   assertSupportedEntryKind(entry);
   if (entry.kind === 'directory') return;
   const size = entrySize(entry);
-  assertEntrySize(entry.path, size);
+  assertEntrySize(entry.path, size, sizeLimits.maxFileBytes);
   state.files.push(entry);
   state.totalBytes += size;
 }
@@ -406,13 +793,29 @@ function registerPortablePrefixes(relativePath: string, prefixes: Map<string, st
   const segments = relativePath.split('/');
   for (let index = 1; index <= segments.length; index += 1) {
     const prefix = segments.slice(0, index).join('/');
-    const key = prefix.normalize('NFC').toLocaleLowerCase('en-US');
+    const key = simpleLowerCase(prefix.normalize('NFC'));
     const prior = prefixes.get(key);
     if (prior !== undefined && prior !== prefix) {
       fail('CASE_COLLISION', `${prior} and ${prefix} collide`);
     }
     prefixes.set(key, prefix);
   }
+}
+
+/**
+ * Per-code-point simple lowercase mapping (UnicodeData), identical to Go's
+ * `strings.ToLower` used by archon_server. `toLowerCase` on a whole string is
+ * context sensitive (final sigma) and may expand (`İ` → `i̇`); per code point,
+ * the only unconditional expansion is `İ`, whose first code point is its
+ * simple mapping.
+ */
+function simpleLowerCase(value: string): string {
+  if (/^[\x00-\x7f]*$/u.test(value)) return value.toLowerCase();
+  let lowered = '';
+  for (const character of value) {
+    lowered += String.fromCodePoint(character.toLowerCase().codePointAt(0) ?? 0);
+  }
+  return lowered;
 }
 
 function assertSupportedEntryKind(entry: PluginContractEntry): void {
@@ -423,11 +826,11 @@ function assertSupportedEntryKind(entry: PluginContractEntry): void {
   }
 }
 
-function assertEntrySize(relativePath: string, size: number): void {
+function assertEntrySize(relativePath: string, size: number, maxFileBytes: number): void {
   if (!Number.isSafeInteger(size) || size < 0) {
     fail('INVALID_SIZE', `${relativePath} has an invalid size`);
   }
-  if (size > PLUGIN_PACKAGE_V1_LIMITS.maxFileBytes) {
+  if (size > maxFileBytes) {
     fail('FILE_TOO_LARGE', `${relativePath} exceeds the file limit`);
   }
 }
@@ -505,7 +908,7 @@ async function inspectDirectoryEntry(
   child: Dirent,
   limits: DirectoryTraversalState,
 ): Promise<PluginContractEntry> {
-  validatePackagePath(relativePath, limits.pathPolicy);
+  validatePackagePath(relativePath, limits.pathRules);
   limits.entryCount += 1;
   if (limits.entryCount > PLUGIN_PACKAGE_V1_LIMITS.maxArchiveEntries) {
     fail('TOO_MANY_ENTRIES', `${limits.entryCount} entries exceed the limit`);
@@ -518,13 +921,29 @@ async function inspectDirectoryEntry(
   return inspectDirectoryFile(root, relativePath, limits);
 }
 
-function validatePackagePath(relativePath: string, policy: PluginPackagePathPolicy): void {
-  if (policy === 'unrestricted') {
+interface PathRules {
+  readonly policy: PluginPackagePathPolicy;
+  readonly enforceWindowsNames: boolean;
+}
+
+function resolvePathRules(options: {
+  readonly pathPolicy?: PluginPackagePathPolicy;
+  readonly enforceWindowsNames?: boolean;
+}): PathRules {
+  return {
+    policy: options.pathPolicy ?? 'minimax-portable',
+    enforceWindowsNames: options.enforceWindowsNames === true,
+  };
+}
+
+function validatePackagePath(relativePath: string, rules: PathRules): void {
+  if (rules.policy === 'unrestricted') {
     assertContainedPathShape(relativePath);
     return;
   }
-  if (policy === 'agent-plugin') validateAgentPluginPath(relativePath);
-  else validatePluginPortablePath(relativePath);
+  if (rules.policy === 'agent-plugin') {
+    validateAgentPluginPath(relativePath, rules.enforceWindowsNames);
+  } else validatePluginPortablePath(relativePath);
 }
 
 async function inspectDirectoryFile(
@@ -538,13 +957,13 @@ async function inspectDirectoryFile(
     const stat = await fileHandle.stat();
     if (!stat.isFile()) fail('SPECIAL_ENTRY_NOT_ALLOWED', `${relativePath} is not a file`);
     if (stat.nlink > 1) fail('HARDLINK_NOT_ALLOWED', `${relativePath} is a hardlink`);
-    assertEntrySize(relativePath, stat.size);
+    assertEntrySize(relativePath, stat.size, limits.sizeLimits.maxFileBytes);
     limits.fileCount += 1;
     if (limits.fileCount > PLUGIN_PACKAGE_V1_LIMITS.maxFiles) {
       fail('TOO_MANY_FILES', `${limits.fileCount} files exceed the limit`);
     }
     limits.totalBytes += stat.size;
-    if (limits.totalBytes > PLUGIN_PACKAGE_V1_LIMITS.maxTotalBytes) {
+    if (limits.totalBytes > limits.sizeLimits.maxTotalBytes) {
       fail('TOTAL_SIZE_LIMIT', `${limits.totalBytes} bytes exceed the package limit`);
     }
     return { path: relativePath, kind: 'file', declaredSize: stat.size };
@@ -557,7 +976,8 @@ interface DirectoryTraversalState {
   entryCount: number;
   fileCount: number;
   totalBytes: number;
-  readonly pathPolicy: PluginPackagePathPolicy;
+  readonly pathRules: PathRules;
+  readonly sizeLimits: PluginPackageSizeLimits;
   readonly rejectHardlinks?: boolean;
   readonly skip?: (relativePath: string) => boolean;
 }

@@ -7,7 +7,11 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { RuntimeTool, ToolResultContent } from '@mavis/agent-core/tools';
+import {
+  toolResultIsError,
+  type RuntimeTool,
+  type ToolResultContent,
+} from '@mavis/agent-core/tools';
 import type { TSchema } from '@sinclair/typebox';
 import type { MatrixMediaClient, MatrixToolContext } from '../cloud/matrix-tools/index.js';
 import {
@@ -209,7 +213,9 @@ function formatToolResultAsMcp(
   }
   return {
     content,
-    isError: result.isError === true,
+    // A failure the tool reports only through details (callMatrixTool sets
+    // details.ok false) must reach MCP clients as isError.
+    isError: toolResultIsError(result),
     _meta: {
       matrix: { server: 'matrix', tool: toolName },
       ...(result.details ? { details: result.details } : {}),

@@ -17,6 +17,16 @@ export const SAFETY_CHECK_V2_SCENE = {
   WebUserQuery: 130,
   UserAvatar: 200,
   InterfaceImage: 201,
+  AgentConfigName: 205,
+  AgentConfigAvatar: 206,
+  CronTitle: 210,
+  ProjectName: 211,
+  CustomInstructions: 218,
+  UserProfile: 219,
+  HookConfig: 220,
+  CodeReviewRules: 221,
+  MiniAppRequirements: 222,
+  SidebarSectionName: 225,
 } as const;
 
 export type SafetyCheckV2Scene = (typeof SAFETY_CHECK_V2_SCENE)[keyof typeof SAFETY_CHECK_V2_SCENE];
@@ -92,6 +102,9 @@ export function isSafetyCheckV2Record(value: unknown): value is Record<string, u
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** 单次 SafetyCheckV2 请求的超时时间。 */
+export const SAFETY_CHECK_V2_TIMEOUT_MS = 20_000;
+
 /** No retry or V1 fallback: transport failures never manufacture an Allow verdict. */
 export async function postSafetyCheckV2(input: {
   url: string;
@@ -104,7 +117,7 @@ export async function postSafetyCheckV2(input: {
   try {
     const headers = new Headers(input.headers);
     headers.set('Content-Type', 'application/json');
-    const timeout = AbortSignal.timeout(10_000);
+    const timeout = AbortSignal.timeout(SAFETY_CHECK_V2_TIMEOUT_MS);
     response = await (input.fetchImpl ?? fetch)(input.url, {
       method: 'POST',
       headers,

@@ -1,7 +1,7 @@
 /**
- * matrix_batch_image_to_video — Pattern D batch (parallel lists): Each video uses one local image
- * as first_frame. Upload failure aborts the whole batch; response-stage failures are recorded per
- * slot.
+ * matrix_batch_image_to_video —— Pattern D 批量(parallel lists):每个 video
+ * 用一个本地图作为 first_frame。上传阶段失败整 batch 退;响应阶段单 slot
+ * 失败只记录。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

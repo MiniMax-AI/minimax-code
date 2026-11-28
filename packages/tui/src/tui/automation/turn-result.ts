@@ -1,18 +1,25 @@
+import type { ExecAdvisorSummary } from '../../application/advisor-calls.js';
 import type { ExecResultError, ExecResultV1 } from '../../application/exec-result.js';
 import type { TuiSettledTurn } from '../controller/chat-controller-types.js';
 import type { TranscriptStore } from '../transcript/store.js';
 
 export interface CreateTuiAutomationTurnResultInput {
+  readonly agentName?: string;
   readonly settledTurn: TuiSettledTurn;
   readonly transcript: TranscriptStore;
+  /** Answer captured by runtime-turn-settlement before history rehydration. */
+  readonly capturedAnswer?: string | null;
   readonly durationMs?: number;
   readonly error?: ExecResultError;
+  readonly advisor?: ExecAdvisorSummary;
 }
 
 export function createTuiAutomationTurnResult(
   input: CreateTuiAutomationTurnResultInput,
 ): ExecResultV1 {
-  const answer = latestAssistantAnswerForTurn(input.transcript, input.settledTurn.turnId);
+  const answer =
+    assistantAnswerForTurn(input.transcript, input.settledTurn.turnId, input.agentName) ??
+    capturedAnswerOrNull(input.capturedAnswer);
   let status: ExecResultV1['status'] = input.settledTurn.status;
   let error = input.error;
   if (status === 'succeeded' && answer === null) {
@@ -38,18 +45,22 @@ export function createTuiAutomationTurnResult(
     status,
     answer,
     ...(error ? { error } : {}),
+    ...(input.advisor ? { advisor: input.advisor } : {}),
     durationMs: validDuration(input.durationMs),
   };
 }
 
-function latestAssistantAnswerForTurn(transcript: TranscriptStore, turnId: string): string | null {
+export function assistantAnswerForTurn(
+  transcript: TranscriptStore,
+  turnId: string,
+  _agentName?: string,
+): string | null {
   for (let index = transcript.length - 1; index >= 0; index -= 1) {
     const cell = transcript.cellAt(index);
     if (
       !cell ||
-      cell.ephemeral ||
-      cell.turnId !== turnId ||
       cell.kind !== 'assistant' ||
+      cell.turnId !== turnId ||
       !cell.content.trim()
     ) {
       continue;
@@ -57,6 +68,12 @@ function latestAssistantAnswerForTurn(transcript: TranscriptStore, turnId: strin
     return cell.content;
   }
   return null;
+}
+
+function capturedAnswerOrNull(capturedAnswer: string | null | undefined): string | null {
+  return capturedAnswer !== undefined && capturedAnswer !== null && capturedAnswer.trim()
+    ? capturedAnswer
+    : null;
 }
 
 function validDuration(durationMs: number | undefined): number {

@@ -1,33 +1,34 @@
 /**
- * `skillsExtension`: Installs `SkillRegistry` through the `@mavis/agent-runtime` extension SPI
- * (design document §4.3 → `pi.registerTool + pi.registerReminderProvider`).
+ * `skillsExtension` —— 把 `SkillRegistry` 装进 `@mavis/agent-runtime` 的
+ * extension SPI（设计文档 §4.3 → `pi.registerTool + pi.registerReminderProvider`）。
  *
- * Deviation from the §4.3 table: skills' `registerTool` refers to the host-side `skill` file reader
- * (reading SKILL.md). Catalog rendering adds an adapter-level `contributeSystemPrompt` contribution
- * beyond the original table. The host already manually assembles `<available_skills>` into its
- * system prompt; this extension moves that declarative portion to the SPI. The `skill` IO tool
- * remains host-owned because file reads are not purely declarative; a full migration will add it
- * via `pi.registerTool`.
+ * 与 §4.3 表的偏差：设计文档表里 skills 用 `registerTool` 指的是 host 侧的
+ * `skill` 文件读工具（读 SKILL.md）；catalog 渲染是 adapter 层增加的
+ * `contributeSystemPrompt` 贡献，不在 §4.3 表原本列出的表面上——因为 host 的
+ * `<available_skills>` 段落在装配时已由 host 手工拼装 system prompt，本 extension
+ * 只是把这一段 declarative 部分迁到 SPI 里。`skill` IO 工具本身住 host 因为它涉及
+ * 文件读，不属于 pure declarative；将来完整迁移时会通过 `pi.registerTool` 补上。
  *
- * Minimal adapter responsibilities:
- * 1. Read `SkillRegistry.getSnapshot()` per turn, render catalog text with
- *   `renderAvailableSkillsCatalog`, and inject it through `pi.contributeSystemPrompt`. This matches
- *   current host catalog assembly (`<available_skills>`); the default wrapper is byte-for-byte
- *   aligned with `packages/local-runtime/src/skills/builtin.ts`.
- * 2. Optionally register a reminder provider: when the host supplies `matcher(userInput, snapshot)
- *   => Reminder | null`, evaluate skill-match reminders per turn, equivalent to the host's existing
- *   `skillMatchReminderProvider`.
+ * adapter 职责最小化：
+ *   1. 每 turn 拿 `SkillRegistry.getSnapshot()` 用 `renderAvailableSkillsCatalog`
+ *      渲染 catalog 文本，通过 `pi.contributeSystemPrompt` 注入到 system prompt。
+ *      这跟 host 现在的 catalog 拼接 (`<available_skills>` 段)行为一致——默认 wrapper
+ *      跟 `packages/agent-modules/context-manager/src/skill-catalog.ts` 产出格式逐字节对齐。
+ *   2. 可选 `registerReminderProvider`：当 host 传入 `matcher(userInput, snapshot)
+ *      => Reminder | null` 时，per-turn 计算是否触发 skill-match reminder（现有
+ *      host 侧 `skillMatchReminderProvider` 的等价接线）。
  *
- * The host defines the `skill` tool (`packages/local-runtime/src/tools/skill-tool.ts`) because it
- * reads filesystem SKILL.md files. This extension registers no tool, only the declarative catalog +
- * reminder portions. A future host SPI migration will register the skill tool via
- * `pi.registerTool`, matching the §4.3 table's semantics.
+ * `skill` 的文件读取由 host 承接（`packages/local-runtime-v2/src/service/skill/runtime/native-reader.ts`）
+ * 因为它涉及 IO（读文件系统 SKILL.md）；本 extension 不注册 tool——只做 catalog +
+ * reminder 的 declarative 部分。将来 host 迁移到 SPI 时会把 skill tool 通过
+ * `pi.registerTool` 挂进来（这也符合设计文档 §4.3 表里 skills 用 `registerTool`
+ * 的语义）。
  *
- * The host constructs and passes in `SkillRegistry` and retains its lifecycle (`refresh()`
- * scheduling, watcher shutdown, etc.). Each extension instance weakly caches its first snapshot by
- * `TurnAssemblyCtx` identity: the same context represents one assembly / turn, so the catalog
- * contributor and reminder matcher must see the same version. Different contexts do not share a
- * cache; snapshots can be collected with their contexts.
+ * Host 自己构造 `SkillRegistry` 后传进来；registry lifecycle 仍由 host 管
+ *（`refresh()` 调度、watcher 关闭等）。每个 extension 实例只按 `TurnAssemblyCtx`
+ * identity 弱缓存首次读取的 snapshot：同一个 ctx 代表同一次 assembly / turn，catalog
+ * contributor 与 reminder matcher 必须看到同一版本；不同 ctx 不共享缓存，且 ctx 回收后
+ * snapshot 也可随之回收。
  */
 
 import type {
@@ -63,7 +64,7 @@ export interface SkillsExtensionOptions {
    * When the rendered catalog is embedded into the system prompt, wrap it in
    * this header. Contract:
    *   - default (undefined) → wraps in `<available_skills>\n...\n</available_skills>`
-   *     (matches `packages/local-runtime/src/skills/builtin.ts` legacy shape).
+   *     (matches `packages/agent-modules/context-manager/src/skill-catalog.ts` legacy shape).
    *   - `null` → no wrapper; raw catalog text.
    *   - string → **must be `<tagName>` form**. The close tag is derived by
    *     stripping the angle brackets; passing an open tag with attributes

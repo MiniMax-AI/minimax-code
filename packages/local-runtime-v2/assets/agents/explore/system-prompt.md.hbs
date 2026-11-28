@@ -9,6 +9,9 @@ requires creating, editing, or saving any file, stop immediately and return
 `ROLE_MISMATCH`. Recommend either reassigning the task to `worker`, or removing
 the file-writing requirement and returning the research in `final_text`.
 Referencing existing files for read-only inspection is allowed.
+When `save_run_code_script` is available, saving a reusable run_code script with it
+is not a deliverable and is allowed. Every other file write still returns
+`ROLE_MISMATCH`.
 
 ## Read-only Bash
 

@@ -1,5 +1,5 @@
 import type { McpNameRegistry } from "@mavis/mcp";
-import type { LocalMcpService } from "../mcp/index.js";
+import type { LocalMcpService, McpOAuthService, PluginMcpAuthPort } from "../mcp/index.js";
 import type {
   CreatedLocalRuntimeHost,
   LocalSkillService,
@@ -24,6 +24,7 @@ import type { AppDb } from "../../infra/db/client.js";
 import type { HostProcessConnectorGateway } from "../host-connector-system/index.js";
 import type { ConnectorRuntimePort } from "./app/runtime.js";
 import type { PluginMcpRuntimePort } from "./mcp/runtime.js";
+import type { PluginMcpAuthRequiredEvent, PluginMcpCredentialCleanup } from "./mcp/oauth.js";
 import type { GithubPluginImporter } from "./plugin/import/github-plugin-importer.js";
 import type {
   ReadPluginPackage,
@@ -76,6 +77,9 @@ interface PluginSystemAuthContext {
 }
 
 export interface PluginSystemOptions {
+  readonly forbiddenPluginNames?: readonly string[];
+  readonly onlyOfficialPlugins?: boolean;
+  readonly mcpCredentials?: PluginMcpCredentialCleanup;
   readonly mcpNames?: McpNameRegistry;
   readonly dataDir: string;
   readonly officialCacheRoot: string;
@@ -251,6 +255,11 @@ interface MiniAppRuntimePackageMaterializer {
 /** Narrow v1 capabilities borrowed while Plugin System is migrated into v2 ownership. */
 export interface PluginServiceCompatibility {
   readonly dataDir: string;
+  readonly configGetter?: () => {
+    readonly plugins?: { readonly forbidden: readonly string[]; readonly onlyOfficial?: boolean };
+  };
+  readonly mcpOAuth?: McpOAuthService;
+  readonly publishAuthRequired?: (event: PluginMcpAuthRequiredEvent) => void;
   readonly database: AppDb;
   readonly logger: PluginServiceLogger;
   readonly authContextGetter: () => PluginSystemAuthContext | undefined;
@@ -268,6 +277,7 @@ export interface InitializedPluginService
     MiniAppRuntimePackageMaterializer {
   readonly plugin: PluginServiceFacade;
   readonly mcp: LocalMcpService;
+  readonly mcpAuthPort?: PluginMcpAuthPort;
   readonly skill: LocalSkillService;
   /** Host-process capability boundary for consumers composed by later feature slices. */
   readonly hostConnectorGateway: HostProcessConnectorGateway;

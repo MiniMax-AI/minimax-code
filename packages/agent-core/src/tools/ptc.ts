@@ -7,7 +7,7 @@
  */
 
 import type { ProgrammaticImageEncoding } from './programmatic.js';
-import type { ProgrammaticToolResult, RuntimeTool } from './types.js';
+import type { ProgrammaticToolResult, RuntimeTool, ToolResultContent } from './types.js';
 
 export type PtcChildCallStatus = 'completed' | 'failed' | 'unknown';
 export type PtcToolSource = 'builtin' | 'builtin-matrix' | 'configured';
@@ -122,6 +122,42 @@ export interface PtcToolResultProjection {
     readonly isError?: boolean;
   };
 }
+
+/**
+ * The display copy of a PTC child result, as a host hook sees it. It is the
+ * envelope the executor already built for the UI (content plus
+ * `details.ptc_child`); the tool's own result and the guest projection are
+ * separate objects and never pass through here.
+ */
+export interface PtcChildDisplayResult {
+  readonly content: readonly ToolResultContent[];
+  readonly details: unknown;
+  readonly terminate?: boolean;
+}
+
+export interface PtcChildDisplayResultInput {
+  readonly childToolCallId: string;
+  readonly parentToolCallId: string;
+  readonly toolName: string;
+  /** The call's arguments as the guest issued them. */
+  readonly args: Readonly<Record<string, unknown>>;
+  /** The display copy the executor would emit without a hook. */
+  readonly result: PtcChildDisplayResult;
+}
+
+/**
+ * Host hook over the display copy of one PTC child result, applied right
+ * before the child terminal event leaves the executor. The streamed event,
+ * the display table and display.jsonl all come from that event, so this is the
+ * single place a host can bound what a child writes into conversation history
+ * without touching the program's own value or the model-visible result.
+ *
+ * Returning the input unchanged is always allowed. A hook that throws is
+ * ignored: agent-core logs a warning and emits the untouched display copy.
+ */
+export type PtcChildDisplayResultShaper = (
+  input: PtcChildDisplayResultInput,
+) => Promise<PtcChildDisplayResult>;
 
 export interface PtcToolExecutionRequest {
   readonly parentToolCallId: string;
@@ -327,10 +363,19 @@ export interface PtcToolExecutor {
   execute(input: PtcToolExecutionRequest): Promise<PtcToolExecutionOutcome>;
 }
 
+/** One PTC script file the guest imported; never the file's content. */
+export interface PtcScriptSourceRecord {
+  readonly path: string;
+  readonly scope: 'project' | 'user' | 'skill';
+  readonly sha256: string;
+}
+
 export interface PtcExecutionDetails {
   readonly version: 1;
   readonly child_calls: readonly PtcToolCallRecord[];
   readonly retained_facts: readonly PtcRetainedFact[];
+  /** Files the program actually loaded, recorded even when the program failed. */
+  readonly sources?: readonly PtcScriptSourceRecord[];
   /** Host-authored mandatory prefix already present in the outer run_code content. */
   readonly host_forced_content?: string;
 }
@@ -357,6 +402,10 @@ export function readPtcExecutionDetails(message: unknown): PtcExecutionDetails |
   }
   const childCalls = ptc.child_calls.filter(isPtcToolCallRecord);
   const retainedFacts = ptc.retained_facts.filter(isPtcRetainedFact);
+  // Best effort, unlike the two lists above: an unreadable `sources`, or one
+  // entry this build does not know, must not cost the caller its child calls
+  // and retained facts as well.
+  const sources = readPtcScriptSources(ptc.sources);
   if (
     childCalls.length !== ptc.child_calls.length ||
     retainedFacts.length !== ptc.retained_facts.length
@@ -367,10 +416,31 @@ export function readPtcExecutionDetails(message: unknown): PtcExecutionDetails |
     version: 1,
     child_calls: childCalls,
     retained_facts: retainedFacts,
+    ...(sources && sources.length > 0 ? { sources } : {}),
     ...(typeof ptc.host_forced_content === 'string'
       ? { host_forced_content: ptc.host_forced_content }
       : {}),
   };
+}
+
+/**
+ * The entries this build understands, or undefined when there is no list to
+ * read. An entry whose scope is unknown is dropped instead of failing the
+ * whole envelope: a scope a newer Host added must not take the child calls
+ * and retained facts down with it.
+ */
+function readPtcScriptSources(value: unknown): readonly PtcScriptSourceRecord[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter(isPtcScriptSourceRecord);
+}
+
+function isPtcScriptSourceRecord(value: unknown): value is PtcScriptSourceRecord {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value.path) &&
+    (value.scope === 'project' || value.scope === 'user' || value.scope === 'skill') &&
+    isNonEmptyString(value.sha256)
+  );
 }
 
 export function readPtcToolCallRecords(message: unknown): readonly PtcToolCallRecord[] {

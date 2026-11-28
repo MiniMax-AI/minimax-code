@@ -270,7 +270,7 @@ export class ForkService {
             purpose: request.sidePresentation.purpose,
             sessionKind: 'peek' as const,
           }
-        : {}),
+        : { advisor: source.advisor }),
     });
   }
 

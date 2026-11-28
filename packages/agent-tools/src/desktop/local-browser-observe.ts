@@ -1,9 +1,7 @@
 import type { ToolResult } from '@mavis/agent-core/tools';
 
+import { isRecord } from './type-guards.js';
 import type { LocalBrowserAdapter, LocalRuntimeToolContext } from './types.js';
-
-// The observe read lives in its own file because local-browser.ts sits at the
-// repository's source-file line limit.
 
 const OBSERVE_DEFAULT_WAIT_MS = 5_000;
 const OBSERVE_DEFAULT_TEXT_CHARS = 4_000;
@@ -156,8 +154,4 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(done, ms);
     signal.addEventListener('abort', done, { once: true });
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

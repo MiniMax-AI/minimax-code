@@ -8,6 +8,7 @@ import {
   SESSION_STATUSES,
   SESSION_VISIBILITIES,
   type AppMode,
+  type SessionAdvisorSelection,
   type SessionToolCallMode,
   type SessionDataOrigin,
   type SessionOrigin,
@@ -37,6 +38,7 @@ export interface SessionExtraData {
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   readonly effectiveModelContextWindow?: number | null;
   readonly effectiveModelMaxOutputTokens?: number | null;
+  readonly advisor?: SessionAdvisorSelection;
   readonly scratchpadPath?: string;
   readonly origin?: SessionOrigin;
   readonly sessionDataVersion?: number;
@@ -161,6 +163,7 @@ export function sessionExtraDataFromRecord(record: SessionRecord): SessionExtraD
     effectiveModelThinking: record.effectiveModelThinking,
     effectiveModelContextWindow: record.effectiveModelContextWindow,
     effectiveModelMaxOutputTokens: record.effectiveModelMaxOutputTokens,
+    advisor: record.advisor ?? undefined,
     scratchpadPath: record.scratchpadPath,
     origin: record.origin,
     sessionDataVersion: record.sessionDataVersion,
@@ -227,7 +230,56 @@ export function parseSessionExtraData(raw: string): SessionExtraData {
       'extra_data_json',
     ),
     toolCallMode: readToolCallMode(record.toolCallMode),
+    advisor: readAdvisorSelection(record.advisor),
   });
+}
+
+function readAdvisorSelection(value: unknown): SessionAdvisorSelection | undefined {
+  if (!isPlainObject(value) || !hasAdvisorScalars(value)) return undefined;
+  const { enabled, model, contextWindow } = value;
+  let thinking: ConversationModelThinkingSelection | null | undefined;
+  try {
+    thinking = readOptionalModelThinkingSelection(value, 'thinking', 'extra_data_json.advisor');
+  } catch {
+    return undefined;
+  }
+  return {
+    enabled,
+    ...(model === undefined ? {} : { model }),
+    ...(thinking ? { thinking } : {}),
+    ...(contextWindow === undefined ? {} : { contextWindow }),
+  };
+}
+
+function hasAdvisorScalars(value: Record<string, unknown>): value is {
+  readonly enabled: boolean;
+  readonly model?: string;
+  readonly contextWindow?: number;
+} {
+  return (
+    typeof value.enabled === 'boolean' &&
+    (value.model === undefined || isAdvisorModelKey(value.model)) &&
+    (value.contextWindow === undefined || isPositiveSafeInteger(value.contextWindow))
+  );
+}
+
+function validateAdvisorSelection(selection: SessionAdvisorSelection, field: string): void {
+  if (typeof selection.enabled !== 'boolean') throw new Error(`${field}.enabled must be a boolean`);
+  if (selection.model !== undefined && !isAdvisorModelKey(selection.model)) {
+    throw new Error(`${field}.model must be a providerId/modelId string`);
+  }
+  assertOptionalPositiveSafeInteger(selection.contextWindow, `${field}.contextWindow`);
+  if (selection.thinking) validateModelThinkingSelection(selection.thinking, `${field}.thinking`);
+}
+
+function isAdvisorModelKey(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const slash = value.indexOf('/');
+  return slash > 0 && slash < value.length - 1;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 /**
@@ -262,6 +314,7 @@ function validateExtraData(data: SessionExtraData): void {
   if (data.memoryPolicy) {
     readSessionMemoryPolicy(data.memoryPolicy, 'extra_data_json.memoryPolicy');
   }
+  if (data.advisor) validateAdvisorSelection(data.advisor, 'extra_data_json.advisor');
 }
 
 function readOptionalSessionMemoryPolicy(

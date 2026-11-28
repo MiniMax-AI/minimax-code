@@ -711,9 +711,6 @@ function toConfigSelection(config: CanonicalAgentConfig): AgentConfigurationSele
     ...(config.disallowedTools === undefined ? {} : { disallowedTools: config.disallowedTools }),
     ...(config.mcpServers === undefined ? {} : { mcpServers: config.mcpServers }),
     ...(config.skills === undefined ? {} : { skills: config.skills }),
-    ...(config.xMavis?.extensionSkills === undefined
-      ? {}
-      : { extensionSkills: config.xMavis.extensionSkills }),
   };
 }
 
@@ -742,10 +739,15 @@ function frozenConfigSelection(
     ...copyFrozenSelector(capabilities, 'tools'),
     ...copyFrozenSelector(capabilities, 'disallowedTools'),
     ...frozenMcpServers(copyFrozenSelector(capabilities, 'mcpServers').mcpServers, current),
-    ...copyFrozenSelector(capabilities, 'skills'),
-    ...copyFrozenSelector(capabilities, 'extensionSkills'),
+    ...frozenPreloadSkills(copyFrozenSelector(capabilities, 'preloadSkills').preloadSkills),
     frozenSelectorVersion: current ? FROZEN_SELECTOR_VERSION : 'legacy',
   };
+}
+
+function frozenPreloadSkills(
+  value: readonly string[] | undefined,
+): Pick<AgentConfigurationSelection, 'skills'> {
+  return value === undefined ? {} : { skills: value };
 }
 
 /**
@@ -765,10 +767,12 @@ function frozenMcpServers(
   return value.length === 0 ? {} : { mcpServers: value };
 }
 
-function copyFrozenSelector(
+function copyFrozenSelector<
+  K extends Exclude<keyof FrozenAgentExecutionDefinition['capabilities'], 'selectorVersion'>,
+>(
   capabilities: FrozenAgentExecutionDefinition['capabilities'],
-  key: Exclude<keyof FrozenAgentExecutionDefinition['capabilities'], 'selectorVersion'>,
-): Partial<AgentConfigurationSelection> {
+  key: K,
+): Partial<Record<K, readonly string[]>> {
   const value = capabilities[key];
   if (value === undefined) return {};
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
@@ -779,7 +783,9 @@ function copyFrozenSelector(
       { field: `definition.capabilities.${key}`, reason: 'must be a string array' },
     );
   }
-  return { [key]: [...value] };
+  const copied: Partial<Record<K, readonly string[]>> = {};
+  copied[key] = [...value];
+  return copied;
 }
 
 export function asAgentConfigServiceError(error: unknown): Error {

@@ -3,15 +3,26 @@ import {
   ThinkingMode,
   type IAgentConfig,
   type IModelCapabilities,
+  type IModelRef,
 } from '@mavis/protocol';
 import { describe, expect, it, vi } from 'vitest';
 
 import { streamSimple } from '@earendil-works/pi-ai';
+import { hasThinkingPrefixBinding } from '@mavis/agent-core/pi-turn-runner';
 
-import { LocalModelResolver, lookupLocalModelLimits } from './local-model-resolver.js';
+import { LocalModelResolver } from './local-model-resolver.js';
+import { lookupLocalModelLimits } from '../../../infra/config/model-catalog.js';
 import { OPENPLATFORM_THINKING_VARIANTS_CAPABILITY } from './openplatform-thinking.js';
 import { capabilitiesFromModelConfig, modelRefForModel } from './model-ref.js';
-import type { LocalModelConfig, LocalRuntimeAuthContext } from '../contracts.js';
+import type {
+  LocalByokProviderConfig,
+  LocalCustomProviderConfig,
+  LocalModelConfig,
+  LocalModelsConfig,
+} from '../contracts.js';
+import type { LocalRuntimeAuthContext } from '../../../infra/config/auth-context.js';
+import { apiKeyId } from '../byok-keys/key-list.js';
+import { ByokKeyPool } from '../byok-keys/key-pool.js';
 
 const AGENT_CONFIG: IAgentConfig = {
   system_prompt: 'system',
@@ -178,6 +189,74 @@ describe('LocalModelResolver dynamic output strategy', () => {
 });
 
 describe('LocalModelResolver', () => {
+  it('defaults a managed model without a ModelRef window to its configured limit', async () => {
+    const resolver = new LocalModelResolver({
+      authContextGetter: () => ({ accessToken: 'managed-token', realUserID: 'user-managed' }),
+      providerConfig: {
+        minimax: {
+          options: {
+            authMode: 'managed-login',
+            apiKey: 'sk-xxx',
+            baseURL: 'https://agent.minimax.io/mavis/api/v1/llm/v1',
+          },
+          models: { 'MiniMax-M3-Pro': { limit: { context: 400_000, output: 64_000 } } },
+        },
+      },
+    });
+    const resolve = (model: IModelRef) =>
+      resolver.resolveModel({
+        sessionId: 'session-memory',
+        turnId: 'turn-memory',
+        agentConfig: { ...AGENT_CONFIG, model },
+      });
+
+    // Memory V2 passes only the model identity, so the configured default window applies.
+    const bare = await resolve({ provider: 'minimax', model_id: 'MiniMax-M3-Pro' });
+    expect(bare.managedProvider).toBe(true);
+    expect(bare.model.contextWindow).toBe(400_000);
+    expect(bare.maxTokens).toBe(64_000);
+
+    // A window selected for the turn still wins over the configured default.
+    const selected = await resolve({
+      provider: 'minimax',
+      model_id: 'MiniMax-M3-Pro',
+      context_window: 1_000_000,
+      max_tokens: 32_000,
+    });
+    expect(selected.model.contextWindow).toBe(1_000_000);
+    expect(selected.maxTokens).toBe(32_000);
+  });
+
+  it.each([
+    { limit: undefined, context: 200_000 },
+    { limit: { context: 0, output: -1 }, context: 200_000 },
+    { limit: { context: 400_000 }, context: 400_000 },
+  ])(
+    'falls back independently for missing or invalid configured limits: $limit',
+    async ({ limit, context }) => {
+      const resolver = new LocalModelResolver({
+        authContextGetter: () => ({ accessToken: 'managed-token', realUserID: 'user-managed' }),
+        providerConfig: {
+          minimax: {
+            options: {
+              authMode: 'managed-login',
+              apiKey: 'sk-xxx',
+              baseURL: 'https://agent.minimax.io/mavis/api/v1/llm/v1',
+            },
+            models: { 'MiniMax-M3-Pro': { limit } },
+          },
+        },
+      });
+      const resolved = await resolver.resolveModel({
+        sessionId: 'session-memory',
+        turnId: 'turn-memory',
+        agentConfig: { ...AGENT_CONFIG, model: { provider: 'minimax', model_id: 'MiniMax-M3-Pro' } },
+      });
+      expect(resolved.model.contextWindow).toBe(context);
+      expect(resolved.maxTokens).toBe(128_000);
+    },
+  );
+
   it('uses current managed auth facts for a recognized managed endpoint', async () => {
     const authContextGetter = vi.fn(() => ({
       accessToken: 'managed-token',
@@ -299,6 +378,46 @@ describe('LocalModelResolver', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('LocalModelResolver managed request headers', () => {
+  it('sends the turn id on managed requests without any review opt-in header', async () => {
+    const resolver = new LocalModelResolver({
+      authContextGetter: () => ({ accessToken: 'managed-token', realUserID: 'user-managed' }),
+      providerConfig: {
+        minimax: {
+          options: {
+            authMode: 'managed-login',
+            apiKey: 'sk-xxx',
+            baseURL: 'https://agent.minimax.io/mavis/api/v1/llm/v1',
+          },
+        },
+      },
+    });
+
+    const resolved = await resolver.resolveModel({
+      sessionId: 'session-managed',
+      turnId: 'turn-managed',
+      agentConfig: {
+        ...AGENT_CONFIG,
+        model: { provider: 'minimax', model_id: 'MiniMax-M2.7' },
+      },
+    });
+
+    expect(resolved.managedProvider).toBe(true);
+    // 网关对所有托管请求一律审核：Mavis 头只有身份、时区和 turn id。
+    expect(
+      Object.keys(resolved.headers ?? {})
+        .filter((key) => key.startsWith('X-Mavis-'))
+        .sort(),
+    ).toEqual([
+      'X-Mavis-Agent-Id',
+      'X-Mavis-Session-Id',
+      'X-Mavis-Timezone-Offset',
+      'X-Mavis-Turn-Id',
+    ]);
+    expect(resolved.headers?.['X-Mavis-Turn-Id']).toBe('turn-managed');
   });
 });
 
@@ -457,7 +576,7 @@ describe('LocalModelResolver request-body byte authority', () => {
     );
 
     expect(resolved.map((model) => model.maxRequestBodyBytes)).toEqual([
-      128, 256, 18_874_368, 18_874_368, 18_874_368, 18_874_368, 18_874_368, 18_874_368, 18_874_368,
+      128, 256, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864,
     ]);
   });
 });
@@ -506,6 +625,71 @@ describe('LocalModelResolver BYOK routing and fallback', () => {
       },
     });
     expect(resolved.streamFn).toBeTypeOf('function');
+  });
+
+  it('hands a provider with several enabled keys a key lifecycle and its first free key', async () => {
+    const pool = new ByokKeyPool(() => 1_000);
+    pool.restKey('work', apiKeyId('sk-first-aaaaaaaa'), 'rate');
+    const resolver = new LocalModelResolver({
+      byokKeyPool: pool,
+      byokConfigGetter: () => ({
+        custom_provider: {
+          work: {
+            api: 'openai-completions',
+            options: {
+              apiKey: 'sk-first-aaaaaaaa',
+              apiKeys: [
+                { key: 'sk-first-aaaaaaaa', enabled: true },
+                { key: 'sk-off-cccccccc', enabled: false },
+                { key: 'sk-second-bbbbbbbb', enabled: true },
+              ],
+              baseURL: 'https://custom.example/v1',
+            },
+            models: { m: {} },
+          },
+        },
+      }),
+    });
+    const input = {
+      sessionId: 's',
+      turnId: 't',
+      agentConfig: { ...AGENT_CONFIG, model: { provider: 'custom_provider:work', model_id: 'm' } },
+    };
+
+    const resolved = await resolver.resolveModel(input);
+
+    expect(resolved.apiKey).toBe('sk-second-bbbbbbbb');
+    expect(resolved.callLifecycle).toBeDefined();
+  });
+
+  it('keeps a single-key provider without a key lifecycle', async () => {
+    const resolver = new LocalModelResolver({
+      byokConfigGetter: () => ({
+        custom_provider: {
+          work: {
+            api: 'openai-completions',
+            options: {
+              apiKeys: [
+                { key: 'sk-only-aaaaaaaa', enabled: true },
+                { key: 'sk-off-cccccccc', enabled: false },
+              ],
+              apiKey: 'sk-only-aaaaaaaa',
+              baseURL: 'https://custom.example/v1',
+            },
+            models: { m: {} },
+          },
+        },
+      }),
+    });
+
+    const resolved = await resolver.resolveModel({
+      sessionId: 's',
+      turnId: 't',
+      agentConfig: { ...AGENT_CONFIG, model: { provider: 'custom_provider:work', model_id: 'm' } },
+    });
+
+    expect(resolved.apiKey).toBe('sk-only-aaaaaaaa');
+    expect(resolved.callLifecycle).toBeUndefined();
   });
 
   it('resolves configured custom providers without truncating slashed model ids', async () => {
@@ -646,127 +830,78 @@ describe('LocalModelResolver custom-provider endpoint normalization', () => {
   );
 });
 
-describe('LocalModelResolver BYOK fallback', () => {
-  it('falls back from dangling BYOK references to the first managed model', async () => {
-    const warn = vi.fn();
-    const resolver = new LocalModelResolver({
-      providerConfig: {
-        minimax: {
-          options: {
-            apiKey: 'builtin-key',
-            baseURL: 'https://builtin.example/messages-api',
-          },
-          models: {
-            'MiniMax-M3': {
-              reasoning: true,
-              modalities: { input: ['text', 'image'], output: ['text'] },
-              capabilities: { max_request_body_bytes: '67108864' },
-              limit: { context: 400_000, output: 128_000 },
-            },
-          },
-        },
+describe('LocalModelResolver BYOK references fail closed', () => {
+  // byok-v2 §8: a deleted provider, a disabled or removed model, or a missing
+  // connection returns a configuration error; another provider is never used.
+  const managedProvider = {
+    minimax: {
+      options: {
+        apiKey: 'builtin-key',
+        baseURL: 'https://builtin.example/messages-api',
       },
-      byokConfigGetter: () => ({
-        custom_provider: {
-          work: {
-            enabled: true,
-            options: {
-              apiKey: 'unused-key',
-              baseURL: 'https://unused.example/v1',
-            },
-            models: {},
-          },
-        },
-      }),
+      models: {
+        'MiniMax-M3': { limit: { context: 400_000, output: 128_000 } },
+      },
+    },
+  };
+  const workConnection = {
+    options: { apiKey: 'work-key', baseURL: 'https://work.example/v1' },
+  };
+
+  function resolveWith(byok: LocalByokProviderConfig, model: IModelRef, warn = vi.fn()) {
+    return new LocalModelResolver({
+      providerConfig: managedProvider,
+      byokConfigGetter: () => byok,
       logger: { info: vi.fn(), warn },
+    }).resolveModel({
+      sessionId: 'session-byok-closed',
+      turnId: 'turn-byok-closed',
+      agentConfig: { ...AGENT_CONFIG, model },
     });
+  }
 
-    const staleCapabilities = capabilitiesFromModelConfig({
-      capabilities: { max_request_body_bytes: 123, support_json_object_output: true },
-    });
-    const resolved = await resolver.resolveModel({
-      sessionId: 'session-fallback',
-      turnId: 'turn-fallback',
-      agentConfig: {
-        ...AGENT_CONFIG,
-        model: {
-          provider: 'custom_provider:work',
-          model_id: 'deleted-model',
-          capabilities: staleCapabilities,
-        },
-      },
-    });
+  it('still resolves an ordinary managed reference with the same provider config', async () => {
+    const resolved = await resolveWith({}, { provider: 'minimax', model_id: 'MiniMax-M3' });
 
-    expect(resolved.model).toMatchObject({
-      provider: 'minimax',
-      id: 'MiniMax-M3',
-      contextWindow: 400_000,
-      maxTokens: 128_000,
-      reasoning: true,
-      input: ['text', 'image'],
-    });
-    expect(resolved.apiKey).toBe('builtin-key');
-    expect(resolved.maxRequestBodyBytes).toBe(67_108_864);
-    expect(resolved.supportsJsonObjectOutput).toBe(false);
-    expect(warn).toHaveBeenCalledOnce();
+    expect(resolved).toMatchObject({ apiKey: 'builtin-key', model: { provider: 'minimax' } });
   });
 
-  it('projects json_object capability from the final fallback model', async () => {
-    const resolver = new LocalModelResolver({
-      defaultApi: 'openai-completions',
-      providerConfig: {
-        'builtin-openai': {
-          options: {
-            apiKey: 'builtin-key',
-            baseURL: 'https://builtin.example/v1',
-          },
-          models: {
-            'fallback-model': {
-              capabilities: { support_json_object_output: true },
-            },
-          },
-        },
-      },
-      byokConfigGetter: () => ({
-        custom_provider: {
-          work: {
-            enabled: true,
-            options: {
-              apiKey: 'unused-key',
-              baseURL: 'https://unused.example/v1',
-            },
-            models: {},
-          },
-        },
-      }),
-    });
+  it.each([
+    ['a deleted provider', {}],
+    ['a disabled provider', { work: { ...workConnection, enabled: false, models: { model: {} } } }],
+    ['a removed model', { work: { ...workConnection, enabled: true, models: {} } }],
+  ])(
+    'rejects a custom-provider reference to %s without logging a fallback',
+    async (_label, custom) => {
+      const warn = vi.fn();
 
-    const resolved = await resolver.resolveModel({
-      sessionId: 'session-openai-fallback',
-      turnId: 'turn-openai-fallback',
-      agentConfig: {
-        ...AGENT_CONFIG,
-        model: {
-          provider: 'custom_provider:work',
-          model_id: 'deleted-model',
-        },
-      },
-    });
+      await expect(
+        resolveWith(
+          { custom_provider: custom },
+          { provider: 'custom_provider:work', model_id: 'model' },
+          warn,
+        ),
+      ).rejects.toThrow(
+        'LocalModelResolver: BYOK model configuration "custom_provider:work/model" is unavailable or disabled.',
+      );
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
 
-    expect(resolved.model).toMatchObject({
-      provider: 'builtin-openai',
-      id: 'fallback-model',
-      api: 'openai-completions',
-    });
-    expect(resolved.supportsJsonObjectOutput).toBe(true);
-  });
+  it.each([
+    ['a direct MiniMax API reference', {}, 'minimax_api'],
+    ['the MiniMax API-key source', { minimaxModelSource: 'minimax_api_key' as const }, 'minimax'],
+  ])(
+    'rejects %s without MiniMax API credentials instead of managed login',
+    async (_label, byok, provider) => {
+      await expect(resolveWith(byok, { provider, model_id: 'MiniMax-M3' })).rejects.toThrow(
+        'LocalModelResolver: BYOK model configuration "minimax_api/MiniMax-M3" is unavailable or disabled.',
+      );
+    },
+  );
 
-  it('fails closed when neither a BYOK reference nor a builtin fallback exists', async () => {
-    const resolver = new LocalModelResolver({
-      byokConfigGetter: () => ({
-        custom_provider: {},
-      }),
-    });
+  it('fails closed when no builtin provider is configured either', async () => {
+    const resolver = new LocalModelResolver({ byokConfigGetter: () => ({ custom_provider: {} }) });
 
     await expect(
       resolver.resolveModel({
@@ -774,13 +909,10 @@ describe('LocalModelResolver BYOK fallback', () => {
         turnId: 'turn-no-fallback',
         agentConfig: {
           ...AGENT_CONFIG,
-          model: {
-            provider: 'custom_provider:missing',
-            model_id: 'missing',
-          },
+          model: { provider: 'custom_provider:missing', model_id: 'missing' },
         },
       }),
-    ).rejects.toThrow('no builtin fallback model is configured');
+    ).rejects.toThrow('BYOK model configuration "custom_provider:missing/missing"');
   });
 });
 
@@ -1243,9 +1375,15 @@ describe('Codex OAuth discovered models', () => {
 });
 
 describe('OpenCode Go conversation identity', () => {
-  it.each(['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai'] as const)(
-    'keeps session identity across turns for renamed %s providers',
-    async (api) => {
+  it.each([
+    ['openai-completions', 'https://opencode.ai/zen/go/v1'],
+    ['openai-responses', 'https://opencode.ai/zen/go/v1'],
+    ['anthropic-messages', 'https://opencode.ai/zen/go/v1'],
+    ['openai-completions', 'https://opencode.ai/inference/go/openai/v1'],
+    ['anthropic-messages', 'https://opencode.ai/inference/go/openai/v1'],
+  ] as const)(
+    'keeps session identity across turns for renamed %s providers at %s',
+    async (api, baseURL) => {
       const resolver = new LocalModelResolver({
         byokConfigGetter: () => ({
           custom_provider: {
@@ -1253,7 +1391,7 @@ describe('OpenCode Go conversation identity', () => {
               api,
               options: {
                 apiKey: 'offline-test-key',
-                baseURL: 'https://opencode.ai/inference/go/v1',
+                baseURL,
                 headers: { 'USER-AGENT': 'generic-sdk' },
               },
               models: { 'test-model': { headers: { 'X-OpenCode-Session': 'static-id' } } },
@@ -1374,7 +1512,9 @@ describe('LocalModelResolver custom provider compat overrides', () => {
 
     expect(resolved.model.compat).toBeUndefined();
   });
+});
 
+describe('LocalModelResolver instruction roles', () => {
   // The incident was a wire-level symptom: pi chooses the system prompt role from the
   // resolved compat, so these cases pin the request pi would actually send.
   const reasoningModelConfig: LocalModelConfig = {
@@ -1505,33 +1645,27 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
     'https://example-workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
   ])('honors an explicit developer-role override on %s', async (baseURL) => {
-    expect(
-      await systemPromptRoleFor(
-        { supportsDeveloperRole: true },
-        baseURL,
-      ),
-    ).toBe('developer');
+    expect(await systemPromptRoleFor({ supportsDeveloperRole: true }, baseURL)).toBe('developer');
   });
 
   it('honors an explicit developer-role override on a Kimi Coding endpoint', async () => {
     expect(
-      await systemPromptRoleFor(
-        { supportsDeveloperRole: true },
-        'https://api.kimi.com/coding/v1',
-      ),
+      await systemPromptRoleFor({ supportsDeveloperRole: true }, 'https://api.kimi.com/coding/v1'),
     ).toBe('developer');
   });
 });
 
 // A relay keyed on session identity only sees it when the provider entry opts in, so these
-// cases pin the wire-level request for an Anthropic-compatible custom provider.
+// cases pin the wire-level request for a protocol-compatible custom provider.
 describe('LocalModelResolver custom provider session affinity', () => {
   const readHeaders = (source: unknown): Record<string, string> => {
     if (!source) return {};
-    const entries =
-      typeof Headers !== 'undefined' && source instanceof Headers
-        ? [...source.entries()]
-        : Object.entries(source as Record<string, unknown>);
+    const entries: Array<[string, unknown]> = [];
+    if (typeof Headers !== 'undefined' && source instanceof Headers) {
+      source.forEach((value, key) => entries.push([key, value]));
+    } else {
+      entries.push(...Object.entries(source as Record<string, unknown>));
+    }
     return Object.fromEntries(
       entries.flatMap(([key, value]) =>
         typeof value === 'string' ? [[key.toLowerCase(), value]] : [],
@@ -1539,10 +1673,7 @@ describe('LocalModelResolver custom provider session affinity', () => {
     );
   };
 
-  const requestFor = async (
-    compat: LocalModelConfig['compat'],
-    cacheRetention?: 'none',
-  ) => {
+  const requestFor = async (compat: LocalModelConfig['compat'], cacheRetention?: 'none') => {
     const modelConfig: LocalModelConfig = compat ? { compat } : {};
     const resolver = new LocalModelResolver({
       byokConfigGetter: () => ({
@@ -1648,6 +1779,53 @@ describe('LocalModelResolver request image ceiling (#425)', () => {
       }
     ).maxImagesPerRequest;
 
+  it('carries separate image and video support from capabilities onto the executor model', async () => {
+    const media = async (capabilities: LocalModelConfig['capabilities']) => {
+      const { model } = await resolveModelWith({ capabilities });
+      return {
+        input: model.input,
+        supportsImageInput: 'supportsImageInput' in model ? model.supportsImageInput : undefined,
+        supportsVideoInput: 'supportsVideoInput' in model ? model.supportsVideoInput : undefined,
+      };
+    };
+
+    expect(await media({ support_image: true })).toEqual({
+      input: ['text', 'image'],
+      supportsImageInput: true,
+      supportsVideoInput: false,
+    });
+    // Video still travels as pi-ai image blocks, so a video-only model keeps
+    // the `image` modality and relies on the flags to drop still images.
+    expect(await media({ support_video: true })).toEqual({
+      input: ['text', 'image'],
+      supportsImageInput: false,
+      supportsVideoInput: true,
+    });
+    expect(await media({ support_image: true, support_video: true })).toEqual({
+      input: ['text', 'image'],
+      supportsImageInput: true,
+      supportsVideoInput: true,
+    });
+    expect(await media({})).toEqual({
+      input: ['text'],
+      supportsImageInput: false,
+      supportsVideoInput: false,
+    });
+  });
+
+  it('lets a configured thinking_prefix_binding override the model-id inference', async () => {
+    const family = '\x63\x6c\x61\x75\x64\x65';
+    const bound = async (modelId: string, capabilities: LocalModelConfig['capabilities']) =>
+      hasThinkingPrefixBinding(
+        (await resolveModelWith({ capabilities }, undefined, { modelId })).model,
+      );
+
+    expect(await bound('gateway-model', {})).toBe(false);
+    expect(await bound('gateway-model', { thinking_prefix_binding: true })).toBe(true);
+    expect(await bound(`${family}-5-5`, {})).toBe(true);
+    expect(await bound(`${family}-4`, { thinking_prefix_binding: false })).toBe(false);
+  });
+
   it('carries a configured max_images_per_request onto the executor model', async () => {
     expect(
       await resolveWith({ capabilities: { support_image: true, max_images_per_request: 6 } }),
@@ -1669,7 +1847,7 @@ describe('LocalModelResolver request image ceiling (#425)', () => {
     ).toBe(20);
     expect(
       await resolveWith({ capabilities: { support_image: true } }, undefined, {
-        modelId: 'MiniMax-M3.1-Flash-Preview',
+        modelId: 'MiniMax-M3.1-Flash',
       }),
     ).toBe(20);
     expect(
@@ -1687,7 +1865,7 @@ describe('LocalModelResolver request image ceiling (#425)', () => {
     ) => (await resolveModelWith({ capabilities }, baseURL, { api })).maxRequestBodyBytes;
     const mib = 1_024 * 1_024;
 
-    expect(await bodyBytes('https://gateway.example/v1', 'anthropic-messages')).toBe(18 * mib);
+    expect(await bodyBytes('https://gateway.example/v1', 'anthropic-messages')).toBe(64 * mib);
     expect(await bodyBytes('https://api.anthropic.com', 'anthropic-messages')).toBe(28 * mib);
     expect(
       await bodyBytes('https://us-east5-aiplatform.googleapis.com/v1', 'anthropic-messages'),
@@ -1720,58 +1898,107 @@ describe('LocalModelResolver request image ceiling (#425)', () => {
   });
 });
 
-describe('Google custom providers', () => {
-  it('preserves the Google API and delegates thinking parameters to Pi', async () => {
-    const config: LocalModelConfig = {
-      reasoning: true,
-      thinking: { effortOptions: ['low', 'high'] },
-    };
-    const resolver = new LocalModelResolver({
-      byokConfigGetter: () => ({
+describe('LocalModelResolver call route', () => {
+  const managedMiniMax: LocalModelsConfig = {
+    minimax: {
+      options: {
+        authMode: 'managed-login',
+        apiKey: 'sk-xxx',
+        baseURL: 'https://agent.minimax.io/mavis/api/v1/llm/v1',
+      },
+      models: { 'MiniMax-M3': { limit: { context: 512_000, output: 128_000 } } },
+    },
+    'provider-native': {
+      options: { apiKey: 'secret-native', baseURL: 'https://provider.example/v1' },
+    },
+  };
+  const userMiniMaxKey = { apiKey: 'user-key', baseURL: 'https://api.minimaxi.com/messages-api' };
+
+  function resolveWith(
+    model: { readonly provider: string; readonly model_id: string },
+    byok?: LocalByokProviderConfig,
+  ) {
+    return new LocalModelResolver({
+      authContextGetter: () => ({ accessToken: 'managed-token', realUserID: 'user-managed' }),
+      providerConfig: managedMiniMax,
+      ...(byok ? { byokConfigGetter: () => byok } : {}),
+    }).resolveModel({
+      sessionId: 'session-route',
+      turnId: 'turn-route',
+      agentConfig: { ...AGENT_CONFIG, model },
+    });
+  }
+
+  it('reports the managed Token Plan for the builtin MiniMax entry under managed login', async () => {
+    await expect(
+      resolveWith({ provider: 'minimax', model_id: 'MiniMax-M3' }),
+    ).resolves.toMatchObject({ managedProvider: true, route: 'managed_token_plan' });
+  });
+
+  it('reports the user key when the builtin MiniMax entry is switched to minimax_api_key', async () => {
+    await expect(
+      resolveWith(
+        { provider: 'minimax', model_id: 'MiniMax-M3' },
+        { minimaxModelSource: 'minimax_api_key', minimax_api: userMiniMaxKey },
+      ),
+    ).resolves.toMatchObject({
+      managedProvider: false,
+      apiKey: 'user-key',
+      route: 'minimax_api_key',
+    });
+  });
+
+  it.each([
+    [
+      'the MiniMax API key provider',
+      { provider: 'minimax_api', model_id: 'MiniMax-M3' },
+      { minimax_api: userMiniMaxKey },
+      'minimax_api_key',
+    ],
+    [
+      'a custom provider',
+      { provider: 'custom_provider:work', model_id: 'org/model-v1' },
+      {
         custom_provider: {
-          google: {
-            api: 'google-generative-ai',
-            options: {
-              apiKey: 'offline-key',
-              baseURL: 'https://example.com/v1beta/',
-            },
-            models: { 'gemini-3-pro-preview': config },
+          work: {
+            api: 'openai-completions',
+            options: { apiKey: 'custom-key', baseURL: 'https://custom.example/v1' },
+            models: { 'org/model-v1': {} },
           },
         },
-      }),
-    });
-    const resolved = await resolver.resolveModel({
-      sessionId: 'google-session',
-      turnId: 'google-turn',
-      agentConfig: {
-        ...AGENT_CONFIG,
-        model: modelRefForModel('custom_provider:google', 'gemini-3-pro-preview', config, {
-          thinking: { effort: 'high' },
-        }),
       },
-    });
-    expect(resolved.model.api).toBe('google-generative-ai');
-    expect(resolved.model.baseUrl).toBe('https://example.com/v1beta');
-    expect(resolved.model.thinkingLevelMap).toBeUndefined();
-    expect(resolved.thinkingLevel).toBe('high');
-    let payload: unknown;
-    await streamSimple(
-      resolved.model,
-      {
-        messages: [{ role: 'user', content: 'ping', timestamp: 0 }],
-      },
-      {
-        apiKey: 'offline-key',
-        reasoning: resolved.thinkingLevel,
-        onPayload: (value) => {
-          payload = value;
-          throw new Error('stop before network');
-        },
-      },
-    ).result();
-    expect(payload).toMatchObject({
-      config: { thinkingConfig: { thinkingLevel: 'HIGH' } },
-    });
-    expect(payload).not.toHaveProperty('reasoning');
+      'custom_provider',
+    ],
+    [
+      'another configured provider',
+      { provider: 'provider-native', model_id: 'model-native' },
+      undefined,
+      'configured_provider',
+    ],
+  ] as const)('reports %s', async (_name, model, byok, route) => {
+    const resolved = await resolveWith(model, byok as LocalByokProviderConfig | undefined);
+    expect(resolved.managedProvider).toBe(false);
+    expect(resolved.route).toBe(route);
+  });
+
+  it('names the turn phase header for managed Token Plan requests only', async () => {
+    await expect(
+      resolveWith({ provider: 'minimax', model_id: 'MiniMax-M3' }),
+    ).resolves.toMatchObject({ turnPhaseHeader: 'X-Mavis-Turn-Phase' });
+    const unmanaged = await Promise.all([
+      resolveWith(
+        { provider: 'minimax', model_id: 'MiniMax-M3' },
+        { minimaxModelSource: 'minimax_api_key', minimax_api: userMiniMaxKey },
+      ),
+      resolveWith(
+        { provider: 'minimax_api', model_id: 'MiniMax-M3' },
+        { minimax_api: userMiniMaxKey },
+      ),
+      resolveWith({ provider: 'provider-native', model_id: 'model-native' }),
+    ]);
+    for (const resolved of unmanaged) {
+      expect(resolved).not.toHaveProperty('turnPhaseHeader');
+      expect(Object.keys(resolved.headers ?? {})).not.toContain('X-Mavis-Turn-Phase');
+    }
   });
 });

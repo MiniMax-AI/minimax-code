@@ -13,8 +13,8 @@ import type { Api, Message, Model } from '@earendil-works/pi-ai';
  *
  * 20 stays below the smallest general-purpose limit seen in practice — the
  * gateway in #425 rejects more than 30 — with headroom for gateways that count
- * images differently, and far below Anthropic (100 per request) and OpenAI
- * (500). It still keeps the attachments of the last five turns (at most four
+ * images differently, and far below the 100+ images per request that major
+ * hosted APIs accept. It still keeps the attachments of the last five turns (at most four
  * inline images per user message) in view. Providers with a smaller limit set
  * `max_images_per_request` on the model; Mistral's API (8) is recognized by
  * host, see `knownMaxImagesPerRequestForBaseUrl`.
@@ -53,7 +53,9 @@ const KNOWN_HOST_IMAGE_LIMITS: ReadonlyMap<string, number> = new Map([
 ]);
 
 /** Known image ceiling for a first-party API base URL, if it is below the default. */
-export function knownMaxImagesPerRequestForBaseUrl(baseUrl: string | undefined): number | undefined {
+export function knownMaxImagesPerRequestForBaseUrl(
+  baseUrl: string | undefined,
+): number | undefined {
   if (!baseUrl) return undefined;
   try {
     return KNOWN_HOST_IMAGE_LIMITS.get(new URL(baseUrl).hostname.toLowerCase());
@@ -68,21 +70,6 @@ export function resolveMaxImagesPerRequest(model: Model<Api> | undefined): numbe
     (model as (Model<Api> & ModelRequestImageLimit) | undefined)?.maxImagesPerRequest,
   );
   return declared ?? DEFAULT_MAX_IMAGES_PER_REQUEST;
-}
-
-// Model id marker of the Messages API model family, escaped like other vendor
-// names in this repo.
-const PREFIX_CACHED_MODEL_ID = /\x63\x6c\x61\x75\x64\x65/iu;
-
-/**
- * Messages API models (direct, Bedrock or behind a gateway) cache the prompt by
- * its exact prefix, so dropping an earlier image from one request re-bills
- * every later message and degrades the cached context. Requests to them carry
- * every image in history; only context compaction removes images, once,
- * durably.
- */
-export function keepsRequestImages(model: Pick<Model<Api>, 'id'> | undefined): boolean {
-  return model !== undefined && PREFIX_CACHED_MODEL_ID.test(model.id);
 }
 
 export interface RequestImageLimitResult {
@@ -199,7 +186,9 @@ function omittedImageText(limit: number, path: string | undefined): string {
 }
 
 function isImageBlock(block: unknown): boolean {
-  return Boolean(block) && typeof block === 'object' && (block as { type?: unknown }).type === 'image';
+  return (
+    Boolean(block) && typeof block === 'object' && (block as { type?: unknown }).type === 'image'
+  );
 }
 
 function textOf(block: unknown): string | undefined {
@@ -310,7 +299,10 @@ function parseTagAttributes(source: string): Map<string, string> {
       nameStart -= 1;
     }
     if (nameStart < equals) {
-      attributes.set(source.slice(nameStart, equals), unescapeAttribute(source.slice(equals + 2, close)));
+      attributes.set(
+        source.slice(nameStart, equals),
+        unescapeAttribute(source.slice(equals + 2, close)),
+      );
     }
     position = close + 1;
   }

@@ -51,6 +51,33 @@ describe('headless invocation', () => {
     expect(readStdin).not.toHaveBeenCalled();
   });
 
+  // A malformed --advisor must fail as an invocation error before any input is read or the
+  // Runtime starts, like --model and --effort.
+  it('parses --advisor into a Session advisor selection and rejects a variant up front', async () => {
+    const cwd = await workspace();
+    const readStdin = vi.fn(async () => 'ignored');
+
+    await expect(
+      resolveTuiExecInvocation('prompt', { cwd, advisor: ' custom_provider:acme/critic ' }, readStdin),
+    ).resolves.toHaveProperty('advisor', {
+      enabled: true,
+      providerId: 'custom_provider:acme',
+      modelId: 'critic',
+    });
+    await expect(
+      resolveTuiExecInvocation('prompt', { cwd, advisor: 'Off' }, readStdin),
+    ).resolves.toHaveProperty('advisor', { enabled: false });
+    await expect(resolveTuiExecInvocation('prompt', { cwd }, readStdin)).resolves.not.toHaveProperty(
+      'advisor',
+    );
+    for (const advisor of ['', 'critic', 'custom_provider:acme/critic#high']) {
+      await expect(
+        resolveTuiExecInvocation(undefined, { cwd, input: '-', advisor }, readStdin),
+      ).rejects.toMatchObject({ kind: 'invocation', message: expect.stringContaining('--advisor') });
+    }
+    expect(readStdin).not.toHaveBeenCalled();
+  });
+
   it('carries a trimmed --effort for exec and exec review and rejects a blank level', async () => {
     const cwd = await workspace();
     const readStdin = vi.fn(async () => 'ignored');
@@ -261,11 +288,17 @@ describe('headless invocation', () => {
       resolveTuiExecInvocation(undefined, { cwd, file: ['large.bin'] }, async () => ''),
     ).rejects.toThrow('100 MB limit');
 
-    const files = Array.from({ length: 11 }, (_, index) => `file-${String(index)}.txt`);
+    const files = Array.from({ length: 21 }, (_, index) => `file-${String(index)}.txt`);
     await Promise.all(files.map((file) => writeFile(join(cwd, file), file)));
+    const atLimit = await resolveTuiExecInvocation(
+      undefined,
+      { cwd, file: files.slice(0, 20) },
+      async () => '',
+    );
+    expect(atLimit.attachments).toHaveLength(20);
     await expect(
       resolveTuiExecInvocation(undefined, { cwd, file: files }, async () => ''),
-    ).rejects.toThrow('up to 10 files');
+    ).rejects.toThrow('You can attach up to 20 files.');
   });
 
   it('normalizes canonical output flags and parses the result schema', async () => {

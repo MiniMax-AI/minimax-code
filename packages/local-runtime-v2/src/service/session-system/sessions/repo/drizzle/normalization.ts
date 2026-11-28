@@ -194,6 +194,7 @@ const OWNED_UPDATE_FIELDS = [
   'effectiveModelThinking',
   'effectiveModelContextWindow',
   'effectiveModelMaxOutputTokens',
+  'advisor',
   'scratchpadPath',
   'origin',
 ] as const;

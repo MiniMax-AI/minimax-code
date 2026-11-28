@@ -19,11 +19,10 @@ go when the user has been away (avoids dumping a multi-day backlog on first cont
 that, hard-cap the report at the **10 newest** entries — if more matched, mention "and N more
 older" without listing them.
 
-1. List recent sessions of this agent with the `mavis` tool:
-   `mavis({ command: "session list", args: { agent_name: "me" } })`.
+1. Load the `session-manage` Skill with the `skill` tool, then list recent sessions of
+   this agent with `session_list` and `agent_name: "me"`.
 2. Filter by the window above. For each match you don't already remember, peek at its tail with
-   `mavis({ command: "session messages", args: { session_id: "<sessionId>", limit: 3 } })` to
-   recover the outcome (deliverables, MR links, blockers).
+   `session_messages` and `limit: 3` to recover the outcome (deliverables, MR links, blockers).
 3. Summarize each in one line, sorted newest-first. Keep it short — the user wants a status board,
    not a transcript.
 

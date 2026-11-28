@@ -1,5 +1,5 @@
 import { InvalidArgumentError, Option, type Command } from 'commander';
-import { parseHeadlessModelOverride } from '../headless/model-selection.js';
+import { parseAdvisorOverride, parseHeadlessModelOverride } from '../headless/model-selection.js';
 import type { TuiMode } from '../tui/engine/public.js';
 import { parseTuiStartupEnvironment } from './environment.js';
 import type { TuiBuildEnvironment } from '../auth/environment.js';
@@ -16,6 +16,8 @@ const RETIRED_TOP_LEVEL_COMMAND_NAMES = new Set(['git', 'changes', 'projects']);
 export interface TuiInteractiveLaunchRequest {
   readonly initialPrompt?: string;
   readonly model?: string;
+  /** `--advisor`: provider/model or off for the startup Session only; the default is unchanged. */
+  readonly advisor?: string;
   readonly sessionId?: string;
   readonly showSessionPicker?: boolean;
   readonly continueLatestSession?: boolean;
@@ -31,6 +33,7 @@ export interface TuiInteractiveLaunchRequest {
 
 export interface RawTuiInteractiveOptions extends RawSystemPromptOptions {
   readonly model?: string;
+  readonly advisor?: string;
   readonly session?: string | boolean;
   readonly continue?: boolean;
   readonly resume?: string;
@@ -41,14 +44,36 @@ export interface RawTuiInteractiveOptions extends RawSystemPromptOptions {
   readonly env?: TuiBuildEnvironment;
 }
 
+export interface InteractiveCliContractOptions {
+  readonly allowStartupEnvironmentSelection?: boolean;
+  readonly exposeManagedBackendLane?: boolean;
+  /** False in a package without the advisor (`beta.advisor`): `--advisor` is not registered. */
+  readonly exposeAdvisor?: boolean;
+}
+
 export function applyInteractiveCliContract(
   command: Command,
-  options: { readonly allowStartupEnvironmentSelection?: boolean } = {},
+  options: InteractiveCliContractOptions = {},
 ): Command {
   const configured = command
     .argument('[prompt]', 'task to execute in the interactive TUI')
-    .addOption(new Option('-m, --model <provider/model>', 'select the model for this Session only'))
-    .addOption(new Option('--lane <lane>', 'managed backend lane for test or staging builds'))
+    .addOption(
+      new Option('-m, --model <provider/model>', 'select the model for this Session only'),
+    );
+  if (options.exposeAdvisor !== false) {
+    configured.addOption(
+      new Option(
+        '--advisor <provider/model|off>',
+        'select the advisor for this Session only, or off; the default is unchanged, and a model turns the advisor switch on',
+      ),
+    );
+  }
+  if (options.exposeManagedBackendLane !== false) {
+    configured.addOption(
+      new Option('--lane <lane>', 'managed backend lane for test or staging builds'),
+    );
+  }
+  configured
     .addOption(
       new Option('--session [id]', 'open a Session by id, or browse Sessions when id is omitted'),
     )
@@ -117,10 +142,20 @@ export function resolveInteractiveLaunchRequest(
       );
     }
   }
+  const advisor = commandOptions.advisor?.trim();
+  if (commandOptions.advisor !== undefined) {
+    parseAdvisorOverride(advisor ?? '');
+    if (showSessionPicker) {
+      throw new Error(
+        '--advisor requires a Session id with --session; use --session <id> or --continue.',
+      );
+    }
+  }
   const systemPromptOverrides = resolveSystemPromptOverrides(commandOptions);
   return {
     ...(prompt ? { initialPrompt: prompt } : {}),
     ...(model ? { model } : {}),
+    ...(advisor ? { advisor } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(showSessionPicker ? { showSessionPicker: true } : {}),
     ...(commandOptions.continue ? { continueLatestSession: true } : {}),
@@ -132,7 +167,10 @@ export function resolveInteractiveLaunchRequest(
   };
 }
 
-export function applyExecCliContract(command: Command): Command {
+export function applyExecCliContract(
+  command: Command,
+  options: Pick<InteractiveCliContractOptions, 'exposeAdvisor'> = {},
+): Command {
   const configured = command
     .argument('[prompt]', 'task to execute')
     .addOption(new Option('--input <source>', 'read explicit input; only "-" is supported'))
@@ -144,7 +182,16 @@ export function applyExecCliContract(command: Command): Command {
         .default([]),
     )
     .addOption(new Option('--model <provider/model>', 'override the model for this Run only'))
-    .addOption(new Option('--effort <level>', 'override the reasoning effort for this Run only'))
+    .addOption(new Option('--effort <level>', 'override the reasoning effort for this Run only'));
+  if (options.exposeAdvisor !== false) {
+    configured.addOption(
+      new Option(
+        '--advisor <provider/model|off>',
+        "set the advisor of this Run's Session, or off; the default is unchanged, and a model turns the advisor switch on",
+      ),
+    );
+  }
+  configured
     .addOption(
       new Option('--mode <mode>', 'Context mode: standard (default) or lightweight').argParser(
         parseContextMode,

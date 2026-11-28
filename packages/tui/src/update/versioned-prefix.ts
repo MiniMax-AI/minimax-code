@@ -10,7 +10,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import type { McodeNpmPackageName } from './install-source.js';
+import { stableHomebrewNodeToolchainPath } from './homebrew-node-path.js';
+import type { McodeNpmDistTag, McodeNpmPackageName } from './install-source.js';
 import {
   readMcodePrefixPackageMetadata,
   type McodePrefixPackageMetadata,
@@ -31,7 +32,19 @@ export interface McodeVersionedPrefixActivation {
   readonly runtimeExecutable: string;
   readonly npmExecutable: string;
   readonly registry: string;
+  readonly distTag?: McodeNpmDistTag;
 }
+
+export interface McodeVersionedPrefixReleaseOwner {
+  readonly activePrefix: string;
+  readonly packageName: McodeNpmPackageName;
+  readonly runtimeExecutable: string;
+  readonly npmExecutable: string;
+  readonly registry: string;
+  readonly distTag?: McodeNpmDistTag;
+}
+
+const RELEASE_KEY_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._-]*$/u;
 
 export function createMcodeVersionedPrefixStagingPrefix(
   activePrefix: string,
@@ -84,9 +97,10 @@ export function acquireMcodeVersionedPrefixUpdateLock(activePrefix: string): () 
 }
 
 export function activateMcodeVersionedPrefixInstall(
-  activation: McodeVersionedPrefixActivation,
+  requestedActivation: McodeVersionedPrefixActivation,
   platform: NodeJS.Platform = process.platform,
 ): string {
+  const activation = withStableToolchain(requestedActivation);
   const platformPath = platformPathFor(platform);
   const releasesRoot = platformPath.join(activation.activePrefix, RELEASES_DIRECTORY);
   const stagingMetadata = readExpectedMetadata(activation.stagingPrefix, activation, platform);
@@ -124,6 +138,77 @@ export function activateMcodeVersionedPrefixInstall(
     0o600,
   );
   return releasePrefix;
+}
+
+/** Validates an immutable release completely before moving the formal current pointer. */
+export function activateMcodeVersionedPrefixRelease(
+  owner: McodeVersionedPrefixReleaseOwner,
+  releaseKey: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  assertReleaseKey(releaseKey);
+  const platformPath = platformPathFor(platform);
+  const releasePrefix = platformPath.join(owner.activePrefix, RELEASES_DIRECTORY, releaseKey);
+  const metadata = readMcodePrefixPackageMetadata(releasePrefix, owner.packageName, platform);
+  const activation = releaseActivation(owner, releasePrefix, metadata.version);
+  assertVersionedRelease(releasePrefix, activation, platform);
+  // A rollback that keeps the recorded toolchain needs no new receipt. Rewriting an identical
+  // one would only widen the window where install.json and the current pointer disagree if the
+  // pointer write below fails; a rollback across toolchains does need it to stay consistent.
+  if (!installReceiptMatches(activation, platform)) {
+    writeVersionedInstallReceipt(activation, platform);
+  }
+  if (!versionedRootLaunchersAreValid(owner.activePrefix, platform)) {
+    writeVersionedRootLaunchers(owner.activePrefix, platform);
+  }
+  writeAtomicText(platformPath.join(owner.activePrefix, CURRENT_FILE), `${releaseKey}\n`, 0o600);
+  return releasePrefix;
+}
+
+export function validateMcodeVersionedPrefixRelease(
+  owner: McodeVersionedPrefixReleaseOwner,
+  releaseKey: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  assertReleaseKey(releaseKey);
+  const prefix = platformPathFor(platform).join(owner.activePrefix, RELEASES_DIRECTORY, releaseKey);
+  const metadata = readMcodePrefixPackageMetadata(prefix, owner.packageName, platform);
+  assertVersionedRelease(prefix, releaseActivation(owner, prefix, metadata.version), platform);
+}
+
+function releaseActivation(
+  owner: McodeVersionedPrefixReleaseOwner,
+  releasePrefix: string,
+  expectedVersion: string,
+): McodeVersionedPrefixActivation {
+  return withStableToolchain({
+    stagingPrefix: releasePrefix,
+    activePrefix: owner.activePrefix,
+    packageName: owner.packageName,
+    expectedVersion,
+    runtimeExecutable: owner.runtimeExecutable,
+    npmExecutable: owner.npmExecutable,
+    registry: owner.registry,
+    distTag: owner.distTag,
+  });
+}
+
+// Launchers and the receipt outlive this process; never persist a Homebrew
+// Cellar keg path that `brew upgrade` would delete.
+function withStableToolchain(
+  activation: McodeVersionedPrefixActivation,
+): McodeVersionedPrefixActivation {
+  return {
+    ...activation,
+    runtimeExecutable: stableHomebrewNodeToolchainPath(activation.runtimeExecutable),
+    npmExecutable: stableHomebrewNodeToolchainPath(activation.npmExecutable),
+  };
+}
+
+function assertReleaseKey(releaseKey: string): void {
+  if (!RELEASE_KEY_PATTERN.test(releaseKey)) {
+    throw new Error(`Invalid MCode release key: ${releaseKey}`);
+  }
 }
 
 function readExpectedMetadata(
@@ -287,6 +372,31 @@ function versionedCommands(
       ...(metadata ? { binEntry: metadata.mcodeToolsBinEntry } : {}),
     },
   ];
+}
+
+/** Whether the active prefix already records exactly this activation's ownership and toolchain. */
+function installReceiptMatches(
+  activation: McodeVersionedPrefixActivation,
+  platform: NodeJS.Platform,
+): boolean {
+  const platformPath = platformPathFor(platform);
+  try {
+    const receipt = JSON.parse(
+      readFileSync(platformPath.join(activation.activePrefix, 'install.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    return (
+      receipt.schemaVersion === 2 &&
+      receipt.product === 'minimax-code' &&
+      receipt.packageName === activation.packageName &&
+      receipt.registry === new URL(activation.registry).href &&
+      receipt.distTag === (activation.distTag ?? 'latest') &&
+      receipt.npmExecutable === activation.npmExecutable &&
+      receipt.nodeExecutable === activation.runtimeExecutable &&
+      receipt.prefix === activation.activePrefix
+    );
+  } catch {
+    return false;
+  }
 }
 
 function writeVersionedInstallReceipt(

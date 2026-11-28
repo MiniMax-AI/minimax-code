@@ -7,9 +7,17 @@ import type {
   TuiAccountStatus,
   TuiAccountStatusOptions,
   TuiActiveRunSnapshot,
+  TuiAdvisor,
+  TuiAdvisorSelection,
   TuiCompactionResult,
   TuiContextSnapshotResponse,
   TuiInstructionSource,
+  TuiMcpAuthClearResult,
+  TuiMcpAuthOutcome,
+  TuiMcpAuthScope,
+  TuiMcpAuthStartResult,
+  TuiMcpAuthStateView,
+  TuiMcpAuthTarget,
   TuiMcpServer,
   TuiProjectMcpPreview,
   TuiModel,
@@ -103,6 +111,16 @@ export class TuiProductAccess {
   }
 
   /** Undefined when this Runtime cannot read the switch. */
+  async getAdvisorEnabled(): Promise<boolean | undefined> {
+    return this.context.service('config.advisor.read').getAdvisorEnabled();
+  }
+
+  /** Undefined when this Runtime cannot persist the switch. */
+  async setAdvisorEnabled(enabled: boolean): Promise<boolean | undefined> {
+    return this.context.service('config.advisor.write').setAdvisorEnabled(enabled);
+  }
+
+  /** Undefined when this Runtime cannot read the switch. */
   async getPtcEnabled(): Promise<boolean | undefined> {
     return this.context.service('config.ptc.read').getPtcEnabled();
   }
@@ -148,6 +166,28 @@ export class TuiProductAccess {
   ): Promise<boolean> {
     return this.context.service("model.select").selectModel({
       ...modelRequest(model),
+      sessionId,
+    });
+  }
+
+  getAdvisor(sessionId?: string): Promise<TuiAdvisor> {
+    return this.context
+      .service('model.advisor.read')
+      .getAdvisor({ ...(sessionId ? { sessionId } : {}) });
+  }
+
+  /** Same order as `selectModel`: the default first, so a rejected default leaves the Session alone. */
+  async selectAdvisor(selection: TuiAdvisorSelection, sessionId?: string): Promise<TuiAdvisor> {
+    const saved = await this.context
+      .service('model.advisor.select')
+      .selectAdvisor(advisorRequest(selection));
+    if (!sessionId) return saved;
+    return this.selectSessionAdvisor(selection, sessionId);
+  }
+
+  selectSessionAdvisor(selection: TuiAdvisorSelection, sessionId: string): Promise<TuiAdvisor> {
+    return this.context.service('model.advisor.select').selectAdvisor({
+      ...advisorRequest(selection),
       sessionId,
     });
   }
@@ -317,15 +357,14 @@ export class TuiProductAccess {
     sessionId: string,
     agentName = this.defaultAgentName,
     customInstructions?: string,
+    reason = 'ui_request',
   ): Promise<TuiCompactionResult> {
-    const response = await this.context
-      .service("session.compaction")
-      .requestCompaction({
-        name: agentName,
-        id: sessionId,
-        reason: "ui_request",
-        ...(customInstructions ? { customInstructions } : {}),
-      });
+    const response = await this.context.service('session.compaction').requestCompaction({
+      name: agentName,
+      id: sessionId,
+      reason,
+      ...(customInstructions ? { customInstructions } : {}),
+    });
     return {
       ...response,
       ...(response.tokensBefore !== undefined
@@ -450,6 +489,32 @@ export class TuiProductAccess {
       .listMcpServers(request);
     return result.servers as TuiMcpServer[];
   }
+  async listMcpAuthStates(scope: TuiMcpAuthScope = {}): Promise<TuiMcpAuthStateView[]> {
+    const result = await this.context.service('mcp.auth.list').listMcpAuthStates(scope);
+    return result.states;
+  }
+  startMcpAuth(
+    target: TuiMcpAuthTarget,
+    options: { readonly force?: boolean } = {},
+  ): Promise<TuiMcpAuthStartResult> {
+    return this.context
+      .service('mcp.auth.start')
+      .startMcpAuth(target, options.force ? { force: true } : {});
+  }
+  cancelMcpAuth(attemptId: string): Promise<boolean> {
+    return this.context.service('mcp.auth.cancel').cancelMcpAuth(attemptId);
+  }
+  completeMcpAuth(attemptId: string, callbackUrl: string): Promise<TuiMcpAuthOutcome> {
+    return this.context.service('mcp.auth.complete').completeMcpAuth(attemptId, callbackUrl);
+  }
+  clearMcpAuth(target: TuiMcpAuthTarget): Promise<TuiMcpAuthClearResult> {
+    return this.context.service('mcp.auth.clear').clearMcpAuth(target);
+  }
+  setMcpUserClientSecret(serverName: string, secret: string | undefined): Promise<boolean> {
+    return this.context
+      .service('mcp.auth.client-secret')
+      .setMcpUserClientSecret(serverName, secret);
+  }
 }
 
 function modelRequest(model: TuiModelSelection): {
@@ -468,6 +533,25 @@ function modelRequest(model: TuiModelSelection): {
       ? { contextLimit: model.contextLimit }
       : {}),
     ...(effort ? { thinking: { effort } } : {}),
+  };
+}
+
+/** A thinking without an effort clears the stored one (`null`); no thinking keeps it. */
+function advisorRequest(selection: TuiAdvisorSelection): {
+  enabled: boolean;
+  providerId?: string;
+  modelId?: string;
+  thinking?: { effort: string } | null;
+  contextLimit?: number;
+} {
+  const effort = selection.thinking?.effort?.trim();
+  return {
+    enabled: selection.enabled,
+    ...(selection.providerId && selection.modelId
+      ? { providerId: selection.providerId, modelId: selection.modelId }
+      : {}),
+    ...(selection.thinking !== undefined ? { thinking: effort ? { effort } : null } : {}),
+    ...(selection.contextLimit !== undefined ? { contextLimit: selection.contextLimit } : {}),
   };
 }
 

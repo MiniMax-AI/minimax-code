@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import spawn from 'cross-spawn';
+import { stableProcessNodeExecutable } from './homebrew-node-path.js';
 import { resolveMcodeNpmPrefixInstall, type McodeNpmPackageName } from './install-source.js';
 
 const PENDING_UPDATE_FILE = '.mcode-update-pending.json';
@@ -245,7 +246,7 @@ export function writeMcodePrefixUpdatePending(activation: McodePrefixUpdateActiv
 
 export async function scheduleMcodePrefixUpdate(
   pendingFile: string,
-  runtimeExecutable = process.execPath,
+  runtimeExecutable = stableProcessNodeExecutable(),
   parentPid = process.pid,
   restartArgs: readonly string[] = [],
   environment: NodeJS.ProcessEnv = process.env,
@@ -291,7 +292,7 @@ export async function scheduleMcodePrefixUpdate(
 
 export async function schedulePendingMcodePrefixUpdate(
   entryFile = process.argv[1],
-  runtimeExecutable = process.execPath,
+  runtimeExecutable = stableProcessNodeExecutable(),
   parentPid = process.pid,
   restartArgs: readonly string[] = [],
   environment: NodeJS.ProcessEnv = process.env,

@@ -92,6 +92,7 @@ export function createSecretFreeTurnAssemblyContext<TAgent extends AgentExecutio
       : undefined;
   return {
     ...context,
+    sendsUserMessage: false,
     userInput: { text: canonicalUserInput.text },
     ...(outputSchema !== undefined || scope.preparation.outputRevisionInstruction !== undefined
       ? {
@@ -129,6 +130,7 @@ export function createSecretFreeModelContextAssemblyContext<
     agentConfig: {
       ...projectAllowedFields(preparation.agentConfig, AGENT_CONFIG_ALLOWLIST),
       model,
+      ...(preparation.advisor ? { advisor: { ...preparation.advisor } } : {}),
     },
     model,
     history,

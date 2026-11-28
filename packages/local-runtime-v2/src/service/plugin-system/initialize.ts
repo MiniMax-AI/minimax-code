@@ -12,6 +12,7 @@ import type {
   InitializedPluginService,
   PluginServiceCompatibility,
 } from "./contracts.js";
+import { createPluginMcpAuthPort, PluginMcpCredentials } from "./mcp/oauth.js";
 import { PluginMcpRuntime } from "./mcp/runtime.js";
 import { GithubPluginImporter } from "./plugin/import/github-plugin-importer.js";
 import { PluginDesktopFacade } from "./plugin/runtime/desktop-facade.js";
@@ -52,9 +53,19 @@ export function initializePluginService(
     metrics: metricTags,
     ...(onPluginDeactivated ? { onPluginDeactivated } : {}),
   });
+  const mcpCredentials = compatibility.mcpOAuth
+    ? new PluginMcpCredentials({
+        service: compatibility.mcpOAuth,
+        ...(compatibility.publishAuthRequired
+          ? { publishAuthRequired: compatibility.publishAuthRequired }
+          : {}),
+        logger: compatibility.logger,
+      })
+    : undefined;
   const createPluginMcpRuntime = () =>
     new PluginMcpRuntime({
       names: compatibility.mcp.getRuntimeNameRegistry(),
+      ...(mcpCredentials ? { auth: mcpCredentials } : {}),
       logger: {
         info: (message, fields) =>
           compatibility.logger.info(fields ?? {}, message),
@@ -117,6 +128,9 @@ export function initializePluginService(
   );
   const system = new PluginSystem({
     mcpNames: compatibility.mcp.getRuntimeNameRegistry(),
+    forbiddenPluginNames: compatibility.configGetter?.().plugins?.forbidden,
+    ...(compatibility.configGetter?.().plugins?.onlyOfficial ? { onlyOfficialPlugins: true } : {}),
+    ...(mcpCredentials ? { mcpCredentials } : {}),
     dataDir: compatibility.dataDir,
     officialCacheRoot,
     repository,
@@ -157,6 +171,14 @@ export function initializePluginService(
   return {
     plugin,
     mcp: compatibility.mcp,
+    mcpAuthPort: createPluginMcpAuthPort({
+      get currentSnapshot() {
+        return system.currentSnapshot;
+      },
+      waitUntilReady: () => system.waitUntilReady(),
+      probeMcpServer: (serverName) => system.probeMcpServer(serverName),
+      rediscoverMcpServers: (serverNames) => system.rediscoverMcpServers(serverNames),
+    }),
     skill: compatibility.skill,
     hostConnectorGateway: hostConnectorSystem.gateway,
     attachMiniAppPublication: (input) =>

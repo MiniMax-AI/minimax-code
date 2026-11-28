@@ -74,7 +74,8 @@
       "src/http/routing/bindings.gen.ts!",
       "src/http/routing/contracts.gen.ts!",
       "src/http/generated/**!",
-      "src/service/turn-system/agent-host/runner/ptc/quickjs-worker.ts!"
+      "src/service/turn-system/agent-host/runner/ptc/quickjs-worker.ts!",
+      "src/service/browser-use/program/browser-program-worker.ts!"
     ],
     "project": [
       "src/**/*.ts!",
@@ -106,6 +107,7 @@
     "better-sqlite3": "12.11.1",
     "croner": "^9",
     "drizzle-orm": "^0.45.2",
+    "es-module-lexer": "1.7.0",
     "handlebars": "^4.7.9",
     "hono": "^4.7.11",
     "jszip": "^3.10.1",

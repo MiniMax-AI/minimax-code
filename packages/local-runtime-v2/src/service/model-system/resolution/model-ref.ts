@@ -8,6 +8,10 @@ import {
   type IModelRef,
 } from '@mavis/protocol';
 import type { ConversationModelThinkingSelection } from '@mavis/conversation-contract';
+import {
+  normalizeThinkingEffortList,
+  sortThinkingEffortOptions,
+} from '@mavis/shared/thinking-effort';
 
 import {
   LocalModelProviderError,
@@ -30,14 +34,34 @@ const THINKING_VARIANT = 'thinking';
 const NONE_THINKING_VARIANT = '';
 const APOLLO_NONE_THINKING_VARIANT = 'none-thinking';
 const PI_THINKING_LEVELS = new Set<string>(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+/**
+ * `models.dev` lists `minimal` on several Gemini 3 models whose upstream endpoints
+ * reject `MINIMAL` with HTTP 400; strip it from built-in catalog presets while
+ * keeping user-authored BYOK efforts unrestricted so connectivity tests validate downstream.
+ */
+const GEMINI_CATALOG_OMITTED_EFFORT = 'minimal';
+
+export function isGeminiRejectedEffort(api: string | undefined, effort: string): boolean {
+  return (
+    api === 'google-generative-ai' && effort.trim().toLowerCase() === GEMINI_CATALOG_OMITTED_EFFORT
+  );
+}
 export const MINIMAX_M3_MODEL_ID = 'MiniMax-M3';
 
 const SELECTED_THINKING_EFFORT_CAPABILITY = 'selected_thinking_effort';
 const SUPPORT_JSON_OBJECT_OUTPUT_CAPABILITY = 'support_json_object_output';
 
 /** Process-local extensions carried alongside generated protocol model capabilities. */
-interface LocalModelRefCapabilities extends IModelCapabilities {
+export interface LocalModelRefCapabilities extends IModelCapabilities {
   readonly [SUPPORT_JSON_OBJECT_OUTPUT_CAPABILITY]?: boolean;
+  /** Most images one provider request may carry; older history images become placeholders. */
+  max_images_per_request?: number | string;
+  /** Inline audio input; set only for transports that carry audio natively. */
+  support_audio?: boolean;
+  /** Inline PDF input; set only for transports that carry PDF natively. */
+  support_pdf?: boolean;
+  /** Whether signed thinking is bound to the exact preceding conversation; unset = inferred. */
+  thinking_prefix_binding?: boolean;
 }
 
 export interface ByokThinkingProtocol {
@@ -195,7 +219,15 @@ function resolveManagedEffort(
     return enabled ? effort : undefined;
   }
   if (!enabled || snapshot || config.parameterErrors?.effortOptions) return undefined;
-  return config.thinking?.defaultEffort;
+  return resolveDefaultThinkingEffort(managedEffortOptions(config), config.thinking?.defaultEffort);
+}
+
+/** The efforts a managed model accepts: its options, else its fixed default. */
+function managedEffortOptions(config: LocalModelConfig): string[] {
+  return (
+    normalizeModelThinkingEffortOptions(config.thinking?.effortOptions) ??
+    fixedParameterOption(normalizeModelThinkingEffort(config.thinking?.defaultEffort))
+  );
 }
 
 function validateManagedEffort(
@@ -208,9 +240,7 @@ function validateManagedEffort(
   if (snapshot?.effort === 'legacy') return;
   if (config.parameterErrors?.effortOptions) invalidManagedParameter('thinking.effort');
   if (snapshot) return;
-  const allowed =
-    config.thinking?.effortOptions ?? fixedParameterOption(config.thinking?.defaultEffort);
-  if (!allowed.includes(effort)) invalidManagedParameter('thinking.effort');
+  if (!managedEffortOptions(config).includes(effort)) invalidManagedParameter('thinking.effort');
 }
 
 function validateManagedContext(config: LocalModelConfig, selection: ModelRefOverride): void {
@@ -234,9 +264,9 @@ function thinkingLevelForEffort(effort: string): ThinkingLevel {
 }
 
 /**
- * Explicit effort wins over a legacy variant. A variant without effort remains
- * authoritative for that selection; only an unqualified selection receives the
- * catalog's upper-middle default effort.
+ * Explicit effort wins over a legacy variant. Without a valid effort, thinking
+ * that is on (no variant, or the thinking variant) runs at the default effort;
+ * any other variant remains authoritative for that selection.
  */
 function resolveEffectiveThinkingEffort(
   provider: string,
@@ -272,8 +302,7 @@ function resolveForcedOnThinkingEffort(
   const options = normalizeModelThinkingEffortOptions(modelConfig?.thinking?.effortOptions);
   if (selected && !isThinkingEffortDisabled(selected) && options?.includes(selected))
     return selected;
-  const defaultEffort = normalizeModelThinkingEffort(modelConfig?.thinking?.defaultEffort);
-  return defaultEffort && options?.includes(defaultEffort) ? defaultEffort : undefined;
+  return resolveDefaultThinkingEffort(options, modelConfig?.thinking?.defaultEffort);
 }
 
 function resolveMiniMaxM3SelectedEffort(
@@ -294,10 +323,9 @@ function resolveConfiguredThinkingEffort(
   if (isThinkingEffortDisabled(selected)) return selected;
   const options = normalizeModelThinkingEffortOptions(modelConfig?.thinking?.effortOptions);
   if (selected && options?.includes(selected)) return selected;
-  if (variant !== undefined) return undefined;
-  const defaultEffort = normalizeModelThinkingEffort(modelConfig?.thinking?.defaultEffort);
-  if (defaultEffort && options?.includes(defaultEffort)) return defaultEffort;
-  return options?.[Math.floor(options.length / 2)];
+  if (variant !== undefined && normalizeThinkingVariant(variant) !== THINKING_VARIANT)
+    return undefined;
+  return resolveDefaultThinkingEffort(options, modelConfig?.thinking?.defaultEffort);
 }
 
 export function readSelectedThinkingEffort(
@@ -383,11 +411,18 @@ export function resolveMiniMaxM3ThinkingProtocol(
   };
 }
 
-export function resolveModelThinkingMiddleEffort(
+/**
+ * The effort a model runs at while thinking is on and no valid effort is chosen: the catalog
+ * default when it is one of the options, else the middle option (the higher one of an even
+ * count), whatever it is.
+ */
+export function resolveDefaultThinkingEffort(
   effortOptions: readonly string[] | undefined,
+  defaultEffort: unknown,
 ): string | undefined {
-  if (!effortOptions?.length) return undefined;
-  return effortOptions[Math.floor(effortOptions.length / 2)];
+  const configured = normalizeModelThinkingEffort(defaultEffort);
+  if (configured && effortOptions?.includes(configured)) return configured;
+  return effortOptions?.[Math.floor(effortOptions.length / 2)];
 }
 
 function resolveMiniMaxM3ModelThinkingProtocol(
@@ -442,6 +477,9 @@ function resolveDisabledThinkingProtocol(
       completionsThinkingFormat: 'openai',
     };
   }
+  // Pi's Google transport sends the disabled thinkingConfig for a reasoning model
+  // with no level: `thinkingBudget: 0` on Gemini 2.x, the lowest level on 3+.
+  if (api === 'google-generative-ai') return { ...base, requestPatch: {} };
   return { ...base, requestPatch: { reasoning: { effort: 'none' } } };
 }
 
@@ -450,8 +488,6 @@ export function resolveModelThinkingProtocol(
   value: unknown,
   modelId?: unknown,
 ): ModelThinkingProtocolConfig | undefined {
-  // Pi owns Google's model-specific thinking parameters.
-  if (api === 'google-generative-ai') return undefined;
   const effort = normalizeModelThinkingEffort(value);
   if (!effort) return undefined;
 
@@ -461,12 +497,20 @@ export function resolveModelThinkingProtocol(
   const disabledProtocol = resolveDisabledThinkingProtocol(api, effort);
   if (disabledProtocol) return disabledProtocol;
 
-  const piLevel = PI_THINKING_LEVELS.has(effort) ? (effort as PiThinkingLevel) : 'high';
+  // Level names are case-insensitive (`LOW` is `low`); `effort` keeps the authored text.
+  const level = effort.toLowerCase();
+  const piLevel = PI_THINKING_LEVELS.has(level) ? (level as PiThinkingLevel) : 'high';
   const base = {
     effort,
     piLevel,
     thinkingLevelMap: { [piLevel]: effort },
   } satisfies Omit<ModelThinkingProtocolConfig, 'requestPatch'>;
+
+  if (api === 'google-generative-ai') {
+    // Forward the user's configured effort verbatim (no silent clamping to `high`)
+    // so downstream gateways and models validate it directly during connectivity tests.
+    return { ...base, requestPatch: {} };
+  }
 
   if (api === 'anthropic-messages') {
     const usesDefaultThinking = isDefaultThinkingModelId(modelId);
@@ -504,6 +548,9 @@ export function capabilitiesFromModelConfig(
     ...normalizeLocalFileApiCapabilities(modelConfig?.capabilities),
     ...normalizeLocalMultimodalLimitCapabilities(modelConfig?.capabilities),
     ...maxImagesPerRequestCapability(modelConfig?.capabilities?.max_images_per_request),
+    ...(typeof modelConfig?.capabilities?.thinking_prefix_binding === 'boolean'
+      ? { thinking_prefix_binding: modelConfig.capabilities.thinking_prefix_binding }
+      : {}),
     ...(modelConfig?.capabilities?.support_json_object_output === true
       ? { [SUPPORT_JSON_OBJECT_OUTPUT_CAPABILITY]: true }
       : {}),
@@ -624,15 +671,80 @@ export function isThinkingEffortDisabled(value: unknown): boolean {
   return effort === 'none' || effort === 'off';
 }
 
+/** Request-local auxiliary policy; never changes the saved conversation selection. */
+export function withMinimumModelThinking(
+  model: IModelRef,
+  config: LocalModelConfig | undefined,
+): IModelRef {
+  const effort = minimumModelThinkingEffort(model, config);
+  const capabilities = { ...model.capabilities };
+  Reflect.deleteProperty(capabilities, SELECTED_THINKING_EFFORT_CAPABILITY);
+  if (effort) Reflect.set(capabilities, SELECTED_THINKING_EFFORT_CAPABILITY, effort);
+  const result = { ...model, capabilities };
+  delete result.thinking_budgets;
+  delete result.thinking_effort;
+  return {
+    ...result,
+    thinking_level: minimumModelThinkingBudget(model, config, effort),
+    ...(effort ? { thinking_effort: effort } : {}),
+  };
+}
+
+function minimumModelThinkingEffort(model: IModelRef, config: LocalModelConfig | undefined) {
+  const options = normalizeModelThinkingEffortOptions(config?.thinking?.effortOptions) ?? [];
+  const fixedEffort =
+    normalizeModelThinkingEffort(config?.thinking?.defaultEffort) ??
+    (options.length === 0
+      ? (model.thinking_effort ?? readSelectedThinkingEffort(model.capabilities))
+      : undefined);
+  const disabled =
+    options.find(isThinkingEffortDisabled) ??
+    (isThinkingEffortDisabled(fixedEffort) ? fixedEffort : undefined);
+  if (canDisableModelThinking(config, disabled)) return disabled ?? 'off';
+  return minimumEnabledEffort(options, fixedEffort);
+}
+
+function canDisableModelThinking(
+  config: LocalModelConfig | undefined,
+  disabled: string | undefined,
+) {
+  const mode = config?.thinking_config?.mode;
+  if (mode === 'forced_on') return false;
+  return (
+    mode === 'forced_off' ||
+    mode === 'switchable' ||
+    disabled !== undefined ||
+    config?.reasoning === false
+  );
+}
+
+function minimumEnabledEffort(options: readonly string[], fixedEffort: string | undefined) {
+  const enabled = options.filter(
+    (effort) => !isThinkingEffortDisabled(effort) && effort !== 'default',
+  );
+  const minimum = sortThinkingEffortOptions(enabled)[0];
+  return minimum ?? (isThinkingEffortDisabled(fixedEffort) ? undefined : fixedEffort);
+}
+
+function minimumModelThinkingBudget(
+  model: IModelRef,
+  config: LocalModelConfig | undefined,
+  effort: string | undefined,
+) {
+  if (isThinkingEffortDisabled(effort)) return ThinkingLevel.OFF;
+  if (
+    effort !== undefined ||
+    config?.reasoning === true ||
+    config?.thinking_config?.mode === 'forced_on'
+  )
+    return ThinkingLevel.MINIMAL;
+  return model.thinking_level === undefined || model.thinking_level === ThinkingLevel.OFF
+    ? ThinkingLevel.OFF
+    : ThinkingLevel.MINIMAL;
+}
+
 export function normalizeModelThinkingEffortOptions(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const options: string[] = [];
-  const seen = new Set<string>();
-  for (const candidate of value) {
-    const option = normalizeModelThinkingEffort(candidate);
-    if (!option || seen.has(option)) continue;
-    seen.add(option);
-    options.push(option);
-  }
+  const options = normalizeThinkingEffortList(value);
   return options.length > 0 ? options : undefined;
 }

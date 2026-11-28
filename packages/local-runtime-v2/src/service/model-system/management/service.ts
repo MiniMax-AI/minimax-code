@@ -16,6 +16,13 @@ import {
   testProvider as testProviderOperation,
 } from './service-connection-operations.js';
 import { ModelProviderServiceContext } from './service-context.js';
+import {
+  testUserModelApiKey as testUserModelApiKeyOperation,
+  unrestUserModelApiKey as unrestUserModelApiKeyOperation,
+} from '../byok-keys/operations.js';
+import type { ApiKeyProbeView } from '../byok-keys/key-pool.js';
+import { readApiKeys } from '../byok-keys/key-list.js';
+import { customProviderViewOptions } from './service-helpers.js';
 import { parseProviderId } from '../resolution/model-key.js';
 import {
   createUserProvider as createUserProviderOperation,
@@ -24,6 +31,7 @@ import {
   updateUserProvider as updateUserProviderOperation,
 } from './service-custom-provider-operations.js';
 import {
+  deleteMinimaxApiKey as deleteMinimaxApiKeyOperation,
   getMinimaxApiKeyStatus as getMinimaxApiKeyStatusOperation,
   getMinimaxModelSource as getMinimaxModelSourceOperation,
   setMinimaxModelSource as setMinimaxModelSourceOperation,
@@ -31,6 +39,9 @@ import {
   upsertMinimaxApiKey as upsertMinimaxApiKeyOperation,
 } from './service-minimax-operations.js';
 import {
+  type ApiKeyView,
+  type LocalRuntimeConfig,
+  type LocalCustomProviderConfig,
   type LocalModelProviderServiceDeps,
   type ModelContextUpdateOutcome,
   type ModelProviderTestOutcome,
@@ -63,6 +74,10 @@ export class LocalModelProviderService {
     this.context = new ModelProviderServiceContext(deps);
   }
 
+  modelCatalogConfig(): LocalRuntimeConfig {
+    return this.context.deps.configGetter();
+  }
+
   loadCacheData(): ModelCacheData {
     return this.context.deps.cache.load();
   }
@@ -75,21 +90,29 @@ export class LocalModelProviderService {
     const providers: ModelProviderView[] = Object.entries(config.provider ?? {}).map(
       ([providerId, provider]) => buildBuiltinProviderView(config, cache, providerId, provider),
     );
+    const viewOptions = customProviderViewOptions(this.context.deps);
     for (const [providerKey, provider] of enabledCustomProviders(config)) {
-      providers.push(buildCustomProviderView(config, cache, providerKey, provider));
+      providers.push(
+        buildCustomProviderView(config, cache, { providerKey, provider }, viewOptions),
+      );
     }
     return providers;
+  }
+
+  listVisibleUserProviders(): ModelProviderView[] {
+    return this.listUserProviders();
   }
 
   listUserProviders(): ModelProviderView[] {
     const config = this.context.deps.configGetter();
     const cache = this.context.deps.cache.load();
+    const viewOptions = customProviderViewOptions(this.context.deps);
     return Object.entries(config.custom_provider ?? {}).map(([providerKey, provider]) =>
-      buildCustomProviderView(config, cache, providerKey, provider),
+      buildCustomProviderView(config, cache, { providerKey, provider }, viewOptions),
     );
   }
 
-  revealModelProviderApiKey(input: { providerId: string }): string {
+  revealModelProviderApiKey(input: { providerId: string; keyId?: string }): string {
     const config = this.context.deps.configGetter();
     if (input.providerId === MINIMAX_API_PROVIDER_ID) {
       const apiKey = config.minimax_api?.apiKey;
@@ -106,18 +129,13 @@ export class LocalModelProviderService {
     if (!provider) {
       throw new LocalModelProviderError(404, 'Model provider not found', 'PROVIDER_NOT_FOUND');
     }
-    if (
-      provider.kind === 'oauth' ||
-      provider.options?.authMode === 'oauth' ||
-      provider.api === 'openai-codex-responses'
-    ) {
-      throw new LocalModelProviderError(
-        400,
-        'OAuth credentials cannot be revealed',
-        'VALIDATION_ERROR',
-      );
+    assertProviderKeyRevealable(provider);
+    const apiKey = input.keyId
+      ? readApiKeys(provider).find((key) => key.id === input.keyId)?.key
+      : provider.options?.apiKey;
+    if (input.keyId && !apiKey) {
+      throw new LocalModelProviderError(404, 'API key not found', 'API_KEY_NOT_FOUND');
     }
-    const apiKey = provider.options?.apiKey;
     if (!apiKey?.trim()) {
       throw new LocalModelProviderError(400, 'Provider API key is not configured', 'NO_API_KEY');
     }
@@ -202,11 +220,28 @@ export class LocalModelProviderService {
     return discoverUserModelsCandidateOperation(this.context, candidate);
   }
 
+  /** One key of a draft; remembers only its latest result (no rest, no reorder). */
+  async testUserModelApiKey(input: {
+    candidate: UserModelProviderCandidateView;
+    keyIndex: number;
+    modelId?: string;
+  }): Promise<ApiKeyProbeView> {
+    return testUserModelApiKeyOperation(this.context, input);
+  }
+
+  unrestUserModelApiKey(input: { providerId: string; keyId: string }): ApiKeyView {
+    return unrestUserModelApiKeyOperation(this.context, input);
+  }
+
   async saveUserModelProviderCandidate(input: {
     candidate: UserModelProviderCandidateView;
     modelId?: string;
     saveAndUse?: boolean;
     skipConnectionTest?: boolean;
+    /** Process-local guard; never part of the DesktopService request. */
+    beforeCommit?: () => void;
+    /** Import-only idempotency; never part of the DesktopService request. */
+    importIfExisting?: boolean;
   }): Promise<SaveUserModelProviderCandidateOutcome> {
     return saveUserModelProviderCandidateOperation(this.context, input);
   }
@@ -223,6 +258,9 @@ export class LocalModelProviderService {
   }
 
   async deleteUserProvider(input: { providerId: string }): Promise<void> {
+    if (input.providerId === MINIMAX_API_PROVIDER_ID) {
+      return deleteMinimaxApiKeyOperation(this.context);
+    }
     return deleteUserProviderOperation(this.context, input);
   }
 
@@ -243,5 +281,20 @@ export class LocalModelProviderService {
 
   assertModelSelectable(providerId: string, modelId: string): void {
     assertModelSelectableOperation(this.context, providerId, modelId);
+  }
+}
+
+/** Only a stored BYOK key can be revealed; extension and OAuth credentials cannot. */
+function assertProviderKeyRevealable(provider: LocalCustomProviderConfig): void {
+  if (
+    provider.kind === 'oauth' ||
+    provider.options?.authMode === 'oauth' ||
+    provider.api === 'openai-codex-responses'
+  ) {
+    throw new LocalModelProviderError(
+      400,
+      'OAuth credentials cannot be revealed',
+      'VALIDATION_ERROR',
+    );
   }
 }

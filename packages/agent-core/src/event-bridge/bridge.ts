@@ -52,16 +52,23 @@
  * @see packages/cloud-runtime/README.md
  */
 
-import type { AgentEvent } from '@earendil-works/pi-agent-core';
+import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
+import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import { LLM_ERROR_CODES, classifyLLMErrorToCode } from '@mavis/shared/llm-error-classifier';
 import {
   InstalledPluginSource,
   PluginCapabilityType,
   type IPluginCapabilityProvenance,
+  type IRuntimeEvent,
 } from '@mavis/protocol';
 import type { RuntimeProtocolError, RuntimeToolCall } from '../protocol/runtime-event.js';
 import type { TokenUsage } from '../protocol/agent-message.js';
+import {
+  markAbandonedStreamClosing,
+  readAbandonedStreamAttempt,
+} from '../protocol/stream-reset.js';
 import { readPtcExecutionDetails } from '../tools/ptc.js';
+import { isTurnClosedByTerminatingTools } from '../tools/turn-termination.js';
 import {
   buildAbortedTerminalStatusEvent,
   buildCompletedAssistantMessage,
@@ -93,20 +100,38 @@ const defaultNowMs = () => Date.now();
  * been updated yet — the bridge logs once when this fallback fires so
  * observers can spot the misconfiguration.
  */
+/**
+ * `finish_reason` for an assistant message whose attempt was abandoned mid-stream.
+ *
+ * Chosen from the values the protocol already carries, by what a baseline
+ * consumer does with each:
+ * - `error` makes the desktop UI raise a terminal error
+ *   (`readTerminalAssistantCompleteError`) and TUI turn the message into an
+ *   `error` event (`stream-events.ts`), so the half answer would read as a
+ *   failure of the whole turn.
+ * - `aborted` makes both surfaces show an interruption / "Response cancelled".
+ * - `stop` maps to `success` but TUI's `delegation-flow` treats a `stop`
+ *   assistant as the latest turn's final answer.
+ * - `length` maps to `success` in the desktop UI (`finishReasonToQueryStatus`)
+ *   and has no special handling anywhere in TUI, so the message simply ends with
+ *   its content kept and no error or cancellation banner.
+ */
+const PARTIAL_STREAM_FINISH_REASON = 'length';
+
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 /**
- * Runtime-side mirror of the UI typed session error messages
+ * UI typed session error 文案集合在 runtime 侧的镜像
  * (`packages/ui/src/i18n/locales/*::errors.codes`).
  *
- * Keep a local copy to avoid making `@mavis/agent-core` depend on the UI package. Keep both sets
- * synchronized: when the UI adds a daemon code that should render as a localized session error
- * during streaming, add it here so the terminal assistant `agent_message` carries `code:message`
- * instead of bare `[Error] ...` text. The UI consumes assistant + finish_reason=error as session
- * status, and local-runtime filters it out of display history.
+ * 保持本地副本是为了避免 `@mavis/agent-core` 依赖 UI package。两边集合必须同步：
+ * 当 UI 新增一个需要在 streaming 期间渲染成本地化 session error 的 daemon code 时，
+ * 这里也要同步添加，让 terminal assistant `agent_message` 携带 `code:message`
+ * 文本，而不是裸 `[Error] ...`。UI 会把 assistant + finish_reason=error 消费为
+ * session status，local-runtime 会把它从 display history 中过滤掉。
  *
- * Codes outside this set (auth / generic upstream / unclassified) retain their original `[Error]
- * ...` content as the only user-visible signal.
+ * 不在此集合中的 code（auth / generic upstream / unclassified）保留原始
+ * `[Error] ...` 内容，作为唯一用户可见信号。
  */
 const TYPED_TERMINAL_ERROR_CODES = new Set<number>([
   LLM_ERROR_CODES.USAGE_LIMIT_EXCEEDED, // 42212
@@ -114,7 +139,7 @@ const TYPED_TERMINAL_ERROR_CODES = new Set<number>([
   LLM_ERROR_CODES.LLM_RATE_LIMITED, // 50111
   LLM_ERROR_CODES.LLM_TPM_RATE_LIMITED, // 50150
   LLM_ERROR_CODES.LLM_CLUSTER_OVERLOADED, // 50151
-  419, // Legacy daemon code retained for cross-version compatibility.
+  419, // 旧 daemon code，保留用于跨版本兼容
 ]);
 
 /**
@@ -132,11 +157,20 @@ const TYPED_TERMINAL_ERROR_CODES = new Set<number>([
 interface PendingCompletedMessageContext {
   msgId: string;
   text: string;
+  systemErrorContent: boolean;
   thinking: string | undefined;
   thinkingDurationMs: number | undefined;
   finishReason: string | undefined;
   usage: TokenUsage;
+  /** The pi assistant message, read again once its tool results are known. */
+  assistant: unknown;
 }
+
+/** The fields of a tool end the completed tool-call snapshot is built from. */
+type ToolCallEnd = Pick<
+  Extract<AgentEvent, { type: 'tool_execution_end' }>,
+  'toolCallId' | 'toolName' | 'result' | 'isError' | 'parentToolCallId'
+>;
 
 /**
  * Per-turn bridge from pi `AgentEvent` to canonical `RuntimeEvent`.
@@ -274,13 +308,13 @@ export class EventBridge {
    *
    * The bridge handles the events relevant to streaming assistant turns —
    * `message_*`, `tool_execution_*`. Pi lifecycle frames (`agent_*`,
-   * `turn_*`, `tool_execution_update`) do not have a `stream.resp`
-   * representation — hosts already track turn outcome at a higher level
-   * (PiTurnRunner) and emit the terminal status explicitly. They are
-   * surfaced as `debug.trace` events so observers (replay tools, cloud
-   * tracing, daemon SSE consumers) can see Pi's full producer-side
-   * lifecycle without affecting the canonical wire format. Callers can
-   * still safely forward every event without coordination.
+   * `turn_*` do not have a `stream.resp` representation — hosts already
+   * track turn outcome at a higher level (PiTurnRunner) and emit the
+   * terminal status explicitly. The `task` tool's `tool_execution_update` is
+   * the exception: it publishes a safe, structured start receipt (the newly
+   * created sub-session id) while the call is still running, so it is
+   * projected as an ordinary tool-call chunk as well as a trace.
+   * Callers can still safely forward every event without coordination.
    * `observedAtMs` uses the bridge clock and is captured before caller-side
    * queues or response hooks; omitted timestamps are measured during processing.
    */
@@ -309,14 +343,7 @@ export class EventBridge {
           tool_result_count: event.toolResults.length,
         });
       case 'tool_execution_update':
-        return this.onPiLifecycleTrace(
-          'pi_tool_execution_update',
-          'Pi tool execution partial update',
-          {
-            tool_name: event.toolName,
-            tool_call_id: event.toolCallId,
-          },
-        );
+        return this.onToolExecutionUpdate(event);
       default: {
         // Defensive — future pi variants surface here as a debug trace so
         // we can detect them without crashing.
@@ -330,11 +357,9 @@ export class EventBridge {
 
   /**
    * Emit a single `debug.trace` event carrying a Pi lifecycle marker.
-   * Used for the producer-side frames (`agent_*` / `turn_*` /
-   * `tool_execution_update`) that have no wire-level `stream.resp`
-   * representation — surfacing them as traces keeps observers informed
-   * without affecting the canonical streaming surface or message
-   * lifecycle.
+   * Used for producer-side frames (`agent_*` / `turn_*`) that have no
+   * wire-level `stream.resp` representation. Tool partial updates use their
+   * own projector below so they can update the live tool-call snapshot.
    */
   private onPiLifecycleTrace(
     phase: string,
@@ -362,7 +387,18 @@ export class EventBridge {
       // chunked streaming — pi emits them as single-shot frames.
       return { events: [] };
     }
-    // New assistant message — reset per-message state.
+    this.beginAssistantMessage();
+    return { events: [], requestAssistantMessageId: true };
+  }
+
+  /**
+   * Open a fresh assistant message: drop the per-message state and ask the host
+   * for a new `msg_id`.
+   *
+   * `chunkIndex` restarts at zero here, which is correct: the session stream
+   * de-duplicates per `msg_id`, so a new message has its own cursor.
+   */
+  private beginAssistantMessage(): void {
     this.activeAssistantMessageId = undefined;
     this.chunkIndex = 0;
     this.thinkingStartMs = undefined;
@@ -378,13 +414,18 @@ export class EventBridge {
     this.toolStartMs = new Map();
     this.preparingToolCalls = new Map();
     this.pendingCompletedMessage = undefined;
-    return { events: [], requestAssistantMessageId: true };
   }
 
-  private onMessageUpdate(
+  private async onMessageUpdate(
     event: Extract<AgentEvent, { type: 'message_update' }>,
     observedAtMs?: number,
-  ): BridgedEvents {
+  ): Promise<BridgedEvents> {
+    // Checked before the delta narrowing below: the reset rides on a frame shape
+    // that carries no delta of its own.
+    const abandoned = readAbandonedStreamAttempt(event.assistantMessageEvent);
+    if (abandoned) {
+      return this.onStreamReset(abandoned);
+    }
     // Output usage includes thinking tokens even when their text is hidden.
     // Keep the timing boundary aligned with that usage, before queue delays.
     if (
@@ -469,6 +510,98 @@ export class EventBridge {
         }),
       ],
     };
+  }
+
+  /**
+  /**
+   * A committed attempt broke on a transient stream interruption and the runtime
+   * is resending the request.
+   *
+   * The abandoned attempt is closed as its own assistant message: the text and
+   * thinking it already streamed stay exactly as rendered, its unexecuted tool
+   * cards are marked failed so no card is left on "preparing" / "prepared", and
+   * the message finishes. The resent attempt then streams under a fresh
+   * `msg_id`, handled exactly like a new assistant message.
+   *
+   * Nothing new goes on the wire: this reuses the existing finish chunk, the
+   * existing completed message and the existing `Failed` tool-call status, so a
+   * baseline consumer shows a finished half answer followed by a new message.
+   */
+  private async onStreamReset(abandoned: AssistantMessage): Promise<BridgedEvents> {
+    const events: IRuntimeEvent[] = [];
+    const msgId = this.activeAssistantMessageId;
+    if (msgId) {
+      // The model never got to run these calls, so they end as failed rather
+      // than staying on the argument-streaming statuses.
+      const toolCalls = extractAssistantToolCalls(abandoned).map((toolCall) => ({
+        ...toolCall,
+        status: 'failed' as const,
+      }));
+      for (const toolCall of toolCalls) {
+        events.push(
+          markAbandonedStreamClosing(
+            buildToolCallChunk({
+              sessionId: this.ctx.sessionId,
+              turnId: this.ctx.turnId,
+              eventId: this.ctx.eventIdGenerator('coding_tool'),
+              runtimeSeq: this.ctx.runtimeSeqGenerator(),
+              msgId,
+              chunkIndex: this.nextChunkIndex(),
+              toolCall,
+              nowMs: this.now(),
+            }),
+          ),
+        );
+      }
+      const thinkingDurationMs =
+        this.thinkingStartMs !== undefined
+          ? (this.thinkingEndMs ?? this.now()) - this.thinkingStartMs
+          : undefined;
+      // Ends the stream for this message without an error or abort banner.
+      events.push(
+        markAbandonedStreamClosing(
+          buildFinishChunk({
+            sessionId: this.ctx.sessionId,
+            turnId: this.ctx.turnId,
+            eventId: this.ctx.eventIdGenerator('coding_finish'),
+            runtimeSeq: this.ctx.runtimeSeqGenerator(),
+            msgId,
+            chunkIndex: this.nextChunkIndex(),
+            finishReason: PARTIAL_STREAM_FINISH_REASON,
+            ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+            nowMs: this.now(),
+          }),
+        ),
+      );
+      // Materialise the message so a consumer that missed deltas, and the
+      // message store, both keep the half answer that was already shown. Usage
+      // is left out on purpose: this attempt reported partial buckets, and the
+      // settlement ledger is where per-attempt usage actually lives.
+      events.push(
+        markAbandonedStreamClosing(
+          await buildCompletedAssistantMessage(
+            {
+              sessionId: this.ctx.sessionId,
+              turnId: this.ctx.turnId,
+              eventId: this.ctx.eventIdGenerator('coding_complete'),
+              runtimeSeq: this.ctx.runtimeSeqGenerator(),
+              msgId,
+              text: extractAssistantText(abandoned),
+              thinking: extractAssistantThinking(abandoned),
+              ...(toolCalls.length ? { toolCalls } : {}),
+              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+              finishReason: PARTIAL_STREAM_FINISH_REASON,
+              nowMs: this.now(),
+              ...(this.ctx.logger ? { logger: this.ctx.logger } : {}),
+            },
+            this.ctx.respDataTransform,
+          ),
+        ),
+      );
+    }
+    // The resend continues as a new assistant message with its own id.
+    this.beginAssistantMessage();
+    return { events, requestAssistantMessageId: true };
   }
 
   /**
@@ -591,52 +724,20 @@ export class EventBridge {
     }
     const errorMessage = extractAssistantErrorMessage(event.message);
     if (errorMessage) this.lastAssistantErrorMessage = errorMessage;
-    // When an LLM error maps to a typed daemon code supported by the UI, emit a compact
-    // `code:message` terminal error. The UI consumes assistant + finish_reason=error
-    // as session status; local-runtime filters out these terminal assistant bubbles.
-    const classified = errorMessage ? classifyLLMErrorToCode(errorMessage) : null;
-    const typedErrorText =
-      classified !== null && TYPED_TERMINAL_ERROR_CODES.has(classified.status_code)
-        ? `${classified.status_code}:${classified.message}`
-        : undefined;
-    const text =
-      extractAssistantText(event.message) ||
-      typedErrorText ||
-      (errorMessage ? `[Error] ${errorMessage}` : '');
-    const thinking = extractAssistantThinking(event.message) || undefined;
-    const toolCalls = extractAssistantToolCalls(event.message);
-    const finishReason = isAssistantError(event.message) ? 'error' : stopReason;
-    const thinkingDurationMs =
-      this.thinkingStartMs !== undefined && this.thinkingEndMs !== undefined
-        ? Math.max(0, this.thinkingEndMs - this.thinkingStartMs)
-        : undefined;
-    const requestDurationMs =
-      this.ctx.includeDetailedUsage === true
-        ? this.ctx.requestDurationMs?.(event.message)
-        : undefined;
-    const decodeDurationMs =
-      this.ctx.includeDetailedUsage === true && this.firstTokenMs !== undefined
-        ? Math.max(0, (observedAtMs ?? this.now()) - this.firstTokenMs)
-        : undefined;
-    const usage: TokenUsage = {
-      ...(extractAssistantUsage(event.message, this.contextWindow) ?? {
-        total_tokens: 0,
-        context_window: this.contextWindow,
-      }),
-      ...(decodeDurationMs !== undefined && Number.isFinite(decodeDurationMs)
-        ? { decode_duration_ms: decodeDurationMs }
-        : {}),
-      ...(typeof requestDurationMs === 'number' &&
-      Number.isFinite(requestDurationMs) &&
-      requestDurationMs > 0
-        ? { request_duration_ms: requestDurationMs }
-        : {}),
-    };
+    const {
+      text,
+      systemErrorContent,
+      thinking,
+      toolCalls,
+      finishReason,
+      thinkingDurationMs,
+      usage,
+    } = this.summarizeAssistantMessage(event.message, stopReason, observedAtMs);
 
-    // Always emit the finish chunk immediately at message_end — it signals
-    // "LLM is done generating" and downstream consumers (UI, archon-server
-    // queue gating) rely on it to advance state regardless of tool-execution
-    // status. The completed RespData (type=2) emit is decided next.
+    // Always emit the finish chunk immediately at message_end — it marks the
+    // end of one model step (tool-use steps included); the UI finalizes that
+    // step's message on it while the Turn keeps running. The completed
+    // RespData (type=2) emit is decided next.
     const finishEvent = buildFinishChunk({
       sessionId: this.ctx.sessionId,
       turnId: this.ctx.turnId,
@@ -660,6 +761,7 @@ export class EventBridge {
           runtimeSeq: this.ctx.runtimeSeqGenerator(),
           msgId: messageId,
           text,
+          systemErrorContent,
           ...(thinking !== undefined ? { thinking } : {}),
           ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
           ...(finishReason ? { finishReason } : {}),
@@ -685,12 +787,137 @@ export class EventBridge {
     this.pendingCompletedMessage = {
       msgId: messageId,
       text,
+      systemErrorContent,
       thinking,
       thinkingDurationMs,
       finishReason,
       usage,
+      assistant: event.message,
     };
     return { events: [finishEvent] };
+  }
+
+  /**
+   * The completed-message fields of one assistant message, as `onMessageEnd`
+   * stages them. Thinking and decode timing come from this bridge's own
+   * stream observation, so a message this bridge never streamed has none.
+   */
+  private summarizeAssistantMessage(
+    message: AgentMessage,
+    stopReason: string | undefined,
+    observedAtMs?: number,
+  ): {
+    text: string;
+    systemErrorContent: boolean;
+    thinking: string | undefined;
+    toolCalls: ReturnType<typeof extractAssistantToolCalls>;
+    finishReason: string | undefined;
+    thinkingDurationMs: number | undefined;
+    usage: TokenUsage;
+  } {
+    const errorMessage = extractAssistantErrorMessage(message);
+    // 当 LLM error 被分类为 UI 已支持的 typed daemon code 时，输出紧凑的
+    // `code:message` terminal error。UI 会将 assistant + finish_reason=error
+    // 消费为 session status，local-runtime 会过滤掉这类 terminal assistant 气泡。
+    const classified = errorMessage ? classifyLLMErrorToCode(errorMessage) : null;
+    const typedErrorText =
+      classified !== null && TYPED_TERMINAL_ERROR_CODES.has(classified.status_code)
+        ? `${classified.status_code}:${classified.message}`
+        : undefined;
+    const assistantText = extractAssistantText(message);
+    const systemErrorContent = !assistantText && Boolean(errorMessage);
+    const text = assistantText || typedErrorText || (errorMessage ? `[Error] ${errorMessage}` : '');
+    const thinking = extractAssistantThinking(message) || undefined;
+    const toolCalls = extractAssistantToolCalls(message);
+    const finishReason = isAssistantError(message) ? 'error' : stopReason;
+    const thinkingDurationMs =
+      this.thinkingStartMs !== undefined && this.thinkingEndMs !== undefined
+        ? Math.max(0, this.thinkingEndMs - this.thinkingStartMs)
+        : undefined;
+    const requestDurationMs =
+      this.ctx.includeDetailedUsage === true ? this.ctx.requestDurationMs?.(message) : undefined;
+    const decodeDurationMs =
+      this.ctx.includeDetailedUsage === true && this.firstTokenMs !== undefined
+        ? Math.max(0, (observedAtMs ?? this.now()) - this.firstTokenMs)
+        : undefined;
+    const usage: TokenUsage = {
+      ...(extractAssistantUsage(message, this.contextWindow) ?? {
+        total_tokens: 0,
+        context_window: this.contextWindow,
+      }),
+      ...(decodeDurationMs !== undefined && Number.isFinite(decodeDurationMs)
+        ? { decode_duration_ms: decodeDurationMs }
+        : {}),
+      ...(typeof requestDurationMs === 'number' &&
+      Number.isFinite(requestDurationMs) &&
+      requestDurationMs > 0
+        ? { request_duration_ms: requestDurationMs }
+        : {}),
+    };
+    return {
+      text,
+      systemErrorContent,
+      thinking,
+      toolCalls,
+      finishReason,
+      thinkingDurationMs,
+      usage,
+    };
+  }
+
+  /**
+   * Re-open an assistant message an earlier run of the same Turn streamed but
+   * never completed (it stopped at a yield while its tool calls waited), so
+   * the resumed tool calls attach to its `msgId` and its completed message is
+   * emitted once, with that id, when the last of them ends. Calls that already
+   * have a result are staged with it; the rest wait for their tool events.
+   */
+  resumeAssistantMessage(input: {
+    readonly msgId: string;
+    readonly assistant: AssistantMessage;
+    readonly toolResults: readonly ToolResultMessage[];
+  }): void {
+    this.beginAssistantMessage();
+    this.activeAssistantMessageId = input.msgId;
+    this.awaitingMessageId = false;
+    const results = new Map(input.toolResults.map((result) => [result.toolCallId, result]));
+    let pending = 0;
+    for (const part of input.assistant.content) {
+      if (part.type !== 'toolCall') continue;
+      const started: RuntimeToolCall = {
+        tool_name: part.name,
+        tool_call_id: part.id,
+        args: part.arguments,
+        status: 'started',
+        ...this.resolveToolCallProvenance({
+          phase: 'start',
+          toolName: part.name,
+          args: part.arguments,
+        }),
+      };
+      const result = results.get(part.id);
+      if (!result) pending += 1;
+      // A settled call gets the snapshot a live tool end builds; its duration was not measured here.
+      const end = result && {
+        toolCallId: part.id,
+        toolName: part.name,
+        result: { content: result.content, details: result.details },
+        isError: result.isError,
+      };
+      this.completedToolCalls.set(part.id, end ? this.endedToolCall(end, started) : started);
+    }
+    this.pendingToolCount = pending;
+    const summary = this.summarizeAssistantMessage(input.assistant, input.assistant.stopReason);
+    this.pendingCompletedMessage = {
+      msgId: input.msgId,
+      text: summary.text,
+      systemErrorContent: summary.systemErrorContent,
+      thinking: summary.thinking,
+      thinkingDurationMs: undefined,
+      finishReason: summary.finishReason,
+      usage: summary.usage,
+      assistant: input.assistant,
+    };
   }
 
   private onToolStart(event: Extract<AgentEvent, { type: 'tool_execution_start' }>): BridgedEvents {
@@ -710,6 +937,8 @@ export class EventBridge {
       };
     }
     const args = event.args;
+    // Before the chunk below sanitizes anything: the host reads the raw arguments from here.
+    this.ctx.toolCallContent?.recordStart(event.toolCallId, args);
     const toolCall: RuntimeToolCall = {
       tool_name: event.toolName,
       tool_call_id: event.toolCallId,
@@ -765,6 +994,81 @@ export class EventBridge {
     };
   }
 
+  /**
+   * Project a tool's partial result into the live tool-call stream. Partial
+   * results are not fed back to the model; they only update the display-side
+   * snapshot until the terminal `tool_execution_end` arrives. This is what
+   * lets a foreground `task` expose its child session id before the child
+   * finishes.
+   */
+  private onToolExecutionUpdate(
+    event: Extract<AgentEvent, { type: 'tool_execution_update' }>,
+  ): BridgedEvents {
+    // Only known dispatch receipts enter the timeline; arbitrary progress stays trace-only.
+    const name = event.toolName.toLowerCase();
+    if (
+      name !== 'task' &&
+      !(name === 'code_review' && isReviewStartedReceipt(event.partialResult))
+    ) {
+      return this.onPiLifecycleTrace(
+        'pi_tool_execution_update',
+        'Pi tool execution partial update',
+        { tool_name: event.toolName, tool_call_id: event.toolCallId },
+      );
+    }
+    const startedSnapshot = this.completedToolCalls.get(event.toolCallId);
+    const parentToolCallId = event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id;
+    const args =
+      startedSnapshot?.args ??
+      (event.args !== undefined && typeof event.args === 'object' && event.args !== null
+        ? (event.args as Record<string, unknown>)
+        : undefined);
+    const toolCall: RuntimeToolCall = {
+      tool_name: event.toolName,
+      tool_call_id: event.toolCallId,
+      ...(parentToolCallId ? { parent_tool_call_id: parentToolCallId } : {}),
+      status: 'started',
+      ...(args ? { args } : {}),
+      ...(event.partialResult !== undefined
+        ? { result: event.partialResult }
+        : startedSnapshot?.result !== undefined
+          ? { result: startedSnapshot.result }
+          : {}),
+      ...(startedSnapshot?.plugin_provenances
+        ? { plugin_provenances: startedSnapshot.plugin_provenances }
+        : {}),
+    };
+    this.completedToolCalls.set(event.toolCallId, toolCall);
+
+    const trace = buildDebugTraceEvent({
+      sessionId: this.ctx.sessionId,
+      turnId: this.ctx.turnId,
+      eventId: this.ctx.eventIdGenerator('pi_tool_execution_update'),
+      phase: 'pi_tool_execution_update',
+      message: 'Pi tool execution partial update',
+      attrs: {
+        tool_name: event.toolName,
+        tool_call_id: event.toolCallId,
+      },
+    });
+    if (!this.activeAssistantMessageId) return { events: [trace] };
+    return {
+      events: [
+        trace,
+        buildToolCallChunk({
+          sessionId: this.ctx.sessionId,
+          turnId: this.ctx.turnId,
+          eventId: this.ctx.eventIdGenerator('coding_tool_update'),
+          runtimeSeq: this.ctx.runtimeSeqGenerator(),
+          msgId: this.activeAssistantMessageId,
+          chunkIndex: this.nextChunkIndex(),
+          toolCall,
+          nowMs: this.now(),
+        }),
+      ],
+    };
+  }
+
   private async onToolEnd(
     event: Extract<AgentEvent, { type: 'tool_execution_end' }>,
   ): Promise<BridgedEvents> {
@@ -807,30 +1111,8 @@ export class EventBridge {
         this.toolStartMs.delete(event.toolCallId);
       }
     }
-    const toolCall: RuntimeToolCall = {
-      tool_name: event.toolName,
-      tool_call_id: event.toolCallId,
-      ...(event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id
-        ? {
-            parent_tool_call_id:
-              event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id,
-          }
-        : {}),
-      ...(startedSnapshot?.args !== undefined ? { args: startedSnapshot.args } : {}),
-      status: event.isError ? 'failed' : 'completed',
-      ...(event.result !== undefined ? { result: event.result } : {}),
-      ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
-      ...this.resolveToolCallProvenance(
-        {
-          phase: 'end',
-          toolName: event.toolName,
-          ...(startedSnapshot?.args !== undefined ? { args: startedSnapshot.args } : {}),
-          ...(event.result !== undefined ? { result: event.result } : {}),
-          isError: event.isError,
-        },
-        startedSnapshot?.plugin_provenances,
-      ),
-    };
+    const toolCall = this.endedToolCall(event, startedSnapshot, durationMs);
+    this.ctx.toolCallContent?.recordEnd(event.toolCallId, event.result);
     const events: BridgedEvents['events'] = [
       ...this.closeUnknownPtcChildren(event),
       buildDebugTraceEvent({
@@ -842,10 +1124,9 @@ export class EventBridge {
         attrs: {
           tool_name: event.toolName,
           tool_call_id: event.toolCallId,
-          ...(event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id
+          ...((event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id)
             ? {
-                parent_tool_call_id:
-                  event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id,
+                parent_tool_call_id: event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id,
               }
             : {}),
           is_error: event.isError,
@@ -889,7 +1170,8 @@ export class EventBridge {
   private closeUnknownPtcChildren(
     event: Extract<AgentEvent, { type: 'tool_execution_end' }>,
   ): BridgedEvents['events'] {
-    if (event.toolName !== 'run_code' || event.parentToolCallId || !this.activeAssistantMessageId) return [];
+    if (event.toolName !== 'run_code' || event.parentToolCallId || !this.activeAssistantMessageId)
+      return [];
     const ptc = readPtcExecutionDetails({
       role: 'toolResult',
       toolName: event.toolName,
@@ -908,12 +1190,17 @@ export class EventBridge {
       ) {
         continue;
       }
-      const text = 'PTC child outcome is unknown after bounded cleanup. The operation may still have side effects; do not replay it automatically.';
+      const text =
+        'PTC child outcome is unknown after bounded cleanup. The operation may still have side effects; do not replay it automatically.';
       const retainedFacts = ptc.retained_facts.filter(
-        (fact) => 'child_tool_call_id' in fact && fact.child_tool_call_id === record.child_tool_call_id,
+        (fact) =>
+          'child_tool_call_id' in fact && fact.child_tool_call_id === record.child_tool_call_id,
       );
       if (!retainedFacts.some((fact) => fact.kind === 'outcome_unknown')) {
-        retainedFacts.push({ kind: 'outcome_unknown', child_tool_call_id: record.child_tool_call_id });
+        retainedFacts.push({
+          kind: 'outcome_unknown',
+          child_tool_call_id: record.child_tool_call_id,
+        });
       }
       const closed: RuntimeToolCall = {
         ...started,
@@ -929,22 +1216,57 @@ export class EventBridge {
           },
         },
       };
+      this.ctx.toolCallContent?.recordEnd(record.child_tool_call_id, closed.result);
       const startedAtMs = this.toolStartMs.get(record.child_tool_call_id);
       if (startedAtMs !== undefined) closed.duration_ms = this.now() - startedAtMs;
       this.toolStartMs.delete(record.child_tool_call_id);
       this.completedToolCalls.set(record.child_tool_call_id, closed);
-      events.push(buildToolCallChunk({
-        sessionId: this.ctx.sessionId,
-        turnId: this.ctx.turnId,
-        eventId: this.ctx.eventIdGenerator('coding_ptc_unknown_child'),
-        runtimeSeq: this.ctx.runtimeSeqGenerator(),
-        msgId: this.activeAssistantMessageId,
-        chunkIndex: this.nextChunkIndex(),
-        toolCall: closed,
-        nowMs: this.now(),
-      }));
+      events.push(
+        buildToolCallChunk({
+          sessionId: this.ctx.sessionId,
+          turnId: this.ctx.turnId,
+          eventId: this.ctx.eventIdGenerator('coding_ptc_unknown_child'),
+          runtimeSeq: this.ctx.runtimeSeqGenerator(),
+          msgId: this.activeAssistantMessageId,
+          chunkIndex: this.nextChunkIndex(),
+          toolCall: closed,
+          nowMs: this.now(),
+        }),
+      );
     }
     return events;
+  }
+
+  /**
+   * The terminal snapshot of a tool call: the started snapshot's parent and
+   * args, the end status and result, and the Plugin provenance resolved at end
+   * (the start's when the end resolves none).
+   */
+  private endedToolCall(
+    end: ToolCallEnd,
+    started: RuntimeToolCall | undefined,
+    durationMs?: number,
+  ): RuntimeToolCall {
+    const parentToolCallId = end.parentToolCallId ?? started?.parent_tool_call_id;
+    return {
+      tool_name: end.toolName,
+      tool_call_id: end.toolCallId,
+      ...(parentToolCallId ? { parent_tool_call_id: parentToolCallId } : {}),
+      ...(started?.args !== undefined ? { args: started.args } : {}),
+      status: end.isError ? 'failed' : 'completed',
+      ...(end.result !== undefined ? { result: end.result } : {}),
+      ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
+      ...this.resolveToolCallProvenance(
+        {
+          phase: 'end',
+          toolName: end.toolName,
+          ...(started?.args !== undefined ? { args: started.args } : {}),
+          ...(end.result !== undefined ? { result: end.result } : {}),
+          isError: end.isError,
+        },
+        started?.plugin_provenances,
+      ),
+    };
   }
 
   private resolveToolCallProvenance(
@@ -988,6 +1310,7 @@ export class EventBridge {
     const pending = this.pendingCompletedMessage;
     if (!pending) return undefined;
     const toolCalls = Array.from(this.completedToolCalls.values());
+    const finishReason = closingFinishReason(pending, toolCalls);
     const event = await buildCompletedAssistantMessage(
       {
         sessionId: this.ctx.sessionId,
@@ -996,12 +1319,13 @@ export class EventBridge {
         runtimeSeq: this.ctx.runtimeSeqGenerator(),
         msgId: pending.msgId,
         text: pending.text,
+        systemErrorContent: pending.systemErrorContent,
         ...(pending.thinking !== undefined ? { thinking: pending.thinking } : {}),
         ...(toolCalls.length ? { toolCalls } : {}),
         ...(pending.thinkingDurationMs !== undefined
           ? { thinkingDurationMs: pending.thinkingDurationMs }
           : {}),
-        ...(pending.finishReason ? { finishReason: pending.finishReason } : {}),
+        ...(finishReason ? { finishReason } : {}),
         usage: pending.usage,
         nowMs: this.now(),
         logger: this.ctx.logger,
@@ -1079,13 +1403,14 @@ export class EventBridge {
   }
 
   /**
-   * Emit the terminal `session.status failed` frame with the supplied human-readable message.
-   * Callers that have already captured an `errorMessage` from a pi assistant message should pass
+   * Emit the terminal `session.status failed` frame with
+   * the supplied human-readable message. Callers that have already
+   * captured an `errorMessage` from a pi assistant message should pass
    * that text in.
    *
-   * When the host has classified the failure (e.g. LLM 401 -> LLM_AUTH_ERROR), pass `error` to
-   * forward the typed runtime status code to the `session.status` wire payload. If the caller omits
-   * `error`, use `{ code: INTERNAL_ERROR, message }` by default.
+   * 当 host 已经分类 failure（例如 LLM 401 -> LLM_AUTH_ERROR）时，传入 `error`，
+   * 让 typed runtime status code 透传到 `session.status` wire payload。调用方省略
+   * `error` 时，默认使用 `{ code: INTERNAL_ERROR, message }`。
    */
   async emitFailed(message: string, error?: RuntimeProtocolError): Promise<BridgedEvents> {
     const text = message || this.lastAssistantErrorMessage || 'Coding agent loop failed.';
@@ -1187,4 +1512,49 @@ function normalizePluginProvenances(
       (left.plugin_version ?? '').localeCompare(right.plugin_version ?? '', 'en-US') ||
       left.capability_name.localeCompare(right.capability_name, 'en-US'),
   );
+}
+
+function isReviewStartedReceipt(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false;
+  const details = (result as { details?: unknown }).details;
+  if (!details || typeof details !== 'object') return false;
+  const executions = (details as { subagent_executions?: unknown }).subagent_executions;
+  return (
+    Array.isArray(executions) &&
+    executions.length > 0 &&
+    executions.every((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      return (
+        entry.status === 'started' &&
+        ['agent_name', 'sub_session_id', 'sub_turn_id'].every(
+          (key) => typeof entry[key] === 'string' && entry[key].trim().length > 0,
+        ) &&
+        ['description', 'agent_display_name'].every(
+          (key) => entry[key] === undefined || typeof entry[key] === 'string',
+        )
+      );
+    })
+  );
+}
+
+/**
+ * A tool batch whose every result ended the Turn on purpose is the Turn's last
+ * model step: pi never asks the model again. Persist that message as `stop`,
+ * so history readers see a normally finished Turn instead of an interrupted
+ * tool step. The finish chunk was already sent at message_end, before any tool
+ * ran, and keeps `toolUse`; the completed message emitted here replaces it.
+ */
+function closingFinishReason(
+  pending: PendingCompletedMessageContext,
+  toolCalls: readonly RuntimeToolCall[],
+): string | undefined {
+  if (pending.finishReason !== 'toolUse') return pending.finishReason;
+  const results = toolCalls.map((call) => ({
+    toolCallId: call.tool_call_id,
+    details:
+      typeof call.result === 'object' && call.result !== null
+        ? (call.result as { details?: unknown }).details
+        : undefined,
+  }));
+  return isTurnClosedByTerminatingTools(pending.assistant, results) ? 'stop' : 'toolUse';
 }

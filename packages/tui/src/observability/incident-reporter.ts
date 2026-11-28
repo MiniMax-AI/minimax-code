@@ -15,6 +15,12 @@ import { basename, dirname, join } from 'node:path';
 import { isTelemetryChannelEnabled, type MavisBuildEnv, type MavisRegion } from '@mavis/config';
 
 export type TuiIncidentPhase = 'startup' | 'runtime' | 'shutdown';
+export const TUI_RUN_STEPS = ['ui', 'runtime', 'listen', 'flush'] as const;
+export type TuiRunStep = (typeof TUI_RUN_STEPS)[number];
+
+export function isTuiRunStep(value: unknown): value is TuiRunStep {
+  return (TUI_RUN_STEPS as readonly unknown[]).includes(value);
+}
 export type TuiIncidentSeverity = 'fatal' | 'error' | 'warning';
 export type TuiIncidentImpact = 'exit' | 'screen_unavailable' | 'action_failed' | 'degraded';
 export type TuiIncidentEventType =
@@ -55,9 +61,25 @@ export interface TuiIncidentReporter extends TuiIncidentSink {
   readonly runId: string;
   readonly hasFatalIncident: boolean;
   setPhase(phase: TuiIncidentPhase): void;
+  setStep(step: TuiRunStep): void;
   drain(): Promise<void>;
   flush(timeoutMs?: number): Promise<void>;
   completeRun(): void;
+}
+
+export type TuiUncleanExitReason = 'likely_oom' | 'system_restart' | 'process_lost';
+
+export interface TuiUncleanRunRecovery {
+  readonly phase: TuiIncidentPhase;
+  readonly appVersion: string;
+  readonly reason: TuiUncleanExitReason;
+  readonly step?: TuiRunStep;
+  readonly labels?: Readonly<Record<string, string>>;
+}
+
+export interface TuiIncidentCaptureSummary {
+  readonly eventType: TuiIncidentEventType;
+  readonly severity: TuiIncidentSeverity;
 }
 
 export interface TuiIncidentAuthContext {
@@ -87,6 +109,9 @@ export interface CreateTuiIncidentReporterOptions {
   readonly terminal?: string;
   readonly tuiMode?: string;
   readonly requestTimeoutMs?: number;
+  readonly onUncleanRunRecovered?: (recovery: TuiUncleanRunRecovery) => void;
+  readonly onCapture?: (summary: TuiIncidentCaptureSummary) => void;
+  readonly runLabels?: Readonly<Record<string, string>>;
 }
 
 interface TuiIncidentBreadcrumb {
@@ -117,7 +142,9 @@ interface TuiRunMarker {
   readonly startedAtMs: number;
   readonly updatedAtMs: number;
   readonly phase: TuiIncidentPhase;
+  readonly step?: TuiRunStep;
   readonly appVersion: string;
+  readonly labels?: Readonly<Record<string, string>>;
 }
 
 interface TuiWireIncident {
@@ -179,6 +206,7 @@ export const noopTuiIncidentReporter: TuiIncidentReporter = Object.freeze({
   capture: () => undefined,
   breadcrumb: () => undefined,
   setPhase: () => undefined,
+  setStep: () => undefined,
   drain: async () => undefined,
   flush: async () => undefined,
   completeRun: () => undefined,
@@ -210,6 +238,7 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
   private drainPromise: Promise<void> | undefined;
   private drainRequested = false;
   private phase: TuiIncidentPhase = 'startup';
+  private step: TuiRunStep | undefined;
   private nonFatalIncidentCount = 0;
   private fatalIncidentCaptured = false;
   private networkDrainStopped = false;
@@ -238,7 +267,14 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
   setPhase(phase: TuiIncidentPhase): void {
     if (this.completed || this.phase === phase) return;
     this.phase = phase;
+    this.step = undefined;
     this.breadcrumb('cli.phase.changed', { phase });
+    this.writeRunMarker();
+  }
+
+  setStep(step: TuiRunStep): void {
+    if (this.completed || this.step === step) return;
+    this.step = step;
     this.writeRunMarker();
   }
 
@@ -266,6 +302,7 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
       const eventType = allowedString(input.eventType, EVENT_TYPES);
       if (!eventType) return undefined;
       const severity = allowedString(input.severity, SEVERITIES) ?? 'error';
+      this.options.onCapture?.({ eventType, severity });
       if (severity !== 'fatal' && this.nonFatalIncidentCount >= MAX_NON_FATAL_INCIDENTS_PER_RUN) {
         return undefined;
       }
@@ -495,7 +532,9 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
       startedAtMs: this.startedAtMs,
       updatedAtMs: Math.floor(this.nowMs()),
       phase: this.phase,
+      ...(this.step ? { step: this.step } : {}),
       appVersion: numericVersion(this.options.appVersion) ?? 'unknown',
+      ...(this.options.runLabels ? { labels: this.options.runLabels } : {}),
     };
     try {
       writeFileSync(this.markerPath, `${JSON.stringify(marker)}\n`, {

@@ -1,5 +1,6 @@
 import { createHash, scryptSync } from 'node:crypto';
 
+import { MANAGED_PROVIDER_API_KEY_PLACEHOLDER } from '../runtime/model-resolver.js';
 import type { RemoteTokenCountContext } from './token-counter-adapters/types.js';
 
 const RETRY_DELAY_MS = 60_000;
@@ -23,8 +24,21 @@ const REQUEST_CONTEXT_HEADERS = new Set([
   'traceparent',
   'tracestate',
 ]);
+const MANAGED_ROTATING_AUTH_HEADERS = new Set(['authorization', 'token']);
+const MANAGED_OAUTH_SCOPE_MARKER = '<managed-oauth>';
 
-interface CounterFailure {
+export interface RemoteTokenCounterFailureScope {
+  /** Exact credential/header fingerprint for 4xx/501 configuration rejections. */
+  readonly credential: string;
+  /**
+   * Normalizes managed-login OAuth bearer headers so periodic JWT refreshes do not
+   * wipe out transient timeout / 5xx backoff on constrained uplinks, while keeping
+   * 401/403 credential rejections scoped to the exact token.
+   */
+  readonly transient: string;
+}
+
+interface CredentialFailure {
   failures: number;
   /** Consecutive 400/422 answers; any other outcome resets it. */
   requestRejections: number;
@@ -32,65 +46,112 @@ interface CounterFailure {
   disabledReason?: string;
 }
 
+interface TransientFailure {
+  failures: number;
+  retryAfterMs: number;
+}
+
 /** Failure state belongs to the configured counter, independent of tool schemas. */
 export class RemoteTokenCounterFailures {
-  private readonly states = new Map<string, CounterFailure>();
+  private readonly credentialStates = new Map<string, CredentialFailure>();
+  private readonly transientStates = new Map<string, TransientFailure>();
 
   constructor(private readonly nowMs: () => number = Date.now) {}
 
-  scope(ctx: RemoteTokenCountContext, adapterId: string, counterUrl = ctx.model.baseUrl): string {
-    // Hash credentials instead of retaining them in cache keys or logs. Model,
-    // endpoint and credential edits get a fresh probe without restarting Runtime.
-    return createHash('sha256')
-      .update(
-        JSON.stringify({
-          adapterId,
-          api: ctx.model.api,
-          provider: ctx.model.provider,
-          model: ctx.model.id,
-          counterUrl,
-          credential: credentialFingerprint(ctx.apiKey),
-          headers: Object.entries(ctx.headers ?? {})
-            .map(([key, value]): [string, string] => [key.toLowerCase(), value])
-            .filter(([key]) => !REQUEST_CONTEXT_HEADERS.has(key))
-            .sort(([left], [right]) => left.localeCompare(right)),
-        }),
-      )
-      .digest('hex');
+  scope(
+    ctx: RemoteTokenCountContext,
+    adapterId: string,
+    counterUrl = ctx.model.baseUrl,
+  ): RemoteTokenCounterFailureScope {
+    const normalizedHeaders = Object.entries(ctx.headers ?? {})
+      .map(([key, value]): [string, string] => [key.toLowerCase(), value])
+      .filter(([key]) => !REQUEST_CONTEXT_HEADERS.has(key))
+      .sort(([left], [right]) => left.localeCompare(right));
+    const credential = hashScope({
+      adapterId,
+      api: ctx.model.api,
+      provider: ctx.model.provider,
+      model: ctx.model.id,
+      counterUrl,
+      credential: credentialFingerprint(ctx.apiKey),
+      headers: fingerprintHeaders(normalizedHeaders),
+    });
+    const isManagedOAuth =
+      ctx.apiKey === MANAGED_PROVIDER_API_KEY_PLACEHOLDER &&
+      normalizedHeaders.some(([key]) => MANAGED_ROTATING_AUTH_HEADERS.has(key));
+    if (!isManagedOAuth) {
+      return { credential, transient: credential };
+    }
+    const transient = hashScope({
+      adapterId,
+      api: ctx.model.api,
+      provider: ctx.model.provider,
+      model: ctx.model.id,
+      counterUrl,
+      credential: credentialFingerprint(ctx.apiKey),
+      headers: fingerprintHeaders(
+        normalizedHeaders.map(([key, value]): [string, string] =>
+          MANAGED_ROTATING_AUTH_HEADERS.has(key) ? [key, MANAGED_OAUTH_SCOPE_MARKER] : [key, value],
+        ),
+      ),
+    });
+    return { credential, transient };
   }
 
-  fallbackReason(scope: string): string | undefined {
-    const state = this.states.get(scope);
-    if (!state) return undefined;
-    if (state.disabledReason) return state.disabledReason;
-    return this.nowMs() < state.retryAfterMs ? 'counter_cooldown' : undefined;
+  fallbackReason(scope: RemoteTokenCounterFailureScope): string | undefined {
+    const credentialState = this.credentialStates.get(scope.credential);
+    if (credentialState?.disabledReason) return credentialState.disabledReason;
+    const now = this.nowMs();
+    if (credentialState && now < credentialState.retryAfterMs) return 'counter_cooldown';
+    const transientState = this.transientStates.get(scope.transient);
+    return transientState && now < transientState.retryAfterMs ? 'counter_cooldown' : undefined;
   }
 
-  succeeded(scope: string): void {
+  succeeded(scope: RemoteTokenCounterFailureScope): void {
     // An older in-flight success must not reopen an explicitly rejected route.
-    if (!this.states.get(scope)?.disabledReason) this.states.delete(scope);
+    if (this.credentialStates.get(scope.credential)?.disabledReason) return;
+    this.credentialStates.delete(scope.credential);
+    this.transientStates.delete(scope.transient);
   }
 
-  failed(scope: string, status?: number, retryAfter?: string | null): void {
-    const previous = this.states.get(scope);
-    if (previous?.disabledReason) return;
-    const failures = (previous?.failures ?? 0) + 1;
+  failed(scope: RemoteTokenCounterFailureScope, status?: number, retryAfter?: string | null): void {
+    const previousCredential = this.credentialStates.get(scope.credential);
+    if (previousCredential?.disabledReason) return;
     const requestRejections =
       status !== undefined && REQUEST_REJECTED_STATUSES.has(status)
-        ? (previous?.requestRejections ?? 0) + 1
+        ? (previousCredential?.requestRejections ?? 0) + 1
         : 0;
     const disabledReason = rejectionReason(status, requestRejections);
     const now = this.nowMs();
+    if (disabledReason || requestRejections > 0) {
+      const failures = (previousCredential?.failures ?? 0) + 1;
+      const backoffMs = Math.min(RETRY_DELAY_MS * 2 ** (failures - 1), MAX_RETRY_DELAY_MS);
+      this.credentialStates.set(scope.credential, {
+        failures,
+        requestRejections,
+        retryAfterMs: now + Math.max(backoffMs, retryDelay(retryAfter, now)),
+        ...(disabledReason ? { disabledReason } : {}),
+      });
+      return;
+    }
+    // Non-400/422 outcomes reset consecutive validation-rejection counts.
+    this.credentialStates.delete(scope.credential);
     // Transient failures never stop a configuration: a supported endpoint must
     // recover after an outage, so the delay is bounded instead.
+    const previousTransient = this.transientStates.get(scope.transient);
+    const failures = (previousTransient?.failures ?? 0) + 1;
     const backoffMs = Math.min(RETRY_DELAY_MS * 2 ** (failures - 1), MAX_RETRY_DELAY_MS);
-    this.states.set(scope, {
+    this.transientStates.set(scope.transient, {
       failures,
-      requestRejections,
       retryAfterMs: now + Math.max(backoffMs, retryDelay(retryAfter, now)),
-      ...(disabledReason ? { disabledReason } : {}),
     });
   }
+}
+
+function hashScope(payload: Record<string, unknown>): string {
+  // Hash credentials instead of retaining them in cache keys or logs. Model,
+  // endpoint and credential edits get a fresh probe without restarting Runtime.
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
 function rejectionReason(
@@ -112,12 +173,17 @@ function retryDelay(value: string | null | undefined, now: number): number {
   return Number.isFinite(delay) ? Math.max(0, delay) : 0;
 }
 
-/**
- * Credential fingerprint for the scope key: a password-grade KDF (cheap cost
- * parameters, about a millisecond) so the key never carries a fast hash of the
- * secret, and the secret itself is not retained.
- */
-function credentialFingerprint(apiKey: string | undefined): string {
-  if (!apiKey) return '';
-  return scryptSync(apiKey, 'mcode-remote-token-counter', 16, { N: 1024 }).toString('hex');
+const SENSITIVE_AUTH_HEADERS = new Set(['authorization', 'token', 'x-api-key', 'x-goog-api-key', 'proxy-authorization']);
+
+function credentialFingerprint(secret: string | undefined): string {
+  if (!secret) return '';
+  return scryptSync(secret, 'mcode-remote-token-counter', 16, { N: 1024 }).toString('hex');
+}
+
+function fingerprintHeaders(headers: ReadonlyArray<readonly [string, string]>): Array<[string, string]> {
+  return headers.map(([key, value]): [string, string] =>
+    SENSITIVE_AUTH_HEADERS.has(key) && value !== MANAGED_OAUTH_SCOPE_MARKER
+      ? [key, credentialFingerprint(value)]
+      : [key, value],
+  );
 }

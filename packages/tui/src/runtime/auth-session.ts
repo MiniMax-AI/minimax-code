@@ -29,7 +29,10 @@ export function createMcodeSharedAuthSession(
     region: options.region,
   });
   const oauthClient = options.oauthClient ?? createHttpOAuthClient(options.oauthEndpoints);
-  const credentialStore = createCredentialStore({ authHome: namespace.namespaceHome });
+  const credentialStore = createCredentialStore({
+    authHome: namespace.namespaceHome,
+    root: namespace.authHome,
+  });
   return new MCodeOAuthCore({
     namespace,
     oauthClient,

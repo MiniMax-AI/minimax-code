@@ -22,15 +22,22 @@ const DEFAULT_DOWNLOAD_TIMEOUT_MS = 120_000;
 interface PluginSystemCloudAuthContext {
   readonly accessToken?: string;
   readonly realUserID?: string;
+  readonly loginEpoch?: string;
 }
 
 export interface PluginSystemCloudTransportOptions {
   readonly baseUrl: string;
   readonly fetchImpl: typeof fetch;
   readonly authContextGetter: () => PluginSystemCloudAuthContext | undefined;
+  readonly authContextInvalidator?: (
+    rejectedAccessToken?: string,
+    loginEpoch?: string,
+  ) => void | Promise<void>;
   readonly appVersion?: string;
   readonly previewSecret?: string;
   readonly lane?: string;
+  /** Read on every request; wins over `lane`. Lets a lane switch apply without a restart. */
+  readonly laneGetter?: () => string | undefined;
   readonly nowMs?: () => number;
   readonly timeoutMs?: number;
   readonly downloadTimeoutMs?: number;
@@ -54,6 +61,8 @@ export class PluginSystemCloudTransportError extends Error {
     readonly code: string,
     message: string,
     readonly status?: number,
+    /** archon_biz `base_resp` rejection detail, present only for `BUSINESS_ERROR`. */
+    readonly business?: { readonly statusCode: number; readonly statusMessage?: string },
   ) {
     super(message);
     this.name = 'PluginSystemCloudTransportError';
@@ -79,46 +88,63 @@ export class PluginSystemCloudTransport {
     this.downloadTimeoutMs = options.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
   }
 
+  private currentLane(): string | undefined {
+    return this.options.laneGetter ? this.options.laneGetter() : this.options.lane;
+  }
+
+  private appVersionOf(): string | undefined {
+    return this.options.appVersion;
+  }
+
   async request(request: PluginSystemCloudRequest): Promise<unknown> {
-    const auth = readAuth(
-      resolveAuthContext(request, this.options.authContextGetter),
-      request.auth,
-    );
-    const now = this.nowMs();
-    const route = buildRoute(request.path, request.query);
-    const publicParams = buildPublicParams({
-      now,
-      appVersion: this.options.appVersion,
-      userId: auth?.realUserID,
-    });
-    const signedPath = appendQuery(route, publicParams);
-    const body =
-      request.method === 'POST'
-        ? {
-            ...(request.body ?? {}),
-            ...(auth ? { common_param: { user_id: auth.realUserID } } : {}),
-          }
-        : undefined;
-    const bodyText = body ? JSON.stringify(body) : '';
-    const signal = composeSignal(request.signal, request.timeoutMs ?? this.timeoutMs);
-    let response: Response;
-    try {
+    const rawAuthContext = resolveAuthContext(request, this.options.authContextGetter);
+    const loginEpoch = rawAuthContext?.loginEpoch;
+    const auth = readAuth(rawAuthContext, request.auth);
+    const dispatchOnce = async (
+      currentAuth: ReturnType<typeof readAuth>,
+      notifyDispatch: boolean,
+    ) => {
+      const now = this.nowMs();
+      const route = buildRoute(request.path, request.query);
+      const publicParams = buildPublicParams({
+        now,
+        appVersion: this.appVersionOf(),
+        userId: currentAuth?.realUserID,
+      });
+      const signedPath = appendQuery(route, publicParams);
+      const body =
+        request.method === 'POST'
+          ? {
+              ...(request.body ?? {}),
+              ...(currentAuth ? { common_param: { user_id: currentAuth.realUserID } } : {}),
+            }
+          : undefined;
+      const bodyText = body ? JSON.stringify(body) : '';
+      const signal = composeSignal(request.signal, request.timeoutMs ?? this.timeoutMs);
       const responsePromise = this.options.fetchImpl(joinUrl(this.options.baseUrl, signedPath), {
         method: request.method,
         headers: buildHeaders({
-          auth,
+          auth: currentAuth,
           body,
           bodyText,
           now,
           signedPath,
           previewSecret: this.options.previewSecret,
-          lane: this.options.lane,
+          lane: this.currentLane(),
         }),
         ...(bodyText ? { body: bodyText } : {}),
         signal,
       });
-      request.onDispatch?.();
-      response = await responsePromise;
+      if (notifyDispatch) request.onDispatch?.();
+      return responsePromise;
+    };
+    let response: Response;
+    try {
+      response = await dispatchOnce(auth, true);
+      if (response.status === 401) {
+        const refreshedAuth = await this.refreshAuth(request, auth, loginEpoch);
+        if (refreshedAuth) response = await dispatchOnce(refreshedAuth, false);
+      }
     } catch (error) {
       throw transportFailure(error);
     }
@@ -142,25 +168,59 @@ export class PluginSystemCloudTransport {
     return payload;
   }
 
-  async downloadToFile(url: string, targetPath: string, signal?: AbortSignal): Promise<void> {
+  private async refreshAuth(
+    request: PluginSystemCloudRequest,
+    previousAuth: ReturnType<typeof readAuth>,
+    loginEpoch: string | undefined,
+  ): Promise<ReturnType<typeof readAuth>> {
+    if (
+      request.authContext !== undefined ||
+      !previousAuth?.accessToken ||
+      !this.options.authContextInvalidator ||
+      this.options.authContextGetter()?.loginEpoch !== loginEpoch
+    ) {
+      return undefined;
+    }
+
+    await this.options.authContextInvalidator(previousAuth.accessToken, loginEpoch);
+    const currentContext = this.options.authContextGetter();
+    if (currentContext?.loginEpoch !== loginEpoch) return undefined;
+    const currentAuth = readAuth(currentContext, request.auth);
+    return currentAuth?.accessToken === previousAuth.accessToken ? undefined : currentAuth;
+  }
+
+  /**
+   * Streams a download into a new file. `maxBytes` bounds it and defaults to the package contract
+   * archive limit; a caller whose archives may be larger passes its own bound.
+   */
+  async downloadToFile(
+    url: string,
+    targetPath: string,
+    signal?: AbortSignal,
+    maxBytes: number = PLUGIN_PACKAGE_V1_LIMITS.maxArchiveBytes,
+  ): Promise<void> {
     const parsed = parseDownloadUrl(url);
-    let response: Response;
+    const deadline = new DownloadDeadline(this.downloadTimeoutMs, signal);
     try {
-      response = await this.options.fetchImpl(parsed, {
-        method: 'GET',
-        signal: composeSignal(signal, this.downloadTimeoutMs),
-      });
-    } catch (error) {
-      throw transportFailure(error);
+      let response: Response;
+      try {
+        response = await this.options.fetchImpl(parsed, { method: 'GET', signal: deadline.signal });
+      } catch (error) {
+        throw transportFailure(error);
+      }
+      if (!response.ok || !response.body) {
+        throw new PluginSystemCloudTransportError(
+          'DOWNLOAD_HTTP_ERROR',
+          `Plugin package download failed with HTTP ${response.status}`,
+          response.status,
+        );
+      }
+      const announced = Number(response.headers.get('content-length'));
+      deadline.allowFor(Number.isFinite(announced) && announced > 0 ? announced : maxBytes);
+      await writeBoundedBody(response, targetPath, maxBytes);
+    } finally {
+      deadline.clear();
     }
-    if (!response.ok || !response.body) {
-      throw new PluginSystemCloudTransportError(
-        'DOWNLOAD_HTTP_ERROR',
-        `Plugin package download failed with HTTP ${response.status}`,
-        response.status,
-      );
-    }
-    await writeBoundedBody(response, targetPath);
   }
 }
 
@@ -293,6 +353,50 @@ function parseDownloadUrl(value: string): string {
   return parsed.toString();
 }
 
+/**
+ * How long one download may take. It starts as the transport's download timeout, which is the
+ * budget for an archive within the package contract limit. Once the response tells that more
+ * bytes are coming (its announced size, or the caller's bound when it announces none), the budget
+ * grows in proportion: a larger archive is held to the same minimum transfer rate, not to the
+ * same time. A download within the contract limit keeps exactly the timeout it always had.
+ */
+class DownloadDeadline {
+  readonly signal: AbortSignal;
+  private readonly controller = new AbortController();
+  private readonly startedAtMs = Date.now();
+  private timer: ReturnType<typeof setTimeout>;
+
+  constructor(
+    private readonly timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ) {
+    this.timer = this.arm(timeoutMs);
+    this.signal = signal
+      ? AbortSignal.any([signal, this.controller.signal])
+      : this.controller.signal;
+  }
+
+  allowFor(expectedBytes: number): void {
+    const scale = expectedBytes / PLUGIN_PACKAGE_V1_LIMITS.maxArchiveBytes;
+    if (!(scale > 1)) return;
+    clearTimeout(this.timer);
+    this.timer = this.arm(Math.ceil(this.timeoutMs * scale) - (Date.now() - this.startedAtMs));
+  }
+
+  clear(): void {
+    clearTimeout(this.timer);
+  }
+
+  private arm(delayMs: number): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(
+      () => this.controller.abort(new DOMException('The download timed out', 'TimeoutError')),
+      Math.max(0, delayMs),
+    );
+    timer.unref?.();
+    return timer;
+  }
+}
+
 function composeSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
   const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -309,16 +413,26 @@ function assertBusinessSuccess(payload: unknown): void {
   if (!base) return;
   const status = readNumber(base, 'status_code', 'statusCode');
   if (status !== undefined && status !== 0) {
+    const statusMessage = base.status_message ?? base.statusMessage;
     throw new PluginSystemCloudTransportError(
       'BUSINESS_ERROR',
       'Plugin System Cloud request was rejected',
+      undefined,
+      {
+        statusCode: status,
+        ...(typeof statusMessage === 'string' ? { statusMessage } : {}),
+      },
     );
   }
 }
 
-async function writeBoundedBody(response: Response, targetPath: string): Promise<void> {
+async function writeBoundedBody(
+  response: Response,
+  targetPath: string,
+  maxBytes: number,
+): Promise<void> {
   const contentLength = Number(response.headers.get('content-length'));
-  if (Number.isFinite(contentLength) && contentLength > PLUGIN_PACKAGE_V1_LIMITS.maxArchiveBytes) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw new PluginSystemCloudTransportError(
       'DOWNLOAD_TOO_LARGE',
       'Plugin package exceeds the byte limit',
@@ -338,7 +452,7 @@ async function writeBoundedBody(response: Response, targetPath: string): Promise
         continue;
       }
       total += result.value.byteLength;
-      if (total > PLUGIN_PACKAGE_V1_LIMITS.maxArchiveBytes) {
+      if (total > maxBytes) {
         await reader.cancel();
         throw new PluginSystemCloudTransportError(
           'DOWNLOAD_TOO_LARGE',

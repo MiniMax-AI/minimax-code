@@ -30,7 +30,11 @@ const CUSTOM_FORMATS: readonly {
   },
   { value: 'openai-responses', label: 'OpenAI Responses', description: '/responses' },
   { value: 'anthropic-messages', label: 'Anthropic Messages', description: '/v1/messages' },
-  { value: 'google-generative-ai', label: 'Google Generative AI', description: '/models' },
+  {
+    value: 'google-generative-ai',
+    label: 'Google Gemini',
+    description: '/models/{id}:streamGenerateContent',
+  },
 ];
 
 type OnboardingMode =
@@ -153,7 +157,7 @@ export class TuiProviderOnboarding implements Component, Focusable {
     const safeWidth = Math.max(0, width);
     if (!safeWidth) return [];
     const lines = [
-      chalk.bold.hex(colors.signal)('Add 3rd-party provider'),
+      chalk.bold.hex(colors.signal)('Add provider'),
       chalk.hex(colors.muted)(this.subtitle()),
       ...(this.mode === 'provider' && this.options.catalogWarning
         ? [chalk.hex(colors.warning)(sanitizeTerminalText(this.options.catalogWarning))]

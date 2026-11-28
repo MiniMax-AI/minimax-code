@@ -77,3 +77,23 @@ test('the built PTC QuickJS worker runs a program with a tool call', { timeout: 
   assert.equal(result.type, 'completed', JSON.stringify(result.error));
   assert.equal(result.valueJson, '42');
 });
+
+test('the built Browser program QuickJS worker runs a program and exits cleanly', { timeout: 15000 }, async (t) => {
+  const { Worker } = await import('node:worker_threads');
+  const worker = new Worker(new URL('../dist/browser-program-worker.js', import.meta.url));
+  t.after(() => worker.terminate());
+  const result = await new Promise((resolve, reject) => {
+    worker.once('error', reject);
+    worker.on('message', (message) => {
+      if (message.type === 'done') resolve(message);
+    });
+    worker.postMessage({
+      type: 'start',
+      code: 'return 6 * 7;',
+      maxHeapBytes: 32 * 1024 * 1024,
+      deadlineAt: Date.now() + 5000,
+    });
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.valueJson, '42');
+});

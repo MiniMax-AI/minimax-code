@@ -1,7 +1,8 @@
 /**
- * matrix_batch_text_to_video — Pattern C batch (parallel lists): The server generates videos for N
- * prompts (up to 1200s each), returning separate success_items/failed_items. Map `slot_<i>.mp4`
- * placeholders echoed in `output_file` back to the LLM's `output_file_path_list[i]`.
+ * matrix_batch_text_to_video —— Pattern C 批量(parallel lists):服务端按 N
+ * 个 prompt 生成视频(每个最长 1200s),响应 success_items/failed_items 分列。
+ * 本工具用 `slot_<i>.mp4` 占位符跟响应里回显的 `output_file` 反查 LLM 给的
+ * `output_file_path_list[i]`。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

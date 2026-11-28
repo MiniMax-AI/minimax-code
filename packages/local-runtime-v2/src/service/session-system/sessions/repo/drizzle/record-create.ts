@@ -10,6 +10,7 @@ export function recordFromCreate(input: SessionCreateInput, nowMs: number): Sess
     ...recordModelFields(input),
     ...recordProvenanceFields(input, nowMs),
     ...(input.toolCallMode ? { toolCallMode: input.toolCallMode } : {}),
+    ...(input.advisor ? { advisor: input.advisor } : {}),
   };
 }
 

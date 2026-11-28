@@ -23,6 +23,7 @@ import { getPermissionCheckApiUrl } from './classifier/cloud-classify-client.js'
 import { logger, backgroundCtx, getPermissionManagedAuthToken } from './host-utils.js';
 import type {
   CloudGatewayClient,
+  CloudClassifyFailureReason,
   CloudClassifyRequest,
   CloudClassifyVerdict,
 } from './cloud-gateway.js';
@@ -57,7 +58,7 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
     const startedAtMs = Date.now();
     const url = this.endpointOverride ?? this.resolveUrl();
     if (!url) {
-      return fallbackTimeout('cloud gateway URL not configured');
+      return fallbackTimeout('cloud gateway URL not configured', 'no_url');
     }
 
     const body = {
@@ -93,7 +94,11 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
           backgroundCtx(),
           `[cloud-gateway-v2] non-2xx: status=${resp.status} body=${respText.slice(0, 200)}`,
         );
-        return fallbackTimeout(`permission/check returned ${resp.status}`, durationMs);
+        return fallbackTimeout(
+          `permission/check returned ${resp.status}`,
+          httpFailureReason(resp.status),
+          durationMs,
+        );
       }
 
       let data: {
@@ -106,7 +111,7 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
         data = JSON.parse(respText) as typeof data;
       } catch {
         logger.warn(backgroundCtx(), `[cloud-gateway-v2] non-JSON body=${respText.slice(0, 200)}`);
-        return fallbackTimeout('permission/check returned non-JSON', durationMs);
+        return fallbackTimeout('permission/check returned non-JSON', 'non_json', durationMs);
       }
 
       const statusCode = data.base_resp?.status_code;
@@ -116,7 +121,7 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
             ? data.base_resp.status_msg
             : `status_code=${statusCode}`;
         logger.warn(backgroundCtx(), `[cloud-gateway-v2] biz error: ${msg}`);
-        return fallbackTimeout(`permission/check biz error: ${msg}`, durationMs);
+        return fallbackTimeout(`permission/check biz error: ${msg}`, 'biz_error', durationMs);
       }
 
       const verdict = data.verdict;
@@ -125,7 +130,11 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
           backgroundCtx(),
           `[cloud-gateway-v2] invalid verdict=${String(verdict)} body=${respText.slice(0, 200)}`,
         );
-        return fallbackTimeout('permission/check returned invalid verdict', durationMs);
+        return fallbackTimeout(
+          'permission/check returned invalid verdict',
+          'invalid_verdict',
+          durationMs,
+        );
       }
 
       const reason =
@@ -148,7 +157,7 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
         ? `timed out after ${this.timeoutMs}ms`
         : `network error: ${err instanceof Error ? err.message : String(err)}`;
       logger.warn(backgroundCtx(), `[cloud-gateway-v2] call failed: ${String(err)}`);
-      return fallbackTimeout(reason, durationMs);
+      return fallbackTimeout(reason, isAbort ? 'timeout' : 'network', durationMs);
     }
   }
 
@@ -162,10 +171,21 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
   }
 }
 
-function fallbackTimeout(reason: string, durationMs?: number): CloudClassifyVerdict {
+function httpFailureReason(status: number): CloudClassifyFailureReason {
+  if (status === 401) return 'http_401';
+  if (status === 403) return 'http_403';
+  return status >= 500 ? 'http_5xx' : 'http_4xx';
+}
+
+function fallbackTimeout(
+  reason: string,
+  failureReason: CloudClassifyFailureReason,
+  durationMs?: number,
+): CloudClassifyVerdict {
   return {
     kind: 'timeout',
     reasonLocalized: reason,
+    failureReason,
     model: 'cloud:unavailable',
     ...(durationMs !== undefined ? { durationMs } : {}),
   };

@@ -1,3 +1,6 @@
+import { logger } from '@mavis/shared/local-runtime-logging';
+
+import { describeFetchFailure } from './fetch-failure.js';
 import { buildModelDiscoveryHeaders, providerModelsUrls } from './provider-request.js';
 import type {
   DiscoveredModel,
@@ -13,13 +16,24 @@ export type {
   ModelDiscoveryTarget,
 } from '../contracts.js';
 
-// If all candidates are missing, report only that the provider has no model-list endpoint; status codes do not help users decide.
-// Product copy therefore suggests adding models manually.
+// 候选全部缺失时对外只表达“该提供商没有模型列表接口”，状态码对用户没有判断价值；
+// 产品文案据此提示手动添加模型。
 const MISSING_MODELS_ENDPOINT: ModelDiscoveryResult = {
   ok: false,
   errorCode: 'models_endpoint_missing',
   errorMessage: 'Model list endpoint not found',
 };
+
+const INVALID_DISCOVERY_RESPONSE: ModelDiscoveryResult = {
+  ok: false,
+  errorCode: 'invalid_response',
+  errorMessage: 'Invalid model discovery response',
+};
+
+/** Bounds `nextPageToken` pagination against a gateway that never stops paging. */
+const GEMINI_MAX_MODEL_PAGES = 20;
+
+type DiscoveryPage = { ok: true; payload: unknown } | Extract<ModelDiscoveryResult, { ok: false }>;
 
 export class ModelDiscoveryClient implements ModelDiscoveryClientLike {
   constructor(
@@ -27,8 +41,8 @@ export class ModelDiscoveryClient implements ModelDiscoveryClientLike {
     private readonly timeoutMs = 10_000,
   ) {}
 
-  // A native endpoint's 404/405 means the gateway lacks that list endpoint; continue with OpenAI-style candidates.
-  // Return authentication, rate-limit, and server errors immediately so real failures are not disguised as missing endpoints.
+  // 原生端点返回 404/405 说明该网关没有这个列表接口，继续尝试 OpenAI 风格候选；
+  // 鉴权、限流和服务端错误立即返回，避免把真实故障伪装成端点缺失。
   async discover(target: ModelDiscoveryTarget): Promise<ModelDiscoveryResult> {
     const [primaryUrl, ...fallbackUrls] = providerModelsUrls(target.api, target.baseUrl);
     const primary = await this.discoverAt(primaryUrl, target);
@@ -44,6 +58,42 @@ export class ModelDiscoveryClient implements ModelDiscoveryClientLike {
     url: string,
     target: ModelDiscoveryTarget,
   ): Promise<ModelDiscoveryResult> {
+    const page = await this.fetchPage(url, target);
+    if (!page.ok) return page;
+    if (target.api === 'google-generative-ai') {
+      // Compatible gateways often expose only an OpenAI-shaped `{ data: [...] }`
+      // list under `/v1/models`; accept it instead of treating missing `models` as empty.
+      if (!hasOwnGeminiModelsField(page.payload)) {
+        const openAiModels = readModels(page.payload);
+        if (openAiModels) return { ok: true, models: openAiModels };
+      }
+      return this.collectGeminiPages(url, target, page.payload);
+    }
+    const models = readModels(page.payload);
+    return models ? { ok: true, models } : INVALID_DISCOVERY_RESPONSE;
+  }
+
+  private async collectGeminiPages(
+    url: string,
+    target: ModelDiscoveryTarget,
+    firstPayload: unknown,
+  ): Promise<ModelDiscoveryResult> {
+    const models: DiscoveredModel[] = [];
+    let payload = firstPayload;
+    for (let pageCount = 1; ; pageCount += 1) {
+      const page = readGeminiModelsPage(payload);
+      if (!page) return INVALID_DISCOVERY_RESPONSE;
+      models.push(...page.models);
+      if (!page.nextPageToken || pageCount >= GEMINI_MAX_MODEL_PAGES) return { ok: true, models };
+      const nextUrl = new URL(url);
+      nextUrl.searchParams.set('pageToken', page.nextPageToken);
+      const next = await this.fetchPage(nextUrl.toString(), target);
+      if (!next.ok) return next;
+      payload = next.payload;
+    }
+  }
+
+  private async fetchPage(url: string, target: ModelDiscoveryTarget): Promise<DiscoveryPage> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -66,16 +116,7 @@ export class ModelDiscoveryClient implements ModelDiscoveryClientLike {
           errorMessage: `HTTP ${response.status}`,
         };
       }
-      const payload = await readJson(response);
-      const models = readModels(payload);
-      if (!models) {
-        return {
-          ok: false,
-          errorCode: 'invalid_response',
-          errorMessage: 'Invalid model discovery response',
-        };
-      }
-      return { ok: true, models };
+      return { ok: true, payload: await readJson(response) };
     } catch (error) {
       if (isAbortError(error)) {
         return {
@@ -84,6 +125,14 @@ export class ModelDiscoveryClient implements ModelDiscoveryClientLike {
           errorMessage: `Request timed out after ${this.timeoutMs}ms`,
         };
       }
+      logger.warn(
+        {
+          event: 'model_provider_request_failed',
+          op: 'discover',
+          ...describeFetchFailure(error, url),
+        },
+        'Model provider request failed',
+      );
       return { ok: false, errorCode: 'network', errorMessage: 'Network error' };
     } finally {
       clearTimeout(timer);
@@ -121,6 +170,51 @@ function readModels(payload: unknown): DiscoveredModel[] | undefined {
     ];
   });
   return models;
+}
+
+/**
+ * Gemini `models.list`: `{models: [{name: "models/<id>", displayName,
+ * supportedGenerationMethods}], nextPageToken}`. Embedding and other
+ * non-chat models do not support `generateContent` and are skipped.
+ */
+function hasOwnGeminiModelsField(payload: unknown): boolean {
+  return Boolean(
+    payload &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    Object.hasOwn(payload, 'models'),
+  );
+}
+
+function readGeminiModelsPage(
+  payload: unknown,
+): { models: DiscoveredModel[]; nextPageToken?: string } | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const { models, nextPageToken } = payload as { models?: unknown; nextPageToken?: unknown };
+  // An account without models returns `{}`.
+  if (models !== undefined && !Array.isArray(models)) return undefined;
+  return {
+    models: (models ?? []).flatMap((item: unknown): DiscoveredModel[] => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const record = item as {
+        name?: unknown;
+        displayName?: unknown;
+        supportedGenerationMethods?: unknown;
+      };
+      if (typeof record.name !== 'string') return [];
+      const modelId = record.name.replace(/^models\//u, '').trim();
+      if (!modelId) return [];
+      const methods = record.supportedGenerationMethods;
+      if (Array.isArray(methods) && !methods.includes('generateContent')) return [];
+      return [
+        {
+          modelId,
+          ...(typeof record.displayName === 'string' ? { displayName: record.displayName } : {}),
+        },
+      ];
+    }),
+    ...(typeof nextPageToken === 'string' && nextPageToken ? { nextPageToken } : {}),
+  };
 }
 
 function readDisplayName(record: { name?: unknown; display_name?: unknown }): string | undefined {

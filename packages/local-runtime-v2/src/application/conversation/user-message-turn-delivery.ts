@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import {
   UserMessageCommitAdmissionError,
   UserMessageCommitConflictError,
+  isDeterministicUserMessageCommitRejection,
   retryUserMessageCommit,
   writeQueryCollapseView,
   type CommittedUserMessage,
@@ -172,7 +173,11 @@ async function executeDelivery(
     start.release();
     return result;
   } catch (error) {
-    if (accepted && input.propagateDeliveryFailure) {
+    if (
+      accepted &&
+      input.propagateDeliveryFailure &&
+      !isDeterministicUserMessageCommitRejection(error)
+    ) {
       start.fail(error);
       throw error;
     }

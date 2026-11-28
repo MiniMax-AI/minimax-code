@@ -1,4 +1,4 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
@@ -20,7 +20,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
-import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import { withFileMutationQueue, type RealpathFn } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { renderToolPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -83,6 +83,8 @@ export interface EditOperations {
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
 	/** Check if file is readable and writable (throw if not) */
 	access: (absolutePath: string) => Promise<void>;
+	/** Resolve an absolute path to its canonical form for queue selection. Defaults to `node:fs/promises.realpath`. */
+	realpath?: RealpathFn;
 }
 
 const defaultEditOperations: EditOperations = {
@@ -314,7 +316,7 @@ export function createEditToolDefinition(
 			const { path, edits } = validateEditInput(input);
 			const absolutePath = resolveToCwd(path, cwd);
 
-			return withFileMutationQueue(absolutePath, async () => {
+			const mutate = async (): Promise<AgentToolResult<EditToolDetails>> => {
 				// Do not reject from an abort event listener here: that would release the
 				// mutation queue while an in-flight filesystem operation may still finish.
 				// Checking signal.aborted after each await observes the same aborts while
@@ -377,7 +379,8 @@ export function createEditToolDefinition(
 						patchOmitted,
 					},
 				};
-			});
+			};
+			return withFileMutationQueue(absolutePath, mutate, ops.realpath?.bind(ops));
 		},
 		renderCall(args, theme, context) {
 			const component = getEditCallRenderComponent(context.state, context.lastComponent);

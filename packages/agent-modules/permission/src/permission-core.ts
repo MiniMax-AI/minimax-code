@@ -1,6 +1,5 @@
 import { matchesMcpServerRuntimeName } from './mcp-runtime-name.js';
 import {
-  getContentRulesForTool,
   hasWholeToolRule,
   isBypassMode,
   isInteractiveTool,
@@ -14,12 +13,16 @@ import type {
   PermissionRule,
   ToolCheckResult,
 } from './types.js';
+import { extractToolInputContent, matchesContentAskRule } from './content-ask-rule.js';
+import { decideMcpAllow, findMcpSubjectRule, type McpToolRuleSubject } from './mcp-rule-subject.js';
 
 export type PermissionPolicyOwner = 'engine' | 'core';
 
 export interface PermissionCheckOptions {
   policyOwner?: PermissionPolicyOwner;
   onCheckerDecision?: (trace: PermissionCheckerDecisionTrace) => void;
+  /** Host-supplied MCP source metadata; rules then also match by `(plugin, server, tool)`. */
+  mcpRuleSubject?: McpToolRuleSubject;
 }
 
 /** Checker output exposed only for host-side observability; hosts own log filtering. */
@@ -40,20 +43,22 @@ export interface PermissionCoreDecisionInput {
   context: ToolPermissionContext;
   checkerRegistered: boolean;
   checkerResult?: ToolCheckResult;
+  /** Presence means checker failure, including an empty error message. */
   checkerError?: string;
+  mcpRuleSubject?: McpToolRuleSubject;
 }
 
 export type PermissionAction = 'read' | 'write' | 'delete' | 'execute' | 'network';
 export type ShellFamily = 'posix' | 'cmd' | 'powershell' | 'unknown';
 
 export type PathValue = {
-  /** Original path found in the command, preserving the user's input form. */
+  /** 命令里出现的原始路径；保留用户输入形态。 */
   raw: string;
-  /** Path resolved in the current session's homeDir/workingDirectory context. */
+  /** 在当前 session 的 homeDir/workingDirectory 上下文中解析后的路径。 */
   resolved?: string;
-  /** Whether environment variables, globs, or other dynamic semantics may still affect the path. */
+  /** 是否仍可能受环境变量、glob 或其他动态语义影响。 */
   dynamic: boolean;
-  /** How to interpret the original path: expand ~ to home; keep relative paths relative. */
+  /** 原始路径的解释方式；~ 展开为 home，相对路径仍保留 relative。 */
   resolution?: 'absolute' | 'relative' | 'home' | 'environment' | 'glob' | 'unknown';
 };
 
@@ -114,13 +119,13 @@ export type ExecutionPlan = {
 };
 
 export type PermissionModeProfile = {
-  /** Whether user interaction is available; fail closed in headless mode without an approval channel. */
+  /** 是否可以和用户交互；headless 无审批通道时采用 fail-closed。 */
   interaction: 'ask' | 'neverAsk' | 'headless-fail-closed';
-  /** Whether to allow supplementary LLM/classifier decisions; does not affect host safety or explicit denies. */
+  /** 是否允许交给 LLM/classifier 做补充判断；不影响 host safety 和显式 deny。 */
   classifier: 'allowed' | 'forbidden';
-  /** Whether permissions are a hard execution gate; off means the permission layer does not block execution. */
+  /** 权限结果是否作为执行硬门禁；off 表示权限层不阻断执行。 */
   enforcement: 'strict' | 'off';
-  /** Whether the bypass evaluator may run; this does not bypass host safety. */
+  /** 是否允许走 bypass evaluator；不等于跳过 host safety。 */
   bypass: 'allowed' | 'forbidden';
 };
 
@@ -163,8 +168,11 @@ export type PermissionEvaluation =
 export function reducePermissionDecision(input: PermissionCoreDecisionInput): PermissionDecision {
   const { toolName, context, checkerResult } = input;
 
+  const subject = input.mcpRuleSubject;
   const denyRule =
-    hasWholeToolRule(context, toolName, 'deny') ?? findMcpServerRule(toolName, context, 'deny');
+    hasWholeToolRule(context, toolName, 'deny') ??
+    findMcpServerRule(toolName, context, 'deny') ??
+    findMcpSubjectRule(subject, context, 'deny');
   if (denyRule) return { behavior: 'deny', reason: { type: 'rule', rule: denyRule } };
 
   // A tool/content checker deny is an explicit deny for this invocation. It
@@ -188,7 +196,8 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
     };
   }
 
-  const mcpAskRule = findMcpServerRule(toolName, context, 'ask');
+  const mcpAskRule =
+    findMcpServerRule(toolName, context, 'ask') ?? findMcpSubjectRule(subject, context, 'ask');
   if (mcpAskRule) {
     return {
       behavior: 'ask',
@@ -197,10 +206,13 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
     };
   }
 
-  if (input.checkerError) {
+  if (input.checkerError !== undefined) {
     return {
       behavior: 'ask',
-      reason: { type: 'safetyCheck', description: `Tool checker error: ${input.checkerError}` },
+      reason: {
+        type: 'safetyCheck',
+        description: `Tool checker error: ${input.checkerError || 'Unknown tool permission checker failure'}`,
+      },
       ruleContents: resolveRuleContents(toolName, input.input),
     };
   }
@@ -263,14 +275,16 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
     };
   }
 
-  const allowRule =
-    hasWholeToolRule(context, toolName, 'allow') ?? findMcpServerRule(toolName, context, 'allow');
-  if (allowRule) {
-    return {
-      behavior: 'allow',
-      reason: { type: 'rule', rule: allowRule },
-      rewrittenInput: checkerResult?.rewrittenInput,
-    };
+  const subjectAllow = decideMcpAllow(
+    subject,
+    context,
+    (scope) =>
+      hasWholeToolRule(scope, toolName, 'allow') ?? findMcpServerRule(toolName, scope, 'allow'),
+  );
+  if (subjectAllow) {
+    return subjectAllow.behavior === 'allow'
+      ? { ...subjectAllow, rewrittenInput: checkerResult?.rewrittenInput }
+      : { ...subjectAllow, ruleContents: resolveRuleContents(toolName, input.input) };
   }
 
   if (checkerResult?.behavior === 'allow') {
@@ -339,33 +353,6 @@ function findMcpServerRule(
       !rule.ruleValue.ruleContent &&
       matchesMcpServerRuntimeName(toolName, rule.ruleValue.toolName),
   );
-}
-
-function matchesContentAskRule(
-  toolName: string,
-  input: Record<string, unknown>,
-  context: ToolPermissionContext,
-): PermissionRule | undefined {
-  const inputContent = extractToolInputContent(toolName, input);
-  if (!inputContent) return undefined;
-  return getContentRulesForTool(context, toolName, 'ask').find((rule) => {
-    const ruleContent = rule.ruleValue.ruleContent;
-    return Boolean(ruleContent && inputContent.includes(ruleContent));
-  });
-}
-
-function extractToolInputContent(
-  toolName: string,
-  input: Record<string, unknown>,
-): string | undefined {
-  if (toolName === 'bash') return typeof input.command === 'string' ? input.command : undefined;
-  if (['edit', 'write', 'read', 'glob'].includes(toolName)) {
-    if (typeof input.filePath === 'string') return input.filePath;
-    if (typeof input.path === 'string') return input.path;
-    return typeof input.pattern === 'string' ? input.pattern : undefined;
-  }
-  if (typeof input.command === 'string') return input.command;
-  return typeof input.url === 'string' ? input.url : undefined;
 }
 
 function resolveRuleContents(

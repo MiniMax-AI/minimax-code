@@ -46,6 +46,7 @@ export class TuiPluginAutocomplete implements AutocompleteProvider {
               (plugin) =>
                 plugin.installed &&
                 plugin.enabled &&
+                !plugin.unavailableReason &&
                 [plugin.name, plugin.displayName, plugin.pluginId].some((text) =>
                   text.normalize('NFKC').toLocaleLowerCase().includes(query),
                 ),

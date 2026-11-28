@@ -36,7 +36,9 @@ export const CreateGoalToolDef = {
         description:
           'Optional positive token budget for the goal. Omit unless the user explicitly asked for a cap. ' +
           'When set, the runtime automatically marks the goal as `budget_limited` and stops auto-continuation ' +
-          'the moment cumulative model tokens reach this value.',
+          'the moment cumulative model tokens reach this value. ' +
+          'Token usage counts input, cache writes, cache reads and output of every request, and each request ' +
+          're-reads the cached context, so usage grows much faster than the new text exchanged; size the budget for that.',
       }),
     ),
   }),
@@ -49,11 +51,11 @@ export const UpdateGoalToolDef = {
   name: 'update_goal',
   executionMode: 'sequential',
   description:
-    'Propose a terminal status for the existing goal, or—only when explicitly requested by the user—update its token budget. ' +
+    'Propose a terminal status for the existing goal, or—only when explicitly requested by the user or explicitly written in the goal objective—update its limits (token budget, request limit, time limit). ' +
     'Always set `mode` to choose exactly one operation per call; fields belonging to the other mode are ignored.\n' +
     'Terminal mode (`mode: "status"`): pass `status` and optional `summary`; follow the rules documented on the `status` field. The host settles the proposal after this turn. An accepted `blocked` proposal ends the turn. ' +
     'After an accepted `complete` proposal, do not call any more tools (they are refused): write one final reply to the user in the same turn that says what was accomplished, where each deliverable file is, and how to use it when that is not obvious; declare every deliverable file with delivery markup (<media /> tags inside <deliver-assets>) and write its path in the text; do not claim that verification has passed or that the result is verified, because the host verifies after this reply; describe checks you ran as checks, not as verification.\n' +
-    'Budget mode (`mode: "token_budget"`): call `get_goal` immediately before `update_goal`, then pass only `token_budget`, `expected_goal_id`, and `expected_updated_at`. Use a positive integer token count, or `null` to clear the cap. A successful update does not end the turn and may reactivate a token-limited goal.\n' +
+    'Budget mode (`mode: "token_budget"`): call `get_goal` immediately before `update_goal`, then pass `expected_goal_id`, `expected_updated_at`, and only the limits you change: `token_budget` (tokens), `request_limit` (model requests), `active_seconds_limit` (execution time in seconds). Each is a positive integer, or `null` to clear that limit; omit a limit you are not changing (do not pass `null` for it). Token usage counts cache reads too: each request re-reads the cached context, so set the cap with that in mind. A successful update does not end the turn and may reactivate a token-limited goal. During the goal\'s own turns a budget update only fills limits that are not set yet: limits the user already set are kept.\n' +
     'Do not combine the two modes. This tool cannot directly pause, resume, or edit the objective.',
   schema: Type.Object({
     mode: Type.Optional(
@@ -61,7 +63,7 @@ export const UpdateGoalToolDef = {
         description:
           'Which single operation this call performs. Always set this field. ' +
           '`status`: propose a terminal status; every field other than `status` and `summary` is ignored. ' +
-          '`token_budget`: update the token budget; every field other than `token_budget`, `expected_goal_id`, and `expected_updated_at` is ignored.',
+          '`token_budget`: update the goal limits; every field other than `token_budget`, `request_limit`, `active_seconds_limit`, `expected_goal_id`, and `expected_updated_at` is ignored.',
       }),
     ),
     status: Type.Optional(
@@ -91,6 +93,26 @@ export const UpdateGoalToolDef = {
         Type.Null({ description: 'Budget mode only. Clear the current token cap.' }),
       ]),
     ),
+    request_limit: Type.Optional(
+      Type.Union([
+        Type.Integer({
+          minimum: 1,
+          description:
+            "Budget mode only. New positive integer cap on the goal's model requests (each model call counts as one, wrap-up included); use null to clear it.",
+        }),
+        Type.Null({ description: "Budget mode only. Clear the goal's own request limit." }),
+      ]),
+    ),
+    active_seconds_limit: Type.Optional(
+      Type.Union([
+        Type.Integer({
+          minimum: 1,
+          description:
+            "Budget mode only. New positive integer cap on the goal's execution time, in seconds (for example 7200 for two hours); use null to clear it.",
+        }),
+        Type.Null({ description: "Budget mode only. Clear the goal's own time limit." }),
+      ]),
+    ),
     expected_goal_id: Type.Optional(
       Type.String({
         minLength: 1,
@@ -109,19 +131,34 @@ export const UpdateGoalToolDef = {
 } as const satisfies ToolDefinition;
 export type UpdateGoalToolInput = Static<typeof UpdateGoalToolDef.schema>;
 
+/** The update_goal fields that belong to the budget (limits) mode. */
+export const UPDATE_GOAL_LIMIT_FIELDS = [
+  'token_budget',
+  'request_limit',
+  'active_seconds_limit',
+] as const;
+
+export type UpdateGoalLimitField = (typeof UPDATE_GOAL_LIMIT_FIELDS)[number];
+
 /**
- * Whether an update_goal payload is attempting the durable token-budget mode.
+ * Whether an update_goal payload is attempting the durable budget (limits) mode.
  *
  * Some provider tool-call adapters materialize an omitted nullable property as
  * `null`. When a terminal status is present, that compatibility filler must not
- * turn the completion/block proposal into a budget mutation. A numeric budget
+ * turn the completion/block proposal into a budget mutation. A numeric limit
  * combined with a status remains a real (and invalid) mixed-mode attempt.
  */
 export function hasUpdateGoalTokenBudgetIntent(
-  input: Readonly<{ status?: unknown; token_budget?: unknown }>,
+  input: Readonly<{
+    status?: unknown;
+    token_budget?: unknown;
+    request_limit?: unknown;
+    active_seconds_limit?: unknown;
+  }>,
 ): boolean {
-  if (!Object.hasOwn(input, 'token_budget')) return false;
-  return input.status === undefined || input.token_budget !== null;
+  const present = UPDATE_GOAL_LIMIT_FIELDS.filter((field) => Object.hasOwn(input, field));
+  if (present.length === 0) return false;
+  return input.status === undefined || present.some((field) => input[field] !== null);
 }
 
 export type UpdateGoalResolvedMode = 'status' | 'token_budget' | 'mixed' | 'none';
@@ -137,7 +174,13 @@ export type UpdateGoalResolvedMode = 'status' | 'token_budget' | 'mixed' | 'none
  * including the mixed-mode rejection and the null-budget-filler exemption.
  */
 export function resolveUpdateGoalMode(
-  input: Readonly<{ mode?: unknown; status?: unknown; token_budget?: unknown }>,
+  input: Readonly<{
+    mode?: unknown;
+    status?: unknown;
+    token_budget?: unknown;
+    request_limit?: unknown;
+    active_seconds_limit?: unknown;
+  }>,
 ): UpdateGoalResolvedMode {
   if (input.mode === 'status') return 'status';
   if (input.mode === 'token_budget') return 'token_budget';
@@ -155,7 +198,7 @@ export const GetGoalToolDef = {
   name: 'get_goal',
   executionMode: 'parallel',
   description:
-    'Get the current goal for this thread, including status, timestamps, token usage, and token budget. ' +
+    'Get the current goal for this thread, including status, timestamps, usage, its own limits (token budget `tokenBudget`, request limit `requestLimit`, time limit `activeSecondsLimit` in seconds), and the limits in force (`effectiveLimits`, null = unlimited). ' +
     'Returns an empty result if no goal is set.',
   schema: Type.Object({}),
 } as const satisfies ToolDefinition;

@@ -25,6 +25,7 @@ export interface RemoteTokenCountContext {
    * counter may only serialize this value and must never prepare it itself.
    */
   preparedPayload?: unknown;
+  fetchFn?: typeof fetch;
   signal?: AbortSignal;
 }
 

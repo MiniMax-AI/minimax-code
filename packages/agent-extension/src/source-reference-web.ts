@@ -1,6 +1,7 @@
 import {
   collectFetchedWebSources,
   collectWebSourceCitations,
+  readMcpInvokeArguments,
   type ContextualWebCitation,
 } from '@mavis/agent-runtime';
 import type { ToolSourceAdapterInput, ToolSourceReference } from './source-reference.js';
@@ -49,7 +50,7 @@ export function webFetchSourceReferenceForToolResult(
   const details = readRecord(input.result.details);
   if (details?.ok === false) return undefined;
   const args = readRecord(input.args);
-  const nestedArgs = readRecord(args?.arguments) ?? readRecord(args?.args);
+  const nestedArgs = readMcpInvokeArguments(args) ?? readRecord(args?.args);
   const resultUrl = safeHttpUrl(
     readNonEmptyString(details?.final_url) ??
       readNonEmptyString(details?.finalUrl) ??

@@ -25,7 +25,7 @@
 import path from 'node:path';
 import type { BashCheckContext } from './bash-context.js';
 import { shellTokenize } from './shell-tokenize.js';
-import { pathInAllowedWorkingPath, pathInWorkingPath } from './fs-permission.js';
+import { pathInAnyWorkingRoot } from './fs-permission.js';
 
 // ---------------------------------------------------------------------------
 // Write-authorized path classification
@@ -114,7 +114,7 @@ export function isDiscardSinkTarget(target: string): boolean {
  *    would be silently un-hard-blocked afterwards).
  *  - The agent's `workingDirectory` and any `allowedWorkingPaths` (the
  *    user-selected workspace where fs-permission already auto-allows writes
- *    via `pathInWorkingPath` / `pathInAllowedWorkingPath`).
+ *    via `pathInAnyWorkingRoot`).
  *
  * Returns `false` for paths outside this set (e.g. `/etc/passwd`,
  * `~/.bashrc`, `/Users/other/foo`) so the caller can route those to ASK.
@@ -144,12 +144,7 @@ export function isWriteAuthorizedTarget(target: string, ctx?: BashCheckContext):
     const resolved = path.isAbsolute(expanded)
       ? expanded
       : path.resolve(ctx.workingDirectory, expanded);
-    if (pathInWorkingPath(resolved, ctx.workingDirectory)) return true;
-    if (
-      ctx.allowedWorkingPaths &&
-      ctx.allowedWorkingPaths.length > 0 &&
-      pathInAllowedWorkingPath(resolved, ctx.allowedWorkingPaths)
-    ) {
+    if (pathInAnyWorkingRoot(resolved, ctx.workingDirectory, ctx.allowedWorkingPaths)) {
       return true;
     }
   }

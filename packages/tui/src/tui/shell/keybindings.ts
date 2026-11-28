@@ -314,7 +314,7 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     key: 'ctrl+v',
     action: 'paste-image',
     when: 'composer',
-    description: 'Paste an image or copied video file from the clipboard',
+    description: 'Paste an image or a copied video, audio, or PDF file from the clipboard',
     helpOrder: 70,
   },
   {
@@ -328,7 +328,7 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     key: 'super+v',
     action: 'paste-image',
     when: 'composer',
-    description: 'Paste an image or copied video file from the clipboard',
+    description: 'Paste an image or a copied video, audio, or PDF file from the clipboard',
     helpOrder: 70,
   },
   {
@@ -461,6 +461,10 @@ export function createDefaultTuiKeybindingRegistry(): TuiKeybindingRegistry {
 export interface TuiHostKeybindingOptions {
   readonly platform: NodeJS.Platform;
   readonly suspendSupported: boolean;
+  /**
+   * Same-host WSL. It shares the Windows clipboard and the Windows terminal
+   * host, so it also takes the Windows-safe shortcut defaults.
+   */
   readonly windowsClipboardInterop?: boolean;
   readonly userOverrides?: KeybindingsConfig;
 }
@@ -471,18 +475,38 @@ export interface TuiHostKeybindings {
   readonly hostOverrides: KeybindingsConfig;
 }
 
+/**
+ * Windows Terminal reserves several defaults for itself (Alt+Enter fullscreen,
+ * Alt+Arrow pane focus, Ctrl+Shift+F find, Ctrl+Shift+Up/Down scroll and
+ * Ctrl+- font size), so those keys never reach the TUI. Native Windows and
+ * same-host WSL follow Pi's Windows defaults instead.
+ */
+function usesWindowsKeyboardDefaults(options: TuiHostKeybindingOptions): boolean {
+  return options.platform === 'win32' || options.windowsClipboardInterop === true;
+}
+
 function resolveTuiHostKeybindingDefinitions(
   options: TuiHostKeybindingOptions,
 ): readonly TuiKeybindingDefinition[] {
   const pasteHelpGroup = 'composer.paste-media';
-  const windowsPasteAlias =
-    options.platform === 'win32' || options.windowsClipboardInterop === true;
+  const windowsKeyboard = usesWindowsKeyboardDefaults(options);
+  const windowsPasteAlias = windowsKeyboard;
   const definitions = DEFAULT_TUI_KEYBINDINGS.flatMap((definition) => {
     if (definition.id === 'app.suspend' && !options.suspendSupported) return [];
     if (definition.id === 'composer.paste-image-windows' && !windowsPasteAlias) return [];
     if (definition.id === 'composer.paste-image-macos' && options.platform !== 'darwin') return [];
     if (definition.id === 'composer.restore-draft' && options.platform === 'win32') {
       return [{ ...definition, key: 'ctrl+z' as const }];
+    }
+    // WSL keeps Ctrl+Z for job control, so it uses Pi's WSL undo key.
+    if (definition.id === 'composer.restore-draft' && windowsKeyboard) {
+      return [{ ...definition, key: 'alt+z' as const }];
+    }
+    if (definition.id === 'run.queue-draft' && windowsKeyboard) {
+      return [{ ...definition, key: 'ctrl+q' as const }];
+    }
+    if (definition.id === 'run.restore-waiting-option' && windowsKeyboard) {
+      return [{ ...definition, key: 'alt+q' as const }];
     }
     if (
       definition.id === 'composer.paste-image' &&
@@ -501,7 +525,7 @@ function resolveTuiHostKeybindingDefinitions(
         {
           ...definition,
           key: 'ctrl+v' as const,
-          description: 'Paste an image or copied video file from the clipboard',
+          description: 'Paste an image or a copied video, audio, or PDF file from the clipboard',
           helpOrder: 70,
           helpGroup: pasteHelpGroup,
         },
@@ -511,7 +535,7 @@ function resolveTuiHostKeybindingDefinitions(
       return [
         {
           ...definition,
-          description: 'Paste an image or copied video file from the clipboard',
+          description: 'Paste an image or a copied video, audio, or PDF file from the clipboard',
           helpOrder: 70,
           helpGroup: pasteHelpGroup,
         },
@@ -524,7 +548,7 @@ function resolveTuiHostKeybindingDefinitions(
 
 export function createTuiHostKeybindings(options: TuiHostKeybindingOptions): TuiHostKeybindings {
   const definitions = resolveTuiHostKeybindingDefinitions(options);
-  const hostOverrides = createTuiHostEngineOverrides(options.platform);
+  const hostOverrides = createTuiHostEngineOverrides(options);
   const manager = new KeybindingsManager(
     {
       ...TUI_KEYBINDINGS,
@@ -539,11 +563,18 @@ export function createTuiHostKeybindings(options: TuiHostKeybindingOptions): Tui
   };
 }
 
-function createTuiHostEngineOverrides(platform: NodeJS.Platform): KeybindingsConfig {
+function createTuiHostEngineOverrides(options: TuiHostKeybindingOptions): KeybindingsConfig {
+  if (!usesWindowsKeyboardDefaults(options)) {
+    return {
+      'tui.altScreen.previousPrompt': ['ctrl+shift+up', 'ctrl+up'],
+      'tui.altScreen.nextPrompt': ['ctrl+shift+down', 'ctrl+down'],
+    };
+  }
   return {
-    'tui.altScreen.previousPrompt': ['ctrl+shift+up', 'ctrl+up'],
-    'tui.altScreen.nextPrompt': ['ctrl+shift+down', 'ctrl+down'],
-    ...(platform === 'win32' ? { 'tui.editor.undo': ['ctrl+-', 'ctrl+z'] } : {}),
+    'tui.altScreen.previousPrompt': ['ctrl+up'],
+    'tui.altScreen.nextPrompt': ['ctrl+down'],
+    'tui.altScreen.search': ['ctrl+f'],
+    'tui.editor.undo': ['ctrl+-', options.platform === 'win32' ? 'ctrl+z' : 'alt+z'],
   };
 }
 

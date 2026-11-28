@@ -1308,7 +1308,12 @@ function convertTools(
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const schema = tool.parameters as { properties?: unknown; required?: string[] };
+		const schema = tool.parameters as {
+			properties?: unknown;
+			required?: string[];
+			$defs?: unknown;
+			definitions?: unknown;
+		};
 
 		return {
 			name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name,
@@ -1318,6 +1323,17 @@ function convertTools(
 				type: "object",
 				properties: schema.properties ?? {},
 				required: schema.required ?? [],
+				// Local `$ref`s in properties point here; dropping them leaves the refs dangling.
+				// Endpoints validating against the 2020-12 metaschema reject the whole request on a
+				// non-object map, and no `$ref` can resolve into one, so omitting it loses nothing.
+				...(typeof schema.$defs === "object" && schema.$defs !== null && !Array.isArray(schema.$defs)
+					? { $defs: schema.$defs }
+					: {}),
+				...(typeof schema.definitions === "object" &&
+				schema.definitions !== null &&
+				!Array.isArray(schema.definitions)
+					? { definitions: schema.definitions }
+					: {}),
 			},
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};

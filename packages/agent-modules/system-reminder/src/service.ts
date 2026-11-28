@@ -25,6 +25,7 @@ import { getEvolutionReminder, boundMap } from './evolution.js';
 import type { EvolutionState } from './evolution.js';
 import { touchTodoStateTurn } from './todo-state.js';
 import { stripProviderSuffix } from './providers.js';
+import { wrapSystemReminderBlocks } from './envelope.js';
 
 export class SystemReminderService implements EvolutionState {
   // ── Turn tracking ──
@@ -172,9 +173,12 @@ export class SystemReminderService implements EvolutionState {
         : this.registry.resolve(session.frameworkType);
       const allowlist = data.systemReminders;
       const allowedNames = allowlist ? new Set(allowlist.map((e) => e.name)) : null;
-      const namedProviders = allowedNames
-        ? baseProviders.filter((np) => allowedNames.has(stripProviderSuffix(np.name)))
-        : baseProviders;
+      const sessionAllowlist = session.reminderAllowlist;
+      const namedProviders = baseProviders.filter((np) => {
+        const name = stripProviderSuffix(np.name);
+        if (allowedNames && !allowedNames.has(name)) return false;
+        return !sessionAllowlist || sessionAllowlist.has(name);
+      });
 
       const blocks: string[] = [];
       const providerDiagnostics: ProviderDiagnostic[] = [];
@@ -207,10 +211,7 @@ export class SystemReminderService implements EvolutionState {
         );
       }
 
-      const fullText =
-        blocks.length === 0
-          ? null
-          : `<system-reminder>\n${blocks.join('\n\n')}\n</system-reminder>`;
+      const fullText = blocks.length === 0 ? null : wrapSystemReminderBlocks(blocks);
 
       const diagnostic: SystemReminderDiagnostic | undefined = diagEnabled
         ? {

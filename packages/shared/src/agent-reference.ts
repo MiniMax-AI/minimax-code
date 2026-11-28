@@ -31,4 +31,10 @@ export interface AgentReferenceResolver {
   resolveAgentWriteTarget(requestedName: string): Promise<string>;
   requireExactAgentKey(requestedName: string): Promise<string>;
   resolveAgentExecutionTarget(exactOwnerName: string): Promise<string>;
+  /**
+   * Whether the task tool may dispatch to this owner. An absent method or an
+   * `undefined` result means the Agent is dispatchable, matching the wire
+   * default of `AgentDetail.dispatchable`.
+   */
+  resolveAgentDispatchable?(exactOwnerName: string): Promise<boolean | undefined>;
 }

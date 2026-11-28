@@ -28,7 +28,7 @@ export function grepModeFlags(mode: GrepOutputMode): string[] {
   }
 }
 
-// ─── content mode ────────────────────────────────────────────────────────
+// ─── content 模式 ───────────────────────────────────────────────────────
 
 export interface LimitedGrepOutput {
   text: string;
@@ -283,10 +283,10 @@ export function parseGrepOutput(
   };
 }
 
-// ─── files_with_matches mode (P1-1, default) ──────────────────────────────
+// ─── files_with_matches 模式（P1-1，默认） ─────────────────────────────
 //
-// rg -l emits all matching files; slice in JS so total is exact and the model can be told
-// how many remain and which offset to use for the next page.
+// rg -l 输出全部命中文件，JS 侧 slice —— total 是精确的，可以直接告诉模型
+// 「还有多少、下一页 offset 是多少」。
 
 export function parseFilesOutput(
   stdout: string,
@@ -327,7 +327,7 @@ export function parseFilesOutput(
   };
 }
 
-// ─── count mode (P1-1) ───────────────────────────────────────────────────
+// ─── count 模式（P1-1） ─────────────────────────────────────────────────
 
 export function parseCountOutput(
   stdout: string,
@@ -418,7 +418,7 @@ function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
 
-// ─── Glob filter splitting (shared by desktop/cloud) ─────────────────────
+// ─── glob 过滤器拆分（desktop/cloud 共用） ──────────────────────────────
 
 /**
  * Split "*.ts, *.tsx" style filters into individual globs (models write

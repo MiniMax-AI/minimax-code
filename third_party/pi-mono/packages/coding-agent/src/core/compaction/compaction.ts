@@ -133,7 +133,11 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
  * Uses the native totalTokens field when available, falls back to computing from components.
  */
 export function calculateContextTokens(usage: Usage): number {
-	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	return (
+		usage.contextTokens ||
+		usage.totalTokens ||
+		usage.input + usage.output + usage.cacheRead + usage.cacheWrite
+	);
 }
 
 /**

@@ -25,6 +25,7 @@ export function baseCtx(overrides: Partial<TurnAssemblyCtx> = {}): TurnAssemblyC
     model: {},
     history: [],
     userInput: { text: 'hi' },
+    sendsUserMessage: true,
     ...overrides,
   };
 }

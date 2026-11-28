@@ -147,10 +147,12 @@ describe('Plugin mentions from Composer to durable text', () => {
     expect(editor.getText()).toContain('notes.md');
   });
 
-  it('offers enabled plugins alongside files, refreshes state, and preserves file completion', async () => {
+  it('offers available enabled plugins alongside files, refreshes state, and preserves file completion', async () => {
     const listInstalledPlugins = vi.fn(async () => [
       makePlugin(),
       { ...makePlugin('off'), enabled: false },
+      { ...makePlugin('blocked'), unavailableReason: 'FORBIDDEN_BY_CONFIG' },
+      { ...makePlugin('unavailable'), unavailableReason: 'NOT_AVAILABLE' },
     ]);
     const provider = createTuiAutocomplete([], [], '/workspace', {
       listInstalledPlugins,
@@ -163,11 +165,19 @@ describe('Plugin mentions from Composer to durable text', () => {
     expect(result?.items).toHaveLength(2);
     expect(result?.items[0]).toMatchObject({ pluginId: 'notes@local' });
     expect(result?.items[1]?.value).toContain('notes.md');
-    listInstalledPlugins.mockResolvedValue([{ ...makePlugin(), enabled: false }]);
-    expect((await provider.getSuggestions(['@'], 0, 1, request))?.items).toHaveLength(1);
     expect(provider.applyCompletion(['see @ suffix'], 0, 5, result!.items[0]!, '@').lines).toEqual([
       'see @My Notes  suffix',
     ]);
+
+    listInstalledPlugins.mockResolvedValue([
+      { ...makePlugin(), unavailableReason: 'FORBIDDEN_BY_CONFIG' },
+    ]);
+    const filesOnly = await provider.getSuggestions(['@'], 0, 1, request);
+    expect(filesOnly?.items).toHaveLength(1);
+    expect(filesOnly?.items[0]).not.toHaveProperty('pluginId');
+    expect(provider.applyCompletion(['@'], 0, 1, filesOnly!.items[0]!, '@').lines[0]).toContain(
+      'notes.md',
+    );
   });
 
   it('renders a label, submits stable identity, and preserves history through multiple recalls', async () => {

@@ -1,7 +1,7 @@
 /**
- * matrix_batch_text_to_music — Pattern C batch: The server generates music (mp3/wav/pcm) for N
- * MusicParams and splits success_items/failed_items. Use `slot_<i>.<ext>` placeholders echoed in
- * the response to recover LLM-specified local paths.
+ * matrix_batch_text_to_music —— Pattern C 批量:服务端按 N 个 MusicParams 生成
+ * 音乐(mp3/wav/pcm),响应分 success_items/failed_items。本工具按
+ * `slot_<i>.<ext>` 占位符跟响应回显反查 LLM 给的本地路径。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

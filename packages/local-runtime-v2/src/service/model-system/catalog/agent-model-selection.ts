@@ -1,4 +1,9 @@
-import { getRuntimePresetKey, resolveModelAvailability } from '@mavis/config';
+import {
+  getRuntimePresetKey,
+  resolveModelAvailability,
+  resolveModelReplacement,
+  type ModelReference,
+} from '@mavis/config';
 import { ThinkingLevel } from '@mavis/protocol';
 
 import type { LocalConversationRuntimeConfig, LocalModelConfig } from '../contracts.js';
@@ -17,7 +22,7 @@ import {
   resolveMiniMaxM3ThinkingMode,
   normalizeModelThinkingEffort,
   normalizeModelThinkingEffortOptions,
-  resolveModelThinkingMiddleEffort,
+  resolveDefaultThinkingEffort,
   modelRefForModel,
   type ManagedModelParameterSnapshot,
 } from '../resolution/model-ref.js';
@@ -50,6 +55,11 @@ export interface AgentModelSelectionSource {
   readonly defaultMissingEffortOff?: boolean;
   /** Only the Runtime default may apply `defaultModelVariant` to an omitted M3 switch. */
   readonly usesRuntimeDefaultVariant?: boolean;
+  /**
+   * 这一级给了模型却没给强度时，只要这个模型有可选的思考强度就直接报错并列出可选值，
+   * 不替它选默认档位，也不当成关闭思考。
+   */
+  readonly requireExplicitEffort?: boolean;
 }
 
 export interface AgentModelSelectionDiagnostic {
@@ -71,6 +81,8 @@ export interface ResolvedAgentModelSelection {
   readonly contextWindow?: number;
   readonly maxOutputTokens?: number;
   readonly diagnostics: readonly AgentModelSelectionDiagnostic[];
+  /** Set when an execution-time read replaced a retired official model. */
+  readonly replacedFrom?: ModelReference;
 }
 
 /**
@@ -82,12 +94,20 @@ export interface ResolvedAgentModelSelection {
 export function resolveEffectiveAgentModelSelection(input: {
   readonly config: LocalConversationRuntimeConfig;
   readonly sources: readonly AgentModelSelectionSource[];
+  /**
+   * Execution reads replace a retired official model (its effort/limits are
+   * dropped) instead of failing; saves keep validating strictly.
+   */
+  readonly replaceRetired?: boolean;
 }): ResolvedAgentModelSelection | undefined {
+  const retired = input.replaceRetired
+    ? replaceRetiredSourceModel(input.config, input.sources)
+    : undefined;
   let resolved: ResolvedAgentModelSelection;
   try {
     resolved = resolveAgentModelSelection({
       config: input.config,
-      sources: input.sources,
+      sources: retired?.sources ?? input.sources,
     });
   } catch (error) {
     if (error instanceof AgentModelSelectionError && error.code === 'MODEL_SELECTION_INCOMPLETE') {
@@ -102,8 +122,61 @@ export function resolveEffectiveAgentModelSelection(input: {
     preset: getRuntimePresetKey(),
     source: 'config_default',
   });
-  if (availability.available) return resolved;
+  if (availability.available) {
+    return retired ? { ...resolved, replacedFrom: retired.replacedFrom } : resolved;
+  }
   throw new AgentModelSelectionError('MODEL_SELECTION_INVALID', availability.message);
+}
+
+/**
+ * The winning model source with a retired official model swapped for its
+ * replacement (Runtime default, else delivered default). The replaced group
+ * keeps no effort/limits: they belonged to the retired model.
+ *
+ * With no source naming a model (an AUTO Agent), the Runtime default is the
+ * model this read runs, so it is checked the same way. Its replacement is
+ * inserted ahead of the Runtime default that `withRuntimeDefault` appends;
+ * sources below the winning model never contribute, so the retired default's
+ * effort, context and variant stay behind.
+ */
+function replaceRetiredSourceModel(
+  config: LocalConversationRuntimeConfig,
+  sources: readonly AgentModelSelectionSource[],
+):
+  | {
+      readonly sources: readonly AgentModelSelectionSource[];
+      readonly replacedFrom: ModelReference;
+    }
+  | undefined {
+  const index = sources.findIndex(({ selection }) => selection?.model !== undefined);
+  const source = index < 0 ? undefined : sources[index];
+  const parsed = parseSourceQualifiedModelKey(
+    source ? source.selection?.model : config.defaultModel,
+  );
+  if (!parsed) return undefined;
+  const outcome = resolveModelReplacement({
+    config,
+    providerId: parsed.providerId,
+    modelId: parsed.modelId,
+    preset: getRuntimePresetKey(),
+    fallbacks: source ? [parseSourceQualifiedModelKey(config.defaultModel)] : [],
+  });
+  if (outcome.kind !== 'replaced') return undefined;
+  const model = formatModelKey(outcome.model.providerId, outcome.model.modelId);
+  const next = [...sources];
+  if (source) {
+    next[index] = {
+      source: source.source,
+      selection: { model },
+      ...(source.requireCatalog ? { requireCatalog: true } : {}),
+    };
+  } else {
+    next.push({ source: 'runtime-default', selection: { model } });
+  }
+  return {
+    sources: next,
+    replacedFrom: { providerId: parsed.providerId, modelId: parsed.modelId },
+  };
 }
 
 /** Config editing must remain available when a previously selected model was removed. */
@@ -185,6 +258,7 @@ export class AgentModelSelectionError extends Error {
       | 'MODEL_SELECTION_INCOMPLETE'
       | 'MODEL_SELECTION_INVALID'
       | 'MODEL_EFFORT_UNSUPPORTED'
+      | 'MODEL_EFFORT_REQUIRED'
       | 'MODEL_LIMIT_INVALID'
       | 'MODEL_LIMIT_UNAVAILABLE',
     message: string,
@@ -205,6 +279,7 @@ export function resolveAgentModelSelection(input: {
   readonly sources: readonly AgentModelSelectionSource[];
 }): ResolvedAgentModelSelection {
   const context = resolveSelectionContext(input);
+  assertExplicitEffort(input.config, context);
   const { sources, modelIndex, modelSource, model, modelConfig, contributors } = context;
   if (
     model.providerId === MANAGED_MINIMAX_PROVIDER_ID &&
@@ -384,6 +459,89 @@ function assertRequiredCatalogModel(
   );
 }
 
+/**
+ * 要求显式强度的一级给了模型却没给强度：模型有可选的强度就报错并列出可选值；
+ * 强制关闭思考、没有声明档位的模型没有可选值，照常放行。
+ */
+function assertExplicitEffort(
+  config: LocalConversationRuntimeConfig,
+  context: ReturnType<typeof resolveSelectionContext>,
+): void {
+  const { modelSource, model, modelConfig, contributors } = context;
+  if (!modelSource.requireExplicitEffort) return;
+  const given = contributors.some(
+    ({ selection }) =>
+      selection?.effort !== undefined ||
+      selection?.reasoning !== undefined ||
+      selection?.variant !== undefined,
+  );
+  if (given) return;
+  const choices = selectableEfforts(config, model, modelConfig);
+  if (!choices) return;
+  throw new AgentModelSelectionError(
+    'MODEL_EFFORT_REQUIRED',
+    `Model ${formatModelKey(model.providerId, model.modelId)} from ${modelSource.source} requires an explicit thinking effort: ${choices.join(', ')}.`,
+  );
+}
+
+/** 模型可以选的思考强度，和强度解析接受的值保持一致；没有可选值时返回 undefined。 */
+function selectableEfforts(
+  config: LocalConversationRuntimeConfig,
+  model: { readonly providerId: string; readonly modelId: string },
+  modelConfig: LocalModelConfig | undefined,
+): readonly string[] | undefined {
+  if (modelConfig?.thinking_config?.mode === 'forced_off') return undefined;
+  // 只有非 custom_provider 的 MiniMax M3 走 on/off 开关。
+  const nativeModelId = model.providerId.startsWith(CUSTOM_PROVIDER_ID_PREFIX)
+    ? undefined
+    : model.modelId;
+  if (resolveMiniMaxM3ThinkingMode(nativeModelId, modelConfig)) return ['on', 'off'];
+  return (
+    normalizeModelThinkingEffortOptions(modelConfig?.thinking?.effortOptions) ??
+    managedSwitchEfforts(config, model, modelConfig)
+  );
+}
+
+/** 没有档位时，只有托管 MiniMax 模型还能用 on/off 开关思考；其他模型不接受任何强度。 */
+function managedSwitchEfforts(
+  config: LocalConversationRuntimeConfig,
+  model: { readonly providerId: string },
+  modelConfig: LocalModelConfig | undefined,
+): readonly string[] | undefined {
+  const managed =
+    model.providerId === MANAGED_MINIMAX_PROVIDER_ID &&
+    config.minimaxModelSource !== 'minimax_api_key';
+  const mode = modelConfig?.thinking_config?.mode;
+  if (!managed || mode === 'forced_on') return undefined;
+  if (mode === 'switchable') return ['on', 'off'];
+  // 旧版目录靠 thinking / none-thinking 两个 variant 开关思考，两个都能用才算可选。
+  const usable = (name: string) => {
+    const variant = modelConfig?.variants?.[name];
+    return variant !== undefined && variant.disabled !== true;
+  };
+  return usable('thinking') && usable('none-thinking') ? ['on', 'off'] : undefined;
+}
+
+/**
+ * 按选模型时同样的规则把模型 key 规范成 `<providerId>/<modelId>`，用来判断两种写法是否
+ * 指同一个模型；`allowCustomProviderPrefixFallback` 兼容不带 `custom_provider:` 前缀的旧写法。
+ */
+export function canonicalSelectionModelKey(
+  config: LocalConversationRuntimeConfig,
+  value: string | undefined,
+  options: { readonly allowCustomProviderPrefixFallback?: boolean } = {},
+): string | undefined {
+  const parsed = parseSourceQualifiedModelKey(value);
+  if (!parsed) return undefined;
+  const { model } = resolveModelCatalogReference(config, parsed, {
+    source: 'model-key',
+    ...(options.allowCustomProviderPrefixFallback
+      ? { allowCustomProviderPrefixFallback: true }
+      : {}),
+  });
+  return formatModelKey(model.providerId, model.modelId);
+}
+
 function withRuntimeDefault(
   config: LocalConversationRuntimeConfig,
   sources: readonly AgentModelSelectionSource[],
@@ -532,7 +690,9 @@ function resolveListedEffort(
   requested: string | undefined,
 ): string | undefined {
   if (!requested) {
-    return input.defaultMissingEffortOff ? 'off' : resolveModelThinkingMiddleEffort(options);
+    return input.defaultMissingEffortOff
+      ? 'off'
+      : resolveDefaultThinkingEffort(options, input.modelConfig?.thinking?.defaultEffort);
   }
   if (requested === 'off' && !isOnOffThinkingOptions(options)) return 'off';
   if (options.includes(requested)) return requested;

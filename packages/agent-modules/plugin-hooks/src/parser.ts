@@ -1,8 +1,10 @@
 import {
+  HOOK_MODULES_INVALID_FIX,
   PLUGIN_HOOK_EVENTS,
   type PluginHookCommandHandler,
   type PluginHookDiagnostic,
   type PluginHookEventName,
+  type PluginHookModulesDeclaration,
   type PluginHookSet,
   type PluginHookSourceFormat,
 } from './contracts.js';
@@ -12,6 +14,9 @@ const MAX_TIMEOUT_MS = 10_000;
 const MAX_EXECUTABLE_HANDLERS = 64;
 const MAX_MATCHER_LENGTH = 256;
 const EVENT_NAMES = new Set<string>(PLUGIN_HOOK_EVENTS);
+/** Top-level hooks document keys that are not Hook events. */
+const NON_EVENT_KEYS = new Set(['modules', 'description']);
+const MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.jsx', '.ts', '.mts', '.cts', '.tsx']);
 
 export function parsePluginHookDocuments(input: {
   readonly pluginName: string;
@@ -24,8 +29,19 @@ export function parsePluginHookDocuments(input: {
 }): PluginHookSet {
   const handlers: PluginHookCommandHandler[] = [];
   const diagnostics: PluginHookDiagnostic[] = [];
+  const modules: PluginHookModulesDeclaration[] = [];
   let declarationOrder = 0;
   for (const document of input.documents) {
+    const declaration = readModulesDeclaration(document);
+    if (declaration) {
+      modules.push(declaration);
+      if (!declaration.modulePath && input.sourceFormat === 'MINIMAX') {
+        diagnostics.push({
+          ...baseDiagnostic(input.pluginName, document.sourcePath, 'HOOK_MODULES_INVALID'),
+          fix: HOOK_MODULES_INVALID_FIX,
+        });
+      }
+    }
     const hooks = readHooksEnvelope(document.value);
     if (!hooks) {
       diagnostics.push(
@@ -254,7 +270,28 @@ export function parsePluginHookDocuments(input: {
       }
     }
   }
-  return { handlers, diagnostics };
+  return { handlers, diagnostics, modules };
+}
+
+function readModulesDeclaration(document: {
+  readonly sourcePath: string;
+  readonly value: unknown;
+}): PluginHookModulesDeclaration | undefined {
+  if (!isRecord(document.value) || !('modules' in document.value)) return undefined;
+  const value = document.value.modules;
+  const modulePath =
+    Array.isArray(value) && value.length === 1 && isModulePath(value[0]) ? value[0] : undefined;
+  return { sourcePath: document.sourcePath, ...(modulePath ? { modulePath } : {}) };
+}
+
+function isModulePath(value: unknown): value is string {
+  if (typeof value !== 'string' || value !== value.trim() || !value) return false;
+  if (value.includes('\\') || value.includes('\0')) return false;
+  // Absolute, drive-letter and scheme (`node:`, `data:`) paths; the SDK schema shares this rule.
+  if (value.startsWith('/') || /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(value)) return false;
+  const extensionStart = value.lastIndexOf('.');
+  const fileStart = value.lastIndexOf('/') + 1;
+  return extensionStart > fileStart && MODULE_EXTENSIONS.has(value.slice(extensionStart));
 }
 
 function readAdditionalContextLimit(
@@ -375,7 +412,8 @@ function safeEscapeWidth(pattern: string, index: number): number {
 
 function readHooksEnvelope(value: unknown): Record<string, unknown> | undefined {
   if (!isRecord(value)) return undefined;
-  return isRecord(value.hooks) ? value.hooks : value;
+  if (isRecord(value.hooks)) return value.hooks;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !NON_EVENT_KEYS.has(key)));
 }
 
 function commandValue(value: Record<string, unknown>): string | undefined {

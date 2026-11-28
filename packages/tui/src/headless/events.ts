@@ -1,4 +1,5 @@
 import type { TuiMessage, TuiStreamEvent, TuiToolCall } from '../runtime/stream-events.js';
+import type { TuiModelReplacement } from '../application/turn-run-outcome.js';
 import type {
   ExecError,
   ExecModelIdentity,
@@ -36,6 +37,7 @@ export type ExecEvent = ExecEventBase &
         readonly usage?: ExecTokenUsage;
         readonly usageSource?: ExecUsageSource;
         readonly usageIncomplete?: boolean;
+        readonly usageTotalIncludesCacheRead?: boolean;
         readonly durationMs: number;
       }
     | {
@@ -43,6 +45,13 @@ export type ExecEvent = ExecEventBase &
         readonly status: Exclude<ExecResult['status'], 'succeeded'>;
         readonly error?: ExecError;
         readonly durationMs: number;
+      }
+    | {
+        readonly type: 'model.replaced';
+        readonly requestedModel: TuiModelReplacement['requestedModel'];
+        readonly actualModel: TuiModelReplacement['actualModel'];
+        readonly tier: TuiModelReplacement['tier'];
+        readonly reason: TuiModelReplacement['reason'];
       }
     | { readonly type: 'exec.completed'; readonly result: ExecResult }
   );
@@ -86,6 +95,9 @@ export class ExecEventProjector {
             ...(result.usageIncomplete !== undefined
               ? { usageIncomplete: result.usageIncomplete }
               : {}),
+            ...(result.usageTotalIncludesCacheRead !== undefined
+              ? { usageTotalIncludesCacheRead: result.usageTotalIncludesCacheRead }
+              : {}),
             durationMs: result.durationMs,
           })
         : this.event({
@@ -94,7 +106,14 @@ export class ExecEventProjector {
             ...(result.error ? { error: result.error } : {}),
             durationMs: result.durationMs,
           });
-    return [...this.ensureStarted(), terminal, this.event({ type: 'exec.completed', result })];
+    return [
+      ...this.ensureStarted(),
+      terminal,
+      ...(result.modelReplacement
+        ? [this.event({ type: 'model.replaced', ...result.modelReplacement })]
+        : []),
+      this.event({ type: 'exec.completed', result }),
+    ];
   }
 
   private ensureStarted(): ExecEvent[] {

@@ -148,7 +148,9 @@ export class V1ConversationCompatibilityService implements RuntimeConversation {
       await this.wake(sessionId, itemId);
       return toQueuedItem(updated);
     },
+    interruptTurn: async () => ({ status: 'not-running' as const }),
     promoteQueuedSource: async (sessionId, itemId, source) => {
+      if (source === 'miniapp') return 'not_editable';
       const updated = await this.options.sessions.queue.promote(sessionId, itemId, source);
       if (!updated || updated === 'not_editable') return updated;
       await this.wake(sessionId, itemId);

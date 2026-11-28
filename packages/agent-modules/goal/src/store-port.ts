@@ -61,6 +61,10 @@ export interface ThreadGoalPatchInput {
   readonly objectiveResources?: readonly ThreadGoalAttachment[];
   readonly expectedGoalId?: string;
   readonly tokenBudget?: number | null;
+  /** Same tri-state as `tokenBudget`: omitted keeps, `null` clears, positive sets. */
+  readonly requestLimit?: number | null;
+  /** Same tri-state as `tokenBudget`, in seconds. */
+  readonly activeSecondsLimit?: number | null;
   readonly statusReason?: ThreadGoalStatusReason | null;
   readonly rejectIfCurrentStatus?: ThreadGoalStatus;
   readonly rejectIfObjectiveChangedFrom?: string;
@@ -103,6 +107,13 @@ export interface ThreadGoalSettleBoundTurnInput {
   readonly next: {
     readonly status: Exclude<ThreadGoalStatus, 'active'>;
     readonly statusReason: ThreadGoalStatusReason;
+    /**
+     * Unix ms when the exhausted account quota recovers, when the provider
+     * supplied a trustworthy time. Committed atomically with the stop so the
+     * durable row alone is enough to reschedule the Goal after a restart.
+     * Ignored unless `statusReason` is `usage_limited(provider_quota)`.
+     */
+    readonly usageRecoveryAtMs?: number;
   };
   /** Worker claim committed atomically with the host-owned decision. */
   readonly workerProposal?: ThreadGoalWorkerProposalInput;

@@ -1,5 +1,5 @@
 /**
- * Runtime event surface — bridges `@mavis/protocol`'s thrift-generated
+ * Runtime event surface — bridges `@mavis/protocol`'s protocol
  * shapes into the names agent-core internals use.
  *
  * The protocol package was regenerated from a thrift IDL via

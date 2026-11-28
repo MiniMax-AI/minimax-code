@@ -366,7 +366,7 @@ describe('TuiSessionManager', () => {
   });
 
   it.each([34, 100])('edits a long title within a %i-column rename panel', async (width) => {
-    const title = `WorkBuddy VNC 持久化部署${'很长的会话标题'.repeat(30)} end`;
+    const title = `PeerHelper VNC 持久化部署${'很长的会话标题'.repeat(30)} end`;
     const { callbacks, manager } = createManager({
       sessions: [{ ...sessionById('session-current'), title }],
       initialRenameSessionId: 'session-current',
@@ -374,9 +374,9 @@ describe('TuiSessionManager', () => {
 
     const lines = manager.render(width);
     expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-    expect(stripVTControlCharacters(lines.join('\n'))).not.toContain('WorkBuddy');
+    expect(stripVTControlCharacters(lines.join('\n'))).not.toContain('PeerHelper');
     manager.handleInput('\x01');
-    expect(renderPlain(manager, width)).toContain('WorkBuddy');
+    expect(renderPlain(manager, width)).toContain('PeerHelper');
     manager.handleInput('Updated ');
     manager.handleInput('\r');
 

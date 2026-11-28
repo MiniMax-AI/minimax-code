@@ -1,36 +1,68 @@
 import type { IAgentConfig } from '@mavis/protocol';
+import { withMiniMaxCodeUserAgent } from '@mavis/shared';
 import {
   managedBackendRoutingHeaders,
   type ManagedBackendRoutingContext,
 } from '@mavis/agent-tools/desktop';
-import type { MavisBuildEnv } from '@mavis/config';
+import type { MavisBuildEnv, ModelAvailabilityConfigView, ModelCallRoute } from '@mavis/config';
 import type { LLMModelConfig } from '@mavis/agent-core/pi-turn-runner';
 
-import type { LocalRuntimeAuthContext } from '../contracts.js';
+import type { LocalRuntimeAuthContext } from '../../../infra/config/auth-context.js';
+import type { LocalByokProviderConfig, LocalModelsConfig } from '../contracts.js';
 
 const MANAGED_PROVIDER_USER_AGENT = 'MiniMaxAgent';
+/** 托管模型请求所属的本地 turn id，网关写进诊断和审核记录。 */
+const TURN_ID_HEADER = 'X-Mavis-Turn-Id';
+
+/**
+ * Turn phase of each model request (initial, iteration, compaction), read by
+ * biz-gateway. Only managed Token Plan requests carry it: BYOK and third-party
+ * upstreams never see it.
+ */
+const TURN_PHASE_HEADER = 'X-Mavis-Turn-Phase';
+
+export function turnPhaseHeaderFor(route: ModelCallRoute): { readonly turnPhaseHeader?: string } {
+  return route === 'managed_token_plan' ? { turnPhaseHeader: TURN_PHASE_HEADER } : {};
+}
 
 export function buildLocalProviderHeaders(input: {
   readonly headers?: Record<string, string>;
   readonly managedProvider: boolean;
   readonly routingContext?: ManagedBackendRoutingContext;
   readonly sessionId: string;
+  /** 发起这次模型解析的 turn；只带给托管模型。 */
+  readonly turnId?: string;
   readonly agentId: string;
 }): Record<string, string> {
+  // Third-party providers see MiniMax Code instead of the SDK default unless the
+  // user configured a User-Agent; managed routes keep their own identity below.
   const headers: Record<string, string> = {
-    ...(input.headers ?? {}),
+    ...(input.managedProvider ? input.headers : withMiniMaxCodeUserAgent(input.headers)),
     'X-Mavis-Session-Id': input.sessionId,
     'X-Mavis-Agent-Id': input.agentId,
     'X-Mavis-Timezone-Offset': String(new Date().getTimezoneOffset() * -60),
   };
+  for (const key of Object.keys(headers)) {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === 'bedrock-lane' || normalizedKey === 'bedrock_lane') delete headers[key];
+  }
   if (input.managedProvider) {
-    for (const key of Object.keys(headers)) {
-      if (key.toLowerCase() === 'bedrock-lane') delete headers[key];
-    }
     headers['User-Agent'] = MANAGED_PROVIDER_USER_AGENT;
     Object.assign(headers, managedBackendRoutingHeaders(input.routingContext, currentBuildEnv()));
+    if (input.turnId?.trim()) headers[TURN_ID_HEADER] = input.turnId;
   }
   return headers;
+}
+
+/** The part of the effective config `resolveModelCallRoute` reads. */
+export function modelCallRouteView(
+  providerConfig: LocalModelsConfig | undefined,
+  byok: LocalByokProviderConfig | undefined,
+): ModelAvailabilityConfigView {
+  return {
+    ...(providerConfig ? { provider: providerConfig } : {}),
+    ...(byok?.minimaxModelSource ? { minimaxModelSource: byok.minimaxModelSource } : {}),
+  };
 }
 
 function currentBuildEnv(): MavisBuildEnv | undefined {

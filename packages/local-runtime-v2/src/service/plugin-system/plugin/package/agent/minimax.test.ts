@@ -61,7 +61,6 @@ describe('MiniMax Plugin Agents', () => {
         tools: custom.tools,
         mcpServers: custom.mcpServers,
         skills: ['demo:research', 'standalone-notes'],
-        extensionSkills: ['demo:research'],
         contextWindow: 64000,
       },
     ]);
@@ -117,7 +116,27 @@ describe('MiniMax Plugin Agents', () => {
 
     expect(plugin.agents).toHaveLength(1);
     expect(plugin.agents?.[0]).toMatchObject({ skills: ['research', 'standalone-notes'] });
-    expect(plugin.agents?.[0]?.extensionSkills).toEqual([]);
+    expect(plugin.agents?.[0]?.extensionSkills).toBeUndefined();
+  });
+
+  it('keeps a legacy x-mavis.extensionSkills list as written without selecting Skills', async () => {
+    const root = await pluginRoot('minimax-agent-extension-skills');
+    const legacy = REVIEWER.replace(
+      '  contextWindow: 64000\n',
+      '  contextWindow: 64000\n  extensionSkills: [other-skill]\n',
+    );
+    await writePluginTree(
+      root,
+      miniMaxFiles({ agents: ['agents/reviewer.md'] }, { 'agents/reviewer.md': legacy }),
+    );
+
+    const plugin = await readMiniMaxPlugin(root, { source: 'LOCAL_MINIMAX' });
+
+    expect(plugin.diagnostics).toEqual([]);
+    expect(plugin.agents?.[0]).toMatchObject({
+      skills: ['demo:research', 'standalone-notes'],
+      extensionSkills: ['other-skill'],
+    });
   });
 
   it.each([

@@ -1,6 +1,7 @@
 import type {
   TuiActiveRunSnapshot,
   TuiDelegatedAgent,
+  TuiDelegatedWaitingReason,
   TuiMessage,
   TuiStreamEvent,
   TuiToolCall,
@@ -122,11 +123,18 @@ export class TuiAgentTeamProjection {
       const turnId =
         activeRun?.turnId ??
         (settlesObservedTurn || preservesTerminalStatus ? previous.turnId : undefined);
+      // A status change invalidates the previous activity label: a member that was
+      // running (or already settled) and is now blocked on the user must say so rather
+      // than keep the label it had before the decision appeared.
       const preserved =
-        preservesTerminalStatus || (previous?.turnId === turnId && isActiveStatus(status))
+        preservesTerminalStatus ||
+        (previous !== undefined &&
+          previous.turnId === turnId &&
+          isActiveStatus(status) &&
+          previous.status === status)
           ? previous
           : undefined;
-      const defaults = defaultActivity(status, agent.errorMessage);
+      const defaults = defaultActivity(status, agent.errorMessage, agent.waitingReason);
       next.set(agent.sessionId, {
         sessionId: agent.sessionId,
         parentSessionId: agent.parentSessionId,
@@ -230,7 +238,10 @@ export class TuiAgentTeamProjection {
 
   markWaiting(sessionId: string, activity: string, nowMs: number): void {
     const member = this.members.get(sessionId);
-    if (!member || !isActiveStatus(member.status)) return;
+    // `queued` counts: a dispatched task reports it while idle, which is exactly when a
+    // decision can be pending. `done` does not, so a settled member never flips back on a
+    // stale event; the snapshot probe is what recovers a real one on the next refresh.
+    if (!member || (member.status !== 'queued' && !isActiveStatus(member.status))) return;
     member.status = 'waiting';
     member.phase = 'waiting';
     member.activity = sanitizeLabel(activity, 'Waiting for input');
@@ -337,6 +348,17 @@ export class TuiAgentTeamProjection {
   }
 }
 
+/**
+ * What a blocked member is waiting for. The wording is the only place the user can tell
+ * "this task needs an answer" apart from "this task needs an approval", so it is derived
+ * from the recorded decision rather than left generic.
+ */
+export function tuiDelegatedWaitingActivity(reason: TuiDelegatedWaitingReason | undefined): string {
+  if (reason === 'questionnaire') return 'Waiting for answers';
+  if (reason === 'permission') return 'Waiting for approval';
+  return 'Waiting for input';
+}
+
 export function selectTuiAgentTeamPreview(
   snapshot: TuiAgentTeamSnapshot,
 ): readonly TuiAgentTeamMember[] {
@@ -385,6 +407,9 @@ function resolveMemberStatus(
 ): TuiAgentTeamMemberStatus {
   if (status === 'failed') return 'failed';
   if (status === 'stopped') return 'stopped';
+  // A pending decision outranks the settled reading: `ask_user` and a tool approval both
+  // end the Turn, so the Session is idle while it waits and would otherwise read as done.
+  if (status === 'waiting') return 'waiting';
   if (status === 'completed') return 'done';
   if (activeRunState === 'terminal') return 'done';
   if (activeRunState === 'decision-blocked') return 'waiting';
@@ -395,9 +420,12 @@ function resolveMemberStatus(
 function defaultActivity(
   status: TuiAgentTeamMemberStatus,
   _errorMessage: string | undefined,
+  waitingReason?: TuiDelegatedWaitingReason,
 ): { phase: TuiAgentTeamActivityPhase; activity: string } {
   if (status === 'failed') return { phase: 'failed', activity: 'Failed' };
-  if (status === 'waiting') return { phase: 'waiting', activity: 'Waiting for input' };
+  if (status === 'waiting') {
+    return { phase: 'waiting', activity: tuiDelegatedWaitingActivity(waitingReason) };
+  }
   if (status === 'running') return { phase: 'running', activity: 'Starting' };
   if (status === 'queued') return { phase: 'queued', activity: 'Queued' };
   if (status === 'done') return { phase: 'done', activity: 'Done' };

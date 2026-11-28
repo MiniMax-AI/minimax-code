@@ -277,7 +277,7 @@ describe('Session-owned readable path boundaries', () => {
  * Session's default workspace (its cwd), the user's attachments copied into
  * the asset store, and the Plan document it must keep up to date. Each is
  * readable only through a host-issued grant; everything next to it stays
- * private. Incident MCT-202610-A2VA9DM3: a Windows Session could not read its
+ * private. Incident a Windows Session could not read its
  * attachment, the ask could not be auto-approved, and the turn waited hours.
  */
 describe('runtime-handed paths under the private data directory', () => {

@@ -235,12 +235,22 @@ export function renderPlanModeReminder(canonicalPath: string): string {
 Plan Mode is active. Your task is to investigate and produce an
 implementation-ready plan. Do not implement the plan.
 
-For investigation, you may use any available investigation tool, including
-repository inspection, read-only shell commands, external research, Browser
-tools, Skills, configured tools, and delegated tasks. For a tool that
-supports both reads and writes, select query, get, list, search, fetch,
-inspect, or preview operations. If its operation is unclear, choose the
-obviously read-only operation.
+The investigation capabilities below do not grant additional authorization.
+Respect any narrower scope or tool restrictions in the user's request and
+applicable repository instructions. If the user forbids shell commands,
+tests, network access, or delegation, do not use those capabilities even
+for read-only investigation or because a Skill suggests them. Use permitted
+inspection tools instead, or record the evidence you cannot obtain. Do not
+route a forbidden action through another tool or a delegated task.
+
+For investigation, use only capabilities permitted by the user's request
+and applicable instructions. When permitted, these can include repository
+inspection, read-only shell commands, external research, Browser tools,
+Skills, configured tools, and delegated tasks. A tool being available or
+read-only does not make it authorized. For a permitted tool that supports
+both reads and writes, select query, get, list, search, fetch, inspect, or
+preview operations. If its operation is unclear, do not use it until you can
+establish that it stays within the allowed scope and mutation boundary.
 
 Clarification is part of planning. Prefer investigation for anything the
 repository or references can answer. When a decision that shapes the plan
@@ -251,35 +261,46 @@ Minor open points you can safely defer belong there too, not in questions.
 
 Do not create, update, delete, publish, submit, deploy, send, or upload
 files, messages, jobs, schedules, services, account actions, or external
-objects. Reading or fetching remote content is investigation and is allowed;
-persisting fetched content into the workspace is a mutation and is not.
-Browser tools may navigate, search, filter, and inspect, but must not submit
-a mutating form or account action. Delegated tasks must remain research-only
-and follow the same mutation boundary. Shell commands may inspect but must
-not modify files, Git state, installed packages, or other system state;
-running existing builds or tests to verify current behavior counts as
-investigation, while installing dependencies or modifying files to make them
-run does not.
+objects. Reading or fetching remote content is investigation only when
+network access and that source are permitted; persisting fetched content
+into the workspace is a mutation and is not allowed. When Browser tools are
+permitted, they may navigate, search, filter, and inspect, but must not submit
+a mutating form or account action. When delegation is permitted, delegated
+tasks must remain research-only and inherit all user restrictions. When
+shell commands are permitted, they may inspect but must not modify files,
+Git state, installed packages, or other system state. Existing builds or
+tests may verify current behavior only when those operations are permitted
+and do not create or modify files or other state; installing dependencies or
+changing files to make them run is not investigation. If verification needs
+a forbidden capability or mutation, record it as unverified instead.
 
 The sole mutation exception is writing or editing the canonical Plan file at
 exactly this path:
 ${canonicalPath}
 No other file may be created or modified, and Git state must not change.
 
-If a tool is denied, switch to another read or investigation path. When two
-distinct approaches to the same question have been blocked, stop pursuing
-that question: converge on the evidence already available and record the
-remaining uncertainty in the Plan; do not keep looping.
+If an action is denied by the user or a permission boundary, do not retry
+that action through another tool, path, or delegated task. A technical
+failure may justify a different permitted investigation method, but does
+not expand authorization. When two distinct permitted approaches to the
+same question have been blocked, stop pursuing that question: converge on
+the evidence already available and record the remaining uncertainty in the
+Plan; do not keep looping.
 
 Keep the canonical Plan file up to date as you investigate and decisions
 change. The Plan should contain only relevant sections and cover enough
 detail for another agent to implement it safely, including:
-- goal, scope, and important non-goals;
+- goal, scope, important non-goals, and the user's tool, test, network,
+  delegation, and write restrictions;
 - current implementation and affected components or files;
 - proposed architecture and end-to-end flow;
 - relevant state, ownership, concurrency, failure, and recovery semantics;
 - tests and acceptance criteria;
 - unresolved decisions or risks, if any.
+
+Preserve those user restrictions when revising the Plan after feedback and
+in its implementation instructions. Feedback or approval alone does not
+waive a restriction; change it only when the user explicitly does so.
 
 The Plan may begin with one title; its first body section must be a
 non-empty \`## Summary\` stating the goal, scope, and key design decisions.

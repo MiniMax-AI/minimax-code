@@ -622,9 +622,18 @@ function providerDetail(provider: McodeProviderView): string {
   return [
     provider.enabled ? 'Enabled' : 'Disabled',
     provider.apiFormat ?? 'anthropic-messages',
-    provider.hasApiKey ? (provider.maskedApiKey ?? 'key saved') : 'no key',
+    providerKeys(provider),
     `${provider.models.length} model${provider.models.length === 1 ? '' : 's'}`,
   ].join(' · ');
+}
+
+/** The saved key, or how many keys there are and how many rest (edited in Desktop). */
+function providerKeys(provider: McodeProviderView, nowMs = Date.now()): string {
+  const keys = provider.apiKeys;
+  if (!keys || keys.length < 2)
+    return provider.hasApiKey ? (provider.maskedApiKey ?? 'key saved') : 'no key';
+  const resting = keys.filter((key) => key.enabled && key.rest && key.rest.until > nowMs).length;
+  return `${keys.length} API keys${resting ? ` (${resting} resting)` : ''}`;
 }
 
 function providerSummary(provider: McodeProviderView): string {

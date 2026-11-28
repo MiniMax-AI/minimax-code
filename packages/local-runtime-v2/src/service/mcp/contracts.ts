@@ -4,7 +4,22 @@ import type {
   ManagedBackendRoutingContext as LocalRuntimeRoutingContext,
 } from '@mavis/agent-tools/desktop';
 import type { McpConnectionPool } from '@mavis/mcp/runtime/connection-pool';
-import type { McpConnectionTokenOverrides, McpToolCallResult } from '@mavis/mcp/runtime/types';
+import type {
+  McpConnectionTokenOverrides,
+  McpRuntimeLogger,
+  McpToolCallResult,
+} from '@mavis/mcp/runtime/types';
+import type { GlobalEventInput } from '@mavis/shared/global-events';
+import type { McpAuthState, McpOAuthService } from './oauth/index.js';
+
+/** Public OAuth client settings of a remote server (plan §6.1); never holds a secret. */
+export interface LocalMcpOAuthConfig {
+  clientId?: string;
+  scopes?: string[];
+  callbackPort?: number;
+  callbackHost?: 'localhost' | '127.0.0.1';
+  authServerMetadataUrl?: string;
+}
 
 type McpTransport = 'stdio' | 'http' | 'streamable-http' | 'sse';
 
@@ -21,6 +36,7 @@ export type McpServerConfig =
       readonly transport: Exclude<McpTransport, 'stdio'>;
       readonly url: string;
       readonly headers?: Readonly<Record<string, string>>;
+      readonly oauth?: Readonly<LocalMcpOAuthConfig>;
       readonly timeoutMs?: number;
       readonly description?: string;
     };
@@ -32,12 +48,16 @@ export interface McpServerSummary {
   readonly description?: string;
   readonly endpoint?: string;
   readonly configJson: '{}';
+  /** Remote servers only; stdio servers never take part in OAuth. */
+  readonly authState?: McpAuthState;
 }
 
 export interface McpServerDetail {
   readonly name: string;
   readonly enabled: boolean;
   readonly config: McpServerConfig;
+  /** Whether a confidential client secret is stored for this user server. */
+  readonly oauthClientSecretConfigured?: boolean;
 }
 
 interface McpConnectionTestResult {
@@ -79,7 +99,8 @@ export interface LocalMcpServerConfig {
   env?: Record<string, string>;
   url?: string;
   type?: 'stdio' | 'http' | 'sse' | 'streamable-http';
-  auth?: Record<string, unknown>;
+  /** Raw `oauth` block as stored; validated by its source before use. */
+  oauth?: Record<string, unknown>;
   enabled?: boolean;
   configured?: boolean;
   builtin?: boolean;
@@ -113,6 +134,7 @@ export type ConfiguredMcpServerInput =
       transport: Exclude<ConfiguredMcpTransport, 'stdio'>;
       url: string;
       headers?: Record<string, string>;
+      oauth?: LocalMcpOAuthConfig;
       timeoutMs?: number;
       description?: string;
     };
@@ -125,12 +147,14 @@ export interface ConfiguredMcpServerSummary {
   endpoint?: string;
   /** Retained for wire compatibility; list responses never expose configuration secrets. */
   configJson: '{}';
+  authState?: McpAuthState;
 }
 
 export interface ConfiguredMcpServerDetail {
   name: string;
   enabled: boolean;
   config: ConfiguredMcpServerInput;
+  oauthClientSecretConfigured?: boolean;
 }
 
 export interface ConfiguredMcpConnectionTestResult {
@@ -142,7 +166,8 @@ export interface ConfiguredMcpConnectionTestResult {
     | 'MCP_CONNECTION_TIMEOUT'
     | 'MCP_COMMAND_NOT_FOUND'
     | 'MCP_HANDSHAKE_FAILED'
-    | 'MCP_CONNECTION_FAILED';
+    | 'MCP_CONNECTION_FAILED'
+    | 'MCP_AUTH_REQUIRED';
   errorMessage?: string;
 }
 
@@ -176,10 +201,17 @@ export interface LocalMcpAuthContext {
   subUserName?: string;
 }
 
+export interface LocalMcpCallOptions {
+  context?: LocalMcpRuntimeContext;
+  signal?: AbortSignal;
+}
+
 export interface LocalMcpRuntimeContext {
   /** Runtime Session whose ephemeral MCP overlay should be used for this turn. */
   sessionId?: string;
   workspaceRoot?: string;
+  /** Turn whose discovery triggered the connection; carried on `mcp.auth_required`. */
+  turnId?: string;
   /** local-runtime dataDir; builtin matrix derives its assets input root from it. */
   dataDir?: string;
   authContext?: LocalMcpAuthContext;
@@ -209,11 +241,18 @@ export interface LocalMcpServiceOptions {
    * identity headers / env at spawn time (e.g. archon parent user id).
    */
   connectionPool?: McpConnectionPool;
-  /** Fast budget for already-running or remote MCP discovery during turn assembly. */
+  /**
+   * Turn discovery budget override for remote MCP servers, and for stdio servers when
+   * `turnStdioDiscoveryTimeoutMs` is unset. Takes precedence over the environment defaults.
+   */
   turnDiscoveryTimeoutMs?: number;
-  /** Larger first-connect budget for stdio servers that may cold-start through npx/uvx. */
+  /** Turn discovery budget override for stdio servers, which may cold-start through npx/uvx. */
   turnStdioDiscoveryTimeoutMs?: number;
   builtinMatrix?: LocalMcpBuiltinMatrixOptions;
+  /** OAuth for user `mcp.json` and project `.mcp.json` remote servers. */
+  oauth?: McpOAuthService;
+  publishGlobalEvent?: (event: GlobalEventInput<'mcp.auth_required'>) => void;
+  logger?: McpRuntimeLogger;
   resolveTokenOverrides?: (
     serverName: string,
     config?: LocalMcpServerConfig,
@@ -236,6 +275,7 @@ export interface McpRuntimeCapability {
   listToolEntriesForTurn(input: {
     sessionId: string;
     workspaceRoot: string;
+    turnId?: string;
     authContext?: LocalMcpRuntimeContext['authContext'];
     routingContextGetter?: () => LocalMcpRuntimeContext['routingContext'];
     emitBusEvent: Emit;

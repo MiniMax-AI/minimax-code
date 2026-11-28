@@ -1,4 +1,8 @@
-import { parseCompatibleMcpObject, type ParsedMcpServers } from '../../mcp/config.js';
+import {
+  parseCompatibleMcpObject,
+  type CompatibleMcpFormat,
+  type ParsedMcpServers,
+} from '../../mcp/config.js';
 import { readPluginSkill } from '../../skill/reader.js';
 import {
   canonicalizePluginRoot,
@@ -37,7 +41,7 @@ export async function readCompatiblePluginPackage(
   const name = stringValue(manifest.name);
   if (!name) readerFail('MANIFEST_SCHEMA_INVALID', 'Compatible Plugin name is required');
   const skills = await readCompatibleSkills(root, manifest.skills);
-  const mcp = await readCompatibleMcp(root, manifest.mcpServers);
+  const mcp = await readCompatibleMcp(root, manifest.mcpServers, kind);
   const iconPath = await readOptionalIcon(root, manifest.icon);
   const author = readAuthor(manifest.author);
   const hookResult = await readPluginHooks(root, {
@@ -47,6 +51,7 @@ export async function readCompatiblePluginPackage(
     defaultPath: 'hooks/hooks.json',
     manifestPath: manifestRelativePath,
   });
+  const modulesDiagnostics: PluginReaderDiagnostic[] = [];
   const agentResult =
     kind !== 'CODEX'
       ? await readCompatiblePluginAgents(root, {
@@ -55,15 +60,11 @@ export async function readCompatiblePluginPackage(
           skills,
         })
       : { agents: [], diagnostics: [] };
-  if (
-    mcp.servers.length + skills.length + hookResult.hooks.length + agentResult.agents.length ===
-    0
-  ) {
-    readerFail(
-      'MANIFEST_SCHEMA_INVALID',
-      'Compatible Plugin has no supported executable capability',
-    );
-  }
+  assertSupportedCapability(
+    kind,
+    mcp.servers.length + skills.length + hookResult.hooks.length + agentResult.agents.length,
+    modulesDiagnostics.length > 0,
+  );
 
   return {
     source: kind === 'CODEX' ? 'LOCAL_CODEX' : 'LOCAL_\u0043\u004c\u0041\u0055\u0044\u0045',
@@ -79,8 +80,29 @@ export async function readCompatiblePluginPackage(
     skills,
     hooks: hookResult.hooks,
     ...(agentResult.agents.length > 0 ? { agents: agentResult.agents } : {}),
-    diagnostics: [...mcp.diagnostics, ...hookResult.diagnostics, ...agentResult.diagnostics],
+    diagnostics: [
+      ...mcp.diagnostics,
+      ...hookResult.diagnostics,
+      ...modulesDiagnostics,
+      ...agentResult.diagnostics,
+    ],
   };
+}
+
+function assertSupportedCapability(
+  kind: 'CLAUDE_CODE' | 'CODEX',
+  capabilityCount: number,
+  declaresModules: boolean,
+): void {
+  if (capabilityCount > 0) return;
+  // A mods-only package is rejected for the reason the author can act on.
+  if (kind === 'CLAUDE_CODE' && declaresModules) {
+    readerFail(
+      'MODS_NOT_SUPPORTED_YET',
+      'Compatible Plugin has no supported executable capability; mods are not supported yet',
+    );
+  }
+  readerFail('MANIFEST_SCHEMA_INVALID', 'Compatible Plugin has no supported executable capability');
 }
 
 function compatibleMetadata(
@@ -145,16 +167,19 @@ async function addSkill(
 async function readCompatibleMcp(
   root: CanonicalPluginRoot,
   declared: unknown,
+  kind: string,
 ): Promise<ParsedMcpServers> {
+  // Each format has its own OAuth fields and pre-registered redirect_uri shape.
+  const format: CompatibleMcpFormat = kind === 'CODEX' ? 'codex' : 'localhost-callback';
   const groups: ParsedMcpServers[] = [];
   if (await pluginPathExists(root, '.mcp.json', 'file')) {
-    groups.push(await readCompatibleMcpPath(root, '.mcp.json'));
+    groups.push(await readCompatibleMcpPath(root, '.mcp.json', format));
   }
   if (isRecord(declared)) {
-    groups.push(await parseCompatibleMcpObject(root, declared));
+    groups.push(await parseCompatibleMcpObject(root, declared, format));
   } else {
     for (const relativePath of stringOrStringArray(declared)) {
-      groups.push(await readCompatibleMcpPath(root, relativePath));
+      groups.push(await readCompatibleMcpPath(root, relativePath, format));
     }
   }
 
@@ -181,9 +206,10 @@ async function readCompatibleMcp(
 async function readCompatibleMcpPath(
   root: CanonicalPluginRoot,
   relativePath: string,
+  format: CompatibleMcpFormat,
 ): Promise<ParsedMcpServers> {
   const { value } = await readPluginJsonObject(root, relativePath);
-  return parseCompatibleMcpObject(root, value);
+  return parseCompatibleMcpObject(root, value, format);
 }
 
 async function readOptionalIcon(

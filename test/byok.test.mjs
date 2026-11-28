@@ -496,7 +496,11 @@ test(
       "1",
     ]);
     assert.match(first, /LOCAL_BYOK_OK/);
-    assert.equal(requests.slice(beforeFirst).filter((r) => r.body.stream).length, 1,
+    const firstStreaming = requests.slice(beforeFirst).filter((r) => r.body.stream);
+    const firstTurnRequests = firstStreaming.filter(
+      (r) => !JSON.stringify(r.body.messages ?? []).includes("Checkpoint control: summarize the preceding conversation now."),
+    );
+    assert.equal(firstTurnRequests.length, 1,
       "Display-only Hooks must not start another model request");
     for (const marker of hookMarkers) assert.ok(!first.includes(marker));
     await assert.rejects(run([
@@ -814,6 +818,21 @@ function cancellationTest(cancellation) {
           );
           return;
         }
+        if (
+          JSON.stringify(body.messages ?? []).includes(
+            "Checkpoint control: summarize the preceding conversation now.",
+          )
+        ) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(
+            `data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }] })}\n\n`,
+          );
+          res.write(
+            `data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`,
+          );
+          res.end("data: [DONE]\n\n");
+          return;
+        }
         if (cancellation === "lock") {
           // A separate process releases the lock even when the CLI blocks its event loop.
           holder = spawn(
@@ -892,7 +911,7 @@ function cancellationTest(cancellation) {
           );
         res.end("data: [DONE]\n\n");
         if (cancellation === "tool") {
-          cancelTimer = setInterval(() => {
+          if (!cancelTimer) cancelTimer = setInterval(() => {
             if (!existsSync(marker)) return;
             clearInterval(cancelTimer);
             cancelledDuringTool = true;
@@ -943,7 +962,7 @@ function cancellationTest(cancellation) {
               baseURL: `${origin}/v1`,
               authMode: "api-key",
             },
-            models: { fixture: { limit: { context: 32768, output: 4096 } } },
+            models: { fixture: { limit: { context: 65536, output: 4096 } } },
           },
         },
       }),
@@ -1056,7 +1075,9 @@ function cancellationTest(cancellation) {
       .map((line) => JSON.parse(line).message?.role);
     assert.deepEqual(
       roles,
-      cancellation === "tool" ? ["user", "assistant", "toolResult"] : ["user"],
+      cancellation === "tool"
+        ? ["user", "custom", "assistant", "toolResult"]
+        : ["user", "custom"],
       "Abort reconciliation must preserve executed tools without retaining cancelled text output",
     );
   };

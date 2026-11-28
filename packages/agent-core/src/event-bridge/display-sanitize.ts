@@ -49,7 +49,7 @@
  *   - `packages/agent-core/src/event-bridge/converters.ts::toolCallFromRuntime`
  *     — single chokepoint for the SSE / SQLite / display.jsonl / cloud
  *     uplink channels.
- *   - `packages/local-runtime/src/legacy-opencode/legacy-opencode-migrator.ts`
+ *   - `packages/local-runtime-v2/src/infra/legacy-db/legacy-opencode-display-transforms.ts`
  *     — companion `sanitizeWireToolCallResultData` for already-stringified
  *     legacy payloads that bypass the converter.
  */

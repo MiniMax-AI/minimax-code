@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import * as acp from '@agentclientprotocol/sdk';
+import { SessionActivityKind, SessionActivityState } from '@mavis/local-runtime-v2/cli-service';
 import { describe, expect, it, vi } from 'vitest';
 
 import { TUI_ACP_AVAILABLE_COMMANDS } from '../../src/acp/commands.js';
 import { createTuiAcpAgent } from '../../src/acp/agent.js';
+import { TuiFailure } from '../../src/failure.js';
 import { TuiAcpPromptContinuation } from '../../src/acp/prompt-continuation.js';
 import type { TuiAcpRuntime } from '../../src/acp/runtime.js';
 import type { TuiContextSnapshotResponse, TuiRuntimeDiagnostics } from '../../src/runtime/port.js';
@@ -21,6 +23,53 @@ import type { TuiRuntimeEvent } from '../../src/types/runtime-events.js';
 
 const ONE_PIXEL_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+const ACP_AUTH_METHODS = [
+  {
+    type: 'terminal',
+    id: 'minimax-code-login',
+    name: 'Sign in to MiniMax Code (Mainland China)',
+    args: ['login', '--region', 'cn'],
+  },
+  {
+    type: 'terminal',
+    id: 'minimax-code-login-global',
+    name: 'Sign in to MiniMax Code (Global)',
+    args: ['login', '--region', 'global'],
+  },
+  {
+    type: 'env_var',
+    id: 'minimax-code-api-key',
+    name: 'Use a MiniMax API key (Mainland China)',
+    vars: [{ name: 'MCODE_PROVIDER_API_KEY', label: 'MiniMax API key', secret: true }],
+  },
+  {
+    type: 'env_var',
+    id: 'minimax-code-api-key-global',
+    name: 'Use a MiniMax API key (Global)',
+    vars: [{ name: 'MCODE_PROVIDER_API_KEY', label: 'MiniMax API key', secret: true }],
+  },
+];
+
+type AcpTestConnection = Parameters<
+  Parameters<ReturnType<typeof acp.client>['connectWith']>[1]
+>[0];
+
+/**
+ * session/new only reserves an ID. A local command is the first use that writes the Runtime
+ * Session without starting an Agent turn, for tests that need Runtime-backed Session state.
+ */
+async function newRuntimeSession(
+  connection: AcpTestConnection,
+  params: acp.NewSessionRequest,
+): Promise<acp.NewSessionResponse> {
+  const session = await connection.request(acp.methods.agent.session.new, params);
+  await connection.request(acp.methods.agent.session.prompt, {
+    sessionId: session.sessionId,
+    prompt: [{ type: 'text', text: '/help' }],
+  });
+  return session;
+}
 
 function createRuntime(
   events: readonly TuiStreamEvent[] = [],
@@ -61,10 +110,14 @@ function createRuntime(
       signal.addEventListener('abort', () => resolve(undefined), { once: true });
     });
   };
-  const createSession = vi.fn(async ({ workspaceDir }: { workspaceDir: string }) => ({
-    sessionId: 'session-1',
-    workspaceDir,
-  }));
+  let sessionSequence = 0;
+  const newSessionId = vi.fn(() => `session-${String(++sessionSequence)}`);
+  const createSession = vi.fn(
+    async ({ workspaceDir, sessionId }: { workspaceDir: string; sessionId?: string }) => ({
+      sessionId: sessionId ?? 'session-1',
+      workspaceDir,
+    }),
+  );
   const clearSessionMcpServers = vi.fn(async () => undefined);
   const configureSessionMcpServers = vi.fn(async () => undefined);
   const deleteSession = vi.fn(async () => undefined);
@@ -83,6 +136,10 @@ function createRuntime(
   const listModels = vi.fn(async () => [...(options.models ?? [])]);
   const selectModel = vi.fn(async () => true);
   const selectSessionModel = vi.fn(async () => true);
+  const upsertMiniMaxApiKey = vi.fn(async () => undefined);
+  const getAccountStatus = vi.fn(
+    async () => options.accountStatus ?? { status: 'ready' as const, warnings: [] },
+  );
   const getContextSnapshot = vi.fn(async () =>
     Promise.resolve(options.contextSnapshot ?? { status: 'empty' as const }),
   );
@@ -144,6 +201,13 @@ function createRuntime(
     activeSessionIds: [],
     failedSessionIds: [],
   }));
+  const getActiveRun = vi.fn(async (sessionId: string) => ({
+    schemaVersion: 1 as const,
+    sessionId,
+    state: sessionId === 'session-1' ? ('idle' as const) : ('running' as const),
+    ...(sessionId === 'session-1' ? {} : { turnId: 'turn-active' }),
+    actions: { steer: sessionId !== 'session-1' },
+  }));
   const getSessionForkOptions = vi.fn(async () => ({
     canFork: true,
     worktreeVisible: false,
@@ -153,6 +217,7 @@ function createRuntime(
     session: { sessionId: 'session-fork', workspaceDir: '/workspace' },
   }));
   const runtime = {
+    newSessionId,
     createSession,
     configureSessionMcpServers,
     clearSessionMcpServers,
@@ -160,9 +225,7 @@ function createRuntime(
     listSessionPage,
     getSession,
     listMessagePage,
-    getAccountStatus: vi.fn(
-      async () => options.accountStatus ?? { status: 'ready' as const, warnings: [] },
-    ),
+    getAccountStatus,
     getRuntimeDiagnostics: vi.fn(async () => options.runtimeDiagnostics ?? { warnings: [] }),
     getContextSnapshot,
     getSessionUsage,
@@ -185,6 +248,7 @@ function createRuntime(
     clearGoal,
     getDelegationSnapshot,
     stopDelegation,
+    getActiveRun,
     getSessionForkOptions,
     forkSession,
     sendMessage: vi.fn(async function* sendMessage(req, signal) {
@@ -208,6 +272,7 @@ function createRuntime(
     listModels,
     selectModel,
     selectSessionModel,
+    upsertMiniMaxApiKey,
     replyPermission: vi.fn(async () => true),
     replyQuestionnaire: vi.fn(async () => true),
     dismissQuestionnaire: vi.fn(async () => true),
@@ -228,6 +293,7 @@ function createRuntime(
   };
   return {
     runtime: runtime as unknown as TuiAcpRuntime,
+    newSessionId,
     createSession,
     configureSessionMcpServers,
     clearSessionMcpServers,
@@ -235,11 +301,13 @@ function createRuntime(
     listSessionPage,
     getSession,
     listMessagePage,
+    getAccountStatus,
     sendMessage: sendMessageCall,
     abortSession,
     listModels,
     selectModel,
     selectSessionModel,
+    upsertMiniMaxApiKey,
     getContextSnapshot,
     getSessionUsage,
     listSkills,
@@ -260,11 +328,13 @@ function createRuntime(
     clearGoal,
     getDelegationSnapshot,
     stopDelegation,
+    getActiveRun,
     getSessionForkOptions,
     forkSession,
     replyPermission: runtime.replyPermission,
     replyQuestionnaire: runtime.replyQuestionnaire,
     dismissQuestionnaire: runtime.dismissQuestionnaire,
+    watchEvents: runtime.watchEvents,
     emitRuntimeEvent(event: TuiRuntimeEvent) {
       const deliver = deliverRuntimeEvent;
       deliverRuntimeEvent = undefined;
@@ -274,7 +344,1306 @@ function createRuntime(
   };
 }
 
+/** The Runtime direct-send rejection while another Turn holds the Session lock. */
+function sessionBusyFailure(): TuiFailure {
+  return new TuiFailure(
+    'runtime',
+    'Session already has an active Turn. Use queue send to deliver the message after it.',
+    { code: 'local_session_busy', retryable: true },
+  );
+}
+
+/** Resolves with the request error, or wraps a success so a missing rejection shows in the diff. */
+function settledOutcome(request: Promise<unknown>): Promise<unknown> {
+  return request.then(
+    (resolved) => ({ resolved }),
+    (rejection: unknown) => rejection,
+  );
+}
+
+/** Races a request against a wall-clock bound so a hang fails the assertion instead of the run. */
+function outcomeWithin(request: Promise<unknown>, ms: number): Promise<unknown> {
+  return Promise.race([
+    settledOutcome(request),
+    new Promise((resolve) => setTimeout(() => resolve('still waiting'), ms)),
+  ]);
+}
+
 describe('MiniMax Code ACP agent', () => {
+  it('advertises explicit Mainland China and Global sign-in and API key choices', async () => {
+    const { runtime } = createRuntime();
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      const initialized = await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { auth: { terminal: true } },
+      });
+
+      expect(initialized.authMethods).toEqual(ACP_AUTH_METHODS);
+    });
+  });
+
+  it('uses the API key auth method without exposing the key in ACP responses', async () => {
+    const { runtime, upsertMiniMaxApiKey } = createRuntime({
+      accountStatus: { status: 'ready', modelSource: 'byok', warnings: [] },
+    });
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    const previousRegion = process.env.MAVIS_REGION;
+    process.env.MCODE_PROVIDER_API_KEY = 'sk-test-only';
+    // The Mainland China key method needs no Runtime switch in a Mainland China process.
+    process.env.MAVIS_REGION = 'cn';
+    try {
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp.client({ name: 'test-client' });
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key',
+          }),
+        ).resolves.toEqual({});
+      });
+      expect(upsertMiniMaxApiKey).toHaveBeenCalledWith({
+        apiKey: 'sk-test-only',
+        saveAndUse: true,
+      });
+    } finally {
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it('rejects API key authentication when the process environment is missing the key', async () => {
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    delete process.env.MCODE_PROVIDER_API_KEY;
+    try {
+      const { runtime, upsertMiniMaxApiKey } = createRuntime();
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key',
+          }),
+        ).rejects.toThrow('MCODE_PROVIDER_API_KEY');
+      });
+
+      expect(upsertMiniMaxApiKey).not.toHaveBeenCalled();
+    } finally {
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+    }
+  });
+
+  it('removes the API key from the process environment once authenticate reads it', async () => {
+    const { runtime, upsertMiniMaxApiKey } = createRuntime({
+      accountStatus: { status: 'ready', modelSource: 'byok', warnings: [] },
+    });
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    const previousRegion = process.env.MAVIS_REGION;
+    const previousSibling = process.env.MCODE_ACP_TEST_SIBLING;
+    process.env.MCODE_PROVIDER_API_KEY = 'sk-env-test-only';
+    process.env.MAVIS_REGION = 'cn';
+    process.env.MCODE_ACP_TEST_SIBLING = 'kept';
+    try {
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp.client({ name: 'test-client' });
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key',
+          }),
+        ).resolves.toEqual({});
+      });
+
+      // Bash subprocesses inherit this process environment, so the key must not stay there.
+      expect('MCODE_PROVIDER_API_KEY' in process.env).toBe(false);
+      expect(process.env.MCODE_ACP_TEST_SIBLING).toBe('kept');
+      expect(upsertMiniMaxApiKey).toHaveBeenCalledWith({
+        apiKey: 'sk-env-test-only',
+        saveAndUse: true,
+      });
+    } finally {
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+      if (previousSibling === undefined) delete process.env.MCODE_ACP_TEST_SIBLING;
+      else process.env.MCODE_ACP_TEST_SIBLING = previousSibling;
+    }
+  });
+
+  it('retries a failed Global key switch with the key kept in memory, not in the environment', async () => {
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    const previousRegion = process.env.MAVIS_REGION;
+    process.env.MCODE_PROVIDER_API_KEY = 'sk-retry-test-only';
+    process.env.MAVIS_REGION = 'cn';
+    try {
+      const initial = createRuntime();
+      const switched = createRuntime({
+        accountStatus: { status: 'ready', modelSource: 'byok', warnings: [] },
+      });
+      let attempts = 0;
+      const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+        process.env.MAVIS_REGION = region;
+        attempts += 1;
+        if (attempts === 1) throw new Error('Runtime storage is still locked.');
+        return switched.runtime;
+      });
+      const agent = createTuiAcpAgent({ runtime: initial.runtime, version: '1.2.3', switchRegion });
+      const client = acp.client({ name: 'test-client' });
+      let keyLeftAfterFailedSwitch: boolean | undefined;
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key-global',
+          }),
+        ).rejects.toThrow();
+        keyLeftAfterFailedSwitch = 'MCODE_PROVIDER_API_KEY' in process.env;
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key-global',
+          }),
+        ).resolves.toEqual({});
+      });
+
+      expect(keyLeftAfterFailedSwitch).toBe(false);
+      expect(switched.upsertMiniMaxApiKey).toHaveBeenCalledWith({
+        apiKey: 'sk-retry-test-only',
+        saveAndUse: true,
+      });
+    } finally {
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it('authenticates with the API key the ACP command took from the environment at start', async () => {
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    const previousRegion = process.env.MAVIS_REGION;
+    delete process.env.MCODE_PROVIDER_API_KEY;
+    process.env.MAVIS_REGION = 'cn';
+    try {
+      const { runtime, upsertMiniMaxApiKey } = createRuntime({
+        accountStatus: { status: 'ready', modelSource: 'byok', warnings: [] },
+      });
+      const agent = createTuiAcpAgent({
+        runtime,
+        version: '1.2.3',
+        authApiKey: 'sk-startup-test-only',
+      });
+      const client = acp.client({ name: 'test-client' });
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key',
+          }),
+        ).resolves.toEqual({});
+      });
+
+      expect(upsertMiniMaxApiKey).toHaveBeenCalledWith({
+        apiKey: 'sk-startup-test-only',
+        saveAndUse: true,
+      });
+    } finally {
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it('rejects a blank API key without switching region, saving a key or remembering a region', async () => {
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    const previousRegion = process.env.MAVIS_REGION;
+    process.env.MCODE_PROVIDER_API_KEY = '   ';
+    process.env.MAVIS_REGION = 'cn';
+    try {
+      const initial = createRuntime();
+      const switchRegion = vi.fn(async () => initial.runtime);
+      const rememberRegion = vi.fn();
+      const agent = createTuiAcpAgent({
+        runtime: initial.runtime,
+        version: '1.2.3',
+        switchRegion,
+        rememberRegion,
+      });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key-global',
+          }),
+        ).rejects.toThrow('MCODE_PROVIDER_API_KEY');
+      });
+
+      expect(switchRegion).not.toHaveBeenCalled();
+      expect(initial.upsertMiniMaxApiKey).not.toHaveBeenCalled();
+      expect(rememberRegion).not.toHaveBeenCalled();
+    } finally {
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it('keeps the default terminal login on Mainland China when no region is set', async () => {
+    const previousRegion = process.env.MAVIS_REGION;
+    delete process.env.MAVIS_REGION;
+    try {
+      const { runtime, getAccountStatus } = createRuntime();
+      const switchRegion = vi.fn(async () => runtime);
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3', switchRegion });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login',
+          }),
+        ).resolves.toEqual({});
+      });
+
+      expect(switchRegion).not.toHaveBeenCalled();
+      expect(getAccountStatus).toHaveBeenCalled();
+    } finally {
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it('switches the Runtime to the Global region before Global authentication checks', async () => {
+    const previousRegion = process.env.MAVIS_REGION;
+    process.env.MAVIS_REGION = 'cn';
+    try {
+      const initial = createRuntime();
+      const switched = createRuntime();
+      const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+        process.env.MAVIS_REGION = region;
+        return switched.runtime;
+      });
+      const agent = createTuiAcpAgent({
+        runtime: initial.runtime,
+        version: '1.2.3',
+        switchRegion,
+      });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          }),
+        ).resolves.toEqual({});
+      });
+
+      expect(switchRegion).toHaveBeenCalledWith('en');
+      expect(initial.getAccountStatus).not.toHaveBeenCalled();
+      expect(switched.getAccountStatus).toHaveBeenCalled();
+      expect(process.env.MAVIS_REGION).toBe('en');
+    } finally {
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it('retries the Global Runtime switch after a failed rebuild instead of checking the stopped Runtime', async () => {
+    const previousRegion = process.env.MAVIS_REGION;
+    process.env.MAVIS_REGION = 'cn';
+    try {
+      const initial = createRuntime();
+      const switched = createRuntime();
+      let attempts = 0;
+      const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+        // The ACP command updates the process region before the replacement Runtime starts.
+        process.env.MAVIS_REGION = region;
+        attempts += 1;
+        if (attempts === 1) throw new Error('Runtime storage is still locked.');
+        return switched.runtime;
+      });
+      const agent = createTuiAcpAgent({
+        runtime: initial.runtime,
+        version: '1.2.3',
+        switchRegion,
+      });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          }),
+        ).rejects.toThrow();
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          }),
+        ).resolves.toEqual({});
+      });
+
+      expect(switchRegion.mock.calls).toEqual([['en'], ['en']]);
+      expect(initial.getAccountStatus).not.toHaveBeenCalled();
+      expect(switched.getAccountStatus).toHaveBeenCalled();
+    } finally {
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+    }
+  });
+
+  it.each([
+    { methodId: 'minimax-code-api-key-global', startRegion: 'cn', keyRegion: 'en' },
+    { methodId: 'minimax-code-api-key', startRegion: 'en', keyRegion: 'cn' },
+  ] as const)(
+    'saves the $methodId key in its own region and remembers that region',
+    async ({ methodId, startRegion, keyRegion }) => {
+      const previousRegion = process.env.MAVIS_REGION;
+      const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+      process.env.MAVIS_REGION = startRegion;
+      process.env.MCODE_PROVIDER_API_KEY = 'sk-region-test-only';
+      try {
+        const initial = createRuntime();
+        const switched = createRuntime({
+          accountStatus: { status: 'ready', modelSource: 'byok', warnings: [] },
+        });
+        const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+          process.env.MAVIS_REGION = region;
+          return switched.runtime;
+        });
+        const rememberRegion = vi.fn();
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+          rememberRegion,
+        });
+        const client = acp.client({ name: 'test-client' });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await expect(
+            connection.request(acp.methods.agent.authenticate, { methodId }),
+          ).resolves.toEqual({});
+        });
+
+        expect(switchRegion.mock.calls).toEqual([[keyRegion]]);
+        // The key only works against its own region's API host, so the old Runtime never saves it.
+        expect(initial.upsertMiniMaxApiKey).not.toHaveBeenCalled();
+        expect(switched.upsertMiniMaxApiKey).toHaveBeenCalledWith({
+          apiKey: 'sk-region-test-only',
+          saveAndUse: true,
+        });
+        expect(rememberRegion.mock.calls).toEqual([[keyRegion]]);
+        expect(switchRegion.mock.invocationCallOrder[0]).toBeLessThan(
+          switched.upsertMiniMaxApiKey.mock.invocationCallOrder[0] ?? 0,
+        );
+        expect(switched.upsertMiniMaxApiKey.mock.invocationCallOrder[0]).toBeLessThan(
+          rememberRegion.mock.invocationCallOrder[0] ?? 0,
+        );
+      } finally {
+        if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+        else process.env.MAVIS_REGION = previousRegion;
+        if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+        else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+      }
+    },
+  );
+
+  it('checks for a Global API key before switching the Runtime region', async () => {
+    const previousRegion = process.env.MAVIS_REGION;
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    process.env.MAVIS_REGION = 'cn';
+    delete process.env.MCODE_PROVIDER_API_KEY;
+    try {
+      const initial = createRuntime();
+      const switchRegion = vi.fn(async () => initial.runtime);
+      const rememberRegion = vi.fn();
+      const agent = createTuiAcpAgent({
+        runtime: initial.runtime,
+        version: '1.2.3',
+        switchRegion,
+        rememberRegion,
+      });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key-global',
+          }),
+        ).rejects.toThrow('MCODE_PROVIDER_API_KEY');
+      });
+
+      expect(switchRegion).not.toHaveBeenCalled();
+      expect(initial.upsertMiniMaxApiKey).not.toHaveBeenCalled();
+      expect(rememberRegion).not.toHaveBeenCalled();
+    } finally {
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+    }
+  });
+
+  it('saves no Global API key and remembers no region when the Global Runtime cannot start', async () => {
+    const previousRegion = process.env.MAVIS_REGION;
+    const previousKey = process.env.MCODE_PROVIDER_API_KEY;
+    process.env.MAVIS_REGION = 'cn';
+    process.env.MCODE_PROVIDER_API_KEY = 'sk-region-test-only';
+    try {
+      const initial = createRuntime();
+      const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+        process.env.MAVIS_REGION = region;
+        throw new Error('Runtime storage is still locked.');
+      });
+      const rememberRegion = vi.fn();
+      const agent = createTuiAcpAgent({
+        runtime: initial.runtime,
+        version: '1.2.3',
+        switchRegion,
+        rememberRegion,
+      });
+      const client = acp.client({ name: 'test-client' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { auth: { terminal: true } },
+        });
+        await expect(
+          connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-api-key-global',
+          }),
+        ).rejects.toThrow();
+      });
+
+      expect(switchRegion.mock.calls).toEqual([['en']]);
+      expect(initial.upsertMiniMaxApiKey).not.toHaveBeenCalled();
+      expect(rememberRegion).not.toHaveBeenCalled();
+    } finally {
+      if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+      else process.env.MAVIS_REGION = previousRegion;
+      if (previousKey === undefined) delete process.env.MCODE_PROVIDER_API_KEY;
+      else process.env.MCODE_PROVIDER_API_KEY = previousKey;
+    }
+  });
+
+  it('rejects an unknown ACP authentication method instead of accepting an arbitrary region', async () => {
+    const { runtime } = createRuntime();
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { auth: { terminal: true } },
+      });
+      await expect(
+        connection.request(acp.methods.agent.authenticate, {
+          methodId: 'minimax-code-login-mars',
+        }),
+      ).rejects.toThrow('Unknown authentication method.');
+    });
+  });
+
+  describe('deferred Runtime Session creation', () => {
+    it('keeps a new ACP Session out of the Runtime until its first prompt', async () => {
+      const { runtime, createSession, configureSessionMcpServers, sendMessage, deleteSession } =
+        createRuntime([{ type: 'session-status', status: 'finished' }]);
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+      const client = acp.client({ name: 'ait' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const session = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [{ name: 'docs', command: 'docs-mcp', args: [], env: [] }],
+        });
+        expect(session.sessionId).toBe('session-1');
+        expect(createSession).not.toHaveBeenCalled();
+        expect(configureSessionMcpServers).not.toHaveBeenCalled();
+
+        await connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Hello' }],
+        });
+      });
+
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(createSession).toHaveBeenCalledWith({ workspaceDir: '/workspace', sessionId: 'session-1' });
+      expect(configureSessionMcpServers).toHaveBeenCalledWith('session-1', [
+        { type: 'stdio', name: 'docs', command: 'docs-mcp', args: [] },
+      ]);
+      expect(sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'session-1', turnId: 'turn-1', content: 'Hello' }),
+        expect.any(AbortSignal),
+      );
+      expect(deleteSession).not.toHaveBeenCalled();
+    });
+
+    it('never writes a Runtime Session when the client closes it before prompting', async () => {
+      const { runtime, createSession, clearSessionMcpServers, deleteSession } = createRuntime();
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp.client({ name: 'ait' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const session = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [],
+        });
+        await connection.request(acp.methods.agent.session.close, {
+          sessionId: session.sessionId,
+        });
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'Too late' }],
+          }),
+        ).rejects.toThrow();
+      });
+
+      expect(createSession).not.toHaveBeenCalled();
+      expect(clearSessionMcpServers).not.toHaveBeenCalled();
+      expect(deleteSession).not.toHaveBeenCalled();
+    });
+
+    it('answers extension reads from a reserved Session without creating it', async () => {
+      const { runtime, createSession, listQueuedMessages, getGoal, getDelegationSnapshot } =
+        createRuntime();
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp.client({ name: 'ide' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [],
+        });
+        await expect(
+          connection.request<{ items: unknown[] }, { sessionId: string }>(
+            'mcode/session/queue/list',
+            { sessionId },
+          ),
+        ).resolves.toEqual({ items: [] });
+        await expect(
+          connection.request<{ goal: unknown }, { sessionId: string }>('mcode/session/goal/get', {
+            sessionId,
+          }),
+        ).resolves.toEqual({ goal: null });
+        await expect(
+          connection.request<{ snapshot: unknown }, { sessionId: string }>(
+            'mcode/session/delegation/get',
+            { sessionId },
+          ),
+        ).resolves.toEqual({ snapshot: { schemaVersion: 1, rootSessionId: sessionId, members: [] } });
+        expect(createSession).not.toHaveBeenCalled();
+
+        await connection.request<unknown, { sessionId: string; objective: string }>(
+          'mcode/session/goal/create',
+          { sessionId, objective: 'Ship it' },
+        );
+      });
+
+      expect(listQueuedMessages).not.toHaveBeenCalled();
+      expect(getGoal).not.toHaveBeenCalled();
+      expect(getDelegationSnapshot).not.toHaveBeenCalled();
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(createSession).toHaveBeenCalledWith({ workspaceDir: '/workspace', sessionId: 'session-1' });
+    });
+
+    it('rolls back a Session whose MCP setup failed so the next prompt can create it again', async () => {
+      const { runtime, createSession, configureSessionMcpServers, deleteSession, sendMessage } =
+        createRuntime([{ type: 'session-status', status: 'finished' }]);
+      const written = new Set<string>();
+      createSession.mockImplementation(async ({ workspaceDir, sessionId }) => {
+        const id = sessionId ?? 'session-1';
+        if (written.has(id)) throw new Error(`Session ${id} already exists`);
+        written.add(id);
+        return { sessionId: id, workspaceDir };
+      });
+      deleteSession.mockImplementation(async (sessionId: string) => {
+        written.delete(sessionId);
+      });
+      configureSessionMcpServers.mockRejectedValueOnce(new Error('MCP overlay rejected'));
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+      const client = acp.client({ name: 'ait' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [{ name: 'docs', command: 'docs-mcp', args: [], env: [] }],
+        });
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: 'text', text: 'Hello' }],
+          }),
+        ).rejects.toThrow();
+        expect(deleteSession).toHaveBeenCalledWith('session-1');
+        expect(written.size).toBe(0);
+
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: 'text', text: 'Hello' }],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      });
+
+      expect(createSession).toHaveBeenCalledTimes(2);
+      expect(configureSessionMcpServers).toHaveBeenCalledTimes(2);
+      expect(written).toEqual(new Set(['session-1']));
+      expect(sendMessage).toHaveBeenCalledOnce();
+    });
+
+    it('removes a Session written after the client closed it mid-creation', async () => {
+      const { runtime, createSession, deleteSession, sendMessage } = createRuntime();
+      let releaseCreate!: () => void;
+      createSession.mockImplementationOnce(
+        async ({ workspaceDir, sessionId }: { workspaceDir: string; sessionId?: string }) => {
+          await new Promise<void>((resolve) => {
+            releaseCreate = resolve;
+          });
+          return { sessionId: sessionId ?? 'session-1', workspaceDir };
+        },
+      );
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+      const client = acp.client({ name: 'ait' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [],
+        });
+        const prompt = connection.request(acp.methods.agent.session.prompt, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'Hello' }],
+        });
+        void prompt.catch(() => undefined);
+        await vi.waitFor(() => expect(createSession).toHaveBeenCalledOnce());
+        await connection.request(acp.methods.agent.session.close, { sessionId });
+        releaseCreate();
+        await prompt.catch(() => undefined);
+        await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledWith('session-1'));
+      });
+
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('finishes a written Session on retry when rolling it back failed', async () => {
+      const { runtime, createSession, configureSessionMcpServers, deleteSession, getSession } =
+        createRuntime([{ type: 'session-status', status: 'finished' }]);
+      configureSessionMcpServers.mockRejectedValueOnce(new Error('MCP overlay rejected'));
+      deleteSession.mockRejectedValueOnce(new Error('delete failed'));
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+      const client = acp.client({ name: 'ait' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [{ name: 'docs', command: 'docs-mcp', args: [], env: [] }],
+        });
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: 'text', text: 'Hello' }],
+          }),
+        ).rejects.toThrow();
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: 'text', text: 'Hello' }],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      });
+
+      // The second attempt reads the Session the first one wrote instead of colliding with it.
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(getSession).toHaveBeenCalledWith('session-1');
+      expect(configureSessionMcpServers).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not lose a model chosen while an extension write is creating the Session', async () => {
+      const models = [
+        { providerId: 'minimax', modelId: 'm3', selected: true },
+        { providerId: 'minimax', modelId: 'm3-flash' },
+        { providerId: 'minimax', modelId: 'm3-pro' },
+      ];
+      const { runtime, selectSessionModel, getSession } = createRuntime([], { models });
+      let releaseFirstSelection!: () => void;
+      selectSessionModel.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            releaseFirstSelection = () => resolve(true);
+          }),
+      );
+      const persistedModel: { providerId: string; modelId: string }[] = [];
+      selectSessionModel.mockImplementation(async (selection) => {
+        persistedModel.push(selection);
+        return true;
+      });
+      getSession.mockImplementation(async (sessionId: string) => ({
+        sessionId,
+        workspaceDir: '/workspace',
+        ...(persistedModel.length > 0 ? { model: persistedModel.at(-1) } : {}),
+      }));
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp.client({ name: 'ide' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [],
+        });
+        await connection.request(acp.methods.agent.session.setConfigOption, {
+          sessionId,
+          configId: 'model',
+          value: 'm:minimax:m3-flash:u',
+        });
+        const enqueue = connection.request<unknown, { sessionId: string; text: string }>(
+          'mcode/session/queue/enqueue',
+          { sessionId, text: 'later' },
+        );
+        await vi.waitFor(() => expect(selectSessionModel).toHaveBeenCalledOnce());
+        const switched = connection.request(acp.methods.agent.session.setConfigOption, {
+          sessionId,
+          configId: 'model',
+          value: 'm:minimax:m3-pro:u',
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        releaseFirstSelection();
+        await enqueue;
+        await expect(switched).resolves.toMatchObject({
+          configOptions: expect.arrayContaining([
+            expect.objectContaining({ id: 'model', currentValue: 'm:minimax:m3-pro:u' }),
+          ]),
+        });
+      });
+
+      expect(selectSessionModel.mock.calls.map(([selection]) => selection.modelId)).toEqual([
+        'm3-flash',
+        'm3-pro',
+      ]);
+    });
+
+    it('applies a model chosen before the first prompt once the Session is created', async () => {
+      const models = [
+        { providerId: 'minimax', modelId: 'm3', selected: true, effortOptions: ['low', 'high'] },
+        { providerId: 'minimax', modelId: 'm3-flash', effortOptions: ['low', 'high'] },
+      ];
+      const { runtime, createSession, selectSessionModel, getSession } = createRuntime(
+        [{ type: 'session-status', status: 'finished' }],
+        { models },
+      );
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+      const client = acp.client({ name: 'ait' });
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        const session = await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [],
+        });
+        expect(session.configOptions).toContainEqual(
+          expect.objectContaining({ id: 'model', currentValue: 'm:minimax:m3:u' }),
+        );
+        const changed = await connection.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: session.sessionId,
+          configId: 'model',
+          value: 'm:minimax:m3-flash:u',
+        });
+        expect(changed.configOptions).toContainEqual(
+          expect.objectContaining({ id: 'model', currentValue: 'm:minimax:m3-flash:u' }),
+        );
+        const effort = await connection.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: session.sessionId,
+          configId: 'thinkingEffort',
+          value: 'low',
+        });
+        expect(effort.configOptions).toContainEqual(
+          expect.objectContaining({ id: 'thinkingEffort', currentValue: 'low' }),
+        );
+        expect(createSession).not.toHaveBeenCalled();
+        expect(selectSessionModel).not.toHaveBeenCalled();
+        expect(getSession).not.toHaveBeenCalled();
+
+        await connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Hello' }],
+        });
+      });
+
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(selectSessionModel).toHaveBeenCalledOnce();
+      expect(selectSessionModel).toHaveBeenCalledWith(
+        { providerId: 'minimax', modelId: 'm3-flash', thinking: { effort: 'low' } },
+        'session-1',
+      );
+      expect(createSession.mock.invocationCallOrder[0]).toBeLessThan(
+        selectSessionModel.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
+  });
+
+  describe('Runtime event subscription across a region switch', () => {
+    const withCnRegion = async (run: () => Promise<void>) => {
+      const previousRegion = process.env.MAVIS_REGION;
+      process.env.MAVIS_REGION = 'cn';
+      try {
+        await run();
+      } finally {
+        if (previousRegion === undefined) delete process.env.MAVIS_REGION;
+        else process.env.MAVIS_REGION = previousRegion;
+      }
+    };
+
+    it('forwards permission requests from the Runtime the Global switch started', async () => {
+      await withCnRegion(async () => {
+        const initial = createRuntime();
+        const switched = createRuntime();
+        const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+          process.env.MAVIS_REGION = region;
+          return switched.runtime;
+        });
+        const permissionRequests: acp.RequestPermissionRequest[] = [];
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+        });
+        const client = acp
+          .client({ name: 'test-client' })
+          .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+            permissionRequests.push(params);
+            return { outcome: { outcome: 'selected', optionId: 'allow-once' } };
+          });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          });
+          await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          switched.emitRuntimeEvent(permissionEvent('permission-after-switch'));
+
+          await vi.waitFor(() => expect(switched.replyPermission).toHaveBeenCalledOnce());
+          // The stopped Runtime's subscription is released while the connection stays open.
+          expect(initial.watchEvents.mock.calls[0]?.[0].aborted).toBe(true);
+        });
+
+        expect(permissionRequests).toEqual([
+          expect.objectContaining({
+            sessionId: 'session-1',
+            toolCall: expect.objectContaining({ toolCallId: 'permission-after-switch' }),
+          }),
+        ]);
+        // The decision goes back to the Runtime that asked, never to the stopped one.
+        expect(switched.replyPermission).toHaveBeenCalledWith(
+          'mcode',
+          'permission-after-switch',
+          'allowOnce',
+        );
+        expect(initial.replyPermission).not.toHaveBeenCalled();
+      });
+    });
+
+    it('forwards questionnaires from the Runtime the Global switch started', async () => {
+      await withCnRegion(async () => {
+        const initial = createRuntime();
+        const switched = createRuntime();
+        const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+          process.env.MAVIS_REGION = region;
+          return switched.runtime;
+        });
+        const permissionRequests: acp.RequestPermissionRequest[] = [];
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+        });
+        const client = acp
+          .client({ name: 'test-client' })
+          .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+            permissionRequests.push(params);
+            return {
+              outcome: {
+                outcome: 'selected',
+                optionId: 'questionnaire:questionnaire-after-switch:safe',
+              },
+            };
+          });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          });
+          await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          switched.emitRuntimeEvent(questionnaireEvent('questionnaire-after-switch'));
+
+          await vi.waitFor(() => expect(switched.replyQuestionnaire).toHaveBeenCalledOnce());
+        });
+
+        expect(permissionRequests).toEqual([
+          expect.objectContaining({
+            sessionId: 'session-1',
+            toolCall: expect.objectContaining({ toolCallId: 'questionnaire-after-switch' }),
+          }),
+        ]);
+        expect(switched.replyQuestionnaire).toHaveBeenCalledWith(
+          'mcode',
+          'questionnaire-after-switch',
+          [{ stepId: 'approach', selectedOptionIds: ['safe'] }],
+        );
+        expect(initial.replyQuestionnaire).not.toHaveBeenCalled();
+      });
+    });
+
+    it('denies a pending permission of the replaced Runtime on that Runtime, not the new one', async () => {
+      await withCnRegion(async () => {
+        const initial = createRuntime();
+        const switched = createRuntime();
+        const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+          process.env.MAVIS_REGION = region;
+          return switched.runtime;
+        });
+        const permissionRequests: acp.RequestPermissionRequest[] = [];
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+        });
+        const client = acp
+          .client({ name: 'test-client' })
+          .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+            permissionRequests.push(params);
+            // The user has not answered yet when the region switch completes.
+            return new Promise<acp.RequestPermissionResponse>(() => undefined);
+          });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          initial.emitRuntimeEvent(permissionEvent('permission-before-switch'));
+          await vi.waitFor(() => expect(permissionRequests).toHaveLength(1));
+
+          await connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          });
+
+          await vi.waitFor(() =>
+            expect(initial.replyPermission).toHaveBeenCalledWith(
+              'mcode',
+              'permission-before-switch',
+              'deny',
+            ),
+          );
+        });
+
+        const decisions = (
+          initial.replyPermission.mock.calls as unknown as ReadonlyArray<readonly unknown[]>
+        ).map((call) => call[2]);
+        expect(new Set(decisions)).toEqual(new Set(['deny']));
+        expect(switched.replyPermission).not.toHaveBeenCalled();
+      });
+    });
+
+    it('keeps forwarding the current Runtime permission requests after a failed switch', async () => {
+      await withCnRegion(async () => {
+        const initial = createRuntime();
+        const switchRegion = vi.fn(async () => {
+          throw new Error('Runtime storage is still locked.');
+        });
+        const permissionRequests: acp.RequestPermissionRequest[] = [];
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+        });
+        const client = acp
+          .client({ name: 'test-client' })
+          .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+            permissionRequests.push(params);
+            return { outcome: { outcome: 'selected', optionId: 'allow-once' } };
+          });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await expect(
+            connection.request(acp.methods.agent.authenticate, {
+              methodId: 'minimax-code-login-global',
+            }),
+          ).rejects.toThrow();
+          await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          initial.emitRuntimeEvent(permissionEvent('permission-after-failed-switch'));
+
+          await vi.waitFor(() => expect(initial.replyPermission).toHaveBeenCalledOnce());
+          // The failed switch neither replaced nor re-opened the original subscription.
+          expect(initial.watchEvents).toHaveBeenCalledOnce();
+          expect(initial.watchEvents.mock.calls[0]?.[0].aborted).toBe(false);
+        });
+
+        expect(switchRegion).toHaveBeenCalledOnce();
+        expect(permissionRequests).toEqual([
+          expect.objectContaining({
+            toolCall: expect.objectContaining({ toolCallId: 'permission-after-failed-switch' }),
+          }),
+        ]);
+        expect(initial.replyPermission).toHaveBeenCalledWith(
+          'mcode',
+          'permission-after-failed-switch',
+          'allowOnce',
+        );
+      });
+    });
+
+    // The fence reads the Runtime that owns the Session now. The stopped Runtime fails every
+    // read, and a failed read is fail-open, so a fence still bound to it would admit the
+    // prompt into the Turn the new Runtime reports blocked on a decision.
+    const switchToGlobalWithStoppedInitial = () => {
+      const initial = createRuntime();
+      initial.getActiveRun.mockRejectedValue(new Error('Runtime is closed.'));
+      const switched = createRuntime([{ type: 'session-status', status: 'finished' }]);
+      const switchRegion = vi.fn(async (region: 'cn' | 'en') => {
+        process.env.MAVIS_REGION = region;
+        return switched.runtime;
+      });
+      return { initial, switched, switchRegion };
+    };
+
+    it('runs the admission fence on the Runtime the Global switch started', async () => {
+      await withCnRegion(async () => {
+        const { initial, switched, switchRegion } = switchToGlobalWithStoppedInitial();
+        let pendingDecision = false;
+        switched.getActiveRun.mockImplementation(async (sessionId: string) => ({
+          schemaVersion: 1 as const,
+          sessionId,
+          state: pendingDecision ? ('decision-blocked' as const) : ('idle' as const),
+          ...(pendingDecision ? { turnId: 'turn-hidden' } : {}),
+          actions: { steer: false },
+        }));
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+          promptAdmission: { maxWaitMs: 60_000 },
+        });
+        const client = acp.client({ name: 'test-client' });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          });
+          const session = await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          await connection.request(acp.methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'First' }],
+          });
+          pendingDecision = true;
+          const next = connection.request(acp.methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'Follow up' }],
+          });
+          const outcome = await outcomeWithin(next, 1_000);
+          if (outcome === 'still waiting') {
+            await connection.notify(acp.methods.agent.session.cancel, {
+              sessionId: session.sessionId,
+            });
+            await next.catch(() => undefined);
+          }
+          expect(outcome).toMatchObject({
+            code: -32603,
+            data: { code: 'local_session_busy', retryable: false, reason: 'turn-awaiting-decision' },
+          });
+        });
+
+        expect(switched.sendMessage).toHaveBeenCalledOnce();
+        expect(initial.getActiveRun).not.toHaveBeenCalled();
+      });
+    });
+
+    it('runs the busy retry wait on the Runtime the Global switch started', async () => {
+      await withCnRegion(async () => {
+        const { initial, switched, switchRegion } = switchToGlobalWithStoppedInitial();
+        let pendingDecision = false;
+        switched.getActiveRun.mockImplementation(async (sessionId: string) => ({
+          schemaVersion: 1 as const,
+          sessionId,
+          state: pendingDecision ? ('decision-blocked' as const) : ('idle' as const),
+          ...(pendingDecision ? { turnId: 'turn-hidden' } : {}),
+          actions: { steer: false },
+        }));
+        const attempts: string[] = [];
+        vi.mocked(switched.runtime.sendMessage).mockImplementation((request) =>
+          (async function* promptEvents() {
+            attempts.push(`${request.content}`);
+            if (request.content === 'Follow up') {
+              // A Runtime Turn took the lock after the fence read idle, then asked a questionnaire.
+              pendingDecision = true;
+              throw sessionBusyFailure();
+            }
+            yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+          })(),
+        );
+        const agent = createTuiAcpAgent({
+          runtime: initial.runtime,
+          version: '1.2.3',
+          switchRegion,
+          promptAdmission: { maxWaitMs: 60_000 },
+        });
+        const client = acp.client({ name: 'test-client' });
+
+        await client.connectWith(agent, async (connection) => {
+          await connection.request(acp.methods.agent.initialize, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            clientCapabilities: { auth: { terminal: true } },
+          });
+          await connection.request(acp.methods.agent.authenticate, {
+            methodId: 'minimax-code-login-global',
+          });
+          const session = await connection.request(acp.methods.agent.session.new, {
+            cwd: '/workspace',
+            mcpServers: [],
+          });
+          await connection.request(acp.methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'First' }],
+          });
+          const next = connection.request(acp.methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'Follow up' }],
+          });
+          const outcome = await outcomeWithin(next, 1_000);
+          if (outcome === 'still waiting') {
+            await connection.notify(acp.methods.agent.session.cancel, {
+              sessionId: session.sessionId,
+            });
+            await next.catch(() => undefined);
+          }
+          expect(outcome).toMatchObject({
+            code: -32603,
+            data: { code: 'local_session_busy', retryable: false, reason: 'turn-awaiting-decision' },
+          });
+        });
+
+        // One rejected send and no retry into the Turn that waits for a decision.
+        expect(attempts).toEqual(['First', 'Follow up']);
+        expect(initial.getActiveRun).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   it.each(['new', 'load', 'resume', 'fork'] as const)(
     'advertises session Skills on %s and forwards Skill instructions to the Runtime',
     async (method) => {
@@ -370,7 +1739,7 @@ describe('MiniMax Code ACP agent', () => {
             sessionId,
             prompt: [{ type: 'text', text: '/matt:review focus on error handling' }],
           }),
-        ).resolves.toEqual({ stopReason: 'end_turn' });
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
         expect(sendMessage).toHaveBeenCalledWith(
           expect.objectContaining({
             id: sessionId,
@@ -592,7 +1961,8 @@ describe('MiniMax Code ACP agent', () => {
     });
 
     expect(listModels).toHaveBeenCalledTimes(3);
-    expect(listModels).toHaveBeenNthCalledWith(1, 'session-1');
+    // session/new reads the global roster: the reserved Session is not in the Runtime yet.
+    expect(listModels).toHaveBeenNthCalledWith(1);
     expect(listModels).toHaveBeenNthCalledWith(2, 'session-1');
     expect(listModels).toHaveBeenNthCalledWith(3, 'session-1');
     expect(selectModel).toHaveBeenCalledWith(
@@ -996,7 +2366,7 @@ describe('MiniMax Code ACP agent', () => {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'Continue in the existing session' }],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     expect(createSession).toHaveBeenCalledOnce();
@@ -1117,10 +2487,11 @@ describe('MiniMax Code ACP agent', () => {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: '/not-advertised keep this' }],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
-    expect(listModels).toHaveBeenCalledOnce();
+    // Session control and Prompt result facts read the catalog; no /model command handler ran.
+    expect(listModels).toHaveBeenCalledTimes(2);
     expect(sendMessage).toHaveBeenCalledWith(
       {
         id: 'session-1',
@@ -1179,14 +2550,7 @@ describe('MiniMax Code ACP agent', () => {
             close: {},
           },
         },
-        authMethods: [
-          {
-            type: 'terminal',
-            id: 'minimax-code-login',
-            name: 'Sign in to MiniMax Code',
-            args: ['login'],
-          },
-        ],
+        authMethods: ACP_AUTH_METHODS,
         agentInfo: { name: 'minimax-code', title: 'MiniMax Code', version: '1.2.3' },
         _meta: {
           'minimax-code/extensions': {
@@ -1229,10 +2593,10 @@ describe('MiniMax Code ACP agent', () => {
             },
           ],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
-    expect(createSession).toHaveBeenCalledWith({ workspaceDir: '/workspace' });
+    expect(createSession).toHaveBeenCalledWith({ workspaceDir: '/workspace', sessionId: 'session-1' });
     expect(sendMessage).toHaveBeenCalledWith(
       {
         id: 'session-1',
@@ -1251,6 +2615,2108 @@ describe('MiniMax Code ACP agent', () => {
         },
       },
     ]);
+  });
+
+  it('keeps the Prompt open for a delivery Turn that starts after the admitted Turn', async () => {
+    // Defect measured on 0.7.4 with acpx 0.11.2: a background Task finished after the
+    // admitted Turn, the Runtime steered a delivery Turn into the session 33-40 s later, and
+    // `session/prompt` had already returned `end_turn` at 5.8 s with only "STARTED".
+    const harness = createRuntime([
+      { type: 'delta', messageId: 'message-1', role: 'assistant', content: 'STARTED' },
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let deliveryFollowed = false;
+    let reads = 0;
+    const getSessionActivity = vi.fn(async (rootSessionId: string) => {
+      reads += 1;
+      if (deliveryFollowed) return { state: SessionActivityState.Idle, items: [] };
+      // The background sub-Agent first waits on a permission the Client is answering.
+      if (reads === 1) {
+        return {
+          state: SessionActivityState.WaitingForUser,
+          items: [
+            {
+              kind: SessionActivityKind.BackgroundTask,
+              sessionId: rootSessionId,
+              refId: 'task-1',
+              status: 'running',
+              detail: 'subagent:background',
+            },
+            {
+              kind: SessionActivityKind.Permission,
+              sessionId: 'session-child',
+              refId: 'permission-1',
+            },
+          ],
+        };
+      }
+      return {
+        state: SessionActivityState.Running,
+        items: [
+          {
+            kind: SessionActivityKind.Turn,
+            sessionId: rootSessionId,
+            refId: 'turn-delivery',
+            status: 'turn',
+          },
+        ],
+      };
+    });
+    const watchSessionTurn = vi.fn((_sessionId: string, turnId: string) =>
+      (async function* deliveryEvents() {
+        deliveryFollowed = turnId === 'turn-delivery';
+        yield {
+          type: 'delta',
+          messageId: 'message-2',
+          role: 'assistant',
+          content: 'Background task finished.',
+        } as const;
+        yield { type: 'session-status', status: 'finished' } as const;
+      })(),
+    );
+    Object.assign(harness.runtime, { getSessionActivity, watchSessionTurn });
+    const updates: acp.SessionNotification[] = [];
+    const agent = createTuiAcpAgent({
+      runtime: harness.runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-1',
+      settle: { pollMs: 1 },
+    });
+    const client = acp
+      .client({ name: 'test-client' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => {
+        updates.push(params);
+      });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const response = await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Start it in the background' }],
+      });
+      expect(response).toMatchObject({
+        stopReason: 'end_turn',
+        _meta: { 'minimax-code/turn': { continuationTurnIds: ['turn-delivery'] } },
+      });
+    });
+
+    expect(watchSessionTurn).toHaveBeenCalledWith(
+      'session-1',
+      'turn-delivery',
+      expect.any(AbortSignal),
+    );
+    expect(
+      updates.map((notification) =>
+        notification.update.sessionUpdate === 'agent_message_chunk' &&
+        notification.update.content.type === 'text'
+          ? notification.update.content.text
+          : undefined,
+      ),
+    ).toEqual(expect.arrayContaining(['STARTED', 'Background task finished.']));
+  });
+
+  it('keeps the Prompt open while a delivery Turn question is answered and its continuation admitted', async () => {
+    // The Runtime records an answer before it admits the continuation Turn, so for that
+    // moment the activity snapshot reads Idle; ending there would drop the continuation.
+    const { runtime, emitRuntimeEvent, replyQuestionnaire } = createRuntime([
+      { type: 'delta', messageId: 'message-1', role: 'assistant', content: 'STARTED' },
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let deliveryFollowed = false;
+    let answered = false;
+    let idleReads = 0;
+    let idleTwice: (() => void) | undefined;
+    const readIdleTwice = new Promise<void>((resolve) => {
+      idleTwice = resolve;
+    });
+    const getSessionActivity = vi.fn(async (rootSessionId: string) => {
+      if (!deliveryFollowed) {
+        return {
+          state: SessionActivityState.Running,
+          items: [
+            {
+              kind: SessionActivityKind.Turn,
+              sessionId: rootSessionId,
+              refId: 'turn-delivery',
+              status: 'turn',
+            },
+          ],
+        };
+      }
+      if (!answered) {
+        return {
+          state: SessionActivityState.WaitingForUser,
+          items: [
+            {
+              kind: SessionActivityKind.Questionnaire,
+              sessionId: rootSessionId,
+              refId: 'questionnaire-delivery',
+            },
+          ],
+        };
+      }
+      idleReads += 1;
+      if (idleReads === 2) idleTwice?.();
+      return { state: SessionActivityState.Idle, items: [] };
+    });
+    const watchSessionTurn = vi.fn((_sessionId: string, turnId: string) =>
+      (async function* followedTurnEvents() {
+        if (turnId === 'turn-delivery') {
+          deliveryFollowed = true;
+          emitRuntimeEvent({
+            type: 'questionnaire.ask',
+            timestampMs: 1,
+            source: 'runtime',
+            sessionId: 'session-1',
+            agentName: 'mcode',
+            request: {
+              schemaVersion: 1,
+              id: 'questionnaire-delivery',
+              title: 'Choose an approach',
+              requester: { sessionId: 'session-1', agentName: 'mcode' },
+              presentation: {
+                replaceComposer: false,
+                showProgress: false,
+                allowBackNavigation: false,
+              },
+              steps: [
+                {
+                  id: 'approach',
+                  question: 'Which approach?',
+                  selectionMode: 'single',
+                  options: [{ id: 'safe', label: 'Safe' }],
+                  allowOther: false,
+                  otherPlaceholder: '',
+                  required: true,
+                },
+              ],
+            },
+          });
+        } else {
+          yield {
+            type: 'delta',
+            messageId: 'continued-tool',
+            role: 'assistant',
+            toolCalls: [
+              {
+                id: 'continued-edit',
+                name: 'edit_file',
+                input: { path: 'README.md' },
+                status: 'completed',
+              },
+            ],
+          } as const;
+          yield {
+            type: 'delta',
+            messageId: 'message-3',
+            role: 'assistant',
+            content: 'Continuing after your answer.',
+          } as const;
+        }
+        yield { type: 'session-status', status: 'finished' } as const;
+      })(),
+    );
+    vi.mocked(replyQuestionnaire).mockImplementation(async () => {
+      answered = true;
+      // Admit the continuation only after the Prompt has read the Idle gap twice.
+      await readIdleTwice;
+      emitRuntimeEvent({
+        type: 'session.start',
+        timestampMs: 2,
+        source: 'runtime',
+        sessionId: 'session-1',
+        turnId: 'turn-continued',
+        queueItemIds: [],
+      });
+      return true;
+    });
+    Object.assign(runtime, { getSessionActivity, watchSessionTurn });
+    const updates: acp.SessionNotification[] = [];
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-1',
+      settle: { pollMs: 1 },
+    });
+    const client = acp
+      .client({ name: 'test-client' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params))
+      .onRequest(acp.methods.client.elicitation.create, () => ({
+        action: 'accept',
+        content: { approach: 'safe' },
+      }));
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Start it in the background' }],
+        }),
+      ).resolves.toMatchObject({
+        stopReason: 'end_turn',
+        _meta: {
+          'minimax-code/turn': { continuationTurnIds: ['turn-delivery', 'turn-continued'] },
+        },
+      });
+    });
+
+    expect(replyQuestionnaire).toHaveBeenCalledOnce();
+    expect(updates).toContainEqual({
+      sessionId: 'session-1',
+      update: expect.objectContaining({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'continued-edit',
+        name: 'edit_file',
+        status: 'completed',
+      }),
+    });
+    expect(updates).toContainEqual({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'message-3',
+        content: { type: 'text', text: 'Continuing after your answer.' },
+      },
+    });
+  });
+
+  it('waits for a hidden continuation Turn before admitting the next ACP prompt', async () => {
+    const { runtime, getActiveRun, steer } = createRuntime([
+      {
+        type: 'delta',
+        messageId: 'message-initial',
+        role: 'assistant',
+        content: 'Initial answer.',
+      },
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let hiddenActive = false;
+    let hiddenWatchStarted = false;
+    let releaseHiddenContinuation!: () => void;
+    const hiddenContinuationGate = new Promise<void>((resolve) => {
+      releaseHiddenContinuation = resolve;
+    });
+    let turnSequence = 0;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: hiddenActive ? ('running' as const) : ('idle' as const),
+      ...(hiddenActive ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: hiddenActive },
+    }));
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        if (hiddenActive && request.content === 'After the questionnaire') {
+          throw new TuiFailure('runtime', 'Session already has an active Turn.', {
+            code: 'local_session_busy',
+            retryable: true,
+          });
+        }
+        yield {
+          type: 'delta',
+          messageId:
+            request.content === 'After the questionnaire' ? 'message-next' : 'message-initial',
+          role: 'assistant',
+          content:
+            request.content === 'After the questionnaire' ? 'Next answer.' : 'Initial answer.',
+        } as const;
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId) =>
+      (async function* hiddenContinuation() {
+        expect(turnId).toBe('turn-hidden');
+        hiddenWatchStarted = true;
+        await hiddenContinuationGate;
+        hiddenActive = false;
+        yield {
+          type: 'delta',
+          messageId: 'hidden-tool',
+          role: 'assistant',
+          toolCalls: [
+            {
+              id: 'hidden-edit',
+              name: 'edit_file',
+              input: { path: 'README.md' },
+              status: 'completed',
+            },
+          ],
+        } as const;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => `turn-prompt-${++turnSequence}`,
+    });
+    const updates: acp.SessionNotification[] = [];
+    const client = acp
+      .client({ name: 'test-client' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Initial prompt' }],
+      });
+      hiddenActive = true;
+
+      let nextPromptSettled = false;
+      const nextPrompt = connection
+        .request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'After the questionnaire' }],
+        })
+        .then((response) => {
+          nextPromptSettled = true;
+          return response;
+        });
+      await vi.waitFor(() => expect(hiddenWatchStarted).toBe(true));
+      expect(nextPromptSettled).toBe(false);
+      releaseHiddenContinuation();
+      await expect(nextPrompt).resolves.toMatchObject({ stopReason: 'end_turn' });
+    });
+
+    expect(runtime.watchSessionTurn).toHaveBeenCalledWith(
+      'session-1',
+      'turn-hidden',
+      expect.any(AbortSignal),
+    );
+    expect(runtime.sendMessage).toHaveBeenCalledTimes(2);
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it('rejects steer sent while the cancelled prompt is stopping with a retryable error instead of queueing', async () => {
+    const { runtime, getActiveRun, abortSession, enqueueMessage, steer } = createRuntime();
+    let releaseRun!: () => void;
+    const runGate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    // session/cancel stops the Turn with user_stop; the run stays open until the test releases it,
+    // so the ACP prompt is deterministically in its stopping state when the steer arrives.
+    abortSession.mockImplementation(async () => true);
+    getActiveRun.mockResolvedValue({
+      schemaVersion: 1,
+      sessionId: 'session-1',
+      state: 'running',
+      turnId: 'turn-1',
+      actions: { steer: false },
+    });
+    const sent: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        sent.push(request.content);
+        yield {
+          type: 'delta',
+          messageId: 'message-running',
+          role: 'assistant',
+          content: 'Working.',
+        } as const;
+        await runGate;
+        yield { type: 'session-status', status: 'aborted', turnId: request.turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-1',
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const prompt = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Keep working' }],
+      });
+      await vi.waitFor(() => expect(sent).toEqual(['Keep working']));
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await vi.waitFor(() => expect(abortSession).toHaveBeenCalled());
+      const outcome = await settledOutcome(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Preserve this follow-up',
+        }),
+      );
+      releaseRun();
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
+
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: true, reason: 'prompt-turn-stopping' },
+      });
+      expect(String((outcome as Error).message)).toContain('Session already has an active Turn');
+    });
+
+    expect(enqueueMessage).not.toHaveBeenCalled();
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it('keeps the questionnaire Prompt open until its continuation Turn ends and streams that Turn', async () => {
+    const { runtime, emitRuntimeEvent, replyQuestionnaire } = createRuntime();
+    vi.mocked(runtime.sendMessage).mockImplementation(() =>
+      (async function* questionnaireRunEvents() {
+        yield {
+          type: 'generic',
+          eventType: 'runtime.action-required',
+          data: { kind: 'questionnaire' },
+          turnId: 'turn-1',
+        } as const;
+      })(),
+    );
+    vi.mocked(replyQuestionnaire).mockImplementation(async () => {
+      emitRuntimeEvent({
+        type: 'session.start',
+        timestampMs: 2,
+        source: 'runtime',
+        sessionId: 'session-1',
+        turnId: 'turn-2',
+        queueItemIds: [],
+      });
+      return true;
+    });
+    let releaseContinuation!: () => void;
+    const continuationGate = new Promise<void>((resolve) => {
+      releaseContinuation = resolve;
+    });
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId) =>
+      (async function* continuedTurnEvents() {
+        expect(turnId).toBe('turn-2');
+        yield {
+          type: 'delta',
+          messageId: 'continued-tool',
+          role: 'assistant',
+          toolCalls: [
+            {
+              id: 'continued-edit',
+              name: 'edit_file',
+              input: { path: 'README.md' },
+              status: 'running',
+            },
+          ],
+        } as const;
+        // The continuation Turn is still executing its tool here.
+        await continuationGate;
+        yield {
+          type: 'delta',
+          messageId: 'continued-tool',
+          role: 'assistant',
+          toolCalls: [
+            {
+              id: 'continued-edit',
+              name: 'edit_file',
+              input: { path: 'README.md' },
+              output: 'edited',
+              status: 'completed',
+            },
+          ],
+        } as const;
+        emitRuntimeEvent({
+          type: 'session.finish',
+          timestampMs: 3,
+          source: 'runtime',
+          sessionId: 'session-1',
+          turnId: 'turn-2',
+          queueItemIds: [],
+        });
+        yield { type: 'session-status', status: 'finished' } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-1',
+    });
+    const timeline: string[] = [];
+    const client = acp
+      .client({ name: 'test-client' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => {
+        const update = params.update;
+        if (
+          (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') &&
+          update.toolCallId === 'continued-edit'
+        ) {
+          timeline.push(`${update.sessionUpdate}:${update.status ?? ''}`);
+        }
+      })
+      .onRequest(acp.methods.client.elicitation.create, () => ({
+        action: 'accept',
+        content: { approach: 'safe' },
+      }));
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { elicitation: { form: {} } },
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      let promptSettled = false;
+      const prompt = connection
+        .request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Ask me before editing' }],
+        })
+        .then((response) => {
+          promptSettled = true;
+          timeline.push('prompt-response');
+          return response;
+        });
+      await vi.waitFor(() => expect(runtime.sendMessage).toHaveBeenCalledOnce());
+      emitRuntimeEvent({
+        type: 'questionnaire.ask',
+        timestampMs: 1,
+        source: 'runtime',
+        sessionId: 'session-1',
+        agentName: 'mcode',
+        request: {
+          schemaVersion: 1,
+          id: 'questionnaire-before-edit',
+          title: 'Choose an approach',
+          requester: { sessionId: 'session-1', agentName: 'mcode' },
+          presentation: {
+            replaceComposer: false,
+            showProgress: false,
+            allowBackNavigation: false,
+          },
+          steps: [
+            {
+              id: 'approach',
+              question: 'Which approach?',
+              selectionMode: 'single',
+              options: [{ id: 'safe', label: 'Safe' }],
+              allowOther: false,
+              otherPlaceholder: '',
+              required: true,
+            },
+          ],
+        },
+      });
+
+      // The answered questionnaire admitted the continuation Turn and its tool call reached the
+      // client, but that Turn has not ended, so the original Prompt must still be open.
+      await vi.waitFor(() => expect(timeline).toContain('tool_call:in_progress'));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(promptSettled).toBe(false);
+
+      releaseContinuation();
+      await expect(prompt).resolves.toMatchObject({
+        stopReason: 'end_turn',
+        _meta: { 'minimax-code/turn': { turnId: 'turn-1', continuationTurnIds: ['turn-2'] } },
+      });
+    });
+
+    expect(replyQuestionnaire).toHaveBeenCalledOnce();
+    expect(timeline).toEqual([
+      'tool_call:in_progress',
+      'tool_call_update:completed',
+      'prompt-response',
+    ]);
+  });
+
+  it('retries a prompt once after local_session_busy once the Turn holding the lock settles', async () => {
+    const { runtime, getActiveRun } = createRuntime();
+    let hiddenActive = false;
+    let hiddenWatchStarted = false;
+    let releaseHiddenTurn!: () => void;
+    const hiddenTurnGate = new Promise<void>((resolve) => {
+      releaseHiddenTurn = resolve;
+    });
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: hiddenActive ? ('running' as const) : ('idle' as const),
+      ...(hiddenActive ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: hiddenActive },
+    }));
+    const attempts: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        attempts.push(`${request.turnId}:${request.content}`);
+        if (request.content === 'Follow up' && attempts.length === 2) {
+          // A Runtime-owned Turn took the Session lock after the admission read saw it idle.
+          hiddenActive = true;
+        }
+        if (hiddenActive) {
+          throw sessionBusyFailure();
+        }
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId) =>
+      (async function* hiddenTurnEvents() {
+        expect(turnId).toBe('turn-hidden');
+        hiddenWatchStarted = true;
+        await hiddenTurnGate;
+        hiddenActive = false;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    let turnSequence = 0;
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => `turn-prompt-${++turnSequence}`,
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+
+      let followUpSettled = false;
+      const followUp = connection
+        .request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Follow up' }],
+        })
+        .then((response) => {
+          followUpSettled = true;
+          return response;
+        });
+      await vi.waitFor(() => expect(hiddenWatchStarted).toBe(true));
+      expect(followUpSettled).toBe(false);
+      expect(attempts).toEqual(['turn-prompt-1:First', 'turn-prompt-2:Follow up']);
+
+      releaseHiddenTurn();
+      await expect(followUp).resolves.toMatchObject({ stopReason: 'end_turn' });
+    });
+
+    // The rejected admission recorded nothing, so the retry reuses the same Turn id.
+    expect(attempts).toEqual([
+      'turn-prompt-1:First',
+      'turn-prompt-2:Follow up',
+      'turn-prompt-2:Follow up',
+    ]);
+  });
+
+  it('surfaces local_session_busy after one bounded retry instead of retrying forever', async () => {
+    const { runtime } = createRuntime();
+    const attempts: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        attempts.push(`${request.turnId}:${request.content}`);
+        if (request.content === 'Follow up') {
+          // The Runtime keeps rejecting although its active-run view reads idle.
+          throw sessionBusyFailure();
+        }
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    let turnSequence = 0;
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => `turn-prompt-${++turnSequence}`,
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      const error = await connection
+        .request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Follow up' }],
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+      expect(error).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: true, reason: 'runtime-busy' },
+      });
+      expect(String((error as Error).message)).toContain('Session already has an active Turn');
+    });
+
+    expect(attempts).toEqual([
+      'turn-prompt-1:First',
+      'turn-prompt-2:Follow up',
+      'turn-prompt-2:Follow up',
+    ]);
+    expect(runtime.watchSessionTurn).not.toHaveBeenCalled();
+  });
+
+  it('answers session/cancel for a prompt still waiting for a Runtime Turn to settle', async () => {
+    const { runtime, sendMessage, getActiveRun, abortSession } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let hiddenActive = false;
+    let hiddenWatchStarted = false;
+    let releaseHiddenTurn!: () => void;
+    const hiddenTurnGate = new Promise<void>((resolve) => {
+      releaseHiddenTurn = resolve;
+    });
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: hiddenActive ? ('running' as const) : ('idle' as const),
+      ...(hiddenActive ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: hiddenActive },
+    }));
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* hiddenTurnEvents() {
+        hiddenWatchStarted = true;
+        await new Promise<void>((resolve) => {
+          void hiddenTurnGate.then(resolve);
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        if (signal.aborted) return;
+        hiddenActive = false;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Initial prompt' }],
+      });
+      hiddenActive = true;
+
+      const waiting = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'After the questionnaire' }],
+      });
+      await vi.waitFor(() => expect(hiddenWatchStarted).toBe(true));
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+
+      await expect(waiting).resolves.toEqual({ stopReason: 'cancelled' });
+      // Withdrawing the waiting Prompt does not stop the Runtime-owned Turn.
+      expect(hiddenActive).toBe(true);
+      releaseHiddenTurn();
+    });
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(abortSession).not.toHaveBeenCalled();
+  });
+
+  it('admits a prompt sent right after cancellation once the Runtime finishes aborting the cancelled Turn', async () => {
+    const { runtime, getActiveRun, abortSession } = createRuntime();
+    let abortSettling = false;
+    let settlementWatched = false;
+    let releaseRun!: () => void;
+    const runGate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    let releaseAbortSettlement!: () => void;
+    const abortSettlement = new Promise<void>((resolve) => {
+      releaseAbortSettlement = resolve;
+    });
+    abortSession.mockImplementation(async () => {
+      // ACP answers `cancelled` once its local run stops; the Runtime keeps the Session lock
+      // until the aborted Turn settles (t3code#28383 measured 635 ms).
+      abortSettling = true;
+      releaseRun();
+      return true;
+    });
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: abortSettling ? ('running' as const) : ('idle' as const),
+      ...(abortSettling ? { turnId: 'turn-prompt-1' } : {}),
+      actions: { steer: false },
+    }));
+    const sent: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        sent.push(request.content);
+        if (abortSettling) {
+          throw sessionBusyFailure();
+        }
+        if (request.content === 'Keep working') {
+          yield {
+            type: 'delta',
+            messageId: 'message-running',
+            role: 'assistant',
+            content: 'Working.',
+          } as const;
+          await runGate;
+          yield { type: 'session-status', status: 'aborted', turnId: request.turnId } as const;
+          return;
+        }
+        yield {
+          type: 'delta',
+          messageId: 'message-steered',
+          role: 'assistant',
+          content: 'Using the other approach.',
+        } as const;
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId) =>
+      (async function* abortSettlementEvents() {
+        expect(turnId).toBe('turn-prompt-1');
+        settlementWatched = true;
+        await abortSettlement;
+        abortSettling = false;
+        yield { type: 'session-status', status: 'aborted', turnId } as const;
+      })(),
+    );
+    let turnSequence = 0;
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => `turn-prompt-${++turnSequence}`,
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const cancelled = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Keep working' }],
+      });
+      await vi.waitFor(() => expect(sent).toEqual(['Keep working']));
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await expect(cancelled).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(abortSettling).toBe(true);
+
+      // The client steers by sending the next prompt immediately after `cancelled`.
+      let steeredSettled = false;
+      const steered = connection
+        .request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Use the other approach' }],
+        })
+        .then((response) => {
+          steeredSettled = true;
+          return response;
+        });
+      await vi.waitFor(() => expect(settlementWatched).toBe(true));
+      expect(steeredSettled).toBe(false);
+      expect(sent).toEqual(['Keep working']);
+
+      releaseAbortSettlement();
+      await expect(steered).resolves.toMatchObject({ stopReason: 'end_turn' });
+    });
+
+    expect(sent).toEqual(['Keep working', 'Use the other approach']);
+    expect(abortSession).toHaveBeenCalledWith({
+      id: 'session-1',
+      turnId: 'turn-prompt-1',
+      reason: 'user_stop',
+    });
+  });
+
+  it('keeps later prompts running after cancel + steer: the settlement gap never pauses the Runtime queue', async () => {
+    const { runtime, getActiveRun, abortSession, enqueueMessage, steer } = createRuntime();
+    // Minimal model of the Runtime rule: a foreground Turn that settles aborted by user_stop pauses
+    // the queue when any item is pending (execution.coordinator.ts terminalQueuePauseCause +
+    // turn-priority-fence.ts settledInTransaction), and a paused queue rejects plain direct sends.
+    let pendingQueueItems = 0;
+    let queuePaused = false;
+    let abortSettling = false;
+    let releaseRun!: () => void;
+    const runGate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    enqueueMessage.mockImplementation(async () => {
+      pendingQueueItems += 1;
+      return { itemId: 'queue-1', position: 1 };
+    });
+    abortSession.mockImplementation(async () => {
+      abortSettling = true;
+      releaseRun();
+      return true;
+    });
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: abortSettling ? ('running' as const) : ('idle' as const),
+      ...(abortSettling ? { turnId: 'turn-prompt-1' } : {}),
+      actions: { steer: false },
+    }));
+    const settleCancelledTurn = () => {
+      abortSettling = false;
+      if (pendingQueueItems > 0) queuePaused = true;
+    };
+    const sent: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        sent.push(request.content);
+        if (queuePaused) {
+          throw new TuiFailure('runtime', 'The Session queue is paused.', {
+            code: 'local_session_queue_paused',
+          });
+        }
+        if (abortSettling) throw sessionBusyFailure();
+        if (request.content === 'Keep working') {
+          yield {
+            type: 'delta',
+            messageId: 'message-running',
+            role: 'assistant',
+            content: 'Working.',
+          } as const;
+          await runGate;
+          yield { type: 'session-status', status: 'aborted', turnId: request.turnId } as const;
+          return;
+        }
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    let turnSequence = 0;
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => `turn-prompt-${++turnSequence}`,
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const cancelled = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Keep working' }],
+      });
+      await vi.waitFor(() => expect(sent).toEqual(['Keep working']));
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await expect(cancelled).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(abortSettling).toBe(true);
+
+      // The prompt already answered `cancelled`, but the Runtime still settles its Turn.
+      const steerOutcome = await settledOutcome(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Use the other approach',
+        }),
+      );
+      settleCancelledTurn();
+      const followUps: unknown[] = [];
+      for (const text of ['Use the other approach', 'And keep going']) {
+        followUps.push(
+          await settledOutcome(
+            connection.request(acp.methods.agent.session.prompt, {
+              sessionId: session.sessionId,
+              prompt: [{ type: 'text', text }],
+            }),
+          ),
+        );
+      }
+
+      // Before the fix every later prompt failed with -32603 local_session_queue_paused.
+      expect(followUps).toEqual([
+        { resolved: expect.objectContaining({ stopReason: 'end_turn' }) },
+        { resolved: expect.objectContaining({ stopReason: 'end_turn' }) },
+      ]);
+      expect(steerOutcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: true, reason: 'prompt-turn-settling' },
+      });
+    });
+
+    expect(enqueueMessage).not.toHaveBeenCalled();
+    expect(queuePaused).toBe(false);
+    expect(steer).not.toHaveBeenCalled();
+    expect(sent).toEqual(['Keep working', 'Use the other approach', 'And keep going']);
+  });
+
+  it('does not queue steer behind a running Turn that no ACP prompt of this Session started', async () => {
+    const { runtime, getActiveRun, enqueueMessage, steer } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-prompt-1',
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      // Another entry (e.g. the desktop app) now runs its own Turn on the same Session.
+      getActiveRun.mockResolvedValue({
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        state: 'running',
+        turnId: 'turn-desktop',
+        actions: { steer: true },
+      });
+      const outcome = await settledOutcome(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Not part of any ACP prompt',
+        }),
+      );
+      expect(outcome).toMatchObject({ code: -32602 });
+    });
+
+    expect(enqueueMessage).not.toHaveBeenCalled();
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it('does not queue steer when the Runtime runs a different Turn than the active prompt', async () => {
+    const { runtime, getActiveRun, enqueueMessage, steer } = createRuntime(
+      [{ type: 'delta', messageId: 'message-running', role: 'assistant', content: 'Working.' }],
+      { holdRunAfterEvents: true },
+    );
+    getActiveRun.mockResolvedValue({
+      schemaVersion: 1,
+      sessionId: 'session-1',
+      state: 'running',
+      turnId: 'turn-desktop',
+      actions: { steer: false },
+    });
+    steer.mockImplementation(async (input) => {
+      const result = { turnId: 'turn-desktop', mode: 'steered' as const };
+      await input.preDelivery?.accept(result);
+      return result;
+    });
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-1',
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const prompt = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Keep working' }],
+      });
+      await vi.waitFor(() => expect(runtime.sendMessage).toHaveBeenCalledOnce());
+      const outcome = await settledOutcome(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Belongs to the ACP prompt only',
+        }),
+      );
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(outcome).toMatchObject({ code: -32602 });
+    });
+
+    expect(enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it('bounds the admission wait for a Runtime Turn and then fails with a retryable busy error', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let hiddenActive = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: hiddenActive ? ('running' as const) : ('idle' as const),
+      ...(hiddenActive ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    // The Runtime Turn never ends while the test runs.
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* endlessTurn() {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        if (signal.aborted) return;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { maxWaitMs: 50 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      hiddenActive = true;
+      const next = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      const outcome = await outcomeWithin(next, 1_000);
+      if (outcome === 'still waiting') {
+        await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+        await next.catch(() => undefined);
+      }
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: true, reason: 'turn-wait-timeout' },
+      });
+      expect(String((outcome as Error).message)).toContain('Session already has an active Turn');
+    });
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('fails a prompt fast instead of waiting when another MCode process runs the Session Turn', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let foreignActive = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: foreignActive ? ('running' as const) : ('idle' as const),
+      ...(foreignActive ? { turnId: 'turn-desktop', runningElsewhere: true as const } : {}),
+      actions: { steer: false },
+    }));
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* endlessTurn() {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        if (signal.aborted) return;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      foreignActive = true;
+      const next = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      const outcome = await outcomeWithin(next, 1_000);
+      if (outcome === 'still waiting') {
+        await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+        await next.catch(() => undefined);
+      }
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: true, reason: 'turn-running-elsewhere' },
+      });
+    });
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(runtime.watchSessionTurn).not.toHaveBeenCalled();
+  });
+
+  it('reports a Runtime queue paused by another entry as a recognizable, non-retried prompt error', async () => {
+    const { runtime, sendMessage } = createRuntime();
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        await sendMessage(request, new AbortController().signal);
+        if (request.content === 'Follow up') {
+          // A desktop stop paused the queue over its own pending items; ACP cannot Continue it.
+          throw new TuiFailure('runtime', 'The Session queue is paused.', {
+            code: 'local_session_queue_paused',
+          });
+        }
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      const outcome = await settledOutcome(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Follow up' }],
+        }),
+      );
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_queue_paused', retryable: false },
+      });
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers cancelled, not a retryable busy error, when session/cancel arrives during the busy retry wait', async () => {
+    const { runtime, getActiveRun, abortSession } = createRuntime();
+    let hiddenActive = false;
+    let retryWaitStarted = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: hiddenActive ? ('running' as const) : ('idle' as const),
+      ...(hiddenActive ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    const sent: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        sent.push(request.content);
+        if (request.content === 'Follow up') {
+          // A Runtime-owned Turn took the lock after the fence read the Session idle.
+          hiddenActive = true;
+          throw sessionBusyFailure();
+        }
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* hiddenTurnEvents() {
+        retryWaitStarted = true;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        if (signal.aborted) return;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      const followUp = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      // The first send was rejected busy; the prompt now waits for that Turn before retrying.
+      await vi.waitFor(() => expect(retryWaitStarted).toBe(true));
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      const outcome = await outcomeWithin(followUp, 1_000);
+      expect(outcome).toEqual({ resolved: expect.objectContaining({ stopReason: 'cancelled' }) });
+    });
+
+    // The cancelled content is not sent again, and the Runtime Turn is not stopped.
+    expect(sent).toEqual(['First', 'Follow up']);
+    expect(abortSession).not.toHaveBeenCalled();
+  });
+
+  it('does not accumulate abort listeners across Runtime Turn re-reads while a prompt waits', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    const STALE_READS = 8;
+    let waiting = false;
+    let reads = 0;
+    getActiveRun.mockImplementation(async (sessionId: string) => {
+      const running = waiting && ++reads <= STALE_READS;
+      return {
+        schemaVersion: 1 as const,
+        sessionId,
+        state: running ? ('running' as const) : ('idle' as const),
+        ...(running ? { turnId: 'turn-hidden' } : {}),
+        actions: { steer: false },
+      };
+    });
+    // Abort listeners still registered on the wait signal when each re-read round starts.
+    const outstandingAtRound: number[] = [];
+    let outstanding = 0;
+    const instrumented = new WeakSet<AbortSignal>();
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) => {
+      if (!instrumented.has(signal)) {
+        instrumented.add(signal);
+        const add = signal.addEventListener.bind(signal);
+        const remove = signal.removeEventListener.bind(signal);
+        signal.addEventListener = ((type, listener, listenerOptions) => {
+          if (type === 'abort') outstanding += 1;
+          add(type, listener, listenerOptions);
+        }) as AbortSignal['addEventListener'];
+        signal.removeEventListener = ((type, listener, listenerOptions) => {
+          if (type === 'abort') outstanding -= 1;
+          remove(type, listener, listenerOptions);
+        }) as AbortSignal['removeEventListener'];
+      }
+      outstandingAtRound.push(outstanding);
+      // The watch ends at a terminal frame although the Runtime still reports the Turn running.
+      return (async function* staleTerminal() {
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })();
+    });
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { pollIntervalMs: 1, maxPollIntervalMs: 2 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      waiting = true;
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Follow up' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    });
+
+    expect(outstandingAtRound).toEqual(Array.from({ length: STALE_READS }, () => 0));
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('spaces Runtime Turn re-reads instead of spinning while a stale Turn stays active', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let waiting = false;
+    let readsWhileWaiting = 0;
+    getActiveRun.mockImplementation(async (sessionId: string) => {
+      if (waiting) readsWhileWaiting += 1;
+      return {
+        schemaVersion: 1 as const,
+        sessionId,
+        state: waiting ? ('running' as const) : ('idle' as const),
+        ...(waiting ? { turnId: 'turn-hidden' } : {}),
+        actions: { steer: false },
+      };
+    });
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId) =>
+      (async function* staleTerminal() {
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { maxWaitMs: 300 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      waiting = true;
+      const outcome = await settledOutcome(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Follow up' }],
+        }),
+      );
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: true, reason: 'turn-wait-timeout' },
+      });
+    });
+
+    // Backoff from 25 ms fits about five reads into 300 ms; a 0 ms re-read spins hundreds of times.
+    expect(readsWhileWaiting).toBeGreaterThanOrEqual(2);
+    expect(readsWhileWaiting).toBeLessThan(15);
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('ends a prompt wait promptly when session/cancel arrives between Runtime Turn re-reads', async () => {
+    const { runtime, getActiveRun, sendMessage, abortSession } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let waiting = false;
+    let watchClosed = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: waiting ? ('running' as const) : ('idle' as const),
+      ...(waiting ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    // The watch closes without a terminal frame, so the wait sleeps before its next read.
+    vi.mocked(runtime.watchSessionTurn).mockImplementation(() =>
+      (async function* closedWatch() {
+        watchClosed = true;
+        yield { type: 'delta', messageId: 'hidden', role: 'assistant', content: '' } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { pollIntervalMs: 10_000, maxPollIntervalMs: 10_000 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      waiting = true;
+      const followUp = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      await vi.waitFor(() => expect(watchClosed).toBe(true));
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await expect(outcomeWithin(followUp, 500)).resolves.toEqual({
+        resolved: { stopReason: 'cancelled' },
+      });
+    });
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(abortSession).not.toHaveBeenCalled();
+  });
+
+  it('fails a prompt at once, without waiting for the bound, while the Runtime Turn awaits a decision', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let pendingDecision = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      // A questionnaire or permission request is pending; ACP has no prompt to forward it through.
+      state: pendingDecision ? ('decision-blocked' as const) : ('idle' as const),
+      ...(pendingDecision ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { maxWaitMs: 60_000 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      pendingDecision = true;
+      const next = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      // The bound is 60 s; an answer within 1 s proves the fence did not wait for it.
+      const outcome = await outcomeWithin(next, 1_000);
+      if (outcome === 'still waiting') {
+        await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+        await next.catch(() => undefined);
+      }
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: false, reason: 'turn-awaiting-decision' },
+      });
+      expect(String((outcome as Error).message)).toContain(
+        'pending question or permission request',
+      );
+      expect(String((outcome as Error).message)).not.toContain(
+        'Session already has an active Turn',
+      );
+    });
+
+    expect(runtime.watchSessionTurn).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry a busy prompt once the Turn holding the lock turns out to await a decision', async () => {
+    const { runtime, getActiveRun } = createRuntime();
+    let pendingDecision = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: pendingDecision ? ('decision-blocked' as const) : ('idle' as const),
+      ...(pendingDecision ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    const attempts: string[] = [];
+    vi.mocked(runtime.sendMessage).mockImplementation((request) =>
+      (async function* promptEvents() {
+        attempts.push(`${request.turnId}:${request.content}`);
+        if (request.content === 'Follow up') {
+          // A Runtime Turn took the lock after the fence read idle, then asked a questionnaire.
+          pendingDecision = true;
+          throw sessionBusyFailure();
+        }
+        yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+      })(),
+    );
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* undecidedTurn() {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        if (signal.aborted) return;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    let turnSequence = 0;
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => `turn-prompt-${++turnSequence}`,
+      promptAdmission: { maxWaitMs: 60_000 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      const next = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      const outcome = await outcomeWithin(next, 1_000);
+      if (outcome === 'still waiting') {
+        await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+        await next.catch(() => undefined);
+      }
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: false, reason: 'turn-awaiting-decision' },
+      });
+    });
+
+    // One rejected send and no retry: the Client cannot answer the pending decision.
+    expect(attempts).toEqual(['turn-prompt-1:First', 'turn-prompt-2:Follow up']);
+    expect(runtime.watchSessionTurn).not.toHaveBeenCalled();
+  });
+
+  it('stops waiting for a running Turn as soon as it asks a questionnaire the Client cannot see', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let waiting = false;
+    let asked = false;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: !waiting
+        ? ('idle' as const)
+        : asked
+          ? ('decision-blocked' as const)
+          : ('running' as const),
+      ...(waiting ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    // The Turn is running when the fence starts, then asks a questionnaire and never ends.
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* turnAsksQuestionnaire() {
+        asked = true;
+        yield {
+          type: 'generic',
+          eventType: 'runtime.action-required',
+          data: { kind: 'questionnaire' },
+          turnId,
+        } as const;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { maxWaitMs: 60_000 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      waiting = true;
+      const next = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      const outcome = await outcomeWithin(next, 1_000);
+      if (outcome === 'still waiting') {
+        await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+        await next.catch(() => undefined);
+      }
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: false, reason: 'turn-awaiting-decision' },
+      });
+    });
+
+    // The running Turn was watched (it is not treated like a decision from the start).
+    expect(runtime.watchSessionTurn).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('stops waiting within one poll round once a running Turn asks a permission request mid-watch', async () => {
+    const { runtime, getActiveRun, sendMessage } = createRuntime([
+      { type: 'session-status', status: 'finished' },
+    ]);
+    let waiting = false;
+    let watching = false;
+    let watchSignal: AbortSignal | undefined;
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      // A permission request has no Turn stream frame: only the Runtime state shows it.
+      state: !waiting
+        ? ('idle' as const)
+        : watching
+          ? ('decision-blocked' as const)
+          : ('running' as const),
+      ...(waiting ? { turnId: 'turn-hidden' } : {}),
+      actions: { steer: false },
+    }));
+    // The Turn is running when the watch starts, then asks a permission request and never ends.
+    vi.mocked(runtime.watchSessionTurn).mockImplementation((_sessionId, turnId, signal) =>
+      (async function* turnAsksPermission() {
+        watching = true;
+        watchSignal = signal;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        if (signal.aborted) return;
+        yield { type: 'session-status', status: 'finished', turnId } as const;
+      })(),
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      promptAdmission: { maxWaitMs: 60_000, pollIntervalMs: 10, maxPollIntervalMs: 50 },
+    });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'First' }],
+      });
+      waiting = true;
+      const next = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Follow up' }],
+      });
+      // The bound is 60 s and the re-read gap 50 ms; an answer within 1 s proves a re-read saw it.
+      const outcome = await outcomeWithin(next, 1_000);
+      if (outcome === 'still waiting') {
+        await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+        await next.catch(() => undefined);
+      }
+      expect(outcome).toMatchObject({
+        code: -32603,
+        data: { code: 'local_session_busy', retryable: false, reason: 'turn-awaiting-decision' },
+      });
+    });
+
+    // One watch, ended by a Runtime re-read rather than a frame, and torn down afterwards.
+    expect(runtime.watchSessionTurn).toHaveBeenCalledOnce();
+    expect(watchSignal?.aborted).toBe(true);
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('leaves mcode/session/steer to the Runtime instead of queueing while a decision blocks the prompt Turn', async () => {
+    const { runtime, getActiveRun, enqueueMessage, steer } = createRuntime(
+      [
+        {
+          type: 'delta',
+          messageId: 'message-running',
+          role: 'assistant',
+          content: 'Waiting for approval.',
+        },
+      ],
+      { holdRunAfterEvents: true },
+    );
+    // A pending permission or questionnaire makes the Runtime report the Turn
+    // decision-blocked, which also closes actions.steer. That is not abort settlement.
+    getActiveRun.mockResolvedValue({
+      schemaVersion: 1,
+      sessionId: 'session-1',
+      state: 'decision-blocked',
+      turnId: 'turn-1',
+      actions: { steer: false },
+    });
+    steer.mockImplementation(async (input) => {
+      const result = { turnId: 'turn-1', mode: 'steered' as const };
+      await input.preDelivery?.accept(result);
+      return result;
+    });
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-1',
+    });
+    const updates: acp.SessionNotification[] = [];
+    const client = acp
+      .client({ name: 'test-client' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const prompt = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Edit the config' }],
+      });
+      await vi.waitFor(() =>
+        expect(updates).toContainEqual({
+          sessionId: 'session-1',
+          update: expect.objectContaining({ sessionUpdate: 'agent_message_chunk' }),
+        }),
+      );
+      await expect(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Also update the docs',
+        }),
+      ).resolves.toEqual({ turnId: 'turn-1', mode: 'steered' });
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
+    });
+
+    expect(enqueueMessage).not.toHaveBeenCalled();
+    expect(steer).toHaveBeenCalledOnce();
+  });
+
+  it('admits consecutive prompts without waiting when the Runtime reports the Session idle', async () => {
+    const { runtime, sendMessage } = createRuntime([
+      { type: 'delta', messageId: 'message-1', role: 'assistant', content: 'Done.' },
+      { type: 'session-status', status: 'finished' },
+    ]);
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      for (const text of ['First', 'Second']) {
+        await expect(
+          connection.request(acp.methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text }],
+          }),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      }
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(runtime.watchSessionTurn).not.toHaveBeenCalled();
+  });
+
+  it('reports Turn usage and MCode Turn facts in the session/prompt response', async () => {
+    const message = {
+      id: 'assistant-usage',
+      turnId: 'turn-usage',
+      role: 'assistant' as const,
+      content: 'Done',
+      finishReason: 'stop',
+      usage: {
+        inputTokens: 120,
+        outputTokens: 30,
+        reasoningTokens: 10,
+        cacheReadTokens: 80,
+        cacheWriteTokens: 5,
+      },
+    };
+    const { runtime, listMessagePage } = createRuntime(
+      [
+        { type: 'message', message },
+        { type: 'session-status', status: 'finished' },
+      ],
+      {
+        models: [
+          {
+            providerId: 'minimax',
+            modelId: 'MiniMax-M3',
+            selected: true,
+            providerKind: 'builtin',
+            apiFormat: 'anthropic',
+          },
+        ],
+      },
+    );
+    listMessagePage.mockResolvedValue({ messages: [message], hasMore: false } as never);
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-usage',
+    });
+    await acp.client({ name: 'python-sdk' }).connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Fix it' }],
+        }),
+      ).resolves.toEqual({
+        stopReason: 'end_turn',
+        usage: {
+          // ACP total sums every token type: input + output + cache read + cache write.
+          totalTokens: 235,
+          inputTokens: 120,
+          outputTokens: 30,
+          thoughtTokens: 10,
+          cachedReadTokens: 80,
+          cachedWriteTokens: 5,
+        },
+        _meta: {
+          'minimax-code/turn': {
+            runId: 'acp_turn-usage',
+            turnId: 'turn-usage',
+            model: {
+              providerId: 'minimax',
+              modelId: 'MiniMax-M3',
+              providerKind: 'builtin',
+              protocol: 'anthropic',
+            },
+            durationMs: expect.any(Number),
+            usageIncomplete: false,
+          },
+        },
+      });
+    });
+  });
+
+  it('omits ACP usage instead of fabricating token counts the Runtime did not report', async () => {
+    const { runtime } = createRuntime(
+      [
+        {
+          type: 'message',
+          message: {
+            id: 'assistant-partial',
+            turnId: 'turn-partial',
+            role: 'assistant',
+            content: 'Done',
+            usage: { inputTokens: 5 },
+          },
+        },
+        { type: 'session-status', status: 'finished' },
+      ],
+      { models: [{ providerId: 'minimax', modelId: 'MiniMax-M3', selected: true }] },
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-partial',
+    });
+    await acp.client({ name: 'python-sdk' }).connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+
+      const response = await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Fix it' }],
+      });
+      expect(response).not.toHaveProperty('usage');
+      expect(response).toEqual({
+        stopReason: 'end_turn',
+        _meta: {
+          'minimax-code/turn': {
+            runId: 'acp_turn-partial',
+            turnId: 'turn-partial',
+            model: { providerId: 'minimax', modelId: 'MiniMax-M3' },
+            durationMs: expect.any(Number),
+            usageIncomplete: true,
+          },
+        },
+      });
+    });
   });
 
   it('forwards prompt images to the Runtime as attachments and removes the temporary copies', async () => {
@@ -1284,7 +4750,7 @@ describe('MiniMax Code ACP agent', () => {
             { type: 'image', mimeType: 'image/png', data: ONE_PIXEL_PNG_BASE64 },
           ],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     expect(sendMessage).toHaveBeenCalledWith(
@@ -1328,12 +4794,12 @@ describe('MiniMax Code ACP agent', () => {
     },
     {
       name: 'more images than the attachment limit',
-      blocks: Array.from({ length: 11 }, () => ({
+      blocks: Array.from({ length: 21 }, () => ({
         type: 'image' as const,
         mimeType: 'image/png',
         data: ONE_PIXEL_PNG_BASE64,
       })),
-      message: 'A prompt can include at most 10 images.',
+      message: 'A prompt can include at most 20 images.',
     },
     {
       name: 'an audio block',
@@ -1366,13 +4832,8 @@ describe('MiniMax Code ACP agent', () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it('cleans up cancelled new Sessions and bounds stalled creation generations', async () => {
+  it('cancels new Sessions without Runtime writes and bounds stalled creation generations', async () => {
     const { runtime, createSession, deleteSession, listModels } = createRuntime();
-    let nextSession = 0;
-    createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
-      sessionId: `session-new-${nextSession++}`,
-      workspaceDir,
-    }));
     listModels.mockImplementation(() => new Promise(() => undefined));
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp.client({ name: 'test-client' });
@@ -1394,7 +4855,8 @@ describe('MiniMax Code ACP agent', () => {
       await vi.waitFor(() => expect(listModels).toHaveBeenCalledTimes(8));
       for (const cancellation of cancellations) cancellation.abort();
       await Promise.all(creations.map((creation) => expect(creation).rejects.toThrow('cancel')));
-      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledTimes(8));
+      expect(createSession).not.toHaveBeenCalled();
+      expect(deleteSession).not.toHaveBeenCalled();
 
       await expect(
         connection.request(acp.methods.agent.session.new, {
@@ -1405,7 +4867,7 @@ describe('MiniMax Code ACP agent', () => {
       for (let index = 0; index < 8; index += 1) {
         await expect(
           connection.request(acp.methods.agent.session.close, {
-            sessionId: `session-new-${index}`,
+            sessionId: `session-${index + 1}`,
           }),
         ).rejects.toThrow();
       }
@@ -1448,7 +4910,7 @@ describe('MiniMax Code ACP agent', () => {
     expect(deleteSession).not.toHaveBeenCalled();
   });
 
-  it('serializes resume behind cancelled new Session deletion', async () => {
+  it('serializes resume behind a cancelled new Session reservation', async () => {
     const { runtime, deleteSession, getSession, listModels } = createRuntime();
     listModels.mockImplementationOnce(() => new Promise(() => undefined));
     getSession.mockRejectedValueOnce(new Error('deleted'));
@@ -1479,9 +4941,10 @@ describe('MiniMax Code ACP agent', () => {
 
       cancellation.abort();
       await expect(creation).rejects.toThrow('cancel');
-      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledWith('session-1'));
       await expect(resume).rejects.toThrow();
       expect(getSession).toHaveBeenCalledWith('session-1');
+      // The reservation was never written, so there is nothing to delete.
+      expect(deleteSession).not.toHaveBeenCalled();
     });
   });
 
@@ -1599,7 +5062,7 @@ describe('MiniMax Code ACP agent', () => {
           sessionId: 'session-existing',
           prompt: [{ type: 'text', text: 'Continue' }],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
 
       await expect(
         connection.request(acp.methods.agent.session.close, {
@@ -1874,7 +5337,7 @@ describe('MiniMax Code ACP agent', () => {
           sessionId: session.sessionId,
         }),
       ).resolves.toEqual({});
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     expect(abortSession).toHaveBeenCalledWith(
@@ -1901,7 +5364,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -1926,7 +5389,7 @@ describe('MiniMax Code ACP agent', () => {
       releaseCloseCleanup();
       await expect(close).resolves.toEqual({});
       await expect(resume).resolves.toMatchObject({ modes: { currentModeId: 'default' } });
-      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     expect(clearSessionMcpServers).toHaveBeenCalledTimes(2);
@@ -1954,7 +5417,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -2005,7 +5468,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -2119,7 +5582,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -2181,7 +5644,6 @@ describe('MiniMax Code ACP agent', () => {
       sessionId: 'session-1',
       workspaceDir: '/workspace',
     });
-    configureSessionMcpServers.mockRejectedValueOnce(new Error('MCP configuration failed'));
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp.client({ name: 'test-client' });
 
@@ -2190,7 +5652,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [
           {
@@ -2201,6 +5663,7 @@ describe('MiniMax Code ACP agent', () => {
           },
         ],
       });
+      configureSessionMcpServers.mockRejectedValueOnce(new Error('MCP configuration failed'));
 
       await expect(
         connection.request(acp.methods.agent.session.resume, {
@@ -2225,7 +5688,8 @@ describe('MiniMax Code ACP agent', () => {
     });
 
     expect(clearSessionMcpServers).toHaveBeenCalledTimes(2);
-    expect(configureSessionMcpServers).toHaveBeenCalledOnce();
+    // Once when the Session was created, once for the failed resume overlay.
+    expect(configureSessionMcpServers).toHaveBeenCalledTimes(2);
   });
 
   it('detaches immediately when MCP recovery cleanup remains stalled', async () => {
@@ -2444,14 +5908,7 @@ describe('MiniMax Code ACP agent', () => {
       });
 
       if (testCase.advertisesTerminalAuth) {
-        expect(initialized.authMethods).toEqual([
-          {
-            type: 'terminal',
-            id: 'minimax-code-login',
-            name: 'Sign in to MiniMax Code',
-            args: ['login'],
-          },
-        ]);
+        expect(initialized.authMethods).toEqual(ACP_AUTH_METHODS);
       } else {
         expect(initialized.authMethods).toBeUndefined();
       }
@@ -2755,26 +6212,25 @@ describe('MiniMax Code ACP agent', () => {
   });
 
   it('bounds concurrent fail-closed replies before closing an overflowing interaction stream', async () => {
-    const { runtime, createSession, emitRuntimeEvent, replyPermission } = createRuntime();
-    let nextSession = 0;
-    createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
-      sessionId: `session-${nextSession++}`,
-      workspaceDir,
-    }));
-    replyPermission.mockImplementation(async (_agentName, requestId) => {
-      if (requestId === 'permission-8') await new Promise(() => undefined);
-      return true;
-    });
-    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
-    const client = acp
-      .client({ name: 'test-client' })
-      .onRequest(
-        acp.methods.client.session.requestPermission,
-        () => new Promise<acp.RequestPermissionResponse>(() => undefined),
-      );
+    // permission-8 never answers; drive the bounded cancel timeout instead of sleeping 1s.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { runtime, newSessionId, emitRuntimeEvent, replyPermission } = createRuntime();
+      let nextSession = 0;
+      newSessionId.mockImplementation(() => `session-${nextSession++}`);
+      replyPermission.mockImplementation(async (_agentName, requestId) => {
+        if (requestId === 'permission-8') await new Promise(() => undefined);
+        return true;
+      });
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp
+        .client({ name: 'test-client' })
+        .onRequest(
+          acp.methods.client.session.requestPermission,
+          () => new Promise<acp.RequestPermissionResponse>(() => undefined),
+        );
 
-    await client
-      .connectWith(agent, async (connection) => {
+      const operation = client.connectWith(agent, async (connection) => {
         await connection.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
           clientCapabilities: {},
@@ -2789,11 +6245,20 @@ describe('MiniMax Code ACP agent', () => {
           emitRuntimeEvent(permissionEvent(`permission-${index}`, `session-${index}`));
         }
 
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true), { timeout: 3_000 });
-      })
-      .catch(() => undefined);
+        // Only the Agent closing the connection may settle this operation.
+        await new Promise<never>(() => undefined);
+      });
+      const closed = expect(operation).rejects.toThrow('ACP connection closed');
+      await vi.waitFor(() =>
+        expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-8', 'deny'),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      await closed;
 
-    expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-72', 'deny');
+      expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-72', 'deny');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps watching interactions after one Runtime permission reply fails', async () => {
@@ -3276,7 +6741,16 @@ describe('MiniMax Code ACP agent', () => {
       expect(steer).not.toHaveBeenCalled();
       releaseBlockedRun?.();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(prompt).resolves.toMatchObject({
+        stopReason: 'end_turn',
+        _meta: {
+          'minimax-code/turn': {
+            runId: 'acp_turn-1',
+            turnId: 'turn-1',
+            continuationTurnIds: ['turn-2'],
+          },
+        },
+      });
     });
 
     expect(updates).toContainEqual({
@@ -3484,7 +6958,7 @@ describe('MiniMax Code ACP agent', () => {
 
       await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     expect(abortSession).toHaveBeenCalledWith({
@@ -3555,7 +7029,7 @@ describe('MiniMax Code ACP agent', () => {
 
       cancellation.abort();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
 
     expect(abortSession).toHaveBeenCalledWith({
@@ -3614,7 +7088,7 @@ describe('MiniMax Code ACP agent', () => {
   });
 
   it('passes client-provided stdio MCP servers into the Runtime session', async () => {
-    const { runtime, createSession } = createRuntime();
+    const { runtime, createSession, configureSessionMcpServers } = createRuntime();
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp.client({ name: 'test-client' });
 
@@ -3640,24 +7114,27 @@ describe('MiniMax Code ACP agent', () => {
         modes: { currentModeId: 'default' },
         configOptions: expect.arrayContaining([expect.objectContaining({ id: 'permissionMode' })]),
       });
+      expect(createSession).not.toHaveBeenCalled();
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: 'session-1',
+        prompt: [{ type: 'text', text: '/help' }],
+      });
     });
 
-    expect(createSession).toHaveBeenCalledWith({
-      workspaceDir: '/workspace',
-      mcpServers: [
-        {
-          name: 'client-tools',
-          type: 'stdio',
-          command: '/usr/local/bin/client-tools',
-          args: ['serve'],
-          env: { CLIENT_TOKEN: 'test-token' },
-        },
-      ],
-    });
+    expect(createSession).toHaveBeenCalledWith({ workspaceDir: '/workspace', sessionId: 'session-1' });
+    expect(configureSessionMcpServers).toHaveBeenCalledWith('session-1', [
+      {
+        name: 'client-tools',
+        type: 'stdio',
+        command: '/usr/local/bin/client-tools',
+        args: ['serve'],
+        env: { CLIENT_TOKEN: 'test-token' },
+      },
+    ]);
   });
 
   it('passes client-provided HTTP and SSE MCP servers into the Runtime session', async () => {
-    const { runtime, createSession } = createRuntime();
+    const { runtime, createSession, configureSessionMcpServers } = createRuntime();
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp.client({ name: 'test-client' });
 
@@ -3689,25 +7166,28 @@ describe('MiniMax Code ACP agent', () => {
         modes: { currentModeId: 'default' },
         configOptions: expect.arrayContaining([expect.objectContaining({ id: 'permissionMode' })]),
       });
+      expect(createSession).not.toHaveBeenCalled();
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: 'session-1',
+        prompt: [{ type: 'text', text: '/help' }],
+      });
     });
 
-    expect(createSession).toHaveBeenCalledWith({
-      workspaceDir: '/workspace',
-      mcpServers: [
-        {
-          name: 'http-tools',
-          type: 'http',
-          url: 'https://example.com/mcp',
-          headers: { Authorization: 'Bearer http-token' },
-        },
-        {
-          name: 'sse-tools',
-          type: 'sse',
-          url: 'https://example.com/sse',
-          headers: { 'X-Client': 'acp' },
-        },
-      ],
-    });
+    expect(createSession).toHaveBeenCalledWith({ workspaceDir: '/workspace', sessionId: 'session-1' });
+    expect(configureSessionMcpServers).toHaveBeenCalledWith('session-1', [
+      {
+        name: 'http-tools',
+        type: 'http',
+        url: 'https://example.com/mcp',
+        headers: { Authorization: 'Bearer http-token' },
+      },
+      {
+        name: 'sse-tools',
+        type: 'sse',
+        url: 'https://example.com/sse',
+        headers: { 'X-Client': 'acp' },
+      },
+    ]);
   });
 
   it('applies mode intent to the next prompt and exposes Runtime-backed configuration', async () => {
@@ -3725,7 +7205,7 @@ describe('MiniMax Code ACP agent', () => {
               displayName: 'MiniMax M3',
               selected: true,
               effortOptions: ['low', 'high'],
-              thinkingConfig: { defaultValue: 'low' },
+              defaultEffort: 'low',
             },
           ],
         },
@@ -3761,7 +7241,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -3806,7 +7286,7 @@ describe('MiniMax Code ACP agent', () => {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'Make a plan' }],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     expect(setPermissionMode).toHaveBeenCalledWith('auto');
@@ -3843,30 +7323,30 @@ describe('MiniMax Code ACP agent', () => {
       .client({ name: 'test-client' })
       .onNotification(acp.methods.client.session.update, () => undefined);
 
-    await client
-      .connectWith(agent, async (connection) => {
-        await connection.request(acp.methods.agent.initialize, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: {},
-        });
-        const session = await connection.request(acp.methods.agent.session.new, {
-          cwd: '/workspace',
-          mcpServers: [],
-        });
-        getPermissionMode
-          .mockImplementationOnce(() => new Promise(() => undefined))
-          .mockResolvedValue('auto');
+    const operation = client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      getPermissionMode
+        .mockImplementationOnce(() => new Promise(() => undefined))
+        .mockResolvedValue('auto');
 
-        await expect(
-          connection.request(acp.methods.agent.session.setConfigOption, {
-            sessionId: session.sessionId,
-            configId: 'permissionMode',
-            value: 'auto',
-          }),
-        ).resolves.toEqual(expect.objectContaining({ configOptions: expect.any(Array) }));
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true));
-      })
-      .catch(() => undefined);
+      await expect(
+        connection.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: session.sessionId,
+          configId: 'permissionMode',
+          value: 'auto',
+        }),
+      ).resolves.toEqual(expect.objectContaining({ configOptions: expect.any(Array) }));
+      // Only the Agent closing the connection may settle this operation.
+      await new Promise<never>(() => undefined);
+    });
+    await expect(operation).rejects.toThrow('ACP connection closed');
 
     expect(setPermissionMode).toHaveBeenCalledWith('auto');
   });
@@ -4073,7 +7553,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -4105,16 +7585,15 @@ describe('MiniMax Code ACP agent', () => {
     );
   });
 
-  it('advertises an empty selected variant when supportedVariants is omitted', async () => {
-    const { runtime, selectSessionModel } = createRuntime([], {
+  it('advertises the catalog default effort before the middle one, as Runtime resolves it', async () => {
+    const { runtime } = createRuntime([], {
       models: [
         {
           providerId: 'minimax',
           modelId: 'm3',
           selected: true,
-          variant: '',
-          effortOptions: ['low'],
-          thinkingConfig: { defaultValue: 'low' },
+          effortOptions: ['low', 'high'],
+          defaultEffort: 'high',
         },
       ],
     });
@@ -4127,6 +7606,39 @@ describe('MiniMax Code ACP agent', () => {
         clientCapabilities: {},
       });
       const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      expect(session.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'thinkingEffort', currentValue: 'high' }),
+        ]),
+      );
+    });
+  });
+
+  it('advertises an empty selected variant when supportedVariants is omitted', async () => {
+    const { runtime, selectSessionModel } = createRuntime([], {
+      models: [
+        {
+          providerId: 'minimax',
+          modelId: 'm3',
+          selected: true,
+          variant: '',
+          effortOptions: ['low'],
+          defaultEffort: 'low',
+        },
+      ],
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -4290,7 +7802,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [
           {
@@ -4301,6 +7813,7 @@ describe('MiniMax Code ACP agent', () => {
           },
         ],
       });
+      configureSessionMcpServers.mockClear();
       await expect(
         connection.request(acp.methods.agent.session.fork, {
           sessionId: session.sessionId,
@@ -4316,7 +7829,6 @@ describe('MiniMax Code ACP agent', () => {
   it('deletes a durable fork without waiting for MCP clear after configuration fails', async () => {
     const { runtime, configureSessionMcpServers, clearSessionMcpServers, deleteSession } =
       createRuntime();
-    configureSessionMcpServers.mockRejectedValue(new Error('MCP startup failed'));
     clearSessionMcpServers.mockImplementation(() => new Promise(() => undefined));
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp.client({ name: 'test-client' });
@@ -4326,7 +7838,7 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
-      const session = await connection.request(acp.methods.agent.session.new, {
+      const session = await newRuntimeSession(connection, {
         cwd: '/workspace',
         mcpServers: [
           {
@@ -4337,6 +7849,7 @@ describe('MiniMax Code ACP agent', () => {
           },
         ],
       });
+      configureSessionMcpServers.mockRejectedValue(new Error('MCP startup failed'));
       await expect(
         connection.request(acp.methods.agent.session.fork, {
           sessionId: session.sessionId,
@@ -4545,7 +8058,7 @@ describe('MiniMax Code ACP agent', () => {
         }),
       ).resolves.toEqual({ turnId: 'turn-active', mode: 'steered' });
       await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
       await expect(
         connection.request(acp.methods.agent.session.close, { sessionId: session.sessionId }),
       ).resolves.toEqual({});
@@ -4588,6 +8101,283 @@ describe('MiniMax Code ACP agent', () => {
     expect(abortSession).toHaveBeenCalled();
   });
 
+  it('addresses one delegated agent by targetSessionId without acting on its parent', async () => {
+    const { runtime, steer, listMessagePage, getDelegationSnapshot, stopDelegation, abortSession } =
+      createRuntime();
+    getDelegationSnapshot.mockImplementation(async (rootSessionId: string) => ({
+      schemaVersion: 1 as const,
+      rootSessionId,
+      members: [
+        { sessionId: 'child-1', parentSessionId: rootSessionId, status: 'running' as const },
+        { sessionId: 'grandchild-1', parentSessionId: 'child-1', status: 'running' as const },
+        { sessionId: 'child-2', parentSessionId: rootSessionId, status: 'running' as const },
+      ],
+    }));
+    stopDelegation.mockImplementation(async (rootSessionId: string, options?: unknown) => ({
+      schemaVersion: 1 as const,
+      rootSessionId,
+      ...(options as { targetSessionId?: string }),
+      rootStopped: false,
+      stoppedSessionIds: ['child-1', 'grandchild-1'],
+      activeSessionIds: [],
+      failedSessionIds: [],
+    }));
+    listMessagePage.mockResolvedValueOnce({
+      messages: [
+        { id: 'message-user', role: 'user', content: 'Review the CLI' },
+        { id: 'message-final', role: 'assistant', content: 'Review done', turnId: 'turn-child' },
+      ],
+      hasMore: true,
+      nextCursor: 'cursor-older',
+    } as never);
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      const initialized = await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      expect(initialized._meta?.['minimax-code/extensions']).toMatchObject({
+        methods: expect.arrayContaining([
+          'mcode/session/delegation/message',
+          'mcode/session/delegation/transcript',
+        ]),
+      });
+      const session = await newRuntimeSession(connection, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+
+      await expect(
+        connection.request('mcode/session/delegation/stop', {
+          sessionId: session.sessionId,
+          targetSessionId: 'child-1',
+        }),
+      ).resolves.toEqual({
+        receipt: {
+          schemaVersion: 1,
+          rootSessionId: 'session-1',
+          targetSessionId: 'child-1',
+          rootStopped: false,
+          stoppedSessionIds: ['child-1', 'grandchild-1'],
+          activeSessionIds: [],
+          failedSessionIds: [],
+        },
+      });
+      await expect(
+        connection.request('mcode/session/delegation/stop', {
+          sessionId: session.sessionId,
+          childSessionId: 'child-1',
+        }),
+      ).rejects.toThrow('childSessionId is not supported');
+      await expect(
+        connection.request('mcode/session/delegation/get', {
+          sessionId: session.sessionId,
+          targetSessionId: 'child-1',
+        }),
+      ).rejects.toThrow('targetSessionId is not supported');
+      await expect(
+        connection.request('mcode/session/delegation/stop', {
+          sessionId: session.sessionId,
+          targetSessionId: 'unrelated-session',
+        }),
+      ).rejects.toThrow('not a delegated agent');
+      await expect(
+        connection.request('mcode/session/delegation/stop', {
+          sessionId: session.sessionId,
+          targetSessionId: 'session-1',
+        }),
+      ).rejects.toThrow('not a delegated agent');
+
+      await expect(
+        connection.request('mcode/session/delegation/message', {
+          sessionId: session.sessionId,
+          targetSessionId: 'grandchild-1',
+          text: 'Also check Windows paths',
+          clientRequestId: 'client-message-1',
+        }),
+      ).resolves.toEqual({
+        targetSessionId: 'grandchild-1',
+        turnId: 'turn-active',
+        mode: 'steered',
+      });
+
+      await expect(
+        connection.request('mcode/session/delegation/transcript', {
+          sessionId: session.sessionId,
+          targetSessionId: 'child-1',
+          limit: 20,
+        }),
+      ).resolves.toEqual({
+        targetSessionId: 'child-1',
+        updates: [
+          {
+            sessionUpdate: 'user_message_chunk',
+            messageId: 'message-user',
+            content: { type: 'text', text: 'Review the CLI' },
+          },
+          expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Review done' },
+          }),
+        ],
+        hasMore: true,
+        nextCursor: 'cursor-older',
+      });
+    });
+
+    expect(stopDelegation).toHaveBeenCalledOnce();
+    expect(stopDelegation).toHaveBeenCalledWith('session-1', { targetSessionId: 'child-1' });
+    expect(abortSession).not.toHaveBeenCalled();
+    expect(steer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'grandchild-1',
+        source: 'api',
+        message: { content: 'Also check Windows paths' },
+        producerId: 'mcode-acp',
+        idempotencyKey: 'client-message-1',
+        preDelivery: { accept: expect.any(Function) },
+      }),
+    );
+    expect(listMessagePage).toHaveBeenCalledWith('child-1', { limit: 20 });
+  });
+
+  it('validates delegated-agent transcript paging and accepts _meta', async () => {
+    const { runtime, listMessagePage, getDelegationSnapshot } = createRuntime();
+    getDelegationSnapshot.mockImplementation(async (rootSessionId: string) => ({
+      schemaVersion: 1 as const,
+      rootSessionId,
+      members: [
+        { sessionId: 'child-1', parentSessionId: rootSessionId, status: 'running' as const },
+      ],
+    }));
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await newRuntimeSession(connection, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      for (const limit of [0, 101, 1.5, '10']) {
+        await expect(
+          connection.request('mcode/session/delegation/transcript', {
+            sessionId: session.sessionId,
+            targetSessionId: 'child-1',
+            limit,
+          }),
+        ).rejects.toThrow('limit must be an integer from 1 to 100');
+      }
+      await expect(
+        connection.request('mcode/session/delegation/transcript', {
+          sessionId: session.sessionId,
+          targetSessionId: 'child-1',
+          before: 'cursor-older',
+          _meta: { trace: 'client-1' },
+        }),
+      ).resolves.toEqual({ targetSessionId: 'child-1', updates: [], hasMore: false });
+    });
+
+    expect(listMessagePage).toHaveBeenCalledOnce();
+    expect(listMessagePage).toHaveBeenCalledWith('child-1', { limit: 50, before: 'cursor-older' });
+  });
+
+  it('rejects a message to an idle delegated agent without asking the Runtime to steer it', async () => {
+    const { runtime, steer, getActiveRun, getDelegationSnapshot } = createRuntime();
+    getDelegationSnapshot.mockImplementation(async (rootSessionId: string) => ({
+      schemaVersion: 1 as const,
+      rootSessionId,
+      members: [
+        { sessionId: 'child-idle', parentSessionId: rootSessionId, status: 'completed' as const },
+      ],
+    }));
+    getActiveRun.mockImplementation(async (sessionId: string) => ({
+      schemaVersion: 1 as const,
+      sessionId,
+      state: 'idle',
+      turnId: undefined,
+      actions: { steer: false },
+    }));
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await newRuntimeSession(connection, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request('mcode/session/delegation/message', {
+          sessionId: session.sessionId,
+          targetSessionId: 'child-idle',
+          text: 'Start over',
+        }),
+      ).rejects.toThrow('no running Turn');
+    });
+
+    expect(getActiveRun).toHaveBeenCalledWith('child-idle');
+    // Steering an idle Session would admit a Turn first, and withdrawing it afterwards leaves
+    // a persisted terminal on the agent; the precheck must keep the Runtime out of it.
+    expect(steer).not.toHaveBeenCalled();
+  });
+
+  it('withdraws a delegated-agent message as a cancellation when its Turn ends before delivery', async () => {
+    const { runtime, steer, getDelegationSnapshot } = createRuntime();
+    getDelegationSnapshot.mockImplementation(async (rootSessionId: string) => ({
+      schemaVersion: 1 as const,
+      rootSessionId,
+      members: [
+        { sessionId: 'child-racing', parentSessionId: rootSessionId, status: 'running' as const },
+      ],
+    }));
+    let withdrawal: unknown;
+    steer.mockImplementationOnce(async (input) => {
+      try {
+        await input.preDelivery?.accept({ mode: 'activated', turnId: 'turn-new' });
+      } catch (error) {
+        withdrawal = error;
+        throw error;
+      }
+      return {
+        turnId: 'turn-new',
+        mode: 'activated',
+        completion: new Promise(() => undefined),
+      } as never;
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await newRuntimeSession(connection, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request('mcode/session/delegation/message', {
+          sessionId: session.sessionId,
+          targetSessionId: 'child-racing',
+          text: 'Too late',
+        }),
+      ).rejects.toThrow('no running Turn');
+    });
+
+    // The Runtime projects only an AbortError from pre-delivery as a withdrawn delivery;
+    // any other error is recorded as a failed Turn on the agent's Session.
+    expect(withdrawal).toMatchObject({ name: 'AbortError' });
+  });
   it('rejects ACP steering before the Runtime admits the prompt Turn', async () => {
     const { runtime, sendMessage, steer } = createRuntime([], { holdRunUntilAbort: true });
     const agent = createTuiAcpAgent({
@@ -4621,7 +8411,7 @@ describe('MiniMax Code ACP agent', () => {
       expect(steer).not.toHaveBeenCalled();
 
       await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
   });
 
@@ -4695,7 +8485,7 @@ describe('MiniMax Code ACP agent', () => {
       ).rejects.toThrow('active ACP prompt Turn changed');
 
       await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
     });
   });
 
@@ -4938,13 +8728,10 @@ describe('MiniMax Code ACP agent', () => {
   });
 
   it('closes the connection instead of dropping required Plan removals', async () => {
-    const { runtime, createSession, dismissQuestionnaire, emitRuntimeEvent, getSession } =
+    const { runtime, newSessionId, dismissQuestionnaire, emitRuntimeEvent, getSession } =
       createRuntime();
     let nextSession = 0;
-    createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
-      sessionId: `session-${nextSession++}`,
-      workspaceDir,
-    }));
+    newSessionId.mockImplementation(() => `session-${nextSession++}`);
     const answerQuestionnaires: Array<(response: acp.CreateElicitationResponse) => void> = [];
     let planUpdates = 0;
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
@@ -4961,105 +8748,59 @@ describe('MiniMax Code ACP agent', () => {
           }),
       );
 
-    await client
-      .connectWith(agent, async (connection) => {
-        await connection.request(acp.methods.agent.initialize, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { plan: {}, elicitation: { form: {} } },
-        });
-        for (let index = 0; index < 65; index += 1) {
-          await connection.request(acp.methods.agent.session.new, {
-            cwd: `/workspace/${index}`,
-            mcpServers: [],
-          });
-          emitRuntimeEvent(planReviewEvent(index));
-        }
-        await vi.waitFor(() => expect(planUpdates).toBe(65));
-        await vi.waitFor(() => expect(getSession).toHaveBeenCalledTimes(65));
-        await vi.waitFor(() => expect(answerQuestionnaires).toHaveLength(8));
-
-        const priorSessionReads = getSession.mock.calls.length;
-        getSession.mockImplementation(() => new Promise(() => undefined));
-        for (let index = 0; index < 8; index += 1) {
-          emitRuntimeEvent({
-            type: 'session.start',
-            timestampMs: 100 + index,
-            source: 'runtime',
-            sessionId: `session-${index}`,
-            turnId: `turn-${index}`,
-            queueItemIds: [],
-          });
-        }
-        await vi.waitFor(() => expect(getSession).toHaveBeenCalledTimes(priorSessionReads + 8));
-
-        for (let settled = 0; settled < 64; ) {
-          const nextSettled = Math.min(settled + 8, 64);
-          await vi.waitFor(() =>
-            expect(answerQuestionnaires.length).toBeGreaterThanOrEqual(nextSettled),
-          );
-          for (let index = settled; index < nextSettled; index += 1) {
-            answerQuestionnaires[index]?.({ action: 'cancel' });
-          }
-          settled = nextSettled;
-          await vi.waitFor(() => expect(dismissQuestionnaire).toHaveBeenCalledTimes(settled));
-        }
-        await vi.waitFor(() => expect(answerQuestionnaires).toHaveLength(65));
-        answerQuestionnaires[64]?.({ action: 'cancel' });
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true));
-      })
-      .catch(() => undefined);
-  });
-
-  it('closes the connection when a required Plan removal notification never settles', async () => {
-    const { runtime, emitRuntimeEvent } = createRuntime();
-    let releaseQuestionnaire!: (response: acp.CreateElicitationResponse) => void;
-    const questionnaire = new Promise<acp.CreateElicitationResponse>((resolve) => {
-      releaseQuestionnaire = resolve;
-    });
-    let planDelivered!: () => void;
-    const delivered = new Promise<void>((resolve) => {
-      planDelivered = resolve;
-    });
-    const agent = createTuiAcpAgent({
-      runtime,
-      version: '1.2.3',
-      runtimeEventProjectionTimeoutMs: 10,
-    });
-    const client = acp
-      .client({ name: 'test-client' })
-      .onNotification(acp.methods.client.session.update, ({ params }) => {
-        if (params.update.sessionUpdate === 'plan_update') planDelivered();
-        if (params.update.sessionUpdate === 'plan_removed') {
-          return new Promise<void>(() => undefined);
-        }
-      })
-      .onRequest(acp.methods.client.elicitation.create, () => questionnaire);
-
-    await client
-      .connectWith(agent, async (connection) => {
-        await connection.request(acp.methods.agent.initialize, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { plan: {}, elicitation: { form: {} } },
-        });
+    const operation = client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { plan: {}, elicitation: { form: {} } },
+      });
+      for (let index = 0; index < 65; index += 1) {
         await connection.request(acp.methods.agent.session.new, {
-          cwd: '/workspace',
+          cwd: `/workspace/${index}`,
           mcpServers: [],
         });
-        emitRuntimeEvent(planReviewEvent(1));
-        await delivered;
-        releaseQuestionnaire({ action: 'cancel' });
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true));
-      })
-      .catch(() => undefined);
+        emitRuntimeEvent(planReviewEvent(index));
+      }
+      await vi.waitFor(() => expect(planUpdates).toBe(65));
+      await vi.waitFor(() => expect(getSession).toHaveBeenCalledTimes(65));
+      await vi.waitFor(() => expect(answerQuestionnaires).toHaveLength(8));
+
+      const priorSessionReads = getSession.mock.calls.length;
+      getSession.mockImplementation(() => new Promise(() => undefined));
+      for (let index = 0; index < 8; index += 1) {
+        emitRuntimeEvent({
+          type: 'session.start',
+          timestampMs: 100 + index,
+          source: 'runtime',
+          sessionId: `session-${index}`,
+          turnId: `turn-${index}`,
+          queueItemIds: [],
+        });
+      }
+      await vi.waitFor(() => expect(getSession).toHaveBeenCalledTimes(priorSessionReads + 8));
+
+      for (let settled = 0; settled < 64; ) {
+        const nextSettled = Math.min(settled + 8, 64);
+        await vi.waitFor(() =>
+          expect(answerQuestionnaires.length).toBeGreaterThanOrEqual(nextSettled),
+        );
+        for (let index = settled; index < nextSettled; index += 1) {
+          answerQuestionnaires[index]?.({ action: 'cancel' });
+        }
+        settled = nextSettled;
+        await vi.waitFor(() => expect(dismissQuestionnaire).toHaveBeenCalledTimes(settled));
+      }
+      await vi.waitFor(() => expect(answerQuestionnaires).toHaveLength(65));
+      answerQuestionnaires[64]?.({ action: 'cancel' });
+      // Only the Agent closing the connection may settle this operation.
+      await new Promise<never>(() => undefined);
+    });
+    await expect(operation).rejects.toThrow('ACP connection closed');
   });
 
   it('closes the connection when a required Plan removal expires in the pending queue', async () => {
-    const { runtime, createSession, emitRuntimeEvent, getSession } = createRuntime();
+    const { runtime, newSessionId, emitRuntimeEvent, getSession } = createRuntime();
     let nextSession = 0;
-    createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
-      sessionId: `session-${nextSession++}`,
-      workspaceDir,
-    }));
+    newSessionId.mockImplementation(() => `session-${nextSession++}`);
     let settlePlan!: (response: acp.CreateElicitationResponse) => void;
     let planDelivered!: () => void;
     const agent = createTuiAcpAgent({
@@ -5083,85 +8824,39 @@ describe('MiniMax Code ACP agent', () => {
       planDelivered = resolve;
     });
 
-    await client
-      .connectWith(agent, async (connection) => {
-        await connection.request(acp.methods.agent.initialize, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { plan: {}, elicitation: { form: {} } },
+    const operation = client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: { plan: {}, elicitation: { form: {} } },
+      });
+      for (let index = 0; index < 8; index += 1) {
+        await connection.request(acp.methods.agent.session.new, {
+          cwd: `/workspace/${index}`,
+          mcpServers: [],
         });
-        for (let index = 0; index < 8; index += 1) {
-          await connection.request(acp.methods.agent.session.new, {
-            cwd: `/workspace/${index}`,
-            mcpServers: [],
-          });
-        }
-        emitRuntimeEvent(planReviewEvent(0));
-        await delivered;
-        const priorSessionReads = getSession.mock.calls.length;
-        getSession.mockImplementation(() => new Promise(() => undefined));
-        for (let index = 0; index < 8; index += 1) {
-          emitRuntimeEvent({
-            type: 'session.start',
-            timestampMs: 10 + index,
-            source: 'runtime',
-            sessionId: `session-${index}`,
-            turnId: `turn-${index}`,
-            queueItemIds: [],
-          });
-        }
-        await vi.waitFor(() =>
-          expect(getSession.mock.calls.length).toBeGreaterThanOrEqual(priorSessionReads + 8),
-        );
-        settlePlan({ action: 'cancel' });
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true));
-      })
-      .catch(() => undefined);
-  });
-
-  it('closes the connection when attachment replacement cannot confirm prior Plan delivery', async () => {
-    const { runtime, emitRuntimeEvent } = createRuntime();
-    let planNotificationStarted!: () => void;
-    const planNotification = new Promise<void>((resolve) => {
-      planNotificationStarted = resolve;
-    });
-    const agent = createTuiAcpAgent({
-      runtime,
-      version: '1.2.3',
-      runtimeEventProjectionTimeoutMs: 10,
-    });
-    const client = acp
-      .client({ name: 'test-client' })
-      .onNotification(acp.methods.client.session.update, ({ params }) => {
-        if (params.update.sessionUpdate === 'plan_update') {
-          planNotificationStarted();
-          return new Promise<void>(() => undefined);
-        }
-      })
-      .onRequest(
-        acp.methods.client.elicitation.create,
-        () => new Promise<acp.CreateElicitationResponse>(() => undefined),
+      }
+      emitRuntimeEvent(planReviewEvent(0));
+      await delivered;
+      const priorSessionReads = getSession.mock.calls.length;
+      getSession.mockImplementation(() => new Promise(() => undefined));
+      for (let index = 0; index < 8; index += 1) {
+        emitRuntimeEvent({
+          type: 'session.start',
+          timestampMs: 10 + index,
+          source: 'runtime',
+          sessionId: `session-${index}`,
+          turnId: `turn-${index}`,
+          queueItemIds: [],
+        });
+      }
+      await vi.waitFor(() =>
+        expect(getSession.mock.calls.length).toBeGreaterThanOrEqual(priorSessionReads + 8),
       );
-
-    await client
-      .connectWith(agent, async (connection) => {
-        await connection.request(acp.methods.agent.initialize, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { plan: {}, elicitation: { form: {} } },
-        });
-        const session = await connection.request(acp.methods.agent.session.new, {
-          cwd: '/workspace',
-          mcpServers: [],
-        });
-        emitRuntimeEvent(planReviewEvent(1));
-        await planNotification;
-        await connection.request(acp.methods.agent.session.resume, {
-          sessionId: session.sessionId,
-          cwd: '/workspace',
-          mcpServers: [],
-        });
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true));
-      })
-      .catch(() => undefined);
+      settlePlan({ action: 'cancel' });
+      // Only the Agent closing the connection may settle this operation.
+      await new Promise<never>(() => undefined);
+    });
+    await expect(operation).rejects.toThrow('ACP connection closed');
   });
 
   it('does not let a stalled control projection block questionnaire handling', async () => {
@@ -5700,12 +9395,9 @@ describe('MiniMax Code ACP agent', () => {
   });
 
   it('caps globally active projection lanes when unique Runtime reads never settle', async () => {
-    const { runtime, createSession, emitRuntimeEvent, getSession } = createRuntime();
+    const { runtime, newSessionId, emitRuntimeEvent, getSession } = createRuntime();
     let nextSession = 0;
-    createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
-      sessionId: `session-${nextSession++}`,
-      workspaceDir,
-    }));
+    newSessionId.mockImplementation(() => `session-${nextSession++}`);
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp
       .client({ name: 'test-client' })
@@ -5743,12 +9435,13 @@ describe('MiniMax Code ACP agent', () => {
   it('serializes delegation fan-out and reuses one snapshot for a shared root', async () => {
     const { runtime, createSession, emitRuntimeEvent, getSession, getDelegationSnapshot } =
       createRuntime();
-    let nextSession = 1;
-    createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
-      sessionId: `session-${nextSession++}`,
-      workspaceDir,
-      parentSessionId: 'session-root',
-    }));
+    createSession.mockImplementation(
+      async ({ workspaceDir, sessionId }: { workspaceDir: string; sessionId?: string }) => ({
+        sessionId: sessionId ?? 'session-1',
+        workspaceDir,
+        parentSessionId: 'session-root',
+      }),
+    );
     getSession.mockResolvedValue({ sessionId: 'session-root', workspaceDir: '/workspace' });
     let releaseSnapshot!: () => void;
     const snapshotGate = new Promise<void>((resolve) => {
@@ -5779,7 +9472,7 @@ describe('MiniMax Code ACP agent', () => {
         },
       });
       for (let index = 0; index < 3; index += 1) {
-        await connection.request(acp.methods.agent.session.new, {
+        await newRuntimeSession(connection, {
           cwd: `/workspace/${index}`,
           mcpServers: [],
         });
@@ -5824,7 +9517,7 @@ describe('MiniMax Code ACP agent', () => {
         ),
       ).rejects.toThrow('ACP connection closed');
 
-      await firstConnection.request(acp.methods.agent.session.new, {
+      await newRuntimeSession(firstConnection, {
         cwd: '/workspace',
         mcpServers: [],
       });
@@ -5892,32 +9585,32 @@ describe('MiniMax Code ACP agent', () => {
       });
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
 
-    await client
-      .connectWith(agent, async (connection) => {
-        await connection.request(acp.methods.agent.initialize, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: {},
+    const operation = client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      for (let index = 0; index < 3; index += 1) {
+        const requestId = `permission-detached-${index}`;
+        emitRuntimeEvent(permissionEvent(requestId));
+        await vi.waitFor(() => expect(requested).toContain(requestId));
+        emitRuntimeEvent({
+          type: 'permission.resolved',
+          timestampMs: 2 + index,
+          source: 'runtime',
+          sessionId: 'session-1',
+          requestId,
+          decision: 'deny',
         });
-        await connection.request(acp.methods.agent.session.new, {
-          cwd: '/workspace',
-          mcpServers: [],
-        });
-        for (let index = 0; index < 3; index += 1) {
-          const requestId = `permission-detached-${index}`;
-          emitRuntimeEvent(permissionEvent(requestId));
-          await vi.waitFor(() => expect(requested).toContain(requestId));
-          emitRuntimeEvent({
-            type: 'permission.resolved',
-            timestampMs: 2 + index,
-            source: 'runtime',
-            sessionId: 'session-1',
-            requestId,
-            decision: 'deny',
-          });
-        }
-        await vi.waitFor(() => expect(connection.signal.aborted).toBe(true));
-      })
-      .catch(() => undefined);
+      }
+      // Only the Agent closing the connection may settle this operation.
+      await new Promise<never>(() => undefined);
+    });
+    await expect(operation).rejects.toThrow('ACP connection closed');
   });
 
   it('does not let an old attachment terminal event terminate a reused request id', async () => {
@@ -6069,7 +9762,7 @@ describe('MiniMax Code ACP agent', () => {
       });
       releaseBlockedRun();
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     expect(dismissQuestionnaire).not.toHaveBeenCalledWith('mcode', 'questionnaire-expired');
@@ -6141,13 +9834,13 @@ describe('MiniMax Code ACP agent', () => {
         }),
       ).resolves.toEqual({ _meta: { 'minimax-code/transition': 'next_prompt' } });
       releaseFirst();
-      await expect(firstPrompt).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(firstPrompt).resolves.toMatchObject({ stopReason: 'end_turn' });
       await expect(
         connection.request(acp.methods.agent.session.prompt, {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'Stay in default mode' }],
         }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
     expect(requests.map(({ clientIntent }) => clientIntent)).toEqual(['plan-entry', 'plan-exit']);

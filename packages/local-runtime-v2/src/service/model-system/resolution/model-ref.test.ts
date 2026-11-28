@@ -6,12 +6,110 @@ import {
   capabilitiesFromModelConfig,
   modelLimitsFromConfig,
   modelRefForModel,
+  withMinimumModelThinking,
   readSelectedThinkingEffort,
+  type ModelRefOverride,
   resolveByokThinkingProtocol,
   resolveThinkingLevel,
 } from './model-ref.js';
 import { OPENPLATFORM_THINKING_VARIANTS_CAPABILITY } from './openplatform-thinking.js';
 import type { LocalModelConfig } from '../contracts.js';
+
+describe('withMinimumModelThinking', () => {
+  it.each<{ config: LocalModelConfig; effort: string | undefined; enabled: boolean }>([
+    {
+      config: { thinking: { effortOptions: ['xhigh', 'high', 'low', 'medium'] } },
+      effort: 'low',
+      enabled: true,
+    },
+    {
+      config: { thinking: { effortOptions: ['high', 'medium'] } },
+      effort: 'medium',
+      enabled: true,
+    },
+    {
+      config: { thinking: { effortOptions: ['default', 'low', 'high'] } },
+      effort: 'low',
+      enabled: true,
+    },
+    {
+      config: { thinking: { effortOptions: ['high', 'none', 'low'] } },
+      effort: 'none',
+      enabled: false,
+    },
+    { config: { thinking: { effortOptions: ['off', 'high'] } }, effort: 'off', enabled: false },
+    {
+      config: {
+        thinking_config: { mode: 'switchable' },
+        thinking: { effortOptions: ['low', 'high'] },
+      },
+      effort: 'off',
+      enabled: false,
+    },
+    {
+      config: {
+        thinking_config: { mode: 'forced_on' },
+        thinking: { effortOptions: ['none', 'medium', 'high'] },
+      },
+      effort: 'medium',
+      enabled: true,
+    },
+    { config: { thinking_config: { mode: 'forced_off' } }, effort: 'off', enabled: false },
+    {
+      config: { thinking_config: { mode: 'forced_on' }, thinking: { defaultEffort: 'high' } },
+      effort: 'high',
+      enabled: true,
+    },
+    { config: { thinking: { effortOptions: ['light', 'deep'] } }, effort: 'light', enabled: true },
+    {
+      config: { thinking: { effortOptions: ['low', 'high', 'disabled'] } },
+      effort: 'low',
+      enabled: true,
+    },
+    { config: { thinking_config: { mode: 'forced_on' } }, effort: 'xhigh', enabled: true },
+    { config: { reasoning: false }, effort: 'off', enabled: false },
+  ])('uses the minimum declared thinking setting for $config', ({ config, effort, enabled }) => {
+    const original = {
+      provider: 'custom_provider:gateway',
+      model_id: 'any-model',
+      thinking_level: ThinkingLevel.XHIGH,
+      thinking_effort: 'xhigh',
+      thinking_budgets: { high: 16_384 },
+      capabilities: { selected_thinking_effort: 'xhigh', support_image: true },
+      context_window: 100_000,
+      max_tokens: 16_000,
+    };
+    const before = structuredClone(original);
+    const result = withMinimumModelThinking(original, { reasoning: true, ...config });
+    expect(result).toMatchObject({
+      provider: original.provider,
+      model_id: original.model_id,
+      thinking_level: enabled ? ThinkingLevel.MINIMAL : ThinkingLevel.OFF,
+      context_window: 100_000,
+      max_tokens: 16_000,
+      capabilities: { support_image: true },
+    });
+    expect(result.thinking_effort).toBe(effort);
+    expect(readSelectedThinkingEffort(result.capabilities)).toBe(effort);
+    expect(result).not.toHaveProperty('thinking_budgets');
+    expect(original).toEqual(before);
+  });
+
+  it('uses the minimum budget when a forced-thinking model has no effort parameter', () => {
+    const result = withMinimumModelThinking(
+      {
+        provider: 'gateway',
+        model_id: 'budget-model',
+        thinking_level: ThinkingLevel.HIGH,
+        thinking_budgets: { high: 32_000 },
+      },
+      { reasoning: true, thinking_config: { mode: 'forced_on' } },
+    );
+    expect(result.thinking_level).toBe(ThinkingLevel.MINIMAL);
+    expect(result).not.toHaveProperty('thinking_effort');
+    expect(result).not.toHaveProperty('thinking_budgets');
+  });
+});
 
 describe('modelRefForModel', () => {
   it('resolves managed selection from configured options and rejects explicit conflicts', () => {
@@ -70,6 +168,7 @@ describe('modelRefForModel', () => {
     expect(modelRefForModel('minimax', 'plain', {}, { managed: true })).not.toHaveProperty(
       'thinking_effort',
     );
+    // Without a catalog default the middle level is sent, as for every other model.
     expect(
       modelRefForModel(
         'minimax',
@@ -77,7 +176,7 @@ describe('modelRefForModel', () => {
         { reasoning: true, thinking: { effortOptions: ['low', 'max'] } },
         { managed: true },
       ),
-    ).not.toHaveProperty('thinking_effort');
+    ).toMatchObject({ thinking_effort: 'max' });
   });
 
   it('distinguishes absent options from disabled policies and keeps fixed defaults', () => {
@@ -292,7 +391,7 @@ describe('modelRefForModel thinking compatibility', () => {
   });
 
   it('does not infer Custom BYOK M3 effort from reasoning alone', () => {
-    const ref = modelRefForModel('custom_provider:mafia', 'MiniMax-M3', {
+    const ref = modelRefForModel('custom_provider:gateway', 'MiniMax-M3', {
       reasoning: true,
       thinking_config: { mode: 'switchable', default_value: 'true' },
     });
@@ -401,6 +500,54 @@ describe('BYOK Think Effort selection', () => {
       thinkingLevelMap: { high: 'light' },
       ...expected,
     });
+  });
+
+  it.each([
+    ['minimal', 'minimal', 'minimal'],
+    ['low', 'low', 'low'],
+    ['medium', 'medium', 'medium'],
+    ['xhigh', 'xhigh', 'xhigh'],
+    ['max', 'max', 'max'],
+    ['light', 'high', 'light'],
+    ['LOW', 'low', 'LOW'],
+    ['Medium', 'medium', 'Medium'],
+    ['HIGH', 'high', 'HIGH'],
+    ['XHIGH', 'xhigh', 'XHIGH'],
+  ] as const)(
+    'forwards Gemini effort %s verbatim via Pi level %s without silent clamping',
+    (effort, piLevel, geminiLevel) => {
+      const protocol = resolveByokThinkingProtocol(
+        'google-generative-ai',
+        effort,
+        'gemini-3.5-flash',
+      );
+      expect(protocol).toMatchObject({
+        effort,
+        piLevel,
+        thinkingLevelMap: { [piLevel]: geminiLevel },
+      });
+      expect(protocol?.requestPatch).toEqual({});
+    },
+  );
+
+  it('recognizes an upper-case effort for other APIs and still sends the authored value', () => {
+    expect(resolveByokThinkingProtocol('openai-responses', 'LOW', 'custom-model')).toMatchObject({
+      effort: 'LOW',
+      piLevel: 'low',
+      thinkingLevelMap: { low: 'LOW' },
+    });
+  });
+
+  it('leaves disabling Gemini thinking to the transport', () => {
+    for (const effort of ['none', 'off'] as const) {
+      const protocol = resolveByokThinkingProtocol(
+        'google-generative-ai',
+        effort,
+        'gemini-2.5-flash',
+      );
+      expect(protocol).toMatchObject({ effort, enabled: false });
+      expect(protocol?.requestPatch).toEqual({});
+    }
   });
 
   it.each(['low', 'high', 'max'] as const)(
@@ -524,12 +671,12 @@ describe('modelRefForModel think-effort vs variant', () => {
     });
     expect(readSelectedThinkingEffort(withEffort.capabilities)).toBe('xhigh');
 
-    // Without the explicit level the same selection resolves to no effort, which
-    // is the failure the picker fix prevents.
+    // Without the explicit level Runtime itself applies the catalog default, as it
+    // does for a selection without a variant.
     const withoutEffort = modelRefForModel('minimax', 'deep-reasoner-1', config, {
       variant: 'thinking',
     });
-    expect(readSelectedThinkingEffort(withoutEffort.capabilities)).toBeUndefined();
+    expect(readSelectedThinkingEffort(withoutEffort.capabilities)).toBe('xhigh');
   });
 
   it('keeps an explicit effort for a forced-on model selected with the thinking variant', () => {
@@ -629,7 +776,8 @@ describe('model capability helpers', () => {
   it('requires explicit image input metadata instead of generic attachment support', () => {
     expect(capabilitiesFromModelConfig({ attachment: true }).support_image).toBe(false);
     expect(
-      capabilitiesFromModelConfig({ modalities: { input: ['text'], output: ['image'] } }).support_image,
+      capabilitiesFromModelConfig({ modalities: { input: ['text'], output: ['image'] } })
+        .support_image,
     ).toBe(false);
     expect(
       capabilitiesFromModelConfig({ modalities: { input: ['text', 'image'] } }).support_image,
@@ -651,7 +799,7 @@ describe('model capability helpers', () => {
       support_files_api: false,
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
       default_request_body_bytes: true,
       max_attachments_count: 4,
       thinking_mode: ThinkingMode.FORCED_ON,
@@ -702,7 +850,7 @@ describe('model capability helpers', () => {
       support_files_api: false,
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
       max_attachments_count: 4,
     });
     expect(
@@ -712,7 +860,7 @@ describe('model capability helpers', () => {
     ).toMatchObject({
       support_video: true,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
     });
   });
 
@@ -731,7 +879,7 @@ describe('model capability helpers', () => {
       ).toMatchObject({
         max_image_bytes_inline: 10_485_760,
         max_video_bytes_inline: 52_428_800,
-        max_request_body_bytes: 18_874_368,
+        max_request_body_bytes: 67_108_864,
         max_attachments_count: 4,
       });
     },
@@ -830,7 +978,7 @@ describe('model capability helpers', () => {
     expect(capabilities).toMatchObject({
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
       max_attachments_count: 4,
     });
   });
@@ -846,3 +994,105 @@ function modelConfigWithThinking(
   Object.assign(thinkingConfig, patch);
   return { ...rest, thinking_config: thinkingConfig };
 }
+
+describe('Think Effort while thinking is on and nothing valid is stored', () => {
+  const levels = ['low', 'medium', 'high', 'max'];
+  const switchable = (thinking: LocalModelConfig['thinking']): LocalModelConfig => ({
+    reasoning: true,
+    thinking_config: { mode: 'switchable', default_value: 'true' },
+    thinking,
+  });
+  const forcedOn = (thinking: LocalModelConfig['thinking']): LocalModelConfig => ({
+    thinking_config: { mode: 'forced_on' },
+    thinking,
+  });
+  const sent = (config: LocalModelConfig, options?: ModelRefOverride) =>
+    readSelectedThinkingEffort(modelRefForModel('provider', 'model', config, options).capabilities);
+
+  it('sends the middle level when the catalog names no default', () => {
+    // No variant: already the middle level.
+    expect(sent({ reasoning: true, thinking: { effortOptions: levels } })).toBe('high');
+    expect(sent(switchable({ effortOptions: levels }))).toBe('high');
+    // Thinking switched on, or always on: was no effort, left to the provider.
+    expect(sent(switchable({ effortOptions: levels }), { variant: 'thinking' })).toBe('high');
+    expect(sent(forcedOn({ effortOptions: levels }))).toBe('high');
+    expect(sent(forcedOn({ effortOptions: ['low', 'medium', 'high'] }))).toBe('medium');
+    // A stored level the catalog no longer lists falls back the same way.
+    expect(sent(forcedOn({ effortOptions: levels }), { thinking: { effort: 'removed' } })).toBe(
+      'high',
+    );
+  });
+
+  it('sends the catalog default when it is one of the options', () => {
+    const thinking = { effortOptions: levels, defaultEffort: 'low' };
+    expect(sent({ reasoning: true, thinking })).toBe('low');
+    expect(sent(switchable(thinking), { variant: 'thinking' })).toBe('low');
+    expect(sent(forcedOn(thinking))).toBe('low');
+    // A default the options do not list is ignored.
+    expect(sent(forcedOn({ effortOptions: levels, defaultEffort: 'ultra' }))).toBe('high');
+  });
+
+  it('keeps a valid stored level', () => {
+    const thinking = { effortOptions: levels, defaultEffort: 'low' };
+    for (const options of [{}, { variant: 'thinking' }]) {
+      expect(sent(switchable(thinking), { ...options, thinking: { effort: 'max' } })).toBe('max');
+    }
+    expect(sent(forcedOn(thinking), { thinking: { effort: 'medium' } })).toBe('medium');
+  });
+
+  it('sends no effort while thinking is switched off', () => {
+    const thinking = { effortOptions: levels, defaultEffort: 'high' };
+    expect(sent(switchable(thinking), { variant: '' })).toBeUndefined();
+    expect(
+      sent({
+        ...switchable(thinking),
+        thinking_config: { mode: 'switchable', default_value: 'false' },
+      }),
+    ).toBeUndefined();
+    // A variant that names another model identity keeps leaving the level to it.
+    expect(sent(switchable(thinking), { variant: 'fast' })).toBeUndefined();
+  });
+
+  it('treats `default` as an option like any other', () => {
+    const effortOptions = ['default', 'low', 'high'];
+    expect(sent(forcedOn({ effortOptions, defaultEffort: 'default' }))).toBe('default');
+    expect(
+      sent(switchable({ effortOptions, defaultEffort: 'default' }), { variant: 'thinking' }),
+    ).toBe('default');
+    expect(sent(forcedOn({ effortOptions, defaultEffort: 'high' }))).toBe('high');
+    // Without a catalog default it is the middle option, `default` included in the count.
+    expect(sent({ reasoning: true, thinking: { effortOptions } })).toBe('low');
+    expect(sent(forcedOn({ effortOptions: ['low', 'default', 'high'] }))).toBe('default');
+    expect(
+      sent(forcedOn({ effortOptions, defaultEffort: 'default' }), { thinking: { effort: 'low' } }),
+    ).toBe('low');
+  });
+
+  it('sends the same level for a managed model', () => {
+    const managed = (thinking: LocalModelConfig['thinking'], options: ModelRefOverride = {}) =>
+      modelRefForModel('minimax', 'MiniMax-M3.1', forcedOn(thinking), { managed: true, ...options })
+        .thinking_effort;
+    expect(managed({ effortOptions: levels })).toBe('high');
+    expect(managed({ effortOptions: levels, defaultEffort: 'low' })).toBe('low');
+    expect(managed({ effortOptions: levels }, { thinking: { effort: 'max' } })).toBe('max');
+    // The level it froze is one it accepts back, however the options were written.
+    const frozen = managed({ effortOptions: [' low ', ' high '] });
+    expect(frozen).toBe('high');
+    expect(managed({ effortOptions: [' low ', ' high '] }, { thinking: { effort: frozen } })).toBe(
+      'high',
+    );
+    expect(
+      modelRefForModel('minimax', 'MiniMax-M3.1', switchable({ effortOptions: levels }), {
+        managed: true,
+        reasoning: false,
+      }).thinking_effort,
+    ).toBeUndefined();
+  });
+
+  it('normalizes reversed built-in effort keywords before picking the upper-middle default', () => {
+    expect(sent({ reasoning: true, thinking: { effortOptions: ['high', 'low'] } })).toBe('high');
+    expect(
+      sent({ reasoning: true, thinking: { effortOptions: ['max', 'high', 'medium', 'low'] } }),
+    ).toBe('high');
+  });
+});

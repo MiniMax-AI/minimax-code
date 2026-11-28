@@ -31,14 +31,16 @@
  *   a bash escape hatch, the model can self-correct, and the context window
  *   is not wasted on replacement characters.
  *
- * Local-FS assumption: this module calls `node:fs` directly, following the
- * precedent set by `read-video.ts` — desktop runs on the local machine and
- * cloud runs inside the sandbox executor, so the workspace filesystem is
- * always local. Remote-FS scenarios go through pi's pluggable
+ * Local-FS assumption: this module uses physical-fs by default — desktop runs
+ * on the local machine and cloud runs inside the sandbox executor. Electron's
+ * ASAR virtual directories must not change user-file semantics. The core tools
+ * pass their host fs port instead (`core-tools/ports.ts`). Remote-FS
+ * scenarios go through pi's pluggable
  * `ReadOperations` and never reach these wrapper-level guards.
  */
 
-import { open, stat } from 'node:fs/promises';
+import type { CoreToolFs } from '../core-tools/ports.js';
+import { physicalToolFs } from './physical-fs.js';
 import { basename, extname } from 'node:path';
 
 import { inferReadVideoMimeType } from './read-video.js';
@@ -119,10 +121,13 @@ export function checkBlockedDeviceRead(absolutePath: string): string | null {
  * a blanket `!isFile()` check would break it. A missing path returns `null`
  * so pi's NFD / curly-quote / AM-PM filename fallbacks still get a turn.
  */
-export async function checkNonRegularFileRead(absolutePath: string): Promise<string | null> {
+export async function checkNonRegularFileRead(
+  absolutePath: string,
+  fs: Pick<CoreToolFs, 'stat'> = physicalToolFs,
+): Promise<string | null> {
   let st;
   try {
-    st = await stat(absolutePath); // follows symlinks → catches link → fifo/device
+    st = await fs.stat(absolutePath); // follows symlinks → catches link → fifo/device
   } catch {
     return null; // ENOENT / EACCES etc. surface downstream, not here
   }
@@ -294,6 +299,25 @@ export function checkBinaryReadExtension(absolutePath: string): BinaryReadVerdic
  */
 const BINARY_SNIFF_BYTES = 4100;
 
+async function readFileSample(absolutePath: string, fs: Pick<CoreToolFs, 'open'>): Promise<Buffer> {
+  const handle = await fs.open(absolutePath, 'r');
+  try {
+    const buffer = Buffer.alloc(BINARY_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, BINARY_SNIFF_BYTES, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Keep pi's image sniffing on the same physical filesystem as the read guards. */
+export async function detectPiSupportedImageMimeTypeFromFile(
+  absolutePath: string,
+  fs: Pick<CoreToolFs, 'open'> = physicalToolFs,
+): Promise<string | null> {
+  return detectPiSupportedImageMimeType(await readFileSample(absolutePath, fs));
+}
+
 /**
  * Full binary detection: extension blacklist + 4KB sample (image magic
  * exemption → UTF-16 BOM exemption → NUL short-circuit → control-character
@@ -313,19 +337,15 @@ const BINARY_SNIFF_BYTES = 4100;
  * garbled text, same as today. Full-content scanning would defeat the
  * cheap-preflight design.
  */
-export async function detectBinaryRead(absolutePath: string): Promise<BinaryReadVerdict> {
+export async function detectBinaryRead(
+  absolutePath: string,
+  fs: Pick<CoreToolFs, 'open'> = physicalToolFs,
+): Promise<BinaryReadVerdict> {
   const byExtension = checkBinaryReadExtension(absolutePath);
 
   let sample: Buffer;
   try {
-    const handle = await open(absolutePath, 'r');
-    try {
-      const buffer = Buffer.alloc(BINARY_SNIFF_BYTES);
-      const { bytesRead } = await handle.read(buffer, 0, BINARY_SNIFF_BYTES, 0);
-      sample = buffer.subarray(0, bytesRead);
-    } finally {
-      await handle.close();
-    }
+    sample = await readFileSample(absolutePath, fs);
   } catch {
     // ENOENT / EACCES / EISDIR … — not our call; let pi produce the error
     // (and, for ENOENT, run its filename-variant fallback first).

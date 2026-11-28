@@ -175,16 +175,6 @@ export function createToolPermissionContext(
     interactiveTools: Object.freeze(new Set(config.interactiveTools ?? ['question'])),
   });
 
-  logger.info(
-    {
-      mode: ctx.mode,
-      ruleCount: ctx.rules.length,
-      sandboxEnabled: ctx.sandboxEnabled,
-      workingDirectory: ctx.workingDirectory,
-    },
-    'Created ToolPermissionContext',
-  );
-
   return ctx;
 }
 

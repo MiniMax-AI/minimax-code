@@ -667,6 +667,11 @@ describe("harness compaction", () => {
 		expect(result.firstKeptEntryId).toBeTruthy();
 		expect(result.details).toBeDefined();
 	});
+
+	it("prefers usage.contextTokens over cumulative multi-hop totalTokens", () => {
+		const usage: Usage = { ...createMockUsage(600_000, 130_000), contextTokens: 330_000 };
+		expect(calculateContextTokens(usage)).toBe(330_000);
+	});
 });
 
 function convertMessages(messages: Message[]): Message[] {

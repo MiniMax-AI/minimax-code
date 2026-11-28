@@ -75,6 +75,8 @@ export function createTuiAutocomplete(
     TuiWorkspaceFilePort & Pick<McodePluginRuntimeAccess, 'listInstalledPlugins'>
   >,
   shellCwd?: () => string,
+  /** Command names (and aliases) that run when typed in full but are not offered as suggestions. */
+  unlistedCommandNames: readonly string[] = [],
 ): AutocompleteProvider {
   return new TuiPluginAutocomplete(
     new TuiAutocompleteProvider(
@@ -83,9 +85,22 @@ export function createTuiAutocomplete(
       workspace,
       workspaceFiles,
       shellCwd,
+      unlistedCommandNames,
     ),
     workspaceFiles,
   );
+}
+
+/** Input commands hidden from the suggestions. */
+export function unlistedInputCommandNames(
+  catalog: TuiCommandCatalog | undefined,
+  listed: readonly TuiCommand[],
+): string[] {
+  if (!catalog) return [];
+  const listedNames = new Set(listed.map(({ name }) => name));
+  return catalog.inputCommands
+    .filter(({ name }) => !listedNames.has(name))
+    .flatMap(({ name, aliases }) => [name, ...(aliases ?? [])]);
 }
 
 export function buildTuiSkillCommands(result: TuiSkillList): TuiCommand[] {
@@ -271,11 +286,12 @@ export class TuiActiveRunFlow {
       ...(this.commandCatalog?.searchableCommands ?? MINIMAX_CODE_DISCOVERABLE_COMMANDS),
     ];
     const skillCommands = this.options.skillCommands();
+    const unlistedCommands = unlistedInputCommandNames(this.commandCatalog, builtInCommands);
     const workspace =
       typeof this.options.workspaceRoots === 'function'
         ? this.options.workspaceRoots()
         : (this.options.workspaceRoots ?? this.options.workspaceDir);
-    const signature = autocompleteSignature(builtInCommands, skillCommands, workspace);
+    const signature = `${autocompleteSignature(builtInCommands, skillCommands, workspace)}:${unlistedCommands.join(',')}`;
     if (signature === this.autocompleteSignature) {
       this.pendingAutocomplete = undefined;
       return;
@@ -288,6 +304,7 @@ export class TuiActiveRunFlow {
       workspace,
       this.options.runtime,
       () => this.options.controller.snapshot().session?.workspaceDir ?? this.options.workspaceDir,
+      unlistedCommands,
     );
     if ((this.options.editor.getText?.() ?? '').length > 0) {
       this.pendingAutocomplete = { provider, signature };
@@ -571,6 +588,7 @@ class TuiAutocompleteProvider implements AutocompleteProvider {
     { commandName: string; label: string; description: string }
   >();
   private readonly skillNames: ReadonlySet<string>;
+  private readonly unlistedCommandNames: ReadonlySet<string>;
 
   constructor(
     builtInCommands: readonly TuiCommand[],
@@ -580,7 +598,11 @@ class TuiAutocompleteProvider implements AutocompleteProvider {
       TuiWorkspaceFilePort & Pick<McodePluginRuntimeAccess, 'listInstalledPlugins'>
     >,
     shellCwd?: () => string,
+    unlistedCommandNames: readonly string[] = [],
   ) {
+    this.unlistedCommandNames = new Set(
+      unlistedCommandNames.map((name) => name.toLocaleLowerCase()),
+    );
     this.workspaceRoots = normalizeAutocompleteRoots(workspace);
     this.workspaceDir =
       this.workspaceRoots.find((root) => root.primary)?.path ?? this.workspaceRoots[0]?.path ?? '';
@@ -671,8 +693,14 @@ class TuiAutocompleteProvider implements AutocompleteProvider {
       ? items.filter((item) => item.value.toLocaleLowerCase().startsWith(commandQuery))
       : [];
     const rankedItems = prefixItems.length > 0 ? prefixItems : items;
+    // A command typed in full that is not offered in suggestions is submitted as typed.
+    const typedUnlistedCommand =
+      commandQuery !== undefined &&
+      this.unlistedCommandNames.has(commandQuery) &&
+      !rankedItems.some((item) => item.value.toLocaleLowerCase() === commandQuery);
     return {
       ...suggestions,
+      ...(typedUnlistedCommand ? { applyOnEnter: false } : {}),
       items:
         textBeforeCursor.startsWith('/') && !textBeforeCursor.includes(' ')
           ? [

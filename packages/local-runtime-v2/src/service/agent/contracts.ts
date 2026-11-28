@@ -202,8 +202,11 @@ export interface AgentEffectiveConfigForNewSession {
   readonly maxOutputTokens?: number;
   readonly tools?: readonly string[];
   readonly mcpServers?: readonly string[];
+  /**
+   * Agent `skills`: Skills whose full content is preloaded on the Session's
+   * first Turn. Not an allowlist: every ready Skill stays usable.
+   */
   readonly skills?: readonly string[];
-  readonly extensionSkills?: readonly string[];
 }
 
 export interface AgentConfigDiagnostic {
@@ -548,8 +551,13 @@ export interface FrozenAgentExecutionDefinition {
   readonly systemPrompt: string;
   readonly capabilities: Pick<
     AgentConfigurationSelection,
-    'tools' | 'disallowedTools' | 'mcpServers' | 'skills' | 'extensionSkills'
-  > & { readonly selectorVersion?: typeof FROZEN_SELECTOR_VERSION };
+    'tools' | 'disallowedTools' | 'mcpServers'
+  > & {
+    readonly skills?: readonly string[];
+    readonly extensionSkills?: readonly string[];
+    readonly preloadSkills?: readonly string[];
+    readonly selectorVersion?: typeof FROZEN_SELECTOR_VERSION;
+  };
 }
 
 export interface AgentExecutionProfile {
@@ -599,4 +607,5 @@ export interface BuiltinAgentDefinition {
   readonly legacyNames: readonly string[];
   readonly identity: AgentStoreIdentity;
   readonly capabilityOverride?: AgentCapabilityConfig;
+  readonly preloadSkills?: readonly string[];
 }

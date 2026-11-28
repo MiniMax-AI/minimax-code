@@ -1,8 +1,9 @@
 /**
  * Pure, dependency-free image header reader for PNG and JPEG.
  *
- * Only the outbound request projection needs this, and only to answer one
- * question: "is this image so small that the provider will reject the whole
+ * The outbound request projection and the media entry checks (user
+ * attachments, the read tool) need this, and only to answer one question: "is
+ * this image so small or so elongated that the provider will reject the whole
  * request?". Every unknown input — unrecognised format, truncated payload,
  * invalid base64 — resolves to `undefined`, meaning "cannot determine", and the
  * caller fails open by keeping the block untouched. Nothing in this module
@@ -34,7 +35,7 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
  * `mimeType` is an advisory hint only, never a gate. Blocks projected from
  * `video` content keep their source `video/*` type while carrying image bytes,
  * so dispatch is driven by the magic bytes and the declared type merely picks
- * which parser is tried first.
+ * which parser is tried first. `data` is base64 text or the raw bytes.
  */
 export function imageDimensions(data: unknown, mimeType?: unknown): ImageDimensions | undefined {
   const bytes = decodeHeaderBytes(data);
@@ -46,6 +47,10 @@ export function imageDimensions(data: unknown, mimeType?: unknown): ImageDimensi
 }
 
 function decodeHeaderBytes(data: unknown): Buffer | undefined {
+  if (data instanceof Uint8Array) {
+    if (data.length === 0) return undefined;
+    return Buffer.from(data.buffer, data.byteOffset, Math.min(data.length, MAX_HEADER_BYTES));
+  }
   if (typeof data !== 'string' || data.length === 0) return undefined;
   // Trim to a whole base64 group so the bounded prefix decodes cleanly.
   const maxChars = Math.ceil((MAX_HEADER_BYTES * 4) / 3);

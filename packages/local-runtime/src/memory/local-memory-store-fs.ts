@@ -14,6 +14,7 @@ import {
   type LocalMemorySearchResult,
   type LocalMemoryTarget,
   type LocalMemoryTopicEntry,
+  type LocalMemoryTopicMatch,
   type LocalMemoryUnremindedEntry,
 } from './types.js';
 import {
@@ -22,11 +23,14 @@ import {
   assertDate,
   assertSafeAgentName,
   byteLength,
+  countMatchedTerms,
   deleteIfExists,
   firstLine,
   formatTs,
   formatTopic,
+  parseSearchTerms,
   parseTopic,
+  rankByScore,
   safeRead,
   safeReaddir,
   searchLines,
@@ -216,16 +220,19 @@ export class FsLocalMemoryStore {
     target: LocalMemoryTarget,
     keyword: string,
     limit = 10,
-  ): Promise<LocalMemoryTopicEntry[]> {
-    const lower = keyword.toLowerCase();
+  ): Promise<LocalMemoryTopicMatch[]> {
+    const terms = parseSearchTerms(keyword);
     const topics = await this.listTopics(target);
-    const out: LocalMemoryTopicEntry[] = [];
+    if (terms.length === 0) {
+      return topics.slice(0, limit).map((topic) => ({ topic, matchedTerms: 0 }));
+    }
+    const matches: LocalMemoryTopicMatch[] = [];
     for (const topic of topics) {
       const body = (await this.readTopic(target, topic.name)).body;
-      if (topic.name.includes(lower) || body.toLowerCase().includes(lower)) out.push(topic);
-      if (out.length >= limit) break;
+      const matchedTerms = countMatchedTerms(`${topic.name}\n${body}`, terms);
+      if (matchedTerms > 0) matches.push({ topic, matchedTerms });
     }
-    return out;
+    return rankByScore(matches, ({ matchedTerms }) => matchedTerms).slice(0, limit);
   }
 
   async listDaily(target: LocalMemoryTarget, limit = 20, offset = 0, includeArchived = false) {

@@ -1,3 +1,4 @@
+import { stableHomebrewNodeToolchainPath } from '../../src/update/homebrew-node-path.js';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,7 +85,7 @@ describe('installer-owned npm runtime binding', () => {
       await expect(
         resolveLatestMcodeRegistryVersion('latest', {
           npmExecutable: npm,
-          runtimeExecutable: process.execPath,
+          runtimeExecutable: stableHomebrewNodeToolchainPath(process.execPath),
           distribution: resolveMcodeNpmDistribution('@minimax-ai/code'),
         }),
       ).resolves.toBe('1.2.4');
@@ -696,7 +697,7 @@ describe('MCode update install-source commands', () => {
       activePrefix: '/opt/minimax',
       packageName: '@minimax-ai/code',
       expectedVersion: '1.2.4',
-      runtimeExecutable: process.execPath,
+      runtimeExecutable: stableHomebrewNodeToolchainPath(process.execPath),
       npmExecutable: '/opt/minimax/runtime/node/bin/npm',
       registry: 'https://registry.npmjs.org/',
     });

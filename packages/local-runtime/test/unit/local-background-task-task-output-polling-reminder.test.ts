@@ -10,6 +10,7 @@ import {
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import { toRuntimeTool, type RuntimeTool } from '@mavis/agent-core/tools';
 import { LocalTaskOutputTool } from '@mavis/agent-tools/desktop';
+import { ManagedSkillReceipts } from '@mavis/shared/local-runtime-managed-skills';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { LocalTaskRunnerHostWithSessionLookup } from '../../src/api/local-task-host.js';
@@ -34,7 +35,7 @@ import {
 } from '../../../local-runtime-v2/src/service/turn-system/production-composition.js';
 
 const TASK_OUTPUT_POLLING_REMINDER = `<system-reminder>
-Three task_output reads for the same task have returned an unchanged status and output cursor. Avoid repeated polling; you will be notified automatically and this conversation will resume when the background task completes.
+Three consecutive reads of the same background task have occurred. Stop polling and wait for the automatic completion notification.
 This reminder applies only to the current Turn. Do not save or generalize it into Memory, Skills, or other persistent instructions.
 </system-reminder>`;
 
@@ -347,6 +348,7 @@ async function createTaskOutputPollingHost(input: PollingHostInput) {
     skills: {
       listRuntimeSkills: vi.fn(async () => ({ skills: [] })),
       renderCatalog: vi.fn(async () => ''),
+      listCatalogEntries: vi.fn(async () => []),
     },
     staticPrompts: {
       readBasePrompt: vi.fn(async () => ''),
@@ -365,6 +367,7 @@ async function createTaskOutputPollingHost(input: PollingHostInput) {
     ackSteering: vi.fn(),
     restoreSteering: vi.fn(),
     tryBeginClose: vi.fn(() => ({ closed: true as const })),
+    cancelClose: vi.fn(() => true),
     sealAbnormalTerminal: vi.fn(async () => undefined),
     openToolResultTail: vi.fn(() => true),
     closeAndClaimToolResultTail: vi.fn(() => []),
@@ -413,6 +416,7 @@ async function createTaskOutputPollingHost(input: PollingHostInput) {
     },
     db: {} as AppDb,
     preparation,
+    skillReceipts: new ManagedSkillReceipts(),
     sessions: {
       llmCalls: { writeCurrent: vi.fn(async () => undefined) },
       sessions: {
@@ -420,6 +424,7 @@ async function createTaskOutputPollingHost(input: PollingHostInput) {
         execution: { getExecutionSnapshot: vi.fn(async () => input.session) },
         historyMutation: input.historyMutation,
       },
+      sideChats: { relation: () => undefined },
       canonicalHistory: input.canonicalHistory,
       artifacts: {
         ensureReportsDirectory: vi.fn(async () => {

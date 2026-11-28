@@ -5,17 +5,18 @@ import type {
   Message,
   Model,
   TextContent,
-  ThinkingContent,
   UserMessage,
 } from '@earendil-works/pi-ai';
 import { convertToLlm } from '@earendil-works/pi-coding-agent/messages';
+import { stripMiniAppSuggestionTags } from '@mavis/shared/miniapp-suggestion';
 
 import { imageDimensions } from './image-dimensions.js';
+import { limitRequestImages, resolveMaxImagesPerRequest } from './request-image-limit.js';
 import {
-  keepsRequestImages,
-  limitRequestImages,
-  resolveMaxImagesPerRequest,
-} from './request-image-limit.js';
+  projectUnsupportedMediaBlocks,
+  resolveRequestMediaSupport,
+} from './request-media-support.js';
+import { hasThinkingPrefixBinding } from './thinking-prefix-binding.js';
 
 const PRIOR_THINKING_OPEN = '<|prior-thinking|>';
 const PRIOR_THINKING_CLOSE = '<|/prior-thinking|>';
@@ -40,6 +41,12 @@ const SIBLING_NATIVE_THINKING_APIS = new Set<string>([
 // the only job is "do not get the whole request rejected", and wrongly dropping
 // genuine content costs more than letting a small image through.
 const MIN_PROVIDER_IMAGE_EDGE_PX = 8;
+// The MiniMax gateway rejects the whole request for an image whose long edge is
+// more than 200 times its short edge (`image's aspect ratio exceeds 200:1`,
+// measured with an 8000x8 PNG; reported incident). Such a strip carries
+// almost nothing once a vision encoder resizes it, so the placeholder costs
+// little on other providers too.
+const MAX_PROVIDER_IMAGE_ASPECT_RATIO = 200;
 
 /**
  * Build the exact temporary message list sent to a target model.
@@ -69,17 +76,24 @@ export function projectAgentMessagesForModel(
   );
   const normalized = normalizeOutboundMessagesForModel(compatible.messages, targetModel);
   const undetermined = new Map<string, number>();
+  const mediaSupport = resolveRequestMediaSupport(targetModel);
   // Order matters: projectVideoBlocks turns `video` blocks into `image` blocks,
-  // so the size filter has to run after it or it would miss every
-  // video-derived image.
+  // so the media-support and size filters have to run after it or they would
+  // miss every video-derived image. Unsupported media go before the size
+  // filter so a dropped video is not counted as an undetermined image.
   const projected = normalized
     .map(projectVideoBlocks)
-    .map((message) => projectUndersizedImageBlocks(message, undetermined))
+    // Audio/PDF become text first: the media-support filter treats every
+    // non-video image block as a still image.
+    .map((message) => projectNonNativeDocumentMedia(message, targetModel))
+    .map((message) => projectUnsupportedMediaBlocks(message, mediaSupport))
+    .map((message) => projectDegenerateImageBlocks(message, undetermined))
     .map((message) => projectErrorToolResultImages(message, targetModel));
   // Last, so the ceiling counts exactly the images that would be sent: video
-  // frames projected to images count, undersized placeholders do not. Models
-  // that cache by prefix keep every image; compaction removes them instead.
-  const limited = keepsRequestImages(targetModel)
+  // frames projected to images count, undersized placeholders do not. A model
+  // whose thinking is bound to its prefix keeps every image; compaction
+  // removes them instead.
+  const limited = hasThinkingPrefixBinding(targetModel)
     ? { messages: projected, omittedCount: 0 }
     : limitRequestImages(projected, resolveMaxImagesPerRequest(targetModel));
   return {
@@ -202,10 +216,27 @@ export function normalizeOutboundMessagesForModel(
   messages: Message[],
   targetModel: Model<Api>,
 ): Message[] {
-  return messages.map((message) => {
+  const prefixBound = hasThinkingPrefixBinding(targetModel);
+  return messages.flatMap((message) => {
     if (message.role !== 'assistant') return message;
-    return normalizeAssistantMessage(message, targetModel);
+    const normalized = normalizeAssistantMessage(message, targetModel);
+    // Keep the signed prefix intact, including during a later tool call.
+    if (prefixBound) return normalized;
+    const projected = projectAssistantCardMetadata(normalized);
+    return projected !== normalized && projected.content.length === 0 ? [] : projected;
   });
+}
+
+function projectAssistantCardMetadata(message: AssistantMessage): AssistantMessage {
+  let changed = false;
+  const content = message.content.flatMap((block) => {
+    if (block.type !== 'text') return block;
+    const text = stripMiniAppSuggestionTags(block.text);
+    if (text === block.text) return block;
+    changed = true;
+    return text.trim() ? { type: 'text' as const, text } : [];
+  });
+  return changed ? { ...message, content } : message;
 }
 
 function normalizeAssistantMessage(
@@ -244,7 +275,11 @@ function normalizeAssistantMessage(
   };
 }
 
-function thinkingToPortableText(block: ThinkingContent): TextContent[] {
+/** Thinking replayed as plain text for a target that cannot verify its signature. */
+export function thinkingToPortableText(block: {
+  readonly redacted?: boolean;
+  readonly thinking?: string;
+}): TextContent[] {
   if (block.redacted || !block.thinking || block.thinking.trim().length === 0) return [];
   return [
     {
@@ -272,8 +307,9 @@ function projectVideoBlocks(message: Message): Message {
 }
 
 /**
- * Replace images the provider would reject for being degenerate with a text
- * placeholder, on the temporary request copy only.
+ * Replace images the provider would reject for being degenerate (an edge below
+ * the minimum, or an aspect ratio above the maximum) with a text placeholder,
+ * on the temporary request copy only.
  *
  * Fails open in every uncertain case: an image whose size cannot be read is
  * kept untouched and only counted, because wrongly dropping real user content
@@ -281,7 +317,7 @@ function projectVideoBlocks(message: Message): Message {
  * a message whose only block was an undersized image still has content — no
  * special "would this message become empty" branch is needed.
  */
-function projectUndersizedImageBlocks(
+function projectDegenerateImageBlocks(
   message: Message,
   undetermined: Map<string, number>,
 ): Message {
@@ -294,20 +330,89 @@ function projectUndersizedImageBlocks(
     const size = imageDimensions(candidate.data, candidate.mimeType);
     if (!size) {
       // The size check itself still ran above and still applies: only the
-      // telemetry skips blocks projected from `video`, which keep their
-      // `video/*` mimeType and are unparseable by design. Counting them would
-      // pre-pollute the very signal this counter exists to surface.
+      // telemetry skips media blocks (video, audio, PDF) that ride the image
+      // block with their real mimeType and are unparseable by design.
+      // Counting them would pre-pollute the very signal this counter exists
+      // to surface.
       const mimeType = typeof candidate.mimeType === 'string' ? candidate.mimeType : 'unknown';
-      if (!mimeType.toLowerCase().startsWith('video/')) {
+      if (!isNonImageMediaMime(mimeType)) {
         undetermined.set(mimeType, (undetermined.get(mimeType) ?? 0) + 1);
       }
       return block;
     }
-    if (Math.min(size.width, size.height) >= MIN_PROVIDER_IMAGE_EDGE_PX) return block;
+    const placeholder = degenerateImagePlaceholder(size.width, size.height);
+    if (placeholder === undefined) return block;
     changed = true;
+    return { type: 'text' as const, text: placeholder };
+  });
+  return changed ? ({ ...message, content } as Message) : message;
+}
+
+/**
+ * Why the model provider would reject this image (an edge below
+ * `MIN_PROVIDER_IMAGE_EDGE_PX` or an aspect ratio above
+ * `MAX_PROVIDER_IMAGE_ASPECT_RATIO`), in the words the request placeholder
+ * uses and without a full stop; undefined when it passes or its size cannot be
+ * read (only PNG and JPEG headers are read). `data` is base64 text or the raw
+ * bytes. User attachments and the read tool use it to refuse such an image
+ * when it comes in, so it never reaches history and only the request
+ * placeholder below would have hidden it.
+ */
+export function findDegenerateImageReason(data: unknown, mimeType?: unknown): string | undefined {
+  const size = imageDimensions(data, mimeType);
+  return size ? degenerateImageReason(size.width, size.height) : undefined;
+}
+
+function degenerateImagePlaceholder(width: number, height: number): string | undefined {
+  const reason = degenerateImageReason(width, height);
+  return reason === undefined ? undefined : `[image omitted: ${reason}]`;
+}
+
+function degenerateImageReason(width: number, height: number): string | undefined {
+  const shortEdge = Math.min(width, height);
+  if (shortEdge < MIN_PROVIDER_IMAGE_EDGE_PX) {
+    return `${width}x${height} px is below the ${MIN_PROVIDER_IMAGE_EDGE_PX} px minimum edge required by the model provider`;
+  }
+  const ratio = Math.max(width, height) / shortEdge;
+  if (ratio <= MAX_PROVIDER_IMAGE_ASPECT_RATIO) return undefined;
+  return `${width}x${height} px has an aspect ratio of ${formatAspectRatio(ratio)}:1, above the ${MAX_PROVIDER_IMAGE_ASPECT_RATIO}:1 maximum the model provider accepts. Crop it into less elongated pieces to send it again`;
+}
+
+/** Two decimals at most, rounded down, so 200.4:1 does not read as the 200:1 limit itself. */
+function formatAspectRatio(ratio: number): string {
+  return String(Math.floor(ratio * 100) / 100);
+}
+
+/** Protocols whose wire format carries audio and PDF inline (see the BYOK capability gate). */
+const NATIVE_DOCUMENT_MEDIA_APIS: ReadonlySet<string> = new Set(['google-generative-ai']);
+
+function isDocumentMediaMime(mimeType: unknown): mimeType is string {
+  if (typeof mimeType !== 'string') return false;
+  const normalized = mimeType.toLowerCase();
+  return normalized.startsWith('audio/') || normalized === 'application/pdf';
+}
+
+function isNonImageMediaMime(mimeType: string): boolean {
+  return mimeType.toLowerCase().startsWith('video/') || isDocumentMediaMime(mimeType);
+}
+
+/**
+ * Audio and PDF blocks exist only in sessions that ran on a native transport
+ * (Gemini). After a switch to another protocol they would be sent as images
+ * and rejected, so the request copy gets a text placeholder instead.
+ */
+function projectNonNativeDocumentMedia(message: Message, targetModel: Model<Api>): Message {
+  if (NATIVE_DOCUMENT_MEDIA_APIS.has(targetModel.api)) return message;
+  if (typeof message.content === 'string' || !Array.isArray(message.content)) return message;
+  let changed = false;
+  const content = message.content.map((block) => {
+    // Persisted history can hold malformed (null) blocks; pass them through.
+    if (block?.type !== 'image' || !isDocumentMediaMime(block.mimeType)) return block;
+    changed = true;
+    const kind = block.mimeType.toLowerCase() === 'application/pdf' ? 'PDF' : 'audio';
     return {
       type: 'text' as const,
-      text: `[image omitted: ${size.width}x${size.height} px is below the ${MIN_PROVIDER_IMAGE_EDGE_PX} px minimum edge required by the model provider]`,
+      text: `[${kind} omitted: the current model cannot read ${block.mimeType} inline]`,
     };
   });
   return changed ? ({ ...message, content } as Message) : message;

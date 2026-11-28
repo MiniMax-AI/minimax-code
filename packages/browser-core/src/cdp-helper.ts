@@ -1,40 +1,35 @@
 /**
- * CDP (Chrome DevTools Protocol) Helper. Encapsulates CDP operations, including screenshots and
- * interactive-element discovery.
+ * CDP (Chrome DevTools Protocol) Helper
+ * 封装 CDP 相关操作，包括截图、获取可交互元素等
  *
- * Following browser-use, merge three data sources:
- * 1. DOMSnapshot.captureSnapshot: Layout, computed styles, and paint order.
- * 2. DOM.getDocument: Full DOM tree.
- * 3. Accessibility.getFullAXTree: Accessibility tree.
+ * 参考 browser-use 的实现，使用三个数据源融合：
+ * 1. DOMSnapshot.captureSnapshot - 获取布局信息、计算样式、paint order
+ * 2. DOM.getDocument - 获取完整 DOM 树
+ * 3. Accessibility.getFullAXTree - 获取可访问性树
  *
- * Incremental updates:
- * - Listen for DOM changes (childNodeInserted, childNodeRemoved, attributeModified).
- * - Track isDirty and refetch elements only when the DOM changes.
- * - Provide waitForDOMStable to wait intelligently for a stable DOM.
+ * 增量更新机制：
+ * - 监听 DOM 变化事件（childNodeInserted, childNodeRemoved, attributeModified）
+ * - 维护 isDirty 标志，只在 DOM 变化时才重新获取元素
+ * - 提供 waitForDOMStable 方法，智能等待 DOM 稳定
  */
 import type { InteractiveElement } from './browser-core-contracts.js';
 import { browserPrintableKeyDescriptor } from './browser-keyboard.js';
 import { CDPPageScanner } from './cdp-page-scanner.js';
 import type { BrowserTransport } from './browser-transport.js';
+import { EDITABLE_FIELD_SOURCE } from './browser-editable-field.js';
 import { type CdpExceptionDetails, describeCdpException, isRecord } from './browser-state.js';
 import {
   browserInputDiagnosticLogger,
   type BufferedConsoleDiagnosticEntry,
-  type BufferedNetworkDiagnosticEntry,
   type CDPConsoleCallFrame,
   type CDPConsoleStackTrace,
   type CDPRemoteObjectSummary,
   formatConsoleStack,
   MAX_CONSOLE_DIAGNOSTIC_ENTRIES,
   MAX_CONSOLE_DIAGNOSTIC_PAGE_BYTES,
-  MAX_NETWORK_DIAGNOSTIC_ENTRIES,
-  MAX_NETWORK_DIAGNOSTIC_PAGE_BYTES,
-  networkStatusMatches,
-  normalizeNetworkResourceType,
-  sanitizeNetworkDiagnosticUrl,
-  sanitizeNetworkText,
   summarizeRemoteObject,
 } from './cdp-diagnostic-helpers.js';
+import { CDPNetworkDiagnostics } from './cdp-network-diagnostics.js';
 import { uploadFilesByBackendNodeId as runFileUpload } from './cdp-file-upload.js';
 import {
   abortReason,
@@ -60,19 +55,16 @@ import {
   type CDPFileUploadResult,
   type CDPConsoleDiagnosticsOptions,
   type CDPConsoleDiagnosticsPage,
-  type CDPNetworkDiagnosticEntry,
-  type CDPNetworkDiagnosticResourceType,
-  type CDPNetworkDiagnosticStatusFilter,
   type CDPNetworkDiagnosticsOptions,
   type CDPNetworkDiagnosticsPage,
   type CDPHoverSemanticSnapshot,
   type CDPRenderedState,
+  type FormStateScanOptions,
 } from './cdp-helper-contracts.js';
 import {
   buildBoundedConsoleDiagnosticMessage,
   MAX_CONSOLE_ARGUMENTS,
   sanitizeConsoleDiagnosticUrl,
-  truncateConsoleValue,
 } from './console-diagnostic-sanitizer.js';
 
 export type {
@@ -100,7 +92,8 @@ type ListenerInitializationKind = 'base' | 'dom' | 'console' | 'network';
 export { sanitizeConsoleDiagnosticUrl } from './console-diagnostic-sanitizer.js';
 
 /**
- * CDP Helper class. Manages the CDP debugger connection and related operations.
+ * CDP Helper 类
+ * 管理 CDP debugger 连接和相关操作
  */
 export class CDPHelper {
   private transport: BrowserTransport;
@@ -108,10 +101,11 @@ export class CDPHelper {
   private debuggerResetPromise: Promise<void> | undefined;
   private interruptionRecoveryGeneration = 0;
   private lastInterruptionRecoverySucceeded = true;
+  private interruptionRecoveryGuard: (() => boolean) | undefined;
   private dragProbeSequence = 0;
   private pageScanner: CDPPageScanner;
 
-  // DOM change listeners
+  // DOM 变化监听相关
   private domListenerAttached = false;
   private domListenerDesired = false;
   private domListenerGeneration = 0;
@@ -119,7 +113,7 @@ export class CDPHelper {
   private listenerInitializations = new Map<ListenerInitializationKind, Promise<void>>();
   private domDomainEnabled = false;
   private pageDomainEnabled = false;
-  private isDirty = true; // Initially true to require an initial fetch.
+  private isDirty = true; // 初始为 true，表示需要获取
   private lastDOMChangeTime = 0;
   private domChangeCount = 0;
   private onDOMChangeCallback: (() => void) | null = null;
@@ -129,11 +123,10 @@ export class CDPHelper {
   private consoleDiagnosticsEnabled = false;
   private consoleMainFrameId: string | null = null;
   private consoleExecutionContextFrames = new Map<number, string>();
-  private networkDiagnosticSequence = 0;
-  private networkDiagnostics: BufferedNetworkDiagnosticEntry[] = [];
   private networkDiagnosticsEnabled = false;
-  private networkMainFrameId: string | null = null;
-  private networkRequests = new Map<string, BufferedNetworkDiagnosticEntry>();
+  private readonly network = new CDPNetworkDiagnostics();
+  /** Set by interruption recovery: the re-attached listener keeps the network records. */
+  private preserveNetworkOnAttach = false;
 
   constructor(
     transport: BrowserTransport,
@@ -153,7 +146,7 @@ export class CDPHelper {
 
   /** Update the concrete provider transport without changing Browser semantics. */
   setTransport(transport: BrowserTransport): void {
-    // Clean up old listeners first.
+    // 先清理旧的监听器
     this.stopDOMListener();
     void this.transport.close();
     this.transport = transport;
@@ -162,7 +155,8 @@ export class CDPHelper {
     this.isDirty = true;
     this.pageScanner.reset();
     this.resetConsoleDiagnostics();
-    this.resetNetworkDiagnostics(true);
+    this.preserveNetworkOnAttach = false;
+    this.network.reset(true);
   }
 
   /** Return the provider transport so adapters can share one debugger owner. */
@@ -176,7 +170,7 @@ export class CDPHelper {
   }
 
   /**
-   * Ensure the CDP debugger is connected.
+   * 确保 CDP debugger 已连接
    */
   async ensureAttached(
     signal?: AbortSignal,
@@ -197,13 +191,14 @@ export class CDPHelper {
   }
 
   /**
-   * Disconnect the CDP debugger.
+   * 断开 CDP debugger
    */
   detach(): void {
     this.domListenerDesired = false;
     this.removeDOMListener();
     this.resetConsoleDiagnostics();
-    this.resetNetworkDiagnostics();
+    this.preserveNetworkOnAttach = false;
+    this.network.reset();
     void this.detachDebugger().catch(() => undefined);
   }
 
@@ -239,6 +234,26 @@ export class CDPHelper {
     await this.recoverTransportAfterInterruption(timeoutMs);
   }
 
+  /**
+   * Defer interruption resets while the guard reports true. A held JavaScript
+   * dialog is lost when the debugger reconnects (CDP cannot handle it again
+   * and Page.enable stalls), so the connection is kept until it is handled.
+   */
+  setInterruptionRecoveryGuard(guard: () => boolean): () => void {
+    this.interruptionRecoveryGuard = guard;
+    return () => {
+      if (this.interruptionRecoveryGuard === guard) this.interruptionRecoveryGuard = undefined;
+    };
+  }
+
+  private isInterruptionRecoveryDeferred(): boolean {
+    try {
+      return this.interruptionRecoveryGuard?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Return the helper-owned recovery epoch so Core avoids a duplicate reset. */
   getInterruptionRecoveryState(): { generation: number; succeeded: boolean } {
     return {
@@ -257,12 +272,22 @@ export class CDPHelper {
     if (!force && !this.cdpDebuggerAttached && !this.debuggerResetPromise) {
       return this.lastInterruptionRecoverySucceeded;
     }
+    if (this.isInterruptionRecoveryDeferred()) {
+      // The command is blocked by a held JavaScript dialog, not by a broken
+      // connection. Keep the connection so the dialog can still be handled.
+      this.interruptionRecoveryGeneration += 1;
+      this.lastInterruptionRecoverySucceeded = true;
+      return true;
+    }
+    // Recovery keeps the same logical page session: its network records and
+    // sequence survive, marked with the reset (in evaluation the query after a
+    // timed-out submit came back empty and the model submitted again). Mark
+    // first: removing the listener forgets the requests still in flight.
+    this.network.markReset();
+    this.preserveNetworkOnAttach = true;
     this.removeDOMListener();
     this.pageScanner.reset();
     this.resetConsoleDiagnostics();
-    // Recovery keeps the same logical page session, so preserve the monotonic
-    // sequence used by Network query checkpoints while discarding stale data.
-    this.resetNetworkDiagnostics();
     this.isDirty = true;
     let succeeded = false;
     try {
@@ -279,12 +304,12 @@ export class CDPHelper {
   }
 
   // ============================================
-  // DOM change listening
+  // DOM 变化监听机制
   // ============================================
 
   /**
-   * Start listening for DOM changes, including DOM.childNodeInserted, DOM.childNodeRemoved,
-   * DOM.attributeModified, etc.
+   * 启动 DOM 变化监听
+   * 监听 DOM.childNodeInserted, DOM.childNodeRemoved, DOM.attributeModified 等事件
    */
   async startDOMListener(signal?: AbortSignal): Promise<void> {
     throwIfAborted(signal);
@@ -473,11 +498,11 @@ export class CDPHelper {
           frameTree.frame && typeof frameTree.frame === 'object' ? frameTree.frame : {}
         ) as Record<string, unknown>;
         this.consoleMainFrameId = typeof frame.id === 'string' ? frame.id : null;
-        this.networkMainFrameId = this.consoleMainFrameId;
+        this.network.mainFrameId = this.consoleMainFrameId;
       }
       if (this.consoleMainFrameId === null) return;
-      if (this.networkMainFrameId === null) this.networkMainFrameId = this.consoleMainFrameId;
-      this.isDirty = true; // Mark dirty initially to require one fetch.
+      if (this.network.mainFrameId === null) this.network.mainFrameId = this.consoleMainFrameId;
+      this.isDirty = true; // 初始标记为脏，需要获取一次
     } catch (error) {
       if (signal?.aborted || isBrowserOperationInterruption(error)) throw error;
       console.warn('Failed to start DOM listener:', error);
@@ -520,8 +545,10 @@ export class CDPHelper {
   private attachDOMMessageListener(): void {
     this.resetConsoleDiagnostics();
     this.resetConsoleDiagnosticScope();
-    this.resetNetworkDiagnostics();
-    this.resetNetworkDiagnosticScope();
+    // A listener after interruption recovery continues the same page's records.
+    if (this.preserveNetworkOnAttach) this.preserveNetworkOnAttach = false;
+    else this.network.reset();
+    this.network.resetScope();
     this.domEventDisposer?.();
     this.domEventDisposer = this.transport.onEvent(({ method, params, sessionId }) => {
       if (
@@ -562,12 +589,12 @@ export class CDPHelper {
       this.domListenerAttached &&
       this.pageDomainEnabled &&
       this.consoleMainFrameId !== null &&
-      this.networkMainFrameId !== null
+      this.network.mainFrameId !== null
     );
   }
 
   /**
-   * Stop listening for DOM changes.
+   * 停止 DOM 变化监听
    */
   stopDOMListener(): void {
     this.domListenerDesired = false;
@@ -588,7 +615,7 @@ export class CDPHelper {
     this.consoleDiagnosticsEnabled = false;
     this.networkDiagnosticsEnabled = false;
     this.resetConsoleDiagnosticScope();
-    this.resetNetworkDiagnosticScope();
+    this.network.resetScope();
   }
 
   getConsoleDiagnostics(options: CDPConsoleDiagnosticsOptions = {}): CDPConsoleDiagnosticsPage {
@@ -641,54 +668,7 @@ export class CDPHelper {
   }
 
   getNetworkDiagnostics(options: CDPNetworkDiagnosticsOptions = {}): CDPNetworkDiagnosticsPage {
-    const requestedLimit = Number.isFinite(options.limit) ? Number(options.limit) : 100;
-    const limit = Math.max(1, Math.min(MAX_NETWORK_DIAGNOSTIC_ENTRIES, Math.floor(requestedLimit)));
-    const requestedStatus = new Set<CDPNetworkDiagnosticStatusFilter>(options.status ?? []);
-    const requestedResourceTypes = new Set<CDPNetworkDiagnosticResourceType>(
-      options.resourceTypes ?? [],
-    );
-    const filter = options.filter ?? '';
-    const requestedAfterSequence = Number.isFinite(options.afterSequence)
-      ? Number(options.afterSequence)
-      : 0;
-    const afterSequence = Math.max(0, Math.floor(requestedAfterSequence));
-    const filteredEntries = this.networkDiagnostics.filter(
-      (entry) =>
-        entry.sequence > afterSequence &&
-        networkStatusMatches(entry, requestedStatus) &&
-        (requestedResourceTypes.size === 0 || requestedResourceTypes.has(entry.resourceType)) &&
-        (filter.length === 0 || entry.url.includes(filter)),
-    );
-    const totalEntries = filteredEntries.length;
-    const limitedEntries = filteredEntries.slice(Math.max(0, totalEntries - limit));
-    const entries: BufferedNetworkDiagnosticEntry[] = [];
-    for (let index = limitedEntries.length - 1; index >= 0; index -= 1) {
-      const entry = limitedEntries[index];
-      if (!entry) continue;
-      const candidateEntries = [entry, ...entries].map((candidate) =>
-        this.publicNetworkDiagnosticEntry(candidate),
-      );
-      const candidatePage: CDPNetworkDiagnosticsPage = {
-        entries: candidateEntries,
-        lastSequence: this.networkDiagnosticSequence,
-        totalEntries,
-        returnedEntries: candidateEntries.length,
-        truncated: candidateEntries.length < totalEntries,
-      };
-      if (
-        Buffer.byteLength(JSON.stringify(candidatePage), 'utf8') > MAX_NETWORK_DIAGNOSTIC_PAGE_BYTES
-      ) {
-        break;
-      }
-      entries.unshift(entry);
-    }
-    return {
-      entries: entries.map((entry) => this.publicNetworkDiagnosticEntry(entry)),
-      lastSequence: this.networkDiagnosticSequence,
-      totalEntries,
-      returnedEntries: entries.length,
-      truncated: entries.length < totalEntries,
-    };
+    return this.network.page(options);
   }
 
   isConsoleDiagnosticsAvailable(): boolean {
@@ -705,7 +685,7 @@ export class CDPHelper {
       this.domListenerAttached &&
       this.pageDomainEnabled &&
       this.networkDiagnosticsEnabled &&
-      this.networkMainFrameId !== null
+      this.network.mainFrameId !== null
     );
   }
 
@@ -716,7 +696,7 @@ export class CDPHelper {
   private handleDiagnosticMessage(method: string, params: unknown): void {
     const payload = (params && typeof params === 'object' ? params : {}) as Record<string, unknown>;
     if (method.startsWith('Network.')) {
-      this.handleNetworkDiagnosticMessage(method, payload);
+      this.network.handleMessage(method, payload);
       return;
     }
     if (method === 'Runtime.executionContextCreated') {
@@ -759,12 +739,12 @@ export class CDPHelper {
       ) as Record<string, unknown>;
       if (!frame.parentId) {
         this.resetConsoleDiagnostics();
-        this.resetNetworkDiagnosticsForNavigation(
+        this.network.resetForNavigation(
           typeof frame.loaderId === 'string' ? frame.loaderId : undefined,
         );
         this.consoleExecutionContextFrames.clear();
         this.consoleMainFrameId = typeof frame.id === 'string' ? frame.id : null;
-        this.networkMainFrameId = this.consoleMainFrameId;
+        this.network.mainFrameId = this.consoleMainFrameId;
       }
       return;
     }
@@ -772,9 +752,9 @@ export class CDPHelper {
       if (typeof payload.frameId === 'string') {
         if (payload.frameId === this.consoleMainFrameId) {
           this.resetConsoleDiagnostics();
-          this.resetNetworkDiagnostics();
+          this.network.reset();
           this.resetConsoleDiagnosticScope();
-          this.resetNetworkDiagnosticScope();
+          this.network.resetScope();
           return;
         }
         for (const [contextId, frameId] of this.consoleExecutionContextFrames) {
@@ -864,138 +844,6 @@ export class CDPHelper {
     }
   }
 
-  private handleNetworkDiagnosticMessage(method: string, payload: Record<string, unknown>): void {
-    const requestId = typeof payload.requestId === 'string' ? payload.requestId : '';
-    if (!requestId) return;
-
-    if (method === 'Network.requestWillBeSent') {
-      if (payload.frameId !== this.networkMainFrameId) return;
-      const timestamp = typeof payload.timestamp === 'number' ? payload.timestamp : 0;
-      const previous = this.networkRequests.get(requestId);
-      const redirectResponse = (
-        payload.redirectResponse && typeof payload.redirectResponse === 'object'
-          ? payload.redirectResponse
-          : null
-      ) as Record<string, unknown> | null;
-      if (previous && redirectResponse) {
-        this.applyNetworkResponse(previous, redirectResponse);
-        previous.outcome = 'redirect';
-        this.finishNetworkDiagnostic(previous, timestamp);
-        this.networkRequests.delete(requestId);
-      }
-
-      const request = (
-        payload.request && typeof payload.request === 'object' ? payload.request : {}
-      ) as Record<string, unknown>;
-      this.networkDiagnosticSequence += 1;
-      const entry: BufferedNetworkDiagnosticEntry = {
-        requestId,
-        startedAtMonotonic: timestamp,
-        ...(typeof payload.loaderId === 'string' ? { loaderId: payload.loaderId } : {}),
-        sequence: this.networkDiagnosticSequence,
-        method: truncateConsoleValue(
-          typeof request.method === 'string' ? request.method.toUpperCase() : 'GET',
-          32,
-        ),
-        url: sanitizeNetworkDiagnosticUrl(
-          typeof request.url === 'string' ? request.url : '<unknown>',
-        ),
-        resourceType: normalizeNetworkResourceType(payload.type),
-        outcome: 'pending',
-        timestamp:
-          typeof payload.wallTime === 'number' ? Math.round(payload.wallTime * 1_000) : Date.now(),
-      };
-      this.networkRequests.set(requestId, entry);
-      this.appendNetworkDiagnostic(entry);
-      return;
-    }
-
-    const entry = this.networkRequests.get(requestId);
-    if (!entry) return;
-    if (method === 'Network.responseReceived') {
-      const response = (
-        payload.response && typeof payload.response === 'object' ? payload.response : {}
-      ) as Record<string, unknown>;
-      this.applyNetworkResponse(entry, response);
-      if (entry.status !== undefined && entry.status >= 400) entry.outcome = 'http-error';
-      if (entry.resourceType === 'other') {
-        entry.resourceType = normalizeNetworkResourceType(payload.type);
-      }
-      return;
-    }
-    if (method === 'Network.loadingFinished') {
-      if (entry.outcome === 'pending') entry.outcome = 'success';
-      this.finishNetworkDiagnostic(
-        entry,
-        typeof payload.timestamp === 'number' ? payload.timestamp : entry.startedAtMonotonic,
-      );
-      this.networkRequests.delete(requestId);
-      return;
-    }
-    if (method === 'Network.loadingFailed') {
-      entry.outcome = 'failed';
-      entry.failureReason = sanitizeNetworkText(
-        typeof payload.errorText === 'string'
-          ? payload.errorText
-          : payload.canceled === true
-            ? 'canceled'
-            : 'request failed',
-      );
-      this.finishNetworkDiagnostic(
-        entry,
-        typeof payload.timestamp === 'number' ? payload.timestamp : entry.startedAtMonotonic,
-      );
-      this.networkRequests.delete(requestId);
-    }
-  }
-
-  private applyNetworkResponse(
-    entry: BufferedNetworkDiagnosticEntry,
-    response: Record<string, unknown>,
-  ): void {
-    if (typeof response.status === 'number') entry.status = response.status;
-    if (typeof response.statusText === 'string' && response.statusText.length > 0) {
-      entry.statusText = sanitizeNetworkText(response.statusText);
-    }
-    if (typeof response.mimeType === 'string' && response.mimeType.length > 0) {
-      entry.mimeType = truncateConsoleValue(sanitizeNetworkText(response.mimeType), 256);
-    }
-  }
-
-  private finishNetworkDiagnostic(
-    entry: BufferedNetworkDiagnosticEntry,
-    endedAtMonotonic: number,
-  ): void {
-    entry.durationMs = Math.max(
-      0,
-      Math.round((endedAtMonotonic - entry.startedAtMonotonic) * 1_000),
-    );
-  }
-
-  private appendNetworkDiagnostic(entry: BufferedNetworkDiagnosticEntry): void {
-    this.networkDiagnostics.push(entry);
-    if (this.networkDiagnostics.length <= MAX_NETWORK_DIAGNOSTIC_ENTRIES) return;
-    const removed = this.networkDiagnostics.splice(
-      0,
-      this.networkDiagnostics.length - MAX_NETWORK_DIAGNOSTIC_ENTRIES,
-    );
-    for (const candidate of removed) {
-      if (this.networkRequests.get(candidate.requestId) === candidate) {
-        this.networkRequests.delete(candidate.requestId);
-      }
-    }
-  }
-
-  private publicNetworkDiagnosticEntry(
-    entry: BufferedNetworkDiagnosticEntry,
-  ): CDPNetworkDiagnosticEntry {
-    const publicEntry: Partial<BufferedNetworkDiagnosticEntry> = { ...entry };
-    delete publicEntry.requestId;
-    delete publicEntry.startedAtMonotonic;
-    delete publicEntry.loaderId;
-    return publicEntry as CDPNetworkDiagnosticEntry;
-  }
-
   private releaseConsoleRemoteObjects(value: unknown): void {
     if (!Array.isArray(value)) return;
     const objectIds = new Set(
@@ -1020,30 +868,6 @@ export class CDPHelper {
     this.consoleExecutionContextFrames.clear();
   }
 
-  private resetNetworkDiagnostics(resetSequence = false): void {
-    if (resetSequence) this.networkDiagnosticSequence = 0;
-    this.networkDiagnostics = [];
-    this.networkRequests.clear();
-  }
-
-  private resetNetworkDiagnosticsForNavigation(loaderId?: string): void {
-    if (!loaderId) {
-      this.resetNetworkDiagnostics();
-      return;
-    }
-    this.networkDiagnostics = this.networkDiagnostics.filter(
-      (entry) => entry.loaderId === loaderId,
-    );
-    this.networkRequests = new Map(
-      [...this.networkRequests].filter(([, entry]) => entry.loaderId === loaderId),
-    );
-  }
-
-  private resetNetworkDiagnosticScope(): void {
-    this.networkMainFrameId = null;
-    this.networkRequests.clear();
-  }
-
   private isMainFrameConsoleContext(executionContextId: unknown): boolean {
     return (
       typeof executionContextId === 'number' &&
@@ -1053,28 +877,28 @@ export class CDPHelper {
   }
 
   /**
-   * Mark the DOM dirty (needs refetching).
+   * 标记 DOM 为脏（需要重新获取）
    */
   markDirty(): void {
     this.isDirty = true;
     this.lastDOMChangeTime = Date.now();
     this.domChangeCount++;
 
-    // Trigger the callback.
+    // 触发回调
     if (this.onDOMChangeCallback) {
       this.onDOMChangeCallback();
     }
   }
 
   /**
-   * Check whether the DOM needs updating.
+   * 检查 DOM 是否需要更新
    */
   needsUpdate(): boolean {
     return this.isDirty;
   }
 
   /**
-   * Clear the dirty flag after successfully fetching elements.
+   * 清除脏标记（在成功获取元素后调用）
    */
   clearDirty(): void {
     this.isDirty = false;
@@ -1082,19 +906,20 @@ export class CDPHelper {
   }
 
   /**
-   * Set the DOM change callback.
+   * 设置 DOM 变化回调
    */
   onDOMChange(callback: (() => void) | null): void {
     this.onDOMChangeCallback = callback;
   }
 
   /**
-   * Wait for DOM stability, returning once changes stop.
+   * 等待 DOM 稳定
+   * 智能等待：在 DOM 停止变化后返回
    *
-   * @param options Configuration options.
-   * @param options.timeout Maximum wait in milliseconds; defaults to 3000.
-   * @param options.stableTime DOM stability duration in milliseconds; defaults to 200.
-   * @param options.minWait Minimum wait in milliseconds; defaults to 100.
+   * @param options 配置选项
+   * @param options.timeout 最大等待时间（毫秒），默认 3000
+   * @param options.stableTime DOM 稳定时间（毫秒），默认 200
+   * @param options.minWait 最小等待时间（毫秒），默认 100
    */
   async waitForDOMStable(options?: {
     timeout?: number;
@@ -1107,28 +932,28 @@ export class CDPHelper {
     const startTime = Date.now();
     const startChangeCount = this.domChangeCount;
 
-    // Minimum wait.
+    // 最小等待
     await this.sleep(minWait, signal);
 
-    // Wait for DOM stability.
+    // 等待 DOM 稳定
     while (Date.now() - startTime < timeout) {
       const timeSinceLastChange = Date.now() - this.lastDOMChangeTime;
 
-      // Consider the DOM stable once stableTime has elapsed since the last change.
+      // 如果距离上次变化已经超过 stableTime，认为 DOM 已稳定
       if (timeSinceLastChange >= stableTime) {
         break;
       }
 
-      // Also consider it stable if the change count is unchanged after waiting for a while.
+      // 如果变化次数没有增加且已经等待了一段时间，也认为稳定
       if (this.domChangeCount === startChangeCount && Date.now() - startTime >= stableTime) {
         break;
       }
 
-      // Continue waiting.
+      // 继续等待
       await this.sleep(50, signal);
     }
 
-    // Mark dirty because we are fetching fresh state.
+    // 标记为脏，因为我们要获取新状态
     this.isDirty = true;
   }
 
@@ -1137,11 +962,10 @@ export class CDPHelper {
   }
 
   /**
-   * Send a CDP command.
+   * 发送 CDP 命令
    *
-   * Protect with a timeout: some commands (typically Page.captureScreenshot on an uncomposited
-   * page) can hang indefinitely. Without a limit, they exhaust the broker's 30-second tool timeout
-   * and block subsequent calls in a chain.
+   * 带超时保护：个别命令（典型是对未合成页面的 Page.captureScreenshot）会
+   * 永久挂起；不设上限会拖满 broker 的 30s 工具超时并连环卡死后续调用。
    */
   async sendCommand(
     method: string,
@@ -1492,7 +1316,8 @@ export class CDPHelper {
   }
 
   /**
-   * Capture a screenshot using CDP, including when the window is minimized or invisible.
+   * 使用 CDP 截图
+   * 支持窗口最小化/不可见时截图
    */
   async captureScreenshot(): Promise<{
     data: string;
@@ -1536,7 +1361,7 @@ export class CDPHelper {
 
     const buffer = Buffer.from(result.data, 'base64');
 
-    // Read image dimensions by parsing the PNG header.
+    // 获取图片尺寸（通过解析 PNG header）
     const width = buffer.readUInt32BE(16);
     const height = buffer.readUInt32BE(20);
 
@@ -1548,11 +1373,11 @@ export class CDPHelper {
   }
 
   // ============================================
-  // Element operations using backendNodeId
+  // 基于 backendNodeId 的元素操作
   // ============================================
 
   /**
-   * Get an element's box model (bounding box) by backendNodeId.
+   * 通过 backendNodeId 获取元素的盒模型（边界框）
    */
   async getBoxModelByBackendNodeId(
     backendNodeId: number,
@@ -1581,7 +1406,7 @@ export class CDPHelper {
       };
     };
 
-    // content is [x1,y1, x2,y2, x3,y3, x4,y4]: four corner coordinates in clockwise order.
+    // content 是 [x1,y1, x2,y2, x3,y3, x4,y4] 四个角的坐标（顺时针）
     const content = result.model.content;
     if (content.length < 6) throw new Error('DOM box model content quad is incomplete');
     const x = content[0]!;
@@ -1595,7 +1420,7 @@ export class CDPHelper {
   }
 
   /**
-   * Scroll an element into view by backendNodeId.
+   * 通过 backendNodeId 滚动元素到视口
    */
   async scrollIntoViewByBackendNodeId(backendNodeId: number, signal?: AbortSignal): Promise<void> {
     await this.sendCommand(
@@ -1607,7 +1432,7 @@ export class CDPHelper {
   }
 
   /**
-   * Focus an element by backendNodeId.
+   * 通过 backendNodeId 聚焦元素
    */
   async focusByBackendNodeId(backendNodeId: number): Promise<void> {
     await this.sendCommand('DOM.focus', {
@@ -1616,7 +1441,7 @@ export class CDPHelper {
   }
 
   /**
-   * Get an element's nodeId by backendNodeId for operations requiring nodeId.
+   * 通过 backendNodeId 获取元素的 nodeId（用于某些需要 nodeId 的操作）
    */
   async resolveNodeId(backendNodeId: number): Promise<number> {
     const result = (await this.sendCommand('DOM.pushNodesByBackendIdsToFrontend', {
@@ -1633,7 +1458,7 @@ export class CDPHelper {
   }
 
   /**
-   * Get element attributes by backendNodeId.
+   * 通过 backendNodeId 获取元素的属性
    */
   async getAttributesByBackendNodeId(backendNodeId: number): Promise<Record<string, string>> {
     const nodeId = await this.resolveNodeId(backendNodeId);
@@ -1653,7 +1478,7 @@ export class CDPHelper {
   }
 
   /**
-   * Set an element attribute by backendNodeId.
+   * 通过 backendNodeId 设置元素的属性
    */
   async setAttributeByBackendNodeId(
     backendNodeId: number,
@@ -1669,7 +1494,7 @@ export class CDPHelper {
   }
 
   /**
-   * Get an element's outerHTML by backendNodeId.
+   * 通过 backendNodeId 获取元素的 outerHTML
    */
   async getOuterHTMLByBackendNodeId(backendNodeId: number): Promise<string> {
     const result = (await this.sendCommand('DOM.getOuterHTML', {
@@ -1679,7 +1504,8 @@ export class CDPHelper {
   }
 
   /**
-   * Send click events through the CDP Input domain to more closely emulate real user interaction.
+   * 通过 CDP Input 域发送点击事件
+   * 这种方式更接近真实用户操作
    */
   async dispatchClickEvent(
     x: number,
@@ -1700,7 +1526,7 @@ export class CDPHelper {
     const delay = options?.delay ?? 50;
     const signal = options?.signal;
 
-    // Move the mouse.
+    // 移动鼠标
     await this.sendCommand(
       'Input.dispatchMouseEvent',
       {
@@ -1714,9 +1540,9 @@ export class CDPHelper {
 
     await this.sleep(delay, signal);
 
-    // CDP clickCount is only the current click's ordinal; it cannot replace the preceding click sequence.
-    // A double-click must send clickCount=1 followed by clickCount=2 so the page receives
-    // two click events and the final dblclick.
+    // CDP 的 clickCount 只是当前点击序号，不能替代前面的点击序列。
+    // 双击必须依次发送 clickCount=1 和 clickCount=2，页面才会收到
+    // 两次 click 以及最终的 dblclick。
     for (let currentClick = 1; currentClick <= clickCount; currentClick += 1) {
       await this.sendCommand(
         'Input.dispatchMouseEvent',
@@ -1751,8 +1577,8 @@ export class CDPHelper {
   }
 
   /**
-   * Click an element by backendNodeId, automatically scrolling it into view and clicking its
-   * center.
+   * 通过 backendNodeId 点击元素
+   * 自动滚动到视口并点击元素中心
    */
   async clickByBackendNodeId(
     backendNodeId: number,
@@ -1763,14 +1589,14 @@ export class CDPHelper {
       signal?: AbortSignal;
     },
   ): Promise<{ x: number; y: number }> {
-    // 1. Scroll the element into view.
+    // 1. 先滚动元素到视口
     await this.scrollIntoViewByBackendNodeId(backendNodeId, options?.signal);
     await this.sleep(100, options?.signal);
 
-    // 2. Get the element position.
+    // 2. 获取元素位置
     const box = await this.getBoxModelByBackendNodeId(backendNodeId, options?.signal);
 
-    // 3. Click the element center.
+    // 3. 点击元素中心
     await this.dispatchClickEvent(box.centerX, box.centerY, options);
 
     return { x: box.centerX, y: box.centerY };
@@ -1809,7 +1635,8 @@ export class CDPHelper {
   }
 
   /**
-   * Enter text by backendNodeId: focus the element first, then type.
+   * 通过 backendNodeId 输入文本
+   * 先聚焦元素，然后输入文本
    */
   async typeByBackendNodeId(
     backendNodeId: number,
@@ -1822,21 +1649,21 @@ export class CDPHelper {
   ): Promise<void> {
     const signal = options?.signal;
     throwIfAborted(signal);
-    // 1. Scroll into view and focus.
+    // 1. 滚动到视口并聚焦
     await this.scrollIntoViewByBackendNodeId(backendNodeId);
     await this.sleep(50, signal);
     await this.focusByBackendNodeId(backendNodeId);
     await this.sleep(50, signal);
 
-    // 2. If clearing is requested, select all and delete first.
+    // 2. 如果需要清空，先全选再删除
     if (options?.clear) {
       await this.selectAllAtCurrentFocus({ signal });
       await this.sleep(50, signal);
     }
 
-    // 3. Enter text.
+    // 3. 输入文本
     if (options?.delay && options.delay > 0) {
-      // Type character by character.
+      // 逐字符输入
       for (const char of text) {
         await this.sendCommand(
           'Input.insertText',
@@ -1847,7 +1674,7 @@ export class CDPHelper {
         await this.sleep(options.delay, signal);
       }
     } else {
-      // Insert all text at once.
+      // 一次性输入
       await this.sendCommand('Input.insertText', { text }, BROWSER_TIMEOUTS.cdpCommand, signal);
     }
   }
@@ -2006,12 +1833,7 @@ export class CDPHelper {
       `function(expectedText) {
         const tag = String(this.tagName || '').toLowerCase();
         const role = String(this.getAttribute?.('role') || '').toLowerCase();
-        const inputType = this instanceof HTMLInputElement ? String(this.type || '').toLowerCase() : '';
-        const editableInput = this instanceof HTMLInputElement && ![
-          'button', 'checkbox', 'file', 'hidden', 'image', 'radio', 'reset', 'submit'
-        ].includes(inputType);
-        const editable = editableInput || this instanceof HTMLTextAreaElement ||
-          this.isContentEditable === true || role === 'textbox' || role === 'searchbox';
+        const editable = (${EDITABLE_FIELD_SOURCE})(this);
         const text = this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement
           ? String(this.value || '')
           : String(this.innerText || this.textContent || '');
@@ -2054,14 +1876,7 @@ export class CDPHelper {
         while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
         const tag = String(active?.tagName || '').toLowerCase();
         const role = String(active?.getAttribute?.('role') || '').toLowerCase();
-        const inputType = active instanceof HTMLInputElement
-          ? String(active.type || '').toLowerCase()
-          : '';
-        const editableInput = active instanceof HTMLInputElement && ![
-          'button', 'checkbox', 'file', 'hidden', 'image', 'radio', 'reset', 'submit'
-        ].includes(inputType);
-        const editable = editableInput || active instanceof HTMLTextAreaElement ||
-          active?.isContentEditable === true || role === 'textbox' || role === 'searchbox';
+        const editable = (${EDITABLE_FIELD_SOURCE})(active);
         const text = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
           ? String(active.value || '')
           : String(active?.innerText || active?.textContent || '');
@@ -2354,26 +2169,30 @@ export class CDPHelper {
         for (const option of this.options) option.selected = requested.has(option.value);
         this.dispatchEvent(new Event('input', { bubbles: true }));
         this.dispatchEvent(new Event('change', { bubbles: true }));
-        return Array.from(this.selectedOptions, (option) => option.value);
+        // Not Array.from: Prototype.js/MooTools replace it and drop the map
+        // function, returning DOM nodes that returnByValue cannot serialize.
+        return Array.prototype.filter
+          .call(this.options, (option) => option.selected)
+          .map((option) => option.value);
       }`,
       [values],
     );
   }
 
   /**
-   * Get interactive elements via CDP, following browser-use.
+   * 使用 CDP 获取可交互元素（参考 browser-use 实现）
    *
-   * Flow:
-   * 1. Fetch DOMSnapshot, DOM tree, and Accessibility tree in parallel.
-   * 2. Detect JavaScript event listeners.
-   * 3. Build a snapshot lookup to associate layout information.
-   * 4. Traverse the DOM tree, merge all information, and detect interactive elements.
-   * 5. Filter invisible and occluded elements.
+   * 流程：
+   * 1. 并行获取三个数据源：DOMSnapshot、DOM tree、Accessibility tree
+   * 2. 检测 JavaScript 事件监听器
+   * 3. 构建 snapshot lookup，关联布局信息
+   * 4. 遍历 DOM 树，融合所有信息，检测可交互元素
+   * 5. 过滤不可见和被遮挡的元素
    *
-   * Design principles:
-   * - Ordinary data-source failures may fall back to empty arrays or a pure JS scan.
-   * - Deadlines / aborts must propagate to callers, never masquerade as successful empty results.
-   * - Reset the debugger on interruption so the next scan can reconnect.
+   * 设计原则：
+   * - 普通数据源失败允许降级为空数组或纯 JS 扫描
+   * - deadline / abort 必须向调用方透出，不能伪装成成功空结果
+   * - 中断时重置 debugger，下一次扫描可重新连接
    */
   private traverseDOMTree(...args: Parameters<CDPPageScanner['traverseDOMTree']>) {
     return this.pageScanner.traverseDOMTree(...args);
@@ -2397,11 +2216,14 @@ export class CDPHelper {
     return this.pageScanner.getViewportBoundsByBackendNodeId(...args);
   }
 
-  async getInteractiveElements(signal?: AbortSignal): Promise<InteractiveElement[]> {
+  async getInteractiveElements(
+    signal?: AbortSignal,
+    options: FormStateScanOptions = {},
+  ): Promise<InteractiveElement[]> {
     this.pageScanner.reset();
     try {
       const elements = await withTimeout(
-        (scanSignal) => this.pageScanner.scan(scanSignal),
+        (scanSignal) => this.pageScanner.scan(scanSignal, options),
         BROWSER_TIMEOUTS.cdpScan,
         'CDP interactive element scan',
         { signal },

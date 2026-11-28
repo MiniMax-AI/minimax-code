@@ -1,16 +1,17 @@
 /**
- * Extension factory helpers let hosts wrap plain objects as `AgentExtension` in one call, avoiding
- * repeated `{ id, description, init(pi) { pi.registerXxx(...) } }` boilerplate.
+ * Extension factory helpers —— 让 host 用一句话把普通对象装成 `AgentExtension`
+ * 而不用每次都写 `{ id, description, init(pi) { pi.registerXxx(...) } }` boilerplate。
  *
- * The design document §4.3 table lists eight extensions (`permission / context-manager / memory /
- * system-reminder / mcp-disclosure / desktop-tools / skills / internal-tool-handlers`).
- * Module-to-SPI adapters for `context-manager / system-reminder / permission / skills` are exported
- * centrally by `@mavis/agent-extension`. Thin wrappers for host-only behavior such as
- * `mcp-disclosure / desktop-tools / internal-tool-handlers / memory / output-review-preface` can
- * use these generic factories around existing host helpers such as `hookService.beforeToolCall` /
- * `mcpDisclosureOptions`, without a separate module-level factory for each host-only module.
+ * 设计文档 §4.3 表列出了 8 个 extension（`permission / context-manager / memory /
+ * system-reminder / mcp-disclosure / desktop-tools / skills / internal-tool-handlers`）；其中
+ * `context-manager / system-reminder / permission / skills` 的 module-to-SPI
+ * adapters 集中由 `@mavis/agent-extension` 导出。`mcp-disclosure / desktop-tools /
+ * internal-tool-handlers / memory / output-review-preface` 等 host-only
+ * behavior 的薄封装——host 自己已有 `hookService.beforeToolCall` /
+ * `mcpDisclosureOptions` 等 helper，只需要用本文件里的通用 factory 把它们装成 SPI
+ * extension 即可，无需给每个 host-only module 都造一个 module 级 factory。
  *
- * Example (local-runtime host assembly):
+ * 使用示例（local-runtime host 装配）：
  *
  *   const userHooksExtension = createHookExtension({
  *     id: 'internal-tool-handlers',
@@ -27,7 +28,7 @@
  *     tools: [(ctx) => resolveMcpDisclosureTool(ctx, mcpDisclosureOptions)],
  *   });
  *
- * All factories are pure; the host manages the lifecycle of captured host state.
+ * Factories 都是 pure：闭包 host state 时的 lifecycle 由 host 管。
  */
 
 import type {
@@ -57,8 +58,8 @@ export type HookHandlers = {
 };
 
 /**
- * `createToolExtension`: Expose a host's static tools or per-turn tool factories as an extension.
- * Equivalent to calling `pi.registerTool(...)` for each tool.
+ * `createToolExtension` —— host 有一组 tool（静态或 per-turn factory）想以
+ * extension 形式提供时用。等价于给每个 tool 都 `pi.registerTool(...)`。
  */
 export interface CreateToolExtensionOptions {
   readonly id: string;
@@ -83,8 +84,8 @@ export function createToolExtension(options: CreateToolExtensionOptions): AgentE
 }
 
 /**
- * `createHookExtension`: Expose a host's lifecycle hooks (e.g. external coding-agent
- * internal-tool-handlers) as an extension. All lifecycle events are optional.
+ * `createHookExtension` —— host 有一组 lifecycle hook（e.g. external coding-agent
+ * internal-tool-handlers）想以 extension 形式提供时用。所有 lifecycle event 都可选。
  */
 export interface CreateHookExtensionOptions {
   readonly id: string;
@@ -123,10 +124,10 @@ export function createHookExtension(options: CreateHookExtensionOptions): AgentE
 }
 
 /**
- * `createPromptExtension`: Wrap static host system/user prompt prefixes as an extension. Equivalent
- * to `pi.contributeSystemPrompt(fn) + pi.contributeUserPromptPrefix(fn)`. Primarily wraps
- * `output-review-preface` constants such as `Read the last review carefully before your next
- * assistant turn.`
+ * `createPromptExtension` —— host 有 static system/user prompt prefix 想装成
+ * extension 时用。等价于 `pi.contributeSystemPrompt(fn) + pi.contributeUserPromptPrefix(fn)`。
+ * 主要用来包装 `output-review-preface`（`Read the last review carefully before your next assistant turn.`
+ * 这类 constant prefix）。
  */
 export interface CreatePromptExtensionOptions {
   readonly id: string;
@@ -157,8 +158,8 @@ export function createPromptExtension(options: CreatePromptExtensionOptions): Ag
 }
 
 /**
- * `createReminderExtension`: Wrap a host's reminder providers as an extension (`memory`, custom
- * host reminder packs, etc.).
+ * `createReminderExtension` —— host 有一组 reminder provider 想装成 extension
+ * 时用（`memory`, host 自定义 reminder pack 等）。
  */
 export interface CreateReminderExtensionOptions {
   readonly id: string;

@@ -1,4 +1,4 @@
-import type { TuiModel } from '../../../runtime/port.js';
+import type { TuiAdvisor, TuiModel } from '../../../runtime/port.js';
 import type { TuiLlmRetryEvent } from '../../../types/runtime-events.js';
 import type { TuiChatSnapshot } from '../chat-controller.js';
 import type { TuiPermissionModeSnapshot } from '../interaction/permission-mode-flow.js';
@@ -42,7 +42,7 @@ export class TuiChromeFlow {
   private startupHint?: string;
   private compacting = false;
   private llmRetry?: TuiLlmRetryEvent;
-  private readonly automationStatus = new TuiAutomationStatusStore();
+  private readonly automationStatus: TuiAutomationStatusStore;
 
   constructor(
     private readonly options: {
@@ -65,13 +65,18 @@ export class TuiChromeFlow {
       readonly activePermission: () => boolean;
       readonly activeQuestionnaire: () => boolean;
       readonly agentInteraction: () => TuiAgentInteractionReadback | undefined;
-      readonly agentCounts?: () => { readonly active: number; readonly total: number };
+      readonly agentCounts?: () => {
+        readonly active: number;
+        readonly total: number;
+        readonly waiting: number;
+      };
       readonly backgroundTaskCount?: () => number;
       readonly attachmentCount: () => number;
       readonly expandedDraft: () => string;
       readonly inputCommands?: () => readonly TuiCommand[];
       readonly selectedModel: () => TuiModel | undefined;
       readonly selectedEffort?: () => string | undefined;
+      readonly selectedAdvisor?: () => TuiAdvisor | undefined;
       readonly permissionMode: () => TuiPermissionModeSnapshot | undefined;
       readonly planMode?: () => TuiPlanModeSnapshot;
       /** Paired BTW side conversation, when one exists. */
@@ -86,8 +91,14 @@ export class TuiChromeFlow {
       readonly status: PresentationSink<'shell'>;
       readonly activity: PresentationSink<'activity'>;
       readonly composer: PresentationSink<'composer'>;
+      /** Holds `[V]` terminal states while delegated work remains active. */
+      readonly automationDelegatedHold?: boolean;
     },
-  ) {}
+  ) {
+    this.automationStatus = new TuiAutomationStatusStore({
+      delegatedHold: options.automationDelegatedHold === true,
+    });
+  }
 
   setHint(message: string | undefined, tone?: TuiComposerState['hintTone']): void {
     this.transientHint = message;
@@ -199,6 +210,7 @@ export class TuiChromeFlow {
       homeDir: this.options.homeDir,
       selectedModel: this.options.selectedModel(),
       selectedEffort: this.options.selectedEffort?.(),
+      selectedAdvisor: this.options.selectedAdvisor?.(),
       permissionMode: this.options.permissionMode(),
       planMode: this.options.planMode?.() ?? {
         displayMode: snapshot.session?.interactionMode === 'plan' ? 'plan' : 'default',
@@ -253,6 +265,7 @@ export class TuiChromeFlow {
       ...(automationStatus.requestId ? { agentRequestId: automationStatus.requestId } : {}),
       agentActiveCount: automationStatus.activeAgents,
       agentTotalCount: automationStatus.totalAgents,
+      agentWaitingCount: automationStatus.waitingAgents,
       agentBackgroundCount: automationStatus.backgroundTasks,
     };
     // The welcome header remains visible above the conversation transcript.

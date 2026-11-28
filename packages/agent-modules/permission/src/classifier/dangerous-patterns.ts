@@ -290,16 +290,29 @@ export const PIPE_TO_SHELL_PATTERN = new RegExp(
  * keep `lastIndex` state local; the source strings are shared.
  */
 const PIPE_TO_SHELL_PATTERN_SOURCE = PIPE_TO_SHELL_PATTERN.source;
-const PIPE_TO_INLINE_INTERPRETER_C_PATTERN_SOURCE =
-  // Defined below; assembled here so both regexes stay literally identical
-  // except for the `-c <literal>` tail anchor.
-  `\\|\\s*(?:sudo\\s+)?(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*(?:(?:env|command|exec)\\s+)*["']?(?:[\\w./-]*\\/)?(?:${LOCAL_SCRIPT_INTERPRETERS_SOURCE})["']?\\s+-c\\s+(?:'[^']*'|"[^"$\`]*")`;
+const PIPE_INTERPRETER_PREFIX_SOURCE = `\\|\\s*(?:sudo\\s+)?(?:[A-Z_][A-Z0-9_]*=\\S*\\s+)*(?:(?:env|command|exec)\\s+)*["']?(?:[\\w./-]*\\/)?`;
+const INLINE_LITERAL_SOURCE = `(?:'[^']*'|"[^"$\`]*")`;
+/**
+ * Pipe-to-interpreter shapes whose program comes from argv, so stdin is only
+ * data. Shares the prefix with {@link PIPE_TO_SHELL_PATTERN} so match starts
+ * line up:
+ *   - `| <interpreter> -c '<literal>'`
+ *   - `| python[3] -m json.tool` (the only allowed module: it pretty-prints
+ *     JSON and runs nothing from stdin)
+ *
+ * `node -e|-p` stays out: its program can read and eval fd 0
+ * (`node -e 'eval(require("fs").readFileSync(0,"utf8"))'`).
+ */
+const PIPE_TO_INLINE_C_TAIL_SOURCE = `(?:${LOCAL_SCRIPT_INTERPRETERS_SOURCE})["']?\\s+-c\\s+${INLINE_LITERAL_SOURCE}`;
+const PIPE_TO_JSON_TOOL_TAIL_SOURCE = `python3?["']?\\s+-m\\s+json\\.tool(?=$|[\\s|;&)])`;
+const PIPE_TO_DATA_ONLY_INTERPRETER_PATTERN_SOURCE = `${PIPE_INTERPRETER_PREFIX_SOURCE}(?:${PIPE_TO_INLINE_C_TAIL_SOURCE}|${PIPE_TO_JSON_TOOL_TAIL_SOURCE})`;
 
 /**
- * Returns true when EVERY pipe-to-interpreter occurrence in `command` is the
- * safe inline-`-c` literal shape (interpreter executes a fixed program from
- * argv, stdin is data). Returns false when at least one pipe is a raw
- * `... | bash` / `... | python` (stdin IS the program — dangerous).
+ * Returns true when EVERY pipe-to-interpreter occurrence in `command` is a
+ * data-only shape (interpreter executes a fixed program from argv, stdin is
+ * data): inline `-c` literals or `python -m json.tool`.
+ * Returns false when at least one pipe is a raw `... | bash` /
+ * `... | python` (stdin IS the program — dangerous).
  *
  * Caller is expected to have already confirmed PIPE_TO_SHELL_PATTERN matches
  * at least once; this helper distinguishes the safe inline subset from the
@@ -316,7 +329,7 @@ export function allPipeToShellAreInlineLiteralC(command: string): boolean {
   }
   if (pipeStarts.length === 0) return false;
 
-  const inlineRe = new RegExp(PIPE_TO_INLINE_INTERPRETER_C_PATTERN_SOURCE, 'gi');
+  const inlineRe = new RegExp(PIPE_TO_DATA_ONLY_INTERPRETER_PATTERN_SOURCE, 'gi');
   const inlineStarts = new Set<number>();
   let im: RegExpExecArray | null;
   while ((im = inlineRe.exec(command)) !== null) {
@@ -336,6 +349,57 @@ export function allPipeToShellAreInlineLiteralC(command: string): boolean {
  * form still bailed on the non-shell interpreters.
  */
 export const LOCAL_SCRIPT_INTERPRETERS_RE = LOCAL_SCRIPT_INTERPRETERS_SOURCE;
+
+// ---------------------------------------------------------------------------
+// Strict word boundaries for the bare-word HARD rules
+//
+// `shred` / `srm` / `wipe` / `secure-delete` / `wipefs` / `blkdiscard` /
+// `lvremove` / `sdelete` used to be written as bare words (`/\bsrm\b/i`).
+// `\b` is a word boundary on both sides of `-`, `.`, `=` and `/`, so they
+// denied option clusters (`uname -srm`), file names (`./srm.log`,
+// `./no-such-wipe-dir`), search patterns (`--grep=shred`) and package names
+// (`npm view secure-delete`). Those categories are final-deny and run before
+// the bypass early-exit and before user allow rules, so the user could not
+// override the false denial.
+//
+// Only the boundary is tightened — the rules still scan the raw command text,
+// so no list of launcher programs has to stay in sync. (A command-name-position
+// approach needed such a list and silently let borrowed execution such as
+// `ssh host srm x` through in bypass mode whenever an entry was missing.)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a HARD-blocked bash pattern that fires only when `word` is
+ *
+ *   1. a complete shell word — preceded by start-of-text, whitespace, a
+ *      separator or group delimiter (`;` `&` `|` `(` `)` `{` `}`), a quote or
+ *      backtick, or a path separator (`/` `\`); followed by end-of-text,
+ *      whitespace, one of those same delimiters, a redirect (`<` `>`), or a
+ *      quote. A trailing `.exe` is allowed for the Windows spelling; or
+ *   2. the head of a long option — `--<word>`, preceded by start-of-text or
+ *      whitespace and not followed by a word character, so
+ *      `bleachbit --shred f` and `mytool --wipe=all` keep matching while
+ *      `--grep=shred` and `--no-wipe` do not.
+ *
+ * The trailing boundary also accepts the characters that splice the word
+ * into the same shell command instead of ending it: parameter expansion `$`
+ * (`${IFS}`, `$'\t'`), glob metacharacters `*` `?` `[`, an escape or
+ * line-continuation `\`, and the brace-expansion separator `,`. Without them
+ * `srm${IFS}/tmp/x` and `{srm,file}` ran the command while slipping past the
+ * rule. `:` is deliberately excluded so `pnpm run wipe:cache` stays allowed.
+ *
+ * An option cluster (`-srm`), a file name (`srm.txt`, `wipe/`) and a
+ * `key=value` operand (`--mode=wipe`) are data and no longer deny. The front
+ * boundary is a consumed prefix rather than a lookbehind, so the pattern stays
+ * a single linear scan.
+ */
+function hardBlockWordPattern(word: string): RegExp {
+  // `-` needs no escape: it is literal outside a character class.
+  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const before = '(?:^|[\\s;&|(){}`\'"\\\\/])';
+  const after = '(?=$|[\\s;&|(){}`\'"<>$*?\\[\\\\,])';
+  return new RegExp(`(?:${before}${escaped}(?:\\.exe)?${after}|(?:^|\\s)--${escaped}(?!\\w))`, 'i');
+}
 
 /** Bash-side hard-blocked patterns. Regexes match command text, not filesystem APIs. */
 const HARD_BLOCKED_BASH_PATTERNS: ReadonlyArray<{
@@ -403,22 +467,22 @@ const HARD_BLOCKED_BASH_PATTERNS: ReadonlyArray<{
 
   // ---- irrecoverable-delete: secure / unrecoverable file deletion tools
   {
-    pattern: /\bshred\b/i,
+    pattern: hardBlockWordPattern('shred'),
     category: 'irrecoverable-delete',
     description: 'shred (secure delete, irrecoverable)',
   },
   {
-    pattern: /\bsrm\b/i,
+    pattern: hardBlockWordPattern('srm'),
     category: 'irrecoverable-delete',
     description: 'srm (secure delete, irrecoverable)',
   },
   {
-    pattern: /\bwipe\b/i,
+    pattern: hardBlockWordPattern('wipe'),
     category: 'irrecoverable-delete',
     description: 'wipe (secure delete, irrecoverable)',
   },
   {
-    pattern: /\bsecure-delete\b/i,
+    pattern: hardBlockWordPattern('secure-delete'),
     category: 'irrecoverable-delete',
     description: 'secure-delete (irrecoverable)',
   },
@@ -449,12 +513,12 @@ const HARD_BLOCKED_BASH_PATTERNS: ReadonlyArray<{
 
   // ---- disk-erase: filesystem / partition / disk wipes
   {
-    pattern: /\bwipefs\b/i,
+    pattern: hardBlockWordPattern('wipefs'),
     category: 'disk-erase',
     description: 'wipefs (filesystem signature wipe)',
   },
   {
-    pattern: /\bblkdiscard\b/i,
+    pattern: hardBlockWordPattern('blkdiscard'),
     category: 'disk-erase',
     description: 'blkdiscard (block-device discard)',
   },
@@ -501,7 +565,7 @@ const HARD_BLOCKED_BASH_PATTERNS: ReadonlyArray<{
     description: 'btrfs subvolume delete',
   },
   {
-    pattern: /\blvremove\b/i,
+    pattern: hardBlockWordPattern('lvremove'),
     category: 'storage-volume-delete',
     description: 'lvremove (LVM logical volume removal)',
   },
@@ -523,7 +587,7 @@ const HARD_BLOCKED_BASH_PATTERNS: ReadonlyArray<{
     description: 'format <drive>: (Windows volume format)',
   },
   {
-    pattern: /\bsdelete\b/i,
+    pattern: hardBlockWordPattern('sdelete'),
     category: 'windows-secure-erase',
     description: 'sdelete (Sysinternals secure delete)',
   },
@@ -1273,7 +1337,11 @@ const SEP = '(?:^|[;&|]\\s*|\\n\\s*)';
 //     a different working directory. Other separated-arg short options
 //     aren't common before dangerous git subcommands; -c and -C are the
 //     canonical git escape hatches.
-const FLAGS = '(?:-\\S+\\s+|-[cC]\\s+\\S+\\s+)*';
+// A bare `-c` / `-C` always takes the next token, so the two branches never
+// both match one token: with overlapping branches a run like
+// `-c -x -C -y …` had exponentially many splits and a ~250-char command
+// could block the runtime for minutes.
+const FLAGS = '(?:-(?![cC]\\s)\\S+\\s+|-[cC]\\s+\\S+\\s+)*';
 
 export const SUBCOMMAND_DANGEROUS_PATTERNS: ReadonlyArray<{
   pattern: RegExp;

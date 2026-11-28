@@ -1,3 +1,4 @@
+import { TranscriptReplayCache, type TranscriptRenderedUnit } from './replay-cache.js';
 import { formatTokensPerSecond } from '../rendering/output-rate.js';
 import { Markdown, Text } from '../engine/public.js';
 import { projectAssistantContentForTerminal } from '../../application/assistant-content.js';
@@ -65,14 +66,10 @@ const PTC_PROBLEM_CHILD_LIMIT = 3;
 const MIN_PTC_DESCRIPTION_WIDTH = 8;
 
 export class TranscriptView implements Component {
-  private readonly unitCache = new Map<
-    string,
-    {
-      signature: string;
-      width: number;
-      lines: readonly string[];
-    }
-  >();
+  private readonly unitCache = new Map<string, TranscriptRenderedUnit>();
+  private readonly replayCache = new TranscriptReplayCache();
+  // Source-local revisions are meaningful only for this source, even after a frame reset.
+  private previousSource: TranscriptProjectionSource | undefined;
   private readonly markdownComponents = new Map<string, Markdown>();
   // The theme each cached component was built with; a different theme needs a fresh component.
   private readonly markdownThemes = new Map<string, typeof markdownTheme>();
@@ -113,6 +110,16 @@ export class TranscriptView implements Component {
   /** First cell kept after trimming final rows in append-only mode. */
   private trimmedBeforeCellId: string | undefined;
   private discardedRows = 0;
+  /**
+   * Only a prefix that was fully stable in the previous rendered frame may be
+   * trimmed. Current-frame stability is not enough: those rows may not have
+   * reached the terminal yet.
+   */
+  private previousStableUnits: readonly { key: string; signature: string }[] = [];
+  private previousStableRows = 0;
+  private previousFrameWidth: number | undefined;
+  private previousPresentationRevision: number | undefined;
+  private previousAppendOnly = false;
   /** Paces re-presenting streaming assistant text; absent without a way to render later. */
   private readonly streamingPresentation: StreamingPresentationPacer | undefined;
   /** Whether the frame being rendered re-presented a unit's earlier lines. */
@@ -164,19 +171,41 @@ export class TranscriptView implements Component {
   invalidate(): void {
     this.streamingPresentation?.reset();
     this.unitCache.clear();
+    this.replayCache.clear();
     for (const markdown of this.markdownComponents.values()) markdown.invalidate();
     this.frameCache = undefined;
   }
 
+  /**
+   * Clear only state that assumes the terminal still owns the previously emitted
+   * native scrollback. A full replay has erased that history, so the next frame
+   * must render the retained projection from its original leading cell again.
+   */
+  resetNativeHistory(): void {
+    this.resetRetainedDocumentState();
+    this.frameCache = undefined;
+  }
+
   dispose(): void {
-    this.trimmedBeforeCellId = undefined;
-    this.discardedRows = 0;
+    this.resetRetainedDocumentState();
     this.streamingPresentation?.reset();
     this.unitCache.clear();
+    this.replayCache.clear();
     this.markdownComponents.clear();
     this.markdownThemes.clear();
     this.frameCache = undefined;
     this.projectionWindow.reset();
+  }
+
+  private resetRetainedDocumentState(): void {
+    this.trimmedBeforeCellId = undefined;
+    this.discardedRows = 0;
+    this.stableRows = 0;
+    this.previousStableUnits = [];
+    this.previousStableRows = 0;
+    this.previousFrameWidth = undefined;
+    this.previousPresentationRevision = undefined;
+    this.previousAppendOnly = false;
   }
 
   render(width: number): string[] {
@@ -186,9 +215,20 @@ export class TranscriptView implements Component {
       ? undefined
       : (sourceCells as TranscriptProjectionSource);
     const sourceRevision = source?.revision;
-    if (this.frameCache && this.frameCache.source !== source) this.invalidate();
+    if (this.previousSource !== source) {
+      this.invalidate();
+      this.resetRetainedDocumentState();
+      this.previousSource = source;
+    }
     const presentationRevision = this.displayModes.revision;
     const appendOnly = this.appendOnly();
+    const canTrimPreviouslyRendered =
+      appendOnly &&
+      this.previousAppendOnly &&
+      this.previousFrameWidth === normalizedWidth &&
+      this.previousPresentationRevision === presentationRevision &&
+      this.previousStableRows > this.retainedRows.high &&
+      this.previousStableUnits.length > 1;
     if (
       source &&
       sourceRevision !== undefined &&
@@ -196,7 +236,8 @@ export class TranscriptView implements Component {
       this.frameCache.sourceRevision === sourceRevision &&
       this.frameCache.presentationRevision === presentationRevision &&
       this.frameCache.appendOnly === appendOnly &&
-      this.frameCache.width === normalizedWidth
+      this.frameCache.width === normalizedWidth &&
+      !canTrimPreviouslyRendered
     ) {
       this.stableRows = this.frameCache.stableRows;
       return this.frameCache.lines;
@@ -204,7 +245,10 @@ export class TranscriptView implements Component {
 
     const projection = this.projectionWindow.project(sourceCells, { appendOnly });
     let projectedCells = projection.cells;
-    if (!appendOnly) this.trimmedBeforeCellId = undefined;
+    if (!appendOnly) {
+      this.trimmedBeforeCellId = undefined;
+      this.replayCache.clear();
+    }
     if (this.trimmedBeforeCellId) {
       const firstKept = projectedCells.findIndex((cell) => cell.id === this.trimmedBeforeCellId);
       // The source was replaced (new or switched Session); start from its projection.
@@ -221,7 +265,8 @@ export class TranscriptView implements Component {
     }\u001C${unitSignatures.join('\u001F')}`;
     if (
       this.frameCache?.width === normalizedWidth &&
-      this.frameCache.signature === frameSignature
+      this.frameCache.signature === frameSignature &&
+      !canTrimPreviouslyRendered
     ) {
       this.stableRows = this.frameCache.stableRows;
       return this.frameCache.lines;
@@ -245,12 +290,14 @@ export class TranscriptView implements Component {
     let frontierOpen = true;
     let blockStart = lines.length;
     const unitRowStarts: number[] = [];
+    const stableUnits: { key: string; signature: string }[] = [];
     units.forEach((unit, index) => {
       const next = units[index + 1];
       const key = renderUnitKey(unit);
       activeUnitKeys.add(key);
       const rendered = this.renderUnit(unit, next, normalizedWidth, unitSignatures[index] ?? '');
       const connectedToNext = isConnectedRenderUnit(unit, next);
+      const unitFrameSignature = `${unitSignatures[index] ?? ''}\u001E${connectedToNext ? 'connected' : 'closed'}`;
       const rowsStart = lines.length;
       unitRowStarts.push(rowsStart);
       lines.push(...rendered);
@@ -258,6 +305,7 @@ export class TranscriptView implements Component {
         const finalRows = this.finalRowCount(unit, next, rendered.length);
         if (finalRows >= rendered.length) {
           stableRows = lines.length;
+          stableUnits.push({ key, signature: unitFrameSignature });
         } else {
           // A separator belongs to the block after it; keep it live with a live block.
           stableRows = finalRows > 0 ? rowsStart + finalRows : blockStart;
@@ -269,14 +317,42 @@ export class TranscriptView implements Component {
         lines.push(' ');
       }
     });
-    if (appendOnly && stableRows > this.retainedRows.high) {
-      // Drop whole leading units that are final and far above the screen. Retained
-      // units render independently of earlier ones, so the result is an exact suffix.
-      const target = Math.min(stableRows, lines.length - this.retainedRows.low);
+
+    // A current frame may make a large batch of rows stable at once. Only the
+    // prefix that was already fully stable in the previous frame is eligible;
+    // newly stable rows must be emitted once before they can be discarded.
+    let eligibleStableUnitCount = 0;
+    if (canTrimPreviouslyRendered) {
+      const limit = Math.min(stableUnits.length, this.previousStableUnits.length);
+      while (
+        eligibleStableUnitCount < limit &&
+        stableUnits[eligibleStableUnitCount]?.key ===
+          this.previousStableUnits[eligibleStableUnitCount]?.key &&
+        stableUnits[eligibleStableUnitCount]?.signature ===
+          this.previousStableUnits[eligibleStableUnitCount]?.signature
+      ) {
+        eligibleStableUnitCount += 1;
+      }
+    }
+    // Keep the first previously-stable unit at the retained boundary. This also
+    // keeps the separator before a newly-live unit on the safe side of the cut.
+    const eligibleStableRows =
+      eligibleStableUnitCount > 1
+        ? Math.min(stableRows, unitRowStarts[eligibleStableUnitCount - 1] ?? stableRows)
+        : 0;
+    let renderedStableUnits = stableUnits;
+    if (appendOnly && eligibleStableRows > this.retainedRows.high) {
+      // Drop whole leading units that were already emitted and are far above the
+      // screen. Retained units render independently of earlier ones, so the result
+      // is an exact suffix.
+      const target = Math.max(
+        0,
+        Math.min(eligibleStableRows, lines.length - this.retainedRows.low),
+      );
       let cutUnit = -1;
-      // A cut must never land between a run_code program and its child calls.
+      const maxCutUnit = eligibleStableUnitCount - 1;
       const safeCuts = ptcSafeCutUnits(units, projectedCells);
-      for (let index = 1; index < units.length; index += 1) {
+      for (let index = 1; index < units.length && index <= maxCutUnit; index += 1) {
         if ((unitRowStarts[index] ?? Infinity) > target) break;
         if (safeCuts && !safeCuts[index]) continue;
         cutUnit = index;
@@ -288,6 +364,7 @@ export class TranscriptView implements Component {
         this.discardedRows += cutRow;
         lines = lines.slice(cutRow);
         stableRows -= cutRow;
+        renderedStableUnits = stableUnits.slice(cutUnit);
       }
     }
     this.pruneUnitCaches(activeUnitKeys);
@@ -306,6 +383,11 @@ export class TranscriptView implements Component {
           appendOnly,
           stableRows,
         };
+    this.previousStableUnits = appendOnly ? renderedStableUnits : [];
+    this.previousStableRows = appendOnly ? stableRows : 0;
+    this.previousFrameWidth = normalizedWidth;
+    this.previousPresentationRevision = presentationRevision;
+    this.previousAppendOnly = appendOnly;
     this.performanceSnapshot = {
       sourceUnits: sourceCells.length,
       projectedCells: projection.cells.length,
@@ -404,8 +486,9 @@ export class TranscriptView implements Component {
     const signature = `${presentationSignature}:${dataSignature}:${
       connectedToNext ? 'connected' : 'closed'
     }`;
-    const cached = this.unitCache.get(key);
+    const cached = this.unitCache.get(key) ?? this.replayCache.take(key);
     if (cached?.width === width && cached.signature === signature) {
+      this.unitCache.set(key, cached);
       this.frameUnitCacheHits += 1;
       return cached.lines;
     }
@@ -522,8 +605,11 @@ export class TranscriptView implements Component {
   }
 
   private pruneUnitCaches(activeUnitKeys: ReadonlySet<string>): void {
-    for (const key of this.unitCache.keys()) {
+    for (const [key, cached] of this.unitCache) {
       if (activeUnitKeys.has(key)) continue;
+      // Only append-only trimming can later need these rows for native-history replay.
+      // Entries still pass the ordinary width/content/presentation signature check.
+      if (this.trimmedBeforeCellId) this.replayCache.set(key, cached);
       this.unitCache.delete(key);
     }
     // A held streaming unit has no unit cache entry, so prune components separately.
@@ -575,6 +661,7 @@ function renderUnitSignature(
         cell.turnId,
         cell.toolCallId,
         cell.parentToolCallId,
+        cell.toolSummary,
         cell.ptcFoldedChildren,
         cell.toolErrorCode,
         cell.expanded,
@@ -841,11 +928,20 @@ function renderPtcGroup(
   const running = isMutableCell(program);
 
   if (mode === 'expanded') {
+    const prefix = chalk.hex(colors.dim)(blockRail);
     if (input.code?.trim()) {
-      const prefix = chalk.hex(colors.dim)(blockRail);
       lines.push(
         ...highlightSyntaxLines(input.code.replace(/\n+$/u, ''), 'javascript').map((line) =>
           truncateToWidth(`${prefix}${line}`, Math.max(0, width), chalk.hex(colors.muted)('…')),
+        ),
+      );
+    } else if (input.path) {
+      // A saved-script invocation has no program text; show what it runs instead.
+      lines.push(
+        truncateToWidth(
+          `${prefix}${input.path}${chalk.hex(colors.muted)(runCodeArgsText(input.args))}`,
+          Math.max(0, width),
+          chalk.hex(colors.muted)('…'),
         ),
       );
     }
@@ -1024,7 +1120,15 @@ function renderPtcChildLabel(
   }${error ? chalk.hex(colors.error)(` · ${error}`) : ''}`;
 }
 
-function readRunCodeInput(content: string): { description?: string; code?: string } {
+interface RunCodeInput {
+  description?: string;
+  code?: string;
+  /** Saved script path; `path` and `args` never reach the tool schema. */
+  path?: string;
+  args?: unknown;
+}
+
+function readRunCodeInput(content: string): RunCodeInput {
   const trimmed = content.trim();
   if (!trimmed) return {};
   try {
@@ -1036,6 +1140,8 @@ function readRunCodeInput(content: string): { description?: string; code?: strin
           ? { description: firstVisibleLine(record.description) }
           : {}),
         ...(typeof record.code === 'string' ? { code: record.code } : {}),
+        ...(typeof record.path === 'string' ? { path: record.path } : {}),
+        ...(record.args === undefined ? {} : { args: record.args }),
       };
     }
     return {};
@@ -1043,10 +1149,23 @@ function readRunCodeInput(content: string): { description?: string; code?: strin
     // Arguments still streaming, or retained head-and-tail after the payload budget.
     const description = readJsonStringField(trimmed, 'description');
     const code = readJsonStringField(trimmed, 'code');
+    const path = readJsonStringField(trimmed, 'path');
     return {
       ...(description !== undefined ? { description: firstVisibleLine(description) } : {}),
       ...(code !== undefined ? { code } : {}),
+      ...(path !== undefined ? { path } : {}),
     };
+  }
+}
+
+/** Compact `args` for the saved-script line; never allowed to break the render. */
+function runCodeArgsText(args: unknown): string {
+  if (args === undefined) return '';
+  try {
+    const text = JSON.stringify(args);
+    return typeof text === 'string' ? ` ${text}` : '';
+  } catch {
+    return '';
   }
 }
 
@@ -1123,6 +1242,8 @@ function renderCell(
     }
     return wrapSemanticMessageZone(lines);
   }
+
+  if (cell.kind === 'context-reset') return renderContextResetDivider(cell, width);
 
   if (cell.kind === 'compaction') {
     const running = cell.status === 'pending' || cell.status === 'running';
@@ -1220,7 +1341,9 @@ function renderCell(
       definition?.accentLabel,
       cell.status,
     );
-    const rawSummary = formatTuiToolSummary(cell.content);
+    const rawSummary = cell.toolSummary
+      ? sanitizeTerminalText(cell.toolSummary)
+      : formatTuiToolSummary(cell.content);
     const isShellTool = definition?.family === 'shell';
     const toolSummary = isShellTool ? evidence.summary : rawSummary || evidence.summary;
     const target = toolSummary
@@ -1319,6 +1442,21 @@ function anchorAssistantLines(lines: readonly string[], width: number): string[]
         : ' '.repeat(Math.min(ASSISTANT_ANCHOR_WIDTH, width));
     return truncateToWidth(`${prefix}${line}`, width, '');
   });
+}
+
+/** A centered horizontal rule with a short label. */
+function renderContextResetDivider(cell: TranscriptCell, width: number): string[] {
+  const normalizedWidth = Math.max(0, Math.floor(width));
+  if (normalizedWidth === 0) return [];
+  const label = sanitizeTerminalText(cell.content).trim();
+  const labelWidth = visibleWidth(label);
+  if (labelWidth + 2 >= normalizedWidth) {
+    return [truncateToWidth(chalk.hex(colors.muted)(label), normalizedWidth, '…')];
+  }
+  const rule = normalizedWidth - labelWidth - 2;
+  const left = '─'.repeat(Math.floor(rule / 2));
+  const right = '─'.repeat(rule - left.length);
+  return [chalk.hex(colors.muted)(`${left} ${label} ${right}`)];
 }
 
 function wrapSemanticMessageZone(lines: string[]): string[] {

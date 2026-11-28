@@ -286,6 +286,17 @@ export class Editor implements Component, Focusable {
     this.dismissAttachmentPreview();
   }
 
+  /** Inserts text through the regular bracketed-paste path without the `onPaste` hook. */
+  pasteInline(text: string): void {
+    const onPaste = this.onPaste;
+    this.onPaste = undefined;
+    try {
+      this.handleInput(`\x1b[200~${text}\x1b[201~`);
+    } finally {
+      this.onPaste = onPaste;
+    }
+  }
+
   getAttachmentPreview(): EditorAttachmentPlaceholder | undefined {
     if (!this.focused) return undefined;
     const cursor = this.engine.captureState().cursor;

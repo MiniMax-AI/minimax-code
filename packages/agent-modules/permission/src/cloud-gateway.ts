@@ -28,7 +28,7 @@
  *     }
  *
  * The cloud side is intentionally untouched. Prompt assembly stays in the
- * local runtime (`packages/local-runtime/prompts/llm-gate-classifier.md`),
+ * local runtime (`packages/local-runtime-v2/assets/prompts/llm-gate-classifier.md`),
  * conversation context is rendered runtime-side (see `conversation-renderer.ts`),
  * and the cloud endpoint remains a thin wrapper around gemini-flash with the
  * same prompt baked in.
@@ -80,10 +80,28 @@ export interface CloudClassifyRequest {
  * variant the HTTP client emits on network/timeout failure (fail-safe to
  * ask-user).
  */
+/**
+ * Why the HTTP client synthesized a `timeout` verdict. A bounded enum for
+ * telemetry only: routing is identical for every value (fail closed to ask).
+ */
+export type CloudClassifyFailureReason =
+  | 'no_url'
+  | 'timeout'
+  | 'network'
+  | 'http_401'
+  | 'http_403'
+  | 'http_4xx'
+  | 'http_5xx'
+  | 'non_json'
+  | 'biz_error'
+  | 'invalid_verdict';
+
 export interface CloudClassifyVerdict {
   kind: 'allow' | 'confirm' | 'block' | 'timeout';
   /** Localized rationale from the cloud, or a daemon-local fallback on timeout. */
   reasonLocalized: string;
+  /** Set only on a synthesized `timeout`; see {@link CloudClassifyFailureReason}. */
+  failureReason?: CloudClassifyFailureReason;
 
   /**
    * Forward-compatible: when the cloud endpoint adds a `suggested_rule`

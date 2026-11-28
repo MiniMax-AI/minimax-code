@@ -15,6 +15,8 @@ import {
 export interface CreateMCodeLocalAuthOptions extends AuthNamespaceInput {
   fetchImpl?: typeof fetch;
   onDiagnostic?: AuthDiagnosticObserver;
+  /** See HttpOAuthClientOptions.loginRequestTimeoutMs; unset keeps login requests unbounded. */
+  loginRequestTimeoutMs?: number;
   endpoints: Pick<
     HttpOAuthClientOptions,
     | 'deviceAuthorizationEndpoint'
@@ -36,8 +38,15 @@ function createCore(options: CreateMCodeLocalAuthOptions): MCodeOAuthCore {
   const namespace = createAuthNamespace(options);
   return new MCodeOAuthCore({
     namespace,
-    credentialStore: createCredentialStore({ authHome: namespace.namespaceHome }),
-    oauthClient: new HttpOAuthClient({ ...options.endpoints, fetchImpl: options.fetchImpl }),
+    credentialStore: createCredentialStore({
+      authHome: namespace.namespaceHome,
+      root: namespace.authHome,
+    }),
+    oauthClient: new HttpOAuthClient({
+      ...options.endpoints,
+      fetchImpl: options.fetchImpl,
+      loginRequestTimeoutMs: options.loginRequestTimeoutMs,
+    }),
     initialize: () => migrateLegacyAuthNamespace(namespace),
     onDiagnostic: options.onDiagnostic,
   });

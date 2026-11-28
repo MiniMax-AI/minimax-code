@@ -132,20 +132,23 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		}
 	}
 
-	// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
-	if (contextWindow && message.stopReason === "stop") {
-		const inputTokens = message.usage.input + message.usage.cacheRead;
-		if (inputTokens > contextWindow) {
+	if (contextWindow) {
+		const contextTokens = message.usage.contextTokens;
+		const outputTokens = Number.isFinite(message.usage.output) ? message.usage.output : 0;
+		const inputTokens =
+			typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0
+				? Math.max(0, contextTokens - outputTokens)
+				: message.usage.input + message.usage.cacheRead;
+
+		// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
+		if (message.stopReason === "stop" && inputTokens > contextWindow) {
 			return true;
 		}
-	}
 
-	// Case 3: Length-stop overflow (Xiaomi MiMo style) - server truncates oversized input
-	// to fit the context window, leaving no room for output. Returns stopReason "length"
-	// with output=0 and input+cacheRead filling the context window.
-	if (contextWindow && message.stopReason === "length" && message.usage.output === 0) {
-		const inputTokens = message.usage.input + message.usage.cacheRead;
-		if (inputTokens >= contextWindow * 0.99) {
+		// Case 3: Length-stop overflow (Xiaomi MiMo style) - server truncates oversized input
+		// to fit the context window, leaving no room for output. Returns stopReason "length"
+		// with output=0 and single-turn input filling the context window.
+		if (message.stopReason === "length" && message.usage.output === 0 && inputTokens >= contextWindow * 0.99) {
 			return true;
 		}
 	}

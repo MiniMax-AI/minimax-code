@@ -34,6 +34,24 @@ export interface BrowserSnapshotNode {
   isClickable: boolean;
   paintOrder: number | null;
   frameId?: string;
+  formState?: BrowserFormState;
+}
+
+/**
+ * Live form-control state (`beta.browserReadV2`): what the page currently holds,
+ * which can differ from the serialized `value`/`checked`/`selected` attributes
+ * after scripts or the user changed it. Credential fields never carry a value.
+ */
+export interface BrowserFormState {
+  /** input/textarea current value; select: value of the first selected option. */
+  value?: string;
+  valueTruncated?: true;
+  /** checkbox/radio current checkedness. */
+  checked?: boolean;
+  /** select: label of the first selected option. */
+  selectedText?: string;
+  /** select: number of selected options, only when more than one. */
+  selectedCount?: number;
 }
 
 export interface BrowserInteractiveElement {
@@ -55,6 +73,8 @@ export interface BrowserInteractiveElement {
   paintOrder?: number;
   inputStrategy?: 'focused-keyboard';
   semanticBackendNodeId?: number;
+  /** Present only for scans that request live form state. */
+  formState?: BrowserFormState;
 }
 
 export type BrowserWaitState = 'attached' | 'detached' | 'visible' | 'hidden';

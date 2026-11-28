@@ -1,3 +1,4 @@
+import type { AllowedMetricName } from '@mavis/shared/local-runtime-logging/metrics';
 import { getSandboxConfigDefaults, type SandboxConfig } from '@mavis/config';
 import { resolveBashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
 
@@ -25,8 +26,7 @@ interface LocalSandboxCompositionOptions {
   readonly log?: SandboxObservabilityOptions['log'];
   readonly sandboxOperationsFactory?: DeferredLocalSandboxBashOperationsFactory;
   readonly configWriter: SandboxConfigCommitWriter;
-  readonly metrics?: Pick<SandboxMetricsClient, 'counter' | 'histogram'> &
-    Partial<Pick<SandboxMetricsClient, 'gauge'>>;
+  readonly metrics?: Pick<SandboxMetricsClient, 'counter' | 'histogram'>;
   readonly nowMs?: () => number;
   readonly platform?: NodeJS.Platform;
   readonly sandboxDescriptors?: readonly SandboxBackendDescriptorForTest[];
@@ -63,9 +63,10 @@ export function composeLocalSandboxService(
     ...(input.metrics
       ? {
           metrics: {
-            counter: (name, delta, labels) => input.metrics?.counter(name, delta, labels),
-            histogram: (name, value, labels) => input.metrics?.histogram(name, value, labels),
-            gauge: (name, value) => input.metrics?.gauge?.(name, value),
+            counter: (name: AllowedMetricName, delta, labels) =>
+              input.metrics?.counter(name, delta, labels),
+            histogram: (name: AllowedMetricName, value, labels) =>
+              input.metrics?.histogram(name, value, labels),
           },
         }
       : {}),

@@ -42,6 +42,13 @@ export type AppMode = 'coding' | 'work';
 export type SessionToolCallMode = 'native' | 'ptc';
 export type SessionInteractionMode = 'plan' | 'goal';
 
+export interface SessionAdvisorSelection {
+  readonly enabled: boolean;
+  readonly model?: string;
+  readonly thinking?: ConversationModelThinkingSelection;
+  readonly contextWindow?: number;
+}
+
 export interface SessionRunLocation {
   readonly mode: SessionRunLocationMode;
   readonly resolvedDir: string;
@@ -85,6 +92,7 @@ export interface SessionRecord {
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   readonly effectiveModelContextWindow?: number | null;
   readonly effectiveModelMaxOutputTokens?: number | null;
+  readonly advisor?: SessionAdvisorSelection | null;
   readonly scratchpadPath?: string;
   readonly origin?: SessionOrigin;
   readonly sessionDataVersion?: number;
@@ -135,6 +143,7 @@ export interface SessionCreateInput {
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   readonly effectiveModelContextWindow?: number | null;
   readonly effectiveModelMaxOutputTokens?: number | null;
+  readonly advisor?: SessionAdvisorSelection | null;
   readonly memoryPolicy?: SessionMemoryPolicy;
   readonly origin?: SessionOrigin;
   readonly sessionOrigin?: SessionDataOrigin;

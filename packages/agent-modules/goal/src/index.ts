@@ -30,7 +30,10 @@ export type {
   LastWorkerProposalV1,
   ThreadGoalFailureClass,
   ThreadGoalExecutionWait,
+  ThreadGoalWaitedTask,
   ThreadGoalState,
+  ThreadGoalRequestAccounting,
+  ThreadGoalTokenUsage,
   ThreadGoalSignalCollectionResult,
   ThreadGoalStatus,
   ThreadGoalStatusReason,
@@ -81,6 +84,14 @@ export {
 } from './store-port.js';
 
 export {
+  THREAD_GOAL_AUTO_RECOVERABLE_USAGE_REASON,
+  THREAD_GOAL_USAGE_RECOVERY_MAX_HORIZON_MS,
+  isAwaitingUsageRecovery,
+  normalizeUsageRecoveryAtMs,
+  usageRecoveryDelayMs,
+} from './usage-recovery.js';
+
+export {
   DEFAULT_GOAL_CONTINUATION_TEMPLATE,
   DEFAULT_GOAL_RECOVERY_TEMPLATE,
   DEFAULT_GOAL_RECOVERY_TERMINAL_AUDIT_TEMPLATE,
@@ -103,6 +114,12 @@ export {
   fingerprintThreadGoalToolCall,
 } from './reply-fingerprint.js';
 export { digestThreadGoalObjective } from './objective-digest.js';
+export {
+  THREAD_GOAL_KICKOFF_ORIGIN_TYPE,
+  THREAD_GOAL_KICKOFF_PREFIX,
+  isThreadGoalKickoffQueueItem,
+  readThreadGoalKickoffOriginRecord,
+} from './kickoff-identity.js';
 export {
   boundVerificationTranscript,
   type TranscriptWindowResult,
@@ -149,6 +166,7 @@ export type {
 } from './verification/subagent.js';
 export type {
   EvaluatorAdapterOptions,
+  EvaluatorCallLifecycle,
   EvaluatorModelCallFailureCode,
   EvaluatorModelCallInput,
   EvaluatorModelCallResult,
@@ -170,6 +188,8 @@ export {
   GetGoalToolDef,
   hasUpdateGoalTokenBudgetIntent,
   resolveUpdateGoalMode,
+  UPDATE_GOAL_LIMIT_FIELDS,
+  type UpdateGoalLimitField,
   type UpdateGoalResolvedMode,
   type CreateGoalToolInput,
   type UpdateGoalToolInput,
@@ -182,8 +202,13 @@ export type {
   ThreadGoalTokenBudgetMutationInput,
   ThreadGoalTokenBudgetMutationPort,
   ThreadGoalTokenBudgetMutationResult,
+  ThreadGoalLimitName,
+  ThreadGoalLimitsResolver,
+  ThreadGoalOwnLimits,
 } from './tool-impls.js';
 export {
+  GOAL_BUDGET_WRAP_UP_INSTRUCTION,
+  GOAL_TOKEN_BUDGET_WRAP_UP_INSTRUCTION,
   GOAL_COMPLETION_TOOL_REFUSAL,
   GOAL_FINAL_REPLY_INSTRUCTION,
   GOAL_FINAL_REPLY_RETRY_PROMPT,
@@ -193,7 +218,14 @@ export {
 } from './final-reply.js';
 export type {
   GoalFinalReplyGate,
+  GoalFinalReplyGateOptions,
   GoalFinalReplyResponse,
   GoalFinalReplyResponseDecision,
   GoalFinalReplyTurn,
 } from './final-reply.js';
+
+export {
+  isVerificationInterruptedReason,
+  renderVerificationInterruptedNotice,
+  type ThreadGoalVerificationInterruptedReason,
+} from './verification-interrupted.js';

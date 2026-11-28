@@ -241,7 +241,7 @@ async function appendLocalTask(args: {
       admission,
     });
   }
-  return { taskId: admittedTaskId, mode: steered.mode };
+  return { taskId: admittedTaskId, mode: steered.mode === 'queued' ? 'steered' : steered.mode };
 }
 
 function requireAppendConversation(

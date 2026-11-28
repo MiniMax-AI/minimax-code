@@ -1,5 +1,5 @@
 import type { Api } from '@earendil-works/pi-ai';
-import { minimaxApiModels, getRuntimeRegion } from '@mavis/config';
+import { resolveProviderCredential, minimaxApiModels, getRuntimeRegion } from '@mavis/config';
 
 import type {
   LocalByokProviderConfig,
@@ -9,9 +9,10 @@ import type {
   LocalModelsConfig,
 } from '../contracts.js';
 import { mergeProviderHeaders } from '../connectivity/provider-request.js';
+import { enabledApiKeys, resolveApiKeyValue } from '../byok-keys/key-list.js';
+import type { ByokCallKey } from '../byok-keys/key-lifecycle.js';
 import {
   isModelProviderApi,
-  MANAGED_MINIMAX_PROVIDER_ID,
   MINIMAX_API_PROVIDER_ID,
 } from '../identity.js';
 
@@ -32,6 +33,10 @@ export interface ByokResolutionPlan {
   readonly maxTokens: number;
   readonly configHeaders?: Record<string, string>;
   readonly modelCompat?: LocalModelCompatOverrides;
+  /** More than one enabled API key: the call picks one per request (byok-keys). */
+  readonly apiKeys?: { readonly providerKey: string; readonly keys: readonly ByokCallKey[] };
+  /** The custom model config declares reasoning support. */
+  readonly thinkingCapable?: true;
 }
 
 export function planMinimaxApiResolution(input: {
@@ -46,7 +51,11 @@ export function planMinimaxApiResolution(input: {
 }): ByokResolutionPlan | undefined {
   const config = input.byok?.minimax_api;
   if (!config) return undefined;
-  const apiKey = config.apiKey?.trim();
+  const apiKey = resolveProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: MINIMAX_API_PROVIDER_ID,
+    value: config.apiKey,
+  });
   if (!apiKey) {
     throw new Error('LocalModelResolver: minimax_api apiKey is not configured.');
   }
@@ -76,6 +85,7 @@ export function planCustomProviderResolution(input: {
   readonly modelId: string;
 }): ByokResolutionPlan | undefined {
   const config = input.byok?.custom_provider?.[input.providerKey];
+  assertNotUnboundExtensionProvider(config, input.provider);
   if (!config || config.enabled === false) return undefined;
   const modelConfig = config.models?.[input.modelId];
   if (!modelConfig) return undefined;
@@ -92,30 +102,71 @@ export function planCustomProviderResolution(input: {
     ...customProviderLimits(modelConfig),
     ...(configHeaders ? { configHeaders } : {}),
     ...(modelCompat ? { modelCompat } : {}),
+    ...(modelConfig.reasoning === true ? { thinkingCapable: true } : {}),
   };
 }
+
+/**
+ * Owned bindings are routed before this point. An extension entry reaching
+ * the BYOK planner has lost its binding: never route a stray stored key/URL.
+ */
+function assertNotUnboundExtensionProvider(
+  _config: LocalCustomProviderConfig | undefined,
+  _provider: string,
+): void {}
 
 function resolveCustomProviderCredentials(
   config: LocalCustomProviderConfig,
   input: { readonly provider: string; readonly providerKey: string },
-): Pick<ByokResolutionPlan, 'apiKey' | 'authProvider' | 'runtimeProvider' | 'baseUrl'> {
+): Pick<ByokResolutionPlan, 'apiKey' | 'authProvider' | 'runtimeProvider' | 'baseUrl' | 'apiKeys'> {
   const authProvider =
     config.kind === 'oauth' || config.options?.authMode === 'oauth' ? input.providerKey : undefined;
-  const apiKey = config.options?.apiKey?.trim();
+  const keys = authProvider ? [] : resolveEnabledApiKeys(config, input.provider);
+  const apiKey = keys[0]?.value ?? configuredApiKey(config, input.provider);
   if (!apiKey && !authProvider) {
     throw new Error(`LocalModelResolver: api_key not configured for provider "${input.provider}".`);
-  }
-  const baseUrl = config.options?.baseURL?.trim();
-  if (!baseUrl) {
-    throw new Error(
-      `LocalModelResolver: base_url not configured for provider "${input.provider}".`,
-    );
   }
   return {
     ...(apiKey ? { apiKey } : {}),
     ...(authProvider ? { authProvider, runtimeProvider: authProvider } : {}),
-    baseUrl,
+    ...(keys.length > 1 ? { apiKeys: { providerKey: input.providerKey, keys } } : {}),
+    baseUrl: requireCustomProviderBaseUrl(config, input.provider),
   };
+}
+
+function requireCustomProviderBaseUrl(config: LocalCustomProviderConfig, provider: string): string {
+  const baseUrl = config.options?.baseURL?.trim();
+  if (!baseUrl) {
+    throw new Error(`LocalModelResolver: base_url not configured for provider "${provider}".`);
+  }
+  return baseUrl;
+}
+
+function configuredApiKey(config: LocalCustomProviderConfig, provider: string): string | undefined {
+  return resolveProviderCredential({
+    field: 'custom_provider options.apiKey',
+    provider,
+    value: config.options?.apiKey,
+  });
+}
+
+/**
+ * The enabled keys whose value resolves. A key whose `${VAR}` is unset is skipped while another
+ * resolves; when none does, the first error stands, as for a single key.
+ */
+function resolveEnabledApiKeys(config: LocalCustomProviderConfig, provider: string): ByokCallKey[] {
+  const keys: ByokCallKey[] = [];
+  let firstError: unknown;
+  for (const key of enabledApiKeys(config)) {
+    try {
+      const value = resolveApiKeyValue(key, provider)?.trim();
+      if (value) keys.push({ id: key.id, value });
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (keys.length === 0 && firstError !== undefined) throw firstError;
+  return keys;
 }
 
 function customProviderLimits(
@@ -144,19 +195,6 @@ function resolveCustomProviderApi(value: unknown): Api {
     return value;
   }
   return 'anthropic-messages';
-}
-
-export function firstBuiltinModel(
-  providerConfig: LocalModelsConfig | undefined,
-): { readonly provider: string; readonly modelId: string } | undefined {
-  const preferredModelId = Object.keys(
-    providerConfig?.[MANAGED_MINIMAX_PROVIDER_ID]?.models ?? {},
-  )[0];
-  if (preferredModelId) return { provider: MANAGED_MINIMAX_PROVIDER_ID, modelId: preferredModelId };
-  return Object.entries(providerConfig ?? {}).flatMap(([provider, config]) => {
-    const modelId = Object.keys(config.models ?? {})[0];
-    return modelId ? [{ provider, modelId }] : [];
-  })[0];
 }
 
 export function readStringRecord(value: unknown): Record<string, string> | undefined {

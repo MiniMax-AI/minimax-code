@@ -12,6 +12,8 @@ tools:
   - todowrite
   - web_fetch
   - website_deploy
+  - skill
+  - save_run_code_script
 features:
   delegation: false
   webSearch: true

@@ -53,6 +53,9 @@ export {
   type PtcChildCallStatus,
   type PtcChildDeadline,
   type PtcChildTimeoutDecision,
+  type PtcChildDisplayResult,
+  type PtcChildDisplayResultInput,
+  type PtcChildDisplayResultShaper,
   type PtcChildExecutionDetails,
   type PtcExecutionDetails,
   type PtcRetainedFact,
@@ -69,17 +72,26 @@ export {
   type PtcWallClock,
   type PtcWallClockSource,
 } from './ptc.js';
-export {
-  TURN_TERMINATING_TOOL_RESULT_DETAIL,
-  isTurnTerminatingToolResultDetails,
-} from './turn-termination.js';
 export { defineRuntimeTool, type RuntimeToolDeclaration } from './define.js';
+export { isToolSteerInterruption } from './steer-interruption.js';
 export { bindTool, toRuntimeTool } from './bind.js';
 export { prepareEditArguments, type PreparedEditArguments } from './edit-prepare-arguments.js';
 export {
-  coerceRuntimeToolInput,
   isRuntimeToolInputValid,
+  repairRuntimeToolInput,
+  validateRuntimeToolInput,
+  type RuntimeToolInputRepair,
+  type RuntimeToolInputValidation,
 } from './input-validation.js';
+export {
+  TURN_STOPPING_TOOL_RESULT_DETAIL,
+  TURN_TERMINATING_TOOL_RESULT_DETAIL,
+  isTurnClosedByTerminatingTools,
+  isTurnClosedByTerminatingToolsAt,
+  isTurnStoppingToolResultDetails,
+  isTurnTerminatingToolResultDetails,
+} from './turn-termination.js';
+export { toolResultIsError } from './result-error.js';
 export {
   ReadToolDef,
   WriteToolDef,

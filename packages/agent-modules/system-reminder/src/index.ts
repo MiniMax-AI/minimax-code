@@ -94,7 +94,22 @@ export {
   type TodoStatus,
 } from './todo-state.js';
 export { boundMap, getEvolutionReminder, type EvolutionState } from './evolution.js';
-export { withMcodeToolsMasterReminder } from './mcode-tools-master-reminder.js';
+export {
+  buildMcodeToolsMasterReminderBlock,
+  withMcodeToolsMasterReminder,
+} from './mcode-tools-master-reminder.js';
+export { unwrapSystemReminder, wrapSystemReminderBlocks } from './envelope.js';
+export {
+  buildAskUserGuidanceBlock,
+  buildAskUserPolicyBlock,
+  decideAskUserReminders,
+  findLatestAskUserPolicyDeclaration,
+  hasAskUserGuidance,
+  type AskUserGuidanceReminderReason,
+  type AskUserPolicyReminderReason,
+  type AskUserReminderDecision,
+  type AskUserReminderPolicy,
+} from './ask-user-reminders.js';
 // Block builders — exported so cloud-runtime and adjacent surfaces can render
 // individual blocks outside the registry/service pipeline.
 export {
@@ -125,6 +140,7 @@ export {
   buildTaskCompletionReminderBlock,
   buildBoardNudgeBlock,
   buildSecretEnvBlock,
+  RUNTIME_MANAGED_RESULT_DELIVERY_LINE,
 } from './blocks.js';
 export type {
   SystemReminderInput,

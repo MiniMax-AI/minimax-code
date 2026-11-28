@@ -1,20 +1,14 @@
 import { getShellConfig } from '@earendil-works/pi-coding-agent/shell';
 import type { ToolDefinition } from '@mavis/agent-core/tools';
-import { Clone, Type } from '@sinclair/typebox';
 
-import { LocalBashToolDef } from './builtin-defs.js';
-import {
-  DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS,
-  DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS,
-  MAX_FOREGROUND_BASH_TIMEOUT_SECONDS,
-  MAX_MANAGED_BASH_TIMEOUT_SECONDS,
-} from './local-bash-timing.js';
+import { createBashToolSchema, LocalBashToolDef } from '../core-tools/defs.js';
+import { DEFAULT_FOREGROUND_BASH_SOFT_YIELD_MS } from './local-bash-timing.js';
 
 export interface LocalBashTurnCapabilities {
   readonly background: boolean;
   /** Frozen for this Turn's model guidance; execution reads the live host policy. */
   readonly nativeDelete?: boolean;
-  readonly shell: ReturnType<typeof getShellConfig>['type'] | 'unavailable';
+  readonly shell: ReturnType<typeof getShellConfig>['type'] | 'unavailable' | 'pending';
 }
 
 export function resolveLocalBashShell(): LocalBashTurnCapabilities['shell'] {
@@ -29,14 +23,9 @@ export function resolveLocalBashShell(): LocalBashTurnCapabilities['shell'] {
 export function createLocalBashToolDefinition(
   capabilities: LocalBashTurnCapabilities,
 ): ToolDefinition {
-  const base = Clone(LocalBashToolDef.schema);
-  const schema = capabilities.background ? base : Type.Omit(base, ['run_in_background']);
-  schema.properties.timeout.description = capabilities.background
-    ? `Total command timeout in seconds. Foreground with automatic backgrounding: default/max ${MAX_MANAGED_BASH_TIMEOUT_SECONDS}s, including foreground time. Explicit background: uses the specified timeout, or a 1-hour runtime limit if omitted.`
-    : `Timeout in seconds. Foreground: default ${DEFAULT_FOREGROUND_BASH_TIMEOUT_SECONDS}s; values above ${MAX_FOREGROUND_BASH_TIMEOUT_SECONDS}s are capped.`;
   return {
     ...LocalBashToolDef,
-    schema,
+    schema: createBashToolSchema(capabilities.background),
     description: `${LocalBashToolDef.description}\n\n${renderBashUsage(capabilities)}`,
   };
 }
@@ -60,12 +49,18 @@ function renderBashUsage(capabilities: LocalBashTurnCapabilities): string {
 function deletionRules(nativeDelete: boolean): string[] {
   if (nativeDelete) return [];
   return [
-    '- For file or directory deletion, use one top-level `rm -- <path> ...`; the local runtime routes it through recoverable deletion.',
-    '- Do not bypass recoverable deletion with absolute paths to deletion commands or inline scripts. If it fails, report the failure instead of falling back to permanent deletion. Permission checks still apply.',
+    '- For recoverable file or directory deletion on macOS/Linux, read the exact `activeDataDir` from the current `<runtime-data-context>`; never guess it or invoke bare `mavis-trash`. Run `"<activeDataDir>/bin/mavis-trash" -- "<target1>" "<target2>"`.',
+    '- On Windows, use one top-level `rm -- "<target1>" "<target2>"`; the local runtime routes it through its trusted launcher.',
+    '- If recoverable deletion fails, report the failure instead of bypassing it with another deletion command or inline script. Never fall back to permanent deletion. Permission checks still apply.',
   ];
 }
 
 function shellRules(shell: LocalBashTurnCapabilities['shell']): string[] {
+  if (shell === 'pending')
+    return [
+      '- Shell discovery is pending in the background. Do not assume Bash or PowerShell syntax.',
+      '- The first bash call waits for discovery before permission checks and returns shell instructions without executing the command. Rewrite the command for the resolved shell in a new tool-call batch, then retry. Other tools do not wait for discovery.',
+    ];
   if (shell === 'unavailable')
     return [
       '- No local shell was resolved. Do not assume Bash or PowerShell syntax is executable.',

@@ -1,9 +1,12 @@
-import type { TuiRuntimeEvent } from '../types/runtime-events.js';
+import type { TuiMcpAuthEvent, TuiRuntimeEvent } from '../types/runtime-events.js';
 import type { TuiPendingPermission, TuiQuestionnaireRequest } from '../types/runtime-models.js';
 import { buildTuiToolPreview } from './tool-preview.js';
 import { parseSessionLLMRetryEventPayload } from './llm-retry-event.js';
 import type {
   CompactionTokenUsage,
+  GlobalMcpAuthAttemptOutcome,
+  GlobalMcpAuthState,
+  GlobalMcpAuthTarget,
   GlobalThreadGoal,
   GlobalThreadGoalStatusReason,
   GlobalThreadGoalWaitReason,
@@ -91,6 +94,7 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
         requestAttempt: retry.requestAttempt,
         ...(retry.delayMs !== undefined ? { delayMs: retry.delayMs } : {}),
         ...(retry.nextRetryAtMs !== undefined ? { nextRetryAtMs: retry.nextRetryAtMs } : {}),
+        ...(retry.waitingFor ? { waitingFor: retry.waitingFor } : {}),
         ...(retry.error
           ? {
               error: {
@@ -170,7 +174,10 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
   }
   if (event.type === 'content.retry.exceeded') {
     const variant = readString(payload, ['variant']);
-    if (sessionId && (variant === 'content' || variant === 'network' || variant === 'auth')) {
+    if (
+      sessionId &&
+      (variant === 'content' || variant === 'network' || variant === 'auth' || variant === 'reply')
+    ) {
       return compact({
         ...base,
         type: event.type,
@@ -247,7 +254,94 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       return compact({ ...base, type: event.type, requestId, decision });
     }
   }
+  const mcpAuth = normalizeMcpAuthEvent(event.type, payload, base);
+  if (mcpAuth) return mcpAuth;
   return { ...base, type: 'unknown', originalType: event.type };
+}
+
+function normalizeMcpAuthEvent(
+  type: string,
+  payload: Record<string, unknown>,
+  base: { timestampMs: number; source: string; sessionId?: string },
+): TuiMcpAuthEvent | undefined {
+  if (type !== 'mcp.auth_updated' && type !== 'mcp.auth_required') return undefined;
+  const target = readMcpAuthTarget(payload.target);
+  if (!target) return undefined;
+  const reason = readString(payload, ['reason']);
+  if (type === 'mcp.auth_updated') {
+    const authState = readString(payload, ['authState', 'auth_state']);
+    if (!authState || !MCP_AUTH_STATES.has(authState as GlobalMcpAuthState)) return undefined;
+    return compact<TuiMcpAuthEvent>({
+      ...base,
+      type: 'mcp.auth_updated',
+      target,
+      authState: authState as GlobalMcpAuthState,
+      ...(reason ? { reason } : {}),
+      ...readMcpAuthAttempt(payload),
+    });
+  }
+  if (reason !== 'auth_required' && reason !== 'insufficient_scope' && reason !== 'reauth_required')
+    return undefined;
+  return compact<TuiMcpAuthEvent>({
+    ...base,
+    type: 'mcp.auth_required',
+    target,
+    reason,
+    turnId: readString(payload, ['turnId', 'turn_id']),
+  });
+}
+
+const MCP_AUTH_ATTEMPT_OUTCOMES: ReadonlySet<GlobalMcpAuthAttemptOutcome> = new Set([
+  'authorized',
+  'failed',
+  'cancelled',
+  'expired',
+]);
+
+/** Attempt result carried by `mcp.auth_updated`; an unknown outcome is dropped. */
+function readMcpAuthAttempt(
+  payload: Record<string, unknown>,
+): Pick<
+  Extract<TuiMcpAuthEvent, { type: 'mcp.auth_updated' }>,
+  'attemptId' | 'attemptOutcome' | 'errorCode'
+> {
+  const attemptId = readString(payload, ['attemptId', 'attempt_id']);
+  const outcome = readString(payload, ['attemptOutcome', 'attempt_outcome']);
+  const errorCode = readString(payload, ['errorCode', 'error_code']);
+  return {
+    ...(attemptId ? { attemptId } : {}),
+    ...(outcome && MCP_AUTH_ATTEMPT_OUTCOMES.has(outcome as GlobalMcpAuthAttemptOutcome)
+      ? { attemptOutcome: outcome as GlobalMcpAuthAttemptOutcome }
+      : {}),
+    ...(errorCode ? { errorCode } : {}),
+  };
+}
+
+const MCP_AUTH_STATES: ReadonlySet<GlobalMcpAuthState> = new Set([
+  'unknown',
+  'not_required',
+  'static',
+  'needs_auth',
+  'authorizing',
+  'authorized',
+  'needs_reauth',
+  'failed',
+]);
+
+function readMcpAuthTarget(value: unknown): GlobalMcpAuthTarget | undefined {
+  if (!isRecord(value)) return undefined;
+  const kind = readString(value, ['kind']);
+  const serverName = readString(value, ['serverName', 'server_name']);
+  if (!serverName || (kind !== 'user' && kind !== 'project' && kind !== 'plugin')) return undefined;
+  return compact<GlobalMcpAuthTarget>({
+    kind,
+    serverName,
+    pluginName: readString(value, ['pluginName', 'plugin_name']),
+    pluginMarketplace: readString(value, ['pluginMarketplace', 'plugin_marketplace']),
+    pluginSource: readString(value, ['pluginSource', 'plugin_source']),
+    sessionId: readString(value, ['sessionId', 'session_id']),
+    workspaceRoot: readString(value, ['workspaceRoot', 'workspace_root']),
+  });
 }
 
 function readSessionVisibility(value: unknown): 'visible' | 'hidden' | undefined {

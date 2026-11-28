@@ -49,6 +49,7 @@ export class TuiToolProjection {
       );
       const toolErrorCode =
         extractToolErrorCode(toolCall.output ?? toolCall.error) ?? existing?.toolErrorCode;
+      const toolSummary = resolveToolSummary(toolCall);
       const toolPayloadBudget =
         existing?.toolPayloadBudget || content.truncated || detail.truncated
           ? {
@@ -76,6 +77,7 @@ export class TuiToolProjection {
         ...(toolCall.id ? { toolCallId: toolCall.id } : {}),
         ...(toolCall.parentToolCallId ? { parentToolCallId: toolCall.parentToolCallId } : {}),
         ...(toolErrorCode ? { toolErrorCode } : {}),
+        ...(toolSummary ? { toolSummary } : {}),
         ...(toolPayloadBudget ? { toolPayloadBudget } : {}),
         ...(toolCall.durationMs !== undefined ? { durationMs: toolCall.durationMs } : {}),
         ...(structuredPreview ? { structuredPreview } : {}),
@@ -94,6 +96,11 @@ export class TuiToolProjection {
       this.transcript.moveBefore(id, question.id);
     }
   }
+}
+
+/** The advisor's model is known only from its result; the call itself takes no input. */
+function resolveToolSummary(toolCall: TuiToolCall): string | undefined {
+  return toolCall.advisor?.modelId?.trim() || undefined;
 }
 
 function resolveStructuredPreview(

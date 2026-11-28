@@ -1,5 +1,3 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
 import { resolve as resolvePath } from 'node:path';
 
 import type {
@@ -15,7 +13,16 @@ import type {
   PluginHookRunDiagnostic,
   PluginHookRunResult,
 } from './contracts.js';
-import { resolveHookCommandInvocation } from './command-invocation.js';
+import {
+  spawnHookCommand,
+  type PluginHookCommandExecution,
+  type PluginHookCommandExecutor,
+  type PluginHookCommandOutcome,
+} from './command-executor.js';
+import {
+  resolveHookCommandInvocation,
+  type HookCommandInvocationDependencies,
+} from './command-invocation.js';
 import { isSafePluginHookMatcher } from './parser.js';
 import { boundHandlerDecision } from './output-artifacts.js';
 import {
@@ -27,7 +34,6 @@ import {
   restoreNativeToolInput,
 } from './wire-tool-adapter.js';
 
-const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_REASON_CHARS = 4_096;
 const MAX_INJECTED_TEXT_CHARS = 64 * 1024;
@@ -35,18 +41,36 @@ const MAX_OUTPUT_VALUE_DEPTH = 64;
 const MAX_OUTPUT_VALUE_NODES = 10_000;
 const ORDINARY_EVENT_BUDGET_MS = 15_000;
 const SESSION_END_BUDGET_MS = 3_000;
-const PROCESS_DRAIN_BUDGET_MS = 500;
+
+/** Shell-form resolution for a POSIX executor that is not this machine. */
+const REMOTE_INVOCATION: HookCommandInvocationDependencies = {
+  platform: 'linux',
+  findExecutable: () => undefined,
+};
 
 export class PluginHookRunner {
   private logger?: PluginHookLogger;
   private observer?: PluginHookObserver;
-  private readonly activeChildren = new Set<ChildProcess>();
+  private readonly executor: PluginHookCommandExecutor;
+  private readonly remote: boolean;
+  private readonly activeExecutions = new Set<Promise<PluginHookCommandOutcome>>();
   private readonly disposalController = new AbortController();
   private disposed = false;
 
-  constructor(logger?: PluginHookLogger, observer?: PluginHookObserver) {
+  /**
+   * `executor` replaces local subprocess execution, e.g. to run commands in a remote compute.
+   * With an executor, the command environment carries only Hook variables and shell-form
+   * commands resolve as POSIX without probing local executables.
+   */
+  constructor(
+    logger?: PluginHookLogger,
+    observer?: PluginHookObserver,
+    executor?: PluginHookCommandExecutor,
+  ) {
     this.logger = logger;
     this.observer = observer;
+    this.executor = executor ?? spawnHookCommand;
+    this.remote = executor !== undefined;
   }
 
   configure(input: {
@@ -95,6 +119,7 @@ export class PluginHookRunner {
       observeHandler(this.observer, {
         event: input.event,
         format: handler.sourceFormat,
+        origin: handler.origin ?? 'plugin',
         outcome: 'error',
         durationMs: 0,
         processKilled: false,
@@ -126,6 +151,7 @@ export class PluginHookRunner {
           observeHandler(this.observer, {
             event: input.event,
             format: handler.sourceFormat,
+            origin: handler.origin ?? 'plugin',
             outcome: diagnosticOutcome(outcome.diagnostic.code),
             durationMs: Date.now() - handlerStartedAt,
             processKilled: outcome.processKilled,
@@ -134,6 +160,7 @@ export class PluginHookRunner {
           observeHandler(this.observer, {
             event: input.event,
             format: handler.sourceFormat,
+            origin: handler.origin ?? 'plugin',
             outcome:
               outcome.decision.decision === 'deny'
                 ? 'deny'
@@ -206,7 +233,7 @@ export class PluginHookRunner {
     if (this.disposed) return;
     this.disposed = true;
     this.disposalController.abort('Plugin Hook runner disposed');
-    await Promise.allSettled([...this.activeChildren].map((child) => terminateAndDrain(child)));
+    await Promise.allSettled([...this.activeExecutions]);
   }
 
   private async runCommand(
@@ -230,135 +257,182 @@ export class PluginHookRunner {
     if (!serialized) {
       return { diagnostic: runDiagnostic(handler, 'HOOK_INVALID_INPUT'), processKilled: false };
     }
-    let child: ChildProcess;
-    const pluginDataDir =
-      handler.pluginDataDir ?? resolvePluginDataDirectory(handler.pluginRoot, handler.pluginName);
+    let execution: PluginHookCommandExecution;
     try {
-      await mkdir(pluginDataDir, { recursive: true, mode: 0o700 });
-      const env = {
-        ...safeHookEnvironment(),
-        MINIMAX_PLUGIN_ROOT: handler.pluginRoot,
-        CLAUDE_PLUGIN_ROOT: handler.pluginRoot,
-        CODEX_PLUGIN_ROOT: handler.pluginRoot,
-        PLUGIN_ROOT: handler.pluginRoot,
-        CLAUDE_PLUGIN_DATA: pluginDataDir,
-        PLUGIN_DATA: pluginDataDir,
-        MINIMAX_PROJECT_DIR: input.cwd,
-        CLAUDE_PROJECT_DIR: input.cwd,
-        CODEX_PROJECT_DIR: input.cwd,
-        ...(handler.sourceFormat === 'CLAUDE' && handlerInput.effort
-          ? { CLAUDE_EFFORT: handlerInput.effort.level }
-          : {}),
-      };
-      const command = expandHookPlaceholders(handler.command, env);
-      const args = handler.args?.map((value) => expandHookPlaceholders(value, env));
-      const invocation = resolveHookCommandInvocation({
-        command,
-        ...(args ? { args } : {}),
-        ...(handler.shell ? { shell: handler.shell } : {}),
-        sourceFormat: handler.sourceFormat,
-      });
-      child = spawn(invocation.command, invocation.args, {
-        cwd: input.cwd,
-        env,
-        shell: invocation.shell,
-        detached: process.platform !== 'win32',
-        windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
+      execution = prepareExecution(handler, input, handlerInput, {
+        stdin: serialized,
+        timeoutMs,
+        signal: signal
+          ? AbortSignal.any([signal, this.disposalController.signal])
+          : this.disposalController.signal,
+        remote: this.remote,
       });
     } catch {
       return { diagnostic: runDiagnostic(handler, 'HOOK_PROCESS_ERROR'), processKilled: false };
     }
-    this.activeChildren.add(child);
-    const overflowController = new AbortController();
-    const readOutput = collectOutput(child, () => overflowController.abort());
-    child.stdin?.on('error', () => undefined);
-    child.stdin?.end(serialized);
-    try {
-      const result = await waitForChild(
-        child,
-        timeoutMs,
-        [...(signal ? [signal] : []), this.disposalController.signal],
-        overflowController.signal,
-      );
-      const captured = readOutput();
-      if (result.reason === 'aborted') {
-        return { diagnostic: runDiagnostic(handler, 'HOOK_ABORTED'), processKilled: result.killed };
-      }
-      if (result.reason === 'timeout') {
-        return { diagnostic: runDiagnostic(handler, 'HOOK_TIMEOUT'), processKilled: result.killed };
-      }
-      if (result.reason === 'overflow' || captured.overflow) {
-        return {
-          diagnostic: runDiagnostic(handler, 'HOOK_INVALID_OUTPUT'),
-          processKilled: result.killed,
-        };
-      }
-      if (result.reason !== 'exit') {
-        return { diagnostic: runDiagnostic(handler, 'HOOK_PROCESS_ERROR'), processKilled: true };
-      }
-      const killedDescendants = await terminateRemainingProcessGroup(child);
-      // Codex only interprets structured stdout from a successful command.
-      // Compatible intentionally parses JSON on every exit code; exit 2 then adds
-      // the event-specific blocking effect which JSON cannot override.
-      const parsesStdout =
-        !(handler.sourceFormat === 'CODEX' && input.event === 'SessionEnd') &&
-        (handler.sourceFormat !== 'CODEX' || result.code === 0);
-      const parsed = parsesStdout
-        ? parseDecision(captured.stdout, handler, input)
-        : ({ kind: 'empty', decision: defaultDecision(input.event) } as const);
-      const exitDecision =
-        result.code === 2 && handler.sourceFormat !== 'MINIMAX'
-          ? explicitExitTwoDecision(input.event, captured.stderr, handler.sourceFormat)
-          : undefined;
-      if (parsed.kind === 'invalid') {
-        if (exitDecision) {
-          return {
-            decision: await boundHandlerDecision(handler, input, exitDecision),
-            processKilled: killedDescendants,
-          };
-        }
-        return {
-          ...(parsed.decision
-            ? { decision: await boundHandlerDecision(handler, input, parsed.decision) }
-            : {}),
-          diagnostic: runDiagnostic(handler, 'HOOK_INVALID_OUTPUT'),
-          processKilled: killedDescendants,
-        };
-      }
-      if (parsed.kind === 'structured') {
-        const decision = exitDecision
-          ? mergeExitTwoDecision(
-              parsed.decision,
-              exitDecision,
-              input.event,
-              handler.sourceFormat,
-              parsed.hasStructuredBlock,
-            )
-          : parsed.decision;
-        return {
-          decision: await boundHandlerDecision(handler, input, decision),
-          processKilled: killedDescendants,
-        };
-      }
-      if (exitDecision)
+    const result = await this.execute(execution);
+    if (result.reason === 'aborted') {
+      return {
+        diagnostic: runDiagnostic(handler, 'HOOK_ABORTED'),
+        processKilled: result.processKilled,
+      };
+    }
+    if (result.reason === 'timeout') {
+      return {
+        diagnostic: runDiagnostic(handler, 'HOOK_TIMEOUT'),
+        processKilled: result.processKilled,
+      };
+    }
+    if (result.reason === 'overflow') {
+      return {
+        diagnostic: runDiagnostic(handler, 'HOOK_INVALID_OUTPUT'),
+        processKilled: result.processKilled,
+      };
+    }
+    if (result.reason !== 'exit') {
+      return {
+        diagnostic: runDiagnostic(handler, 'HOOK_PROCESS_ERROR'),
+        processKilled: result.processKilled,
+      };
+    }
+    const killedDescendants = result.processKilled;
+    // Codex only interprets structured stdout from a successful command.
+    // MiniMax and Compatible intentionally parse JSON on every exit code; exit 2
+    // then adds the event-specific blocking effect which JSON cannot override.
+    const parsesStdout =
+      !(handler.sourceFormat === 'CODEX' && input.event === 'SessionEnd') &&
+      (handler.sourceFormat !== 'CODEX' || result.code === 0);
+    const parsed = parsesStdout
+      ? parseDecision(result.stdout, handler, input)
+      : ({ kind: 'empty', decision: defaultDecision(input.event) } as const);
+    const exitDecision =
+      result.code === 2
+        ? explicitExitTwoDecision(input.event, result.stderr, handler.sourceFormat)
+        : undefined;
+    if (parsed.kind === 'invalid') {
+      if (exitDecision) {
         return {
           decision: await boundHandlerDecision(handler, input, exitDecision),
           processKilled: killedDescendants,
         };
-      if (result.code !== 0) {
-        return {
-          diagnostic: runDiagnostic(handler, 'HOOK_PROCESS_EXITED'),
-          processKilled: killedDescendants,
-        };
       }
       return {
-        decision: await boundHandlerDecision(handler, input, parsed.decision),
+        ...(parsed.decision
+          ? { decision: await boundHandlerDecision(handler, input, parsed.decision) }
+          : {}),
+        diagnostic: runDiagnostic(handler, 'HOOK_INVALID_OUTPUT'),
         processKilled: killedDescendants,
       };
-    } finally {
-      this.activeChildren.delete(child);
     }
+    if (parsed.kind === 'structured') {
+      const decision = exitDecision
+        ? mergeExitTwoDecision(
+            parsed.decision,
+            exitDecision,
+            input.event,
+            handler.sourceFormat,
+            parsed.hasStructuredBlock,
+          )
+        : parsed.decision;
+      return {
+        decision: await boundHandlerDecision(handler, input, decision),
+        processKilled: killedDescendants,
+      };
+    }
+    if (exitDecision)
+      return {
+        decision: await boundHandlerDecision(handler, input, exitDecision),
+        processKilled: killedDescendants,
+      };
+    if (result.code !== 0) {
+      return {
+        diagnostic: runDiagnostic(handler, 'HOOK_PROCESS_EXITED'),
+        processKilled: killedDescendants,
+      };
+    }
+    return {
+      decision: await boundHandlerDecision(handler, input, parsed.decision),
+      processKilled: killedDescendants,
+    };
+  }
+
+  private async execute(execution: PluginHookCommandExecution): Promise<PluginHookCommandOutcome> {
+    const pending = invokeExecutor(this.executor, execution);
+    this.activeExecutions.add(pending);
+    try {
+      return await pending;
+    } finally {
+      this.activeExecutions.delete(pending);
+    }
+  }
+}
+
+function prepareExecution(
+  handler: PluginHookCommandHandler,
+  input: PluginHookEventInput,
+  handlerInput: PluginHookEventInput,
+  context: {
+    readonly stdin: string;
+    readonly timeoutMs: number;
+    readonly signal: AbortSignal;
+    readonly remote: boolean;
+  },
+): PluginHookCommandExecution {
+  const pluginDataDir =
+    handler.pluginDataDir ?? resolvePluginDataDirectory(handler.pluginRoot, handler.pluginName);
+  const env: Record<string, string> = {
+    ...(context.remote ? {} : safeHookEnvironment()),
+    ...(handler.origin
+      ? { MINIMAX_HOOKS_DIR: handler.pluginRoot, MINIMAX_HOOKS_DATA: pluginDataDir }
+      : {
+          MINIMAX_PLUGIN_ROOT: handler.pluginRoot,
+          CLAUDE_PLUGIN_ROOT: handler.pluginRoot,
+          CODEX_PLUGIN_ROOT: handler.pluginRoot,
+          PLUGIN_ROOT: handler.pluginRoot,
+          CLAUDE_PLUGIN_DATA: pluginDataDir,
+          PLUGIN_DATA: pluginDataDir,
+        }),
+    MINIMAX_PROJECT_DIR: input.cwd,
+    CLAUDE_PROJECT_DIR: input.cwd,
+    CODEX_PROJECT_DIR: input.cwd,
+    ...(handler.sourceFormat === 'CLAUDE' && handlerInput.effort
+      ? { CLAUDE_EFFORT: handlerInput.effort.level }
+      : {}),
+  };
+  const command = expandHookPlaceholders(handler.command, env);
+  const args = handler.args?.map((value) => expandHookPlaceholders(value, env));
+  const invocation = resolveHookCommandInvocation(
+    {
+      command,
+      ...(args ? { args } : {}),
+      ...(handler.shell ? { shell: handler.shell } : {}),
+      sourceFormat: handler.sourceFormat,
+    },
+    context.remote ? REMOTE_INVOCATION : undefined,
+  );
+  return {
+    sessionId: input.sessionId,
+    command: invocation.command,
+    args: invocation.args,
+    shell: invocation.shell,
+    cwd: input.cwd,
+    env,
+    stdin: context.stdin,
+    timeoutMs: context.timeoutMs,
+    signal: context.signal,
+    pluginDataDir,
+    pluginRoot: handler.pluginRoot,
+  };
+}
+
+async function invokeExecutor(
+  executor: PluginHookCommandExecutor,
+  execution: PluginHookCommandExecution,
+): Promise<PluginHookCommandOutcome> {
+  try {
+    return await executor(execution);
+  } catch {
+    return { reason: 'error', processKilled: false };
   }
 }
 
@@ -408,146 +482,6 @@ function observeEvent(
     observer?.onEvent(input);
   } catch {
     // Observability is best-effort and must never change Hook behavior.
-  }
-}
-
-function collectOutput(
-  child: ChildProcess,
-  onOverflow: () => void,
-): () => { stdout: string; stderr: string; overflow: boolean } {
-  let stdout = Buffer.alloc(0);
-  let stderr = Buffer.alloc(0);
-  let overflow = false;
-  child.stdout?.on('data', (chunk: Buffer) => {
-    if (stdout.length + chunk.length > MAX_OUTPUT_BYTES && !overflow) {
-      overflow = true;
-      onOverflow();
-    }
-    stdout = Buffer.concat([stdout, chunk]).subarray(0, MAX_OUTPUT_BYTES);
-  });
-  child.stderr?.on('data', (chunk: Buffer) => {
-    if (stderr.length + chunk.length > MAX_OUTPUT_BYTES && !overflow) {
-      overflow = true;
-      onOverflow();
-    }
-    stderr = Buffer.concat([stderr, chunk]).subarray(0, MAX_OUTPUT_BYTES);
-  });
-  return () => ({
-    stdout: stdout.toString('utf8'),
-    stderr: stderr.toString('utf8'),
-    overflow,
-  });
-}
-
-function waitForChild(
-  child: ChildProcess,
-  timeoutMs: number,
-  signals: readonly AbortSignal[],
-  overflowSignal: AbortSignal,
-): Promise<
-  | { readonly reason: 'exit'; readonly code: number; readonly killed: false }
-  | { readonly reason: 'aborted' | 'timeout' | 'overflow'; readonly killed: true }
-> {
-  return new Promise((resolve) => {
-    let settled = false;
-    let stopping = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (
-      value:
-        | { readonly reason: 'exit'; readonly code: number; readonly killed: false }
-        | { readonly reason: 'aborted' | 'timeout' | 'overflow'; readonly killed: true },
-    ) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      for (const signal of signals) signal.removeEventListener('abort', abort);
-      overflowSignal.removeEventListener('abort', overflow);
-      resolve(value);
-    };
-    const stop = async (reason: 'aborted' | 'timeout' | 'overflow') => {
-      if (stopping || settled) return;
-      stopping = true;
-      await terminateAndDrain(child);
-      finish({ reason, killed: true });
-    };
-    const abort = () => void stop('aborted');
-    const overflow = () => void stop('overflow');
-    timer = setTimeout(() => void stop('timeout'), timeoutMs);
-    child.once('error', () => finish({ reason: 'exit', code: 1, killed: false }));
-    child.once('close', (code) => {
-      if (!stopping) finish({ reason: 'exit', code: code ?? 1, killed: false });
-    });
-    for (const signal of signals) signal.addEventListener('abort', abort, { once: true });
-    overflowSignal.addEventListener('abort', overflow, { once: true });
-    if (signals.some((signal) => signal.aborted)) abort();
-    else if (overflowSignal.aborted) overflow();
-  });
-}
-
-async function terminateAndDrain(child: ChildProcess): Promise<void> {
-  const closed = new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) resolve();
-    else child.once('close', () => resolve());
-  });
-  try {
-    if (process.platform === 'win32' && child.pid) {
-      const killed = await waitBounded(runTaskkill(child.pid), PROCESS_DRAIN_BUDGET_MS, false);
-      if (!killed) child.kill('SIGKILL');
-    } else if (child.pid) {
-      process.kill(-child.pid, 'SIGKILL');
-    } else {
-      child.kill('SIGKILL');
-    }
-  } catch {
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      // The process may already have exited.
-    }
-  }
-  await waitBounded(closed, PROCESS_DRAIN_BUDGET_MS, undefined);
-}
-
-async function terminateRemainingProcessGroup(child: ChildProcess): Promise<boolean> {
-  if (!child.pid) return false;
-  if (process.platform === 'win32') {
-    return await waitBounded(runTaskkill(child.pid), PROCESS_DRAIN_BUDGET_MS, false);
-  }
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function runTaskkill(pid: number): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
-      windowsHide: true,
-      stdio: 'ignore',
-    });
-    killer.once('error', () => resolve(false));
-    killer.once('close', (code) => resolve(code === 0));
-  });
-}
-
-async function waitBounded<T>(
-  operation: Promise<T>,
-  timeoutMs: number,
-  timeoutValue: T,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<T>((resolve) => {
-        timer = setTimeout(() => resolve(timeoutValue), timeoutMs);
-        timer.unref?.();
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -710,7 +644,7 @@ function explicitExitTwoDecision(
   if (event === 'Stop' || event === 'SubagentStop') {
     return { decision: 'allow', continuePrompt: reason };
   }
-  if (event === 'PreCompact' && sourceFormat === 'CLAUDE') {
+  if (event === 'PreCompact' && sourceFormat !== 'CODEX') {
     return { decision: 'allow', defer: true, reason };
   }
   return undefined;
@@ -723,10 +657,10 @@ function mergeExitTwoDecision(
   sourceFormat: PluginHookCommandHandler['sourceFormat'],
   hasStructuredBlock: boolean,
 ): PluginHookDecision {
-  if (event === 'PermissionRequest' && sourceFormat === 'CLAUDE') return parsed;
-  if (sourceFormat === 'CLAUDE' && hasStructuredBlock) {
-    // Compatible keeps exit-code 2 blocking, but a structured blocking reason wins
-    // over stderr. `parsed` already carries the event-specific blocking effect.
+  if (event === 'PermissionRequest' && sourceFormat !== 'CODEX') return parsed;
+  if (sourceFormat !== 'CODEX' && hasStructuredBlock) {
+    // MiniMax and Compatible keep exit-code 2 blocking, but a structured blocking
+    // reason wins over stderr. `parsed` already carries the event-specific effect.
     return parsed;
   }
   if (event === 'PostToolUse' && sourceFormat === 'CODEX') {
@@ -1772,7 +1706,7 @@ function isValidWireInput(handler: PluginHookCommandHandler, input: PluginHookEv
   }
 }
 
-function safeHookEnvironment(): NodeJS.ProcessEnv {
+function safeHookEnvironment(): Record<string, string> {
   const inherited = [
     'PATH',
     'HOME',
@@ -2148,10 +2082,11 @@ function matcherValues(
 ): readonly string[] {
   const adapted = adaptVendorInput(handler, input).matcherValue;
   if (!adapted) return [];
-  if (handler.sourceFormat !== 'CODEX') return [adapted];
-  if (adapted === 'apply_patch') return [adapted, 'Write', 'Edit'];
-  if (adapted === 'spawn_agent') return [adapted, 'Agent'];
-  return [adapted];
+  const aliases = input.matcherAliases ?? [];
+  if (handler.sourceFormat !== 'CODEX') return [adapted, ...aliases];
+  if (adapted === 'apply_patch') return [adapted, 'Write', 'Edit', ...aliases];
+  if (adapted === 'spawn_agent') return [adapted, 'Agent', ...aliases];
+  return [adapted, ...aliases];
 }
 
 function compatiblePermissionMode(
@@ -2275,9 +2210,14 @@ function withPostToolAdapterEvidence(
   };
 }
 
+const ORIGIN_RANK = { user: 0, project: 1, plugin: 2 } as const;
+
 function compareHandlers(left: PluginHookCommandHandler, right: PluginHookCommandHandler): number {
+  const originOrder = ORIGIN_RANK[left.origin ?? 'plugin'] - ORIGIN_RANK[right.origin ?? 'plugin'];
+  if (originOrder) return originOrder;
+  // Config owner names embed content digests; file order is the declared order.
   return (
-    left.pluginName.localeCompare(right.pluginName) ||
+    (left.origin ? 0 : left.pluginName.localeCompare(right.pluginName)) ||
     left.sourcePath.localeCompare(right.sourcePath) ||
     left.declarationOrder - right.declarationOrder
   );

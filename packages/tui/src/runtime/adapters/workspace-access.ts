@@ -1,10 +1,12 @@
-import type {
-  TuiReviewLink,
-  TuiWorkspaceFileCandidate,
-  TuiWorkspaceFileEntry,
-  TuiWorkspaceGitMetadata,
-  TuiWorkspaceRoot,
-  TuiWorkspaceTreeCandidate,
+import {
+  TUI_REVIEW_STATUSES,
+  type TuiReviewLink,
+  type TuiReviewStatus,
+  type TuiWorkspaceFileCandidate,
+  type TuiWorkspaceFileEntry,
+  type TuiWorkspaceGitMetadata,
+  type TuiWorkspaceRoot,
+  type TuiWorkspaceTreeCandidate,
 } from '../port.js';
 import type { TuiRuntimeAccessContext } from './access-context.js';
 import { interleave, normalizeWorkspaceRoots } from './normalizers.js';
@@ -156,8 +158,9 @@ function normalizeFileTreeEntries(entries: readonly unknown[]): TuiWorkspaceFile
 /**
  * Validates the Runtime's untyped review-link payload.
  *
- * Every field is required: a half-known review would render a status line entry
- * the user cannot act on, so a malformed payload is dropped whole.
+ * Vendor, URL and number are required: a half-known review would render a
+ * status line entry the user cannot act on, so such a payload is dropped
+ * whole. A status the TUI does not know only loses its color.
  */
 function normalizeReviewLink(value: unknown): TuiReviewLink | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -169,5 +172,13 @@ function normalizeReviewLink(value: unknown): TuiReviewLink | undefined {
   if (typeof reviewNumber !== 'number' || !Number.isInteger(reviewNumber) || reviewNumber <= 0) {
     return undefined;
   }
-  return { vendor, url, number: reviewNumber };
+  return { vendor, url, number: reviewNumber, ...readReviewStatus(record.status) };
+}
+
+const REVIEW_STATUSES: ReadonlySet<string> = new Set(TUI_REVIEW_STATUSES);
+
+function readReviewStatus(value: unknown): { status?: TuiReviewStatus } {
+  return typeof value === 'string' && REVIEW_STATUSES.has(value)
+    ? { status: value as TuiReviewStatus }
+    : {};
 }

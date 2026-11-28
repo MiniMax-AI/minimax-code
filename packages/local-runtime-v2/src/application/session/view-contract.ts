@@ -83,6 +83,7 @@ export type SessionInfoView = PresentFields<
   memoryPolicy: SessionMemoryPolicyView;
   conversationCapabilities?: { fork: boolean; rewind: boolean };
   model?: ModelInfoView;
+  advisor?: import("./model-provider-contracts.js").AdvisorSelectionView;
   runLocation?: RunLocationView;
 };
 export type SessionTreeChildView = Pick<

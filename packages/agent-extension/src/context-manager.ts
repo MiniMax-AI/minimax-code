@@ -1,16 +1,16 @@
 /**
- * `contextManagerExtension`: Installs `ContextManager` through the `@mavis/agent-runtime` extension
- * SPI, letting hosts mount it with `createAgentRuntime({ base: [contextManagerExtension(mgr)] })`
- * instead of manually assigning `hooks.beforeLlmCallHook = [manager.beforeLlmCall]`.
+ * `contextManagerExtension` —— 把 `ContextManager` 装进 `@mavis/agent-runtime`
+ * 的 extension SPI，让 host 通过 `createAgentRuntime({ base: [contextManagerExtension(mgr)] })`
+ * 挂载而不是自己去 `hooks.beforeLlmCallHook = [manager.beforeLlmCall]`。
  *
- * The design document §4.3 table identifies context-manager as the first extension to migrate. The
- * SPI uses `pi.on('before_llm_call')` to install `manager.beforeLlmCall`, which returns
- * `PiBeforeLlmCallHookDecision`: `replaceMessages` maps directly to compaction replacement, while
- * `continue`/`skip` mean no compaction is needed.
+ * 设计文档 §4.3 表把 context-manager 定为首个迁移 extension，SPI 侧走
+ * `pi.on('before_llm_call')` 装 `manager.beforeLlmCall`（其内部返回
+ * `PiBeforeLlmCallHookDecision`——`replaceMessages` 直接对应 compaction
+ * 替换，`continue`/`skip` 对应无需压缩）。
  *
- * The extension is a stateless factory: the host constructs and passes in `ContextManager`. It
- * performs no IO, creates no locks, and reads no settings, preserving the §4.4 FAQ Q6 boundary that
- * authors isolate extension state with `Map<sessionId, ...>`.
+ * Extension 是无状态 factory：host 自己构造好 `ContextManager` 实例后传进来。
+ * Extension 内部不做 IO、不构造 lock、不读 settings——保持 §4.4 常见问题 Q6
+ * "extension 内部状态由作者用 `Map<sessionId, ...>` 隔离" 的边界。
  */
 
 import type {
@@ -23,19 +23,18 @@ import type {
 import type { ContextManager } from '@mavis/context-manager';
 
 /**
- * Optional side-effect observer for the extension. Host compaction ownership can wrap
- * `beforeLlmCallHook` with bus-broadcast side effects (`session.compaction.started` / `completed` /
- * `failed`) without adding another host wrapper layer.
+ * Optional side-effect observer for the extension. Host compaction ownership can
+ * wrap `beforeLlmCallHook` with bus-broadcast side effects (`session.compaction.started`
+ * / `completed` / `failed`) without adding another host wrapper layer.
  *
- * `onDecision` runs after the manager decision resolves. Its broadcast / metrics side effects are
- * isolated on failure and cannot block a successful manager decision. `onError` runs only when the
- * manager throws; reporter errors are swallowed while the original manager exception propagates to
- * the pi loop.
- * `onHistoryChanged` covers the `pi.on('on_history_changed')` subscription required for
- * context-manager by the design document §4.3 table, for example to persist replacement history
- * through the compaction owner. Observer errors propagate to `PiTurnRunner` after optional
- * reporting. The runner decides by reason whether to warn/continue for `messageDelta` or use
- * `failClosed: true` for `replaceMessages`; the adapter preserves this distinction.
+ * `onDecision` 在 manager 决策 resolve 后调用；它只是广播 / metrics 副作用，失败会
+ * 被隔离，不能阻断已经成功的 manager 决策。`onError` 只在 manager throw 时调用；
+ * reporter 自己的错误会被吞掉，manager 原始异常仍然 propagate 到 pi loop。
+ * `onHistoryChanged` covers 设计文档 §4.3 表里 context-manager 需要同时订阅的
+ * `pi.on('on_history_changed')` 事件，例如由 compaction owner 持久化 replacement history。
+ * observer 抛错会在可选 reporting
+ * 后继续向 `PiTurnRunner` 传播；runner 自己按 reason 决定 `messageDelta` warn/continue
+ * 或 `replaceMessages` 的 `failClosed: true`，adapter 不抹平这一区别。
  */
 export interface ContextManagerExtensionObserver {
   onDecision?(

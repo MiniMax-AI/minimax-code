@@ -211,7 +211,8 @@ export type PathCheckContext = {
    * Absolute directories or exact files the active Session owns and may READ:
    * paths the runtime itself hands the Agent, e.g. the Session's workspace
    * when the runtime allocated it inside its data directory, the user's
-   * attachments, recoverable tool-output artifacts and compaction snapshots.
+   * attachments, recoverable tool-output artifacts, compaction snapshots and
+   * the home the runtime keeps for the Session's Agent.
    *
    * The host injects them; this engine never derives a path from a Session
    * id, so the runtime layout stays owned by the runtime. A root only counts

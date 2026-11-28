@@ -31,10 +31,12 @@ export interface PtcCrashRecoveryInput {
   readonly processStartedAtMs: number;
   readonly interruptedSessionIds: readonly string[];
   readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
+  readonly failOnAppendError?: boolean;
 }
 
 export interface PtcCrashRecoveryResult {
   readonly recoveredTurnIds: readonly string[];
+  readonly deferredSessionIds?: readonly string[];
 }
 
 export interface PtcCrashRecoveryOptions {
@@ -60,6 +62,13 @@ interface PendingCanonicalToolCall {
 
 interface PendingCanonicalRound {
   readonly calls: readonly PendingCanonicalToolCall[];
+  /**
+   * The assistant message stopped as `aborted` or `error`, so its tool calls
+   * were never complete. Requests skip such a message (pi-ai
+   * `transformMessages`), so a result written for it would reach the model
+   * service as an orphan tool result that it rejects on every request.
+   */
+  readonly abandoned: boolean;
 }
 
 interface RecoveredPtcChild {
@@ -72,7 +81,9 @@ interface RecoveredPtcChild {
  * rows. It never resumes a Worker, invokes a tool, or infers a call from JS.
  * A synthetic outer ToolResult closes Pi's pending `run_code` round so the
  * next turn can consume the preserved PTC facts rather than silently dropping
- * them through canonical-history recovery.
+ * them through canonical-history recovery. A round whose assistant message
+ * was aborted or errored only has its display cards closed: requests skip
+ * that message, and the next request starts from the state before it.
  */
 export async function recoverPtcCrashState(
   options: PtcCrashRecoveryOptions,
@@ -81,6 +92,7 @@ export async function recoverPtcCrashState(
   const terminalFacts = input.terminalFacts ?? [];
   const terminalFactsBySession = groupTerminalFacts(terminalFacts);
   const recoveredTurnIds: string[] = [];
+  const deferredSessionIds: string[] = [];
   const summary = { sessions: 0, programs: 0, closed_calls: 0 };
   const outcomes: Partial<Record<SessionRecovery['outcome'], number>> = {};
   for (const sessionId of new Set([
@@ -91,16 +103,21 @@ export async function recoverPtcCrashState(
       sessionId,
       processStartedAtMs: input.processStartedAtMs,
       terminalFacts: terminalFactsBySession.get(sessionId) ?? [],
+      failOnAppendError: input.failOnAppendError === true,
     });
     summary.sessions += 1;
     outcomes[recovered.outcome] = (outcomes[recovered.outcome] ?? 0) + 1;
+    if (recovered.outcome === 'append_error') deferredSessionIds.push(sessionId);
     if (recovered.outcome !== 'recovered') continue;
     recoveredTurnIds.push(recovered.turnId);
     summary.programs += recovered.programs;
     summary.closed_calls += recovered.closedCalls;
   }
   logPtcCrashRecovery(summary, outcomes, recoveredTurnIds);
-  return { recoveredTurnIds };
+  return {
+    recoveredTurnIds,
+    ...(deferredSessionIds.length > 0 ? { deferredSessionIds } : {}),
+  };
 }
 
 /**
@@ -118,11 +135,36 @@ function logPtcCrashRecovery(
   outcomes: Partial<Record<SessionRecovery['outcome'], number>>,
   recoveredTurnIds: readonly string[],
 ): void {
-  if ((outcomes.recovered ?? 0) === 0 && (outcomes.unmatched ?? 0) === 0) return;
+  if (!hasReportableOutcome(outcomes)) return;
   try {
     logger.info(
       { ...summary, recovered_turn_ids: recoveredTurnIds, outcomes },
       'ptc crash recovery',
+    );
+  } catch {
+    // Diagnostics must not affect startup recovery.
+  }
+}
+
+function hasReportableOutcome(
+  outcomes: Partial<Record<SessionRecovery['outcome'], number>>,
+): boolean {
+  return (
+    (outcomes.recovered ?? 0) > 0 ||
+    (outcomes.unmatched ?? 0) > 0 ||
+    (outcomes.history_error ?? 0) > 0 ||
+    (outcomes.append_error ?? 0) > 0
+  );
+}
+
+function warnSkippedHistoryRecovery(sessionId: string, error: unknown): void {
+  try {
+    logger.warn(
+      {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      'PTC crash recovery skipped canonical history operation',
     );
   } catch {
     // Diagnostics must not affect startup recovery.
@@ -139,7 +181,11 @@ type SessionRecovery =
   /** No run_code in the display rows, or none still pending in canonical history. */
   | { readonly outcome: 'no_ptc_parent' | 'no_pending_round' }
   /** A pending run_code whose Turn has no terminal fact to close it with. */
-  | { readonly outcome: 'unmatched' };
+  | { readonly outcome: 'unmatched' }
+  /** Canonical history file for this Session could not be read. */
+  | { readonly outcome: 'history_error' }
+  /** Active history had a pending round, but writing the synthetic closure failed transiently. */
+  | { readonly outcome: 'append_error' };
 
 async function recoverSessionPtcCrashState(
   options: PtcCrashRecoveryOptions,
@@ -147,57 +193,136 @@ async function recoverSessionPtcCrashState(
     readonly sessionId: string;
     readonly processStartedAtMs: number;
     readonly terminalFacts: readonly PtcCrashRecoveryTerminalFact[];
+    readonly failOnAppendError: boolean;
   },
 ): Promise<SessionRecovery> {
   const listed = await options.messages.list(input.sessionId);
   const parents = findPtcParents(listed.messages);
   if (parents.length === 0) return { outcome: 'no_ptc_parent' };
-  const pendingRound = findPendingCanonicalRound(
-    (await options.history.readActive(input.sessionId)).messages,
-  );
+  const activeMessages = await readActiveMessagesForRecovery(options.history, input.sessionId);
+  if (!activeMessages) return { outcome: 'history_error' };
+  const pendingRound = findPendingCanonicalRound(activeMessages);
   if (!pendingRound || pendingRound.calls.length === 0) return { outcome: 'no_pending_round' };
 
+  const matchedTurn = resolveMatchedRecoveryTurn(parents, pendingRound, input.terminalFacts);
+  if (!matchedTurn) return { outcome: 'unmatched' };
+  const { turnId, parentIds, completedAtMs } = resolveRecoveryCompletion(matchedTurn, input);
+  const detailsByParent = collectPtcDetails(listed.messages, parentIds);
+
+  if (pendingRound.abandoned) {
+    const closedCards = await persistRecoveredDisplayFacts(options.messages, {
+      sessionId: input.sessionId,
+      turnId,
+      messages: listed.messages,
+      parentIds,
+      detailsByParent,
+    });
+    return closedCards === 0
+      ? { outcome: 'no_pending_round' }
+      : { outcome: 'recovered', turnId, programs: parentIds.size, closedCalls: 0 };
+  }
+  const appended = await appendSyntheticRecoveryResults(options.history, {
+    sessionId: input.sessionId,
+    turnId,
+    completedAtMs,
+    pendingCalls: pendingRound.calls,
+    parentIds,
+    detailsByParent,
+    failOnAppendError: input.failOnAppendError,
+  });
+  if (appended.outcome === 'recovered') {
+    await persistRecoveredDisplayFacts(options.messages, {
+      sessionId: input.sessionId,
+      turnId,
+      messages: listed.messages,
+      parentIds,
+      detailsByParent,
+    });
+  }
+  return appended;
+}
+
+async function readActiveMessagesForRecovery(
+  history: PtcCrashRecoveryOptions['history'],
+  sessionId: string,
+): Promise<readonly unknown[] | undefined> {
+  try {
+    return (await history.readActive(sessionId)).messages;
+  } catch (error) {
+    warnSkippedHistoryRecovery(sessionId, error);
+    return undefined;
+  }
+}
+
+function resolveMatchedRecoveryTurn(
+  parents: readonly PtcParent[],
+  pendingRound: PendingCanonicalRound,
+  terminalFacts: readonly PtcCrashRecoveryTerminalFact[],
+): { readonly turnId: string; readonly matched: readonly PtcParent[] } | undefined {
   const pendingParentIds = new Set(
     pendingRound.calls.filter((call) => call.name === 'run_code').map((call) => call.id),
   );
   const candidates = parents.filter((parent) => pendingParentIds.has(parent.id));
-  const matched = matchParentsToRecoveredTurn(candidates, input.terminalFacts);
-  const turnId = matched[0]?.turnId ?? input.terminalFacts[0]?.turnId;
-  if (matched.length === 0 || !turnId) return { outcome: 'unmatched' };
+  const matched = matchParentsToRecoveredTurn(candidates, terminalFacts);
+  const turnId = matched[0]?.turnId ?? terminalFacts[0]?.turnId;
+  return matched.length > 0 && turnId ? { turnId, matched } : undefined;
+}
 
-  const parentIds = new Set(matched.map((parent) => parent.id));
-  const detailsByParent = collectPtcDetails(listed.messages, parentIds);
+function resolveRecoveryCompletion(
+  matchedTurn: { readonly turnId: string; readonly matched: readonly PtcParent[] },
+  input: {
+    readonly processStartedAtMs: number;
+    readonly terminalFacts: readonly PtcCrashRecoveryTerminalFact[];
+  },
+): {
+  readonly turnId: string;
+  readonly parentIds: ReadonlySet<string>;
+  readonly completedAtMs: number;
+} {
+  const { turnId, matched } = matchedTurn;
   const completedAtMs =
     input.terminalFacts.find((fact) => fact.turnId === turnId)?.completedAtMs ??
     input.processStartedAtMs;
+  return { turnId, parentIds: new Set(matched.map((parent) => parent.id)), completedAtMs };
+}
 
-  await persistRecoveredDisplayFacts(options.messages, {
-    sessionId: input.sessionId,
-    turnId,
-    messages: listed.messages,
-    parentIds,
-    detailsByParent,
-  });
-
-  const syntheticResults = pendingRound.calls.map((call) =>
-    call.name === 'run_code' && parentIds.has(call.id)
-      ? recoveredRunCodeToolResult(call.id, detailsByParent.get(call.id) ?? emptyPtcDetails())
+async function appendSyntheticRecoveryResults(
+  history: PtcCrashRecoveryOptions['history'],
+  input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly completedAtMs: number;
+    readonly pendingCalls: readonly PendingCanonicalToolCall[];
+    readonly parentIds: ReadonlySet<string>;
+    readonly detailsByParent: ReadonlyMap<string, PtcExecutionDetails>;
+    readonly failOnAppendError: boolean;
+  },
+): Promise<SessionRecovery> {
+  const syntheticResults = input.pendingCalls.map((call) =>
+    call.name === 'run_code' && input.parentIds.has(call.id)
+      ? recoveredRunCodeToolResult(call.id, input.detailsByParent.get(call.id) ?? emptyPtcDetails())
       : interruptedToolResult(call.id, call.name),
   );
-  await options.history.append({
-    sessionId: input.sessionId,
-    turnId,
-    reason: 'messageDelta',
-    messages: syntheticResults.map((result) => ({ ...result, timestamp: completedAtMs })),
-    operation: {
-      id: `ptc-crash-recovery:${turnId}`,
-      kind: 'ptc-crash-recovery',
-    },
-  });
+  try {
+    await history.append({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      reason: 'messageDelta',
+      messages: syntheticResults.map((result) => ({ ...result, timestamp: input.completedAtMs })),
+      operation: {
+        id: `ptc-crash-recovery:${input.turnId}`,
+        kind: 'ptc-crash-recovery',
+      },
+    });
+  } catch (error) {
+    if (input.failOnAppendError) throw error;
+    warnSkippedHistoryRecovery(input.sessionId, error);
+    return { outcome: 'append_error' };
+  }
   return {
     outcome: 'recovered',
-    turnId,
-    programs: parentIds.size,
+    turnId: input.turnId,
+    programs: input.parentIds.size,
     closedCalls: syntheticResults.length,
   };
 }
@@ -279,7 +404,8 @@ async function persistRecoveredDisplayFacts(
     readonly parentIds: ReadonlySet<string>;
     readonly detailsByParent: ReadonlyMap<string, PtcExecutionDetails>;
   },
-): Promise<void> {
+): Promise<number> {
+  let upserted = 0;
   for (const message of input.messages) {
     const toolCalls = readDisplayToolCalls(message);
     if (toolCalls.length === 0) continue;
@@ -304,7 +430,9 @@ async function persistRecoveredDisplayFacts(
       turnId: messageTurnId(message) ?? input.turnId,
       message: { ...message, tool_calls: nextToolCalls },
     });
+    upserted += 1;
   }
+  return upserted;
 }
 
 function recoveredRunCodeDisplayCall(
@@ -369,6 +497,188 @@ function recoveredRunCodeResult(details: PtcExecutionDetails) {
 
 function outerInterruptedText(details: PtcExecutionDetails): string {
   return renderPtcExecutionEvidence(details, 'runtime-restart');
+}
+
+function emptyPtcDetails(): PtcExecutionDetails {
+  return { version: 1, child_calls: [], retained_facts: [] };
+}
+
+function toRecoveredPtcChild(call: DisplayToolCall): RecoveredPtcChild {
+  const terminal = trustedPtcChildDetails(call);
+  if (terminal) {
+    const record = clonePtcToolCallRecord(terminal.record);
+    const retainedFacts = terminal.retained_facts.map(clonePtcRetainedFact);
+    return {
+      record,
+      retainedFacts:
+        record.status === 'unknown' &&
+        !retainedFacts.some(
+          (fact) =>
+            fact.kind === 'outcome_unknown' &&
+            fact.child_tool_call_id === record.child_tool_call_id,
+        )
+          ? [
+              ...retainedFacts,
+              { kind: 'outcome_unknown', child_tool_call_id: record.child_tool_call_id },
+            ]
+          : retainedFacts,
+    };
+  }
+  const record = fallbackPtcChildRecord(call);
+  return {
+    record,
+    retainedFacts:
+      record.status === 'unknown'
+        ? [{ kind: 'outcome_unknown', child_tool_call_id: record.child_tool_call_id }]
+        : [],
+  };
+}
+
+function trustedPtcChildDetails(call: DisplayToolCall): PtcChildExecutionDetails | undefined {
+  if (!isTerminalToolCall(call)) return undefined;
+  const parentToolCallId = readNonBlankString(call.parent_tool_call_id);
+  const result = parseJsonRecord(call.tool_call_result_data);
+  if (!parentToolCallId || !result) return undefined;
+  return readPtcChildExecutionDetails({
+    tool_call_id: call.tool_call_id,
+    parent_tool_call_id: parentToolCallId,
+    result,
+  });
+}
+
+function fallbackPtcChildRecord(call: DisplayToolCall): PtcToolCallRecord {
+  const status = ptcChildStatus(call);
+  return {
+    child_tool_call_id: call.tool_call_id,
+    parent_tool_call_id: readNonBlankString(call.parent_tool_call_id) ?? '',
+    tool_name: call.tool_name,
+    status,
+    ...(status === 'completed' ? {} : { is_error: true }),
+    ...(status === 'unknown' ? { outcome_unknown: true } : {}),
+  };
+}
+
+function ptcChildStatus(call: DisplayToolCall): PtcToolCallRecord['status'] {
+  if (call.tool_call_status === 2) return 'completed';
+  if (call.tool_call_status === 3 && !hasOutcomeUnknown(call)) return 'failed';
+  return 'unknown';
+}
+
+function hasOutcomeUnknown(call: DisplayToolCall): boolean {
+  if (call.outcome_unknown === true) return true;
+  const result = parseJsonRecord(call.tool_call_result_data);
+  return result?.outcome_unknown === true;
+}
+
+function clonePtcToolCallRecord(record: PtcToolCallRecord): PtcToolCallRecord {
+  return {
+    ...record,
+    ...(record.input ? { input: { ...record.input } } : {}),
+  };
+}
+
+function clonePtcRetainedFact(fact: PtcRetainedFact): PtcRetainedFact {
+  return {
+    ...fact,
+    ...(fact.kind === 'truncation' && fact.continuation
+      ? { continuation: { ...fact.continuation } }
+      : {}),
+    ...(fact.kind === 'media_delivery' && fact.refs
+      ? { refs: fact.refs.map((ref) => ({ ...ref })) }
+      : {}),
+  } as PtcRetainedFact;
+}
+
+function mergeDisplayToolCall(
+  existing: DisplayToolCall,
+  incoming: DisplayToolCall,
+): DisplayToolCall {
+  return isTerminalToolCall(existing) && !isTerminalToolCall(incoming)
+    ? { ...incoming, ...existing }
+    : { ...existing, ...incoming };
+}
+
+function isTerminalToolCall(call: DisplayToolCall): boolean {
+  return call.tool_call_status === 2 || call.tool_call_status === 3;
+}
+
+function findPendingCanonicalRound(
+  messages: readonly unknown[],
+): PendingCanonicalRound | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const assistant = readRecord(messages[index]);
+    if (assistant?.role !== 'assistant') continue;
+    const calls = readCanonicalToolCalls(assistant.content);
+    if (calls.length === 0) continue;
+    const completed = new Set<string>();
+    for (const following of messages.slice(index + 1)) {
+      const result = readRecord(following);
+      if (result?.role !== 'toolResult') return undefined;
+      const id = readNonBlankString(result.toolCallId);
+      if (id) completed.add(id);
+    }
+    const pending = calls.filter((call) => !completed.has(call.id));
+    const abandoned = assistant.stopReason === 'aborted' || assistant.stopReason === 'error';
+    return pending.length > 0 ? { calls: pending, abandoned } : undefined;
+  }
+  return undefined;
+}
+
+function readCanonicalToolCalls(value: unknown): readonly PendingCanonicalToolCall[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((candidate) => {
+    const call = readRecord(candidate);
+    const id = readNonBlankString(call?.id);
+    const name = readNonBlankString(call?.name);
+    if (call?.type !== 'toolCall' || !id || !name || seen.has(id)) return [];
+    seen.add(id);
+    return [{ id, name }];
+  });
+}
+
+function readDisplayToolCalls(message: DisplayMessageRecord): readonly DisplayToolCall[] {
+  return Array.isArray(message.tool_calls)
+    ? message.tool_calls.flatMap((candidate) => (isDisplayToolCall(candidate) ? [candidate] : []))
+    : [];
+}
+
+function isDisplayToolCall(value: unknown): value is DisplayToolCall {
+  const call = readRecord(value);
+  return (
+    call !== undefined &&
+    typeof call.tool_name === 'string' &&
+    call.tool_name.length > 0 &&
+    typeof call.tool_call_id === 'string' &&
+    call.tool_call_id.length > 0 &&
+    typeof call.tool_call_status === 'number'
+  );
+}
+
+function messageTurnId(message: DisplayMessageRecord): string | undefined {
+  const direct = readNonBlankString(message.turn_id) ?? readNonBlankString(message.turnId);
+  if (direct) return direct;
+  const meta = readRecord(message.meta);
+  return readNonBlankString(meta?.turnId);
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'string') return readRecord(value);
+  try {
+    return readRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readNonBlankString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
 export function renderPtcExecutionEvidence(
@@ -493,185 +803,4 @@ function truncateUtf8(value: string, maximumBytes: number, marker: string): stri
     stream: true,
   });
   return `${prefix}${marker}`;
-}
-
-function emptyPtcDetails(): PtcExecutionDetails {
-  return { version: 1, child_calls: [], retained_facts: [] };
-}
-
-function toRecoveredPtcChild(call: DisplayToolCall): RecoveredPtcChild {
-  const terminal = trustedPtcChildDetails(call);
-  if (terminal) {
-    const record = clonePtcToolCallRecord(terminal.record);
-    const retainedFacts = terminal.retained_facts.map(clonePtcRetainedFact);
-    return {
-      record,
-      retainedFacts:
-        record.status === 'unknown' &&
-        !retainedFacts.some(
-          (fact) =>
-            fact.kind === 'outcome_unknown' &&
-            fact.child_tool_call_id === record.child_tool_call_id,
-        )
-          ? [
-              ...retainedFacts,
-              { kind: 'outcome_unknown', child_tool_call_id: record.child_tool_call_id },
-            ]
-          : retainedFacts,
-    };
-  }
-  const record = fallbackPtcChildRecord(call);
-  return {
-    record,
-    retainedFacts:
-      record.status === 'unknown'
-        ? [{ kind: 'outcome_unknown', child_tool_call_id: record.child_tool_call_id }]
-        : [],
-  };
-}
-
-function trustedPtcChildDetails(call: DisplayToolCall): PtcChildExecutionDetails | undefined {
-  if (!isTerminalToolCall(call)) return undefined;
-  const parentToolCallId = readNonBlankString(call.parent_tool_call_id);
-  const result = parseJsonRecord(call.tool_call_result_data);
-  if (!parentToolCallId || !result) return undefined;
-  return readPtcChildExecutionDetails({
-    tool_call_id: call.tool_call_id,
-    parent_tool_call_id: parentToolCallId,
-    result,
-  });
-}
-
-function fallbackPtcChildRecord(call: DisplayToolCall): PtcToolCallRecord {
-  const status = ptcChildStatus(call);
-  return {
-    child_tool_call_id: call.tool_call_id,
-    parent_tool_call_id: readNonBlankString(call.parent_tool_call_id) ?? '',
-    tool_name: call.tool_name,
-    status,
-    ...(status === 'completed' ? {} : { is_error: true }),
-    ...(status === 'unknown' ? { outcome_unknown: true } : {}),
-  };
-}
-
-function ptcChildStatus(call: DisplayToolCall): PtcToolCallRecord['status'] {
-  if (call.tool_call_status === 2) return 'completed';
-  if (call.tool_call_status === 3 && !hasOutcomeUnknown(call)) return 'failed';
-  return 'unknown';
-}
-
-function hasOutcomeUnknown(call: DisplayToolCall): boolean {
-  if (call.outcome_unknown === true) return true;
-  const result = parseJsonRecord(call.tool_call_result_data);
-  return result?.outcome_unknown === true;
-}
-
-function clonePtcToolCallRecord(record: PtcToolCallRecord): PtcToolCallRecord {
-  return {
-    ...record,
-    ...(record.input ? { input: { ...record.input } } : {}),
-  };
-}
-
-function clonePtcRetainedFact(fact: PtcRetainedFact): PtcRetainedFact {
-  return {
-    ...fact,
-    ...(fact.kind === 'truncation' && fact.continuation
-      ? { continuation: { ...fact.continuation } }
-      : {}),
-    ...(fact.kind === 'media_delivery' && fact.refs
-      ? { refs: fact.refs.map((ref) => ({ ...ref })) }
-      : {}),
-  } as PtcRetainedFact;
-}
-
-function mergeDisplayToolCall(
-  existing: DisplayToolCall,
-  incoming: DisplayToolCall,
-): DisplayToolCall {
-  return isTerminalToolCall(existing) && !isTerminalToolCall(incoming)
-    ? { ...incoming, ...existing }
-    : { ...existing, ...incoming };
-}
-
-function isTerminalToolCall(call: DisplayToolCall): boolean {
-  return call.tool_call_status === 2 || call.tool_call_status === 3;
-}
-
-function findPendingCanonicalRound(
-  messages: readonly unknown[],
-): PendingCanonicalRound | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const assistant = readRecord(messages[index]);
-    if (assistant?.role !== 'assistant') continue;
-    const calls = readCanonicalToolCalls(assistant.content);
-    if (calls.length === 0) continue;
-    const completed = new Set<string>();
-    for (const following of messages.slice(index + 1)) {
-      const result = readRecord(following);
-      if (result?.role !== 'toolResult') return undefined;
-      const id = readNonBlankString(result.toolCallId);
-      if (id) completed.add(id);
-    }
-    const pending = calls.filter((call) => !completed.has(call.id));
-    return pending.length > 0 ? { calls: pending } : undefined;
-  }
-  return undefined;
-}
-
-function readCanonicalToolCalls(value: unknown): readonly PendingCanonicalToolCall[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  return value.flatMap((candidate) => {
-    const call = readRecord(candidate);
-    const id = readNonBlankString(call?.id);
-    const name = readNonBlankString(call?.name);
-    if (call?.type !== 'toolCall' || !id || !name || seen.has(id)) return [];
-    seen.add(id);
-    return [{ id, name }];
-  });
-}
-
-function readDisplayToolCalls(message: DisplayMessageRecord): readonly DisplayToolCall[] {
-  return Array.isArray(message.tool_calls)
-    ? message.tool_calls.flatMap((candidate) => (isDisplayToolCall(candidate) ? [candidate] : []))
-    : [];
-}
-
-function isDisplayToolCall(value: unknown): value is DisplayToolCall {
-  const call = readRecord(value);
-  return (
-    call !== undefined &&
-    typeof call.tool_name === 'string' &&
-    call.tool_name.length > 0 &&
-    typeof call.tool_call_id === 'string' &&
-    call.tool_call_id.length > 0 &&
-    typeof call.tool_call_status === 'number'
-  );
-}
-
-function messageTurnId(message: DisplayMessageRecord): string | undefined {
-  const direct = readNonBlankString(message.turn_id) ?? readNonBlankString(message.turnId);
-  if (direct) return direct;
-  const meta = readRecord(message.meta);
-  return readNonBlankString(meta?.turnId);
-}
-
-function parseJsonRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== 'string') return readRecord(value);
-  try {
-    return readRecord(JSON.parse(value));
-  } catch {
-    return undefined;
-  }
-}
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function readNonBlankString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined;
 }

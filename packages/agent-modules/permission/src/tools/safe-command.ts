@@ -71,6 +71,8 @@ export function isSafeToCallWithExec(command: readonly string[]): boolean {
       return isSafeRipgrep(command);
     case 'git':
       return isSafeGitCommand(command);
+    case 'mcode-tools':
+      return isSafeMcodeTools(command);
     case 'sed':
       return isSafeSed(command);
     default:
@@ -125,39 +127,69 @@ export function isKnownSafePowerShellCommand(command: string): boolean {
   const executable = tokens[0]!.toLowerCase();
   if (POWERSHELL_READ_ONLY_COMMANDS.has(executable)) return true;
   const nativeExecutable = executable.endsWith('.exe') ? executable.slice(0, -4) : executable;
-  if (nativeExecutable !== 'git' && nativeExecutable !== 'rg') return false;
+  if (!POWERSHELL_NATIVE_READ_ONLY_COMMANDS.has(nativeExecutable)) return false;
   return isSafeToCallWithExec([nativeExecutable, ...tokens.slice(1)]);
 }
 
-function tokenizeSimplePowerShell(command: string): string[] | undefined {
+/** Native CLIs whose read-only subsets {@link isSafeToCallWithExec} already models. */
+const POWERSHELL_NATIVE_READ_ONLY_COMMANDS = new Set(['git', 'rg', 'mcode-tools']);
+
+/**
+ * PowerShell's own quote and dash characters (System.Management.Automation
+ * CharTraits): any single quote closes a single-quoted string, any double
+ * quote closes a double-quoted one, and an en/em dash or horizontal bar starts
+ * a parameter just like `-`.
+ */
+const POWERSHELL_SINGLE_QUOTES = "'\u2018\u2019\u201A\u201B";
+const POWERSHELL_DOUBLE_QUOTES = '"\u201C\u201D\u201E';
+const POWERSHELL_DASHES = '\u2013\u2014\u2015';
+
+/**
+ * Split one PowerShell command into literal words, reading typographic quotes
+ * and dashes the way PowerShell does. Returns undefined for any operator,
+ * interpolation, assignment, script block or line break.
+ */
+export function tokenizeSimplePowerShell(command: string): string[] | undefined {
   const tokens: string[] = [];
   let token = '';
-  let quote: "'" | '"' | undefined;
+  let started = false;
+  let quote: 'single' | 'double' | undefined;
   for (let index = 0; index < command.length; index += 1) {
     const character = command[index]!;
     if (character === '\r' || character === '\n') return undefined;
     if (quote) {
-      if (character === quote) {
+      const closes =
+        quote === 'single'
+          ? POWERSHELL_SINGLE_QUOTES.includes(character)
+          : POWERSHELL_DOUBLE_QUOTES.includes(character);
+      if (closes) {
         quote = undefined;
       } else {
-        if (quote === '"' && (character === '$' || character === '`')) return undefined;
+        if (quote === 'double' && (character === '$' || character === '`')) return undefined;
         token += character;
       }
       continue;
     }
-    if (character === "'" || character === '"') {
-      quote = character;
+    if (POWERSHELL_SINGLE_QUOTES.includes(character)) {
+      quote = 'single';
+      started = true;
+      continue;
+    }
+    if (POWERSHELL_DOUBLE_QUOTES.includes(character)) {
+      quote = 'double';
+      started = true;
       continue;
     }
     if (/\s/.test(character)) {
-      if (token) {
-        tokens.push(token);
-        token = '';
-      }
+      if (token) tokens.push(token);
+      token = '';
+      started = false;
       continue;
     }
     if (';|><&{}()=`$'.includes(character)) return undefined;
-    token += character;
+    // Only a dash that begins an unquoted word introduces a parameter.
+    token += !started && POWERSHELL_DASHES.includes(character) ? '-' : character;
+    started = true;
   }
   if (quote) return undefined;
   if (token) tokens.push(token);
@@ -204,6 +236,24 @@ function isSafeRipgrep(command: readonly string[]): boolean {
       UNSAFE_WITHOUT_ARGS.has(arg) ||
       UNSAFE_WITH_ARGS.some((opt) => arg === opt || arg.startsWith(`${opt}=`)),
   );
+}
+
+/**
+ * mcode-tools discovery commands. Only the connector catalog reads seen in
+ * feedback replays are listed: `connector tools [--keyword <text>]` and
+ * `connector tool <name>`. `connector call` (effect depends on the tool),
+ * `upload_temp_url` (uploads a local file) and generation commands stay
+ * with the regular gate.
+ */
+function isSafeMcodeTools(command: readonly string[]): boolean {
+  if (command[1] !== 'connector') return false;
+  const args = command.slice(3);
+  const first = args[0] ?? '';
+  if (command[2] === 'tool') return args.length === 1 && !first.startsWith('-');
+  if (command[2] !== 'tools') return false;
+  if (args.length === 0) return true;
+  if (args.length === 1) return first.startsWith('--keyword=');
+  return args.length === 2 && first === '--keyword';
 }
 
 function isSafeSed(command: readonly string[]): boolean {
@@ -309,7 +359,7 @@ function isGitGlobalOptionWithInlineValue(arg: string): boolean {
  * Find the first matching git subcommand, skipping known global options that
  * may appear before it. Mirrors Codex `find_git_subcommand`.
  */
-function findGitSubcommand(
+export function findGitSubcommand(
   command: readonly string[],
   subcommands: readonly string[],
 ): { index: number; subcommand: string } | undefined {

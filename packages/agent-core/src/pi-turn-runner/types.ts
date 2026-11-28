@@ -17,13 +17,21 @@ import type {
 } from '@earendil-works/pi-ai';
 import type { IRuntimeEvent } from '@mavis/protocol';
 import type {
+  AgentKindLabel,
+  ModelCallRouteLabel,
+  TurnWakeLabel,
+} from '@mavis/shared/local-runtime-logging/metric-registry';
+import type {
   RuntimeTool,
   ToolCallProvenanceResolver,
   ToolExecutionContext,
 } from '../tools/index.js';
 import type { TSchema } from '@sinclair/typebox';
+import type { ContentReviewOutcome, ContentReviewTurnOptions } from './content-review.js';
 import type { PiBeforeLlmCallAppendMessage, PiTurnHooks } from './hooks.js';
+import type { LLMCallPreemption } from './llm-preemption.js';
 import type { LLMRetryOptions } from './llm-retry.js';
+import type { TurnToolCallContent } from '../event-bridge/tool-call-content.js';
 
 export type RuntimeEvent = IRuntimeEvent;
 
@@ -32,8 +40,18 @@ export type PiAgentMessage = AgentMessage;
 
 export interface LLMModelConfig {
   model: Model<Api>;
+  /**
+   * The upstream route the host resolved for this model
+   * (`resolveModelCallRoute` in @mavis/config): managed Token Plan, the
+   * user's MiniMax API key, a custom provider or another configured provider.
+   * Only a metric label, so dashboards can tell managed from BYOK calls; a
+   * host that resolves none reports `unknown`.
+   */
+  route?: ModelCallRouteLabel;
   apiKey?: string;
   streamFn?: StreamFn;
+  /** Host-owned binding/transport lifetime spanning all attempts of a logical call. */
+  callLifecycle?: import('./llm-call-lifecycle.js').LLMCallLifecycle;
   thinkingLevel?: ThinkingLevel;
   cacheRetention?: CacheRetention;
   maxTokens?: number;
@@ -51,7 +69,19 @@ export interface LLMModelConfig {
    * turn assembles its stream function, before any provider request.
    */
   hostMaxOutputTokens?: number;
+  /**
+   * Re-read host-owned remaining output allowance before each physical provider
+   * request, including retries. Zero refuses the request; undefined retains
+   * the static ceiling (if present). Input/reasoning usage is not bounded here.
+   */
+  resolveHostMaxOutputTokens?: () => number | undefined;
   headers?: Record<string, string>;
+  /**
+   * Request header that carries each request's turn phase (`initial`,
+   * `iteration` or `compaction`, see `TurnRequestPhase`). Set by hosts whose
+   * upstream reads it; absent sends no phase header.
+   */
+  turnPhaseHeader?: string;
   /**
    * Per-attempt wait (ms) for the first provider stream event before the
    * request is aborted and reported as a retryable timeout. Absent: the
@@ -94,6 +124,12 @@ export interface ToolConfig<TCtx extends ToolExecutionContext = ToolExecutionCon
     readonly name: string;
     readonly arguments: unknown;
   }) => RuntimeTool<TSchema, TCtx> | undefined;
+  /**
+   * Tools `resolveMissingTool` may return outside PTC (Tool Search deferred tools called by
+   * name). Only their `source` is registered so permission policy sees the real provenance;
+   * unlike `ptcTools` they carry no PTC semantics.
+   */
+  deferredTools?: readonly RuntimeTool<TSchema, TCtx>[];
   disableBuiltinToolFallback?: boolean;
   context: TCtx;
 }
@@ -111,8 +147,51 @@ export interface UserMessageInput {
   hostMetadata?: Readonly<Record<string, unknown>> & { readonly immediateSendBatchId?: string };
 }
 
-/** How a fresh per-Turn Pi Agent starts its agent loop. */
-export type RunTurnStartMode = 'prompt' | 'continue';
+/**
+ * Host clock marks of one turn before its first model request, Unix ms from
+ * one clock. Each mark ends the preparation stage of `pi_turn_prepare_ms` it
+ * names; the runner adds `persisting` (running status written) and
+ * `dispatching` (first request).
+ */
+export interface PiTurnTiming {
+  /** The runtime durably accepted the user message. */
+  readonly acceptedAtMs: number;
+  /** The host started the accepted turn; ends `accepted`. */
+  readonly hostStartedAtMs?: number;
+  /** Session, agent and history reads, model resolution and runtime assembly done; ends `assembling`. */
+  readonly assembledAtMs?: number;
+  /** Plugin hooks, tools, prompt and reminders prepared; ends `preparing`. */
+  readonly preparedAtMs?: number;
+}
+
+/**
+ * The first assistant text of a turn the user can see, for
+ * `pi_turn_first_visible_text_ms`. Only the host knows it: the text has to
+ * pass its output review and display projection first. The host creates one
+ * per turn (`createTurnVisibleTextMark`) and hands the same mark to every
+ * attempt of the turn; the metrics recorder of the attempt that carries
+ * `turnTiming` binds to it.
+ */
+export interface TurnVisibleTextMark {
+  /** Host side: the turn's first visible text reached the user now. Only the first call counts. */
+  mark(): void;
+  /** Runner side: what `mark()` reports. The first binding is kept. */
+  bind(onMark: () => void): void;
+}
+
+/**
+ * How a fresh per-Turn Pi Agent starts its agent loop. `resume-tool-calls`
+ * runs the tool calls of the last assistant message that have no result yet,
+ * keeping their ids, and then continues. `settle-interrupted-tool-calls`
+ * gives each of those calls an error result saying it was interrupted with an
+ * unknown outcome (the run executing it stopped), without running it again,
+ * and then continues so the model decides what to do next.
+ */
+export type RunTurnStartMode =
+  | 'prompt'
+  | 'continue'
+  | 'resume-tool-calls'
+  | 'settle-interrupted-tool-calls';
 
 /**
  * Who initiated the turn — becomes the low-cardinality `caller` metric label
@@ -134,6 +213,33 @@ export type RunTurnCaller =
   | 'compact'
   | 'permission_llm';
 
+/**
+ * Optional host-supplied `agentKind` metrics label of a Turn from the metric
+ * registry. Every other Turn leaves it out, and so carries no `agentKind` key
+ * on any metric.
+ */
+export type RunTurnAgentKind = AgentKindLabel;
+
+/**
+ * The `wake` metrics label of a Turn: `user` when a person started any
+ * input of its starting batch in a client, `system` otherwise. Only the
+ * turn-level first-output metrics carry it; a host that does not classify
+ * its Turns gets `system`.
+ */
+export type RunTurnWake = TurnWakeLabel;
+
+/** Spreads `agentKind` into a turn input only when the host classified it. */
+export function agentKindField(agentKind: RunTurnAgentKind | undefined): {
+  readonly agentKind?: RunTurnAgentKind;
+} {
+  return agentKind ? { agentKind } : {};
+}
+
+/** Spreads `wake` into a turn input only when the host classified it. */
+export function wakeField(wake: RunTurnWake | undefined): { readonly wake?: RunTurnWake } {
+  return wake ? { wake } : {};
+}
+
 /** Bounded origin of a cancelled Pi turn. Unknown values collapse to `unknown`. */
 export type AbortSource =
   | 'user_stop'
@@ -143,24 +249,51 @@ export type AbortSource =
    * into the Session's background work, which is expected to keep running.
    */
   | 'session_leave'
+  /**
+   * An Agent stopped another Session's current Turn through `session interrupt`.
+   * Stops only that Turn: no background cascade, no Goal or Queue pause.
+   */
+  | 'agent_interrupt'
   | 'immediate_send'
   | 'input_safety'
   | 'output_safety'
   | 'lifecycle'
+  /**
+   * The Host asked the run to stop without naming a reason of its own (cloud:
+   * `AbortRun` falling back to its default reason).
+   */
+  | 'abort_requested'
+  /**
+   * The run lost its lease: another instance owns the Session now (cloud: a
+   * drain hand-off, or a stale lease reclaimed by the Host).
+   */
+  | 'lease_stale'
   | 'unknown';
 
 export function normalizeAbortSource(value: unknown): AbortSource {
   switch (value) {
     case 'user_stop':
     case 'session_leave':
+    case 'agent_interrupt':
     case 'immediate_send':
     case 'input_safety':
     case 'output_safety':
     case 'lifecycle':
+    case 'abort_requested':
+    case 'lease_stale':
       return value;
     default:
       return 'unknown';
   }
+}
+
+/**
+ * Whether an abort stops a run to yield it: a later run of the same Turn
+ * continues it, so it is no cancellation. The host aborts such a run with an
+ * Error of this name (`TurnYieldStop` in harness turn-yield-control.ts).
+ */
+export function isRunYieldAbort(reason: unknown): boolean {
+  return reason instanceof Error && reason.name === 'TurnYieldStop';
 }
 
 /**
@@ -173,7 +306,14 @@ export function normalizeAbortSource(value: unknown): AbortSource {
  * session instead of extending a finished answer.
  */
 export interface SteeringPollContext {
+  /** All messages from this poll will be sent together after interrupting a generation. */
+  readonly resendBatch?: boolean;
   readonly boundary: 'mid-turn' | 'exit';
+  /**
+   * The host closed this Turn's ordinary work: the poll must not wait for
+   * more work to arrive, and user steering stays for the session.
+   */
+  readonly workClosed?: boolean;
 }
 
 export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionContext> {
@@ -182,7 +322,10 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   workspaceDir: string;
   systemPrompt: string;
   userMessage: UserMessageInput;
-  /** Omitted callers append `userMessage`; continuation re-enters from supplied history. */
+  /**
+   * Omitted callers append `userMessage`; `continue` and `resume-tool-calls`
+   * re-enter from supplied history without it.
+   */
   startMode?: RunTurnStartMode;
   llm: LLMModelConfig;
   eventWriter: PiEventWriter;
@@ -197,14 +340,39 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   hooks?: PiTurnHooks;
   /** Host opt-in for framework transport retry. Omitted hosts keep legacy behavior. */
   llmRetry?: Omit<LLMRetryOptions, 'sessionId' | 'turnId' | 'scope'>;
+  /**
+   * 服务端内容审核（网关 content_error）的本轮处理：action=4 的单次重发、打回通知。
+   * 缺省时不重发、不改请求；content_error 仍会被识别、换成中性文案，
+   * 并以 {@link RunTurnResult.contentReview} 结束本轮。
+   */
+  contentReview?: ContentReviewTurnOptions;
+  /** Host opt-in for cancelling the provider call in flight. Omitted hosts never preempt. */
+  llmPreemption?: LLMCallPreemption;
   /** Attribution captured from the same immutable capability snapshot as this turn's tools. */
   toolCallProvenanceResolver?: ToolCallProvenanceResolver;
   /** Forwarded to {@link EventBridgeContext.captureToolTiming}; host sets it non-prod only. */
   captureToolTiming?: boolean;
+  /** Forwarded to {@link EventBridgeContext.toolCallContent}; one registry spans the turn. */
+  toolCallContent?: TurnToolCallContent;
   /** TUI-only wire detail used to render output throughput. */
   includeDetailedUsage?: boolean;
   /** Turn initiator classification; see {@link RunTurnCaller}. */
   caller?: RunTurnCaller;
+  /**
+   * Preparation marks for the first-output and preparation metrics. Pass it
+   * on a turn's first attempt only, so a regenerated attempt is not measured
+   * from the acceptance again.
+   */
+  turnTiming?: PiTurnTiming;
+  /** Owning Agent classification for metrics; see {@link RunTurnAgentKind}. */
+  agentKind?: RunTurnAgentKind;
+  /** What woke the Turn, for the turn-level first-output metrics; see {@link RunTurnWake}. */
+  wake?: RunTurnWake;
+  /**
+   * The host's mark of the Turn's first visible text. Pass the same mark to
+   * every attempt of the Turn; it is read only with {@link turnTiming}.
+   */
+  turnVisibleText?: TurnVisibleTextMark;
   /** Optional logical-Turn event identity source shared by host-owned retry attempts. */
   eventIdGenerator?: (kind: string) => string;
   /** Optional logical-Turn runtime sequence source shared by host-owned retry attempts. */
@@ -220,13 +388,54 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   /** Text returned when a provider emits a tool call the host intentionally did not expose. */
   unexpectedToolCallFallback?: string;
   /**
+   * True once the host allows no further ordinary work request in this Turn
+   * (its request budget is spent). From then on every steering poll is an
+   * exit boundary, so user input goes back to the session instead of
+   * extending a Turn that can only wrap up.
+   */
+  isWorkClosed?: () => boolean | Promise<boolean>;
+  /**
    * Atomically seals external continuation acceptance once steering is empty.
    * `false` means work won the close race and the runner must poll once more.
    */
   tryBeginClose?: (context: {
     /** Text from the most recent assistant message at this close boundary. */
     readonly lastAssistantMessage?: string;
+    /** The host closed the Turn's work: every pending user input goes back to the session. */
+    readonly workClosed?: boolean;
+    /**
+     * The host refused to send a further request, so nothing more can run in
+     * this Turn: the close must not wait for steering it can no longer
+     * consume. The runner makes this close once and ignores its result.
+     */
+    readonly final?: boolean;
   }) => boolean | Promise<boolean>;
+  /**
+   * True once the host stopped this run to yield it and a later run of the
+   * same Turn finishes its output under the same display ids. From then on the
+   * runner writes no event and no terminal status: the yielded run must leave
+   * nothing on the event stream that the resuming run would contradict.
+   * History deltas still reach the history hooks; the host decides which of
+   * them survive the yield. A stop the host settles as a cancelled run keeps
+   * this false.
+   */
+  isYieldStopped?: () => boolean;
+  /**
+   * `resume-tool-calls` only: the display `msg_id` the stopped run streamed
+   * for the assistant message whose tool calls are resumed. The resumed calls
+   * attach to it and its completed message is emitted once, with this id,
+   * after the last of them ends. Omitted, the resumed calls carry no message.
+   */
+  resumeAssistantMessageId?: string;
+}
+
+/** `PiTurnRunner.runTurn` 的返回值。 */
+export interface RunTurnResult {
+  /**
+   * 本轮因网关 content_error 结束（撤回整轮、固答、审核不可用、重发次数用完）时的结构化结果；
+   * 正常结束、重发后成功或因其他原因结束时缺省。
+   */
+  readonly contentReview?: ContentReviewOutcome;
 }
 
 /**

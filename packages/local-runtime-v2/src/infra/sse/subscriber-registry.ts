@@ -124,6 +124,8 @@ export class StreamSubscription<T> implements AsyncIterableIterator<T> {
       this.pending = undefined;
       return;
     }
+    // Known issue: one value larger than maxBytes overflows even an empty queue, which closes a
+    // send reservation before its first read. See session-system/stream/README.md "已知问题".
     if (this.queue.length + 1 > this.maxItems || this.queuedBytes + byteSize > this.maxBytes) {
       this.overflow(byteSize);
       return;

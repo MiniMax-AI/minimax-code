@@ -1,5 +1,6 @@
 import type { Agent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { PiBeforeLlmCallReplaceMetadata, PiHistoryChangedHookInput } from './hooks.js';
+import type { NonLLMTurnErrorKind } from './metrics.js';
 import type { turnState } from './turn.js';
 
 export interface turnHistory {
@@ -9,13 +10,15 @@ export interface turnHistory {
     metadata: PiBeforeLlmCallReplaceMetadata,
   ): Promise<void>;
   flushTail(): Promise<void>;
+  /** A history change failed to persist; nothing is written for the rest of the Turn. */
+  deliveryFailed(): boolean;
 }
 
 export function newHistory(turn: turnState, agent: Agent): turnHistory {
   // Cursor into agent.state.messages. Initial history belongs to the caller
   // and must not be re-sent through onHistoryChangedHook.
   let lastSnapshotLength = turn.initialMessages.length;
-  let deliveryFailed = false;
+  let deliveryFailure: Error | undefined;
 
   const notify = async (change: PiHistoryChangedHookInput): Promise<void> => {
     if (turn.hooks.onHistory.length === 0) return;
@@ -25,16 +28,16 @@ export function newHistory(turn: turnState, agent: Agent): turnHistory {
   };
 
   const deliver = async (change: PiHistoryChangedHookInput): Promise<boolean> => {
-    if (deliveryFailed) return false;
+    if (deliveryFailure) throw deliveryFailure;
     try {
       await notify(change);
       return true;
     } catch (err) {
-      deliveryFailed = true;
-      turn.metrics.tryRecordTerminalFailure({
-        errorSource: 'history',
-        errorKind: 'persistence',
-      });
+      deliveryFailure = err instanceof Error ? err : new Error(String(err));
+      turn.metrics.tryRecordTerminalFailure(
+        { errorSource: 'history', errorKind: historyFailureKind(err) },
+        err,
+      );
       try {
         const errors = flattenHistoryErrors(err);
         const loggedErrors = errors.slice(0, MAX_LOGGED_HISTORY_ERRORS);
@@ -91,18 +94,24 @@ export function newHistory(turn: turnState, agent: Agent): turnHistory {
       if (delivered) lastSnapshotLength = messages.length;
     },
     async flushTail(): Promise<void> {
-      if (deliveryFailed) return;
+      if (deliveryFailure) return;
       const total = agent.state.messages.length;
       if (total <= lastSnapshotLength) return;
       const delta = agent.state.messages.slice(lastSnapshotLength, total);
+      const assistantMessageIds = delta.flatMap((message, index) => {
+        const messageId = turn.assistantMessageIds.get(message);
+        return messageId ? [{ index, messageId }] : [];
+      });
       const delivered = await deliver({
         sessionId: turn.input.sessionId,
         turnId: turn.input.turnId,
         reason: 'messageDelta',
         messages: [...delta],
+        ...(assistantMessageIds.length > 0 ? { assistantMessageIds } : {}),
       });
       if (delivered) lastSnapshotLength = total;
     },
+    deliveryFailed: () => deliveryFailure !== undefined,
   };
 }
 
@@ -216,6 +225,48 @@ const MAX_HISTORY_ERROR_STACK_LENGTH = 4_096;
 function flattenHistoryErrors(error: unknown): readonly unknown[] {
   if (!(error instanceof AggregateError)) return [error];
   return error.errors.flatMap(flattenHistoryErrors);
+}
+
+const DUPLICATE_APPEND_MESSAGE = 'Canonical history append identity is duplicated';
+
+/**
+ * @internal Exported only for focused tests.
+ *
+ * Which kind of history write failure this is.
+ *
+ * The three concurrency and ordering conflicts are counted apart from a real
+ * storage failure: they all used to land in `persistence`, which left the
+ * dashboards and alerts unable to tell "the object store is unhealthy" from
+ * "two writers raced" or "an append reused an existing identity".
+ *
+ * - `revision_conflict`: the revision checked before writing no longer matches,
+ *   so another writer moved the object and this write was refused;
+ * - `duplicate_append`: an append reuses an identity the history already holds
+ *   with different content (an unchanged replay is dropped by `planAppend`
+ *   before it gets here);
+ * - `late_write`: a Turn whose ownership was taken away by force wrote anyway.
+ *
+ * Anything else stays `persistence`.
+ */
+export function historyFailureKind(error: unknown): NonLLMTurnErrorKind {
+  for (const candidate of flattenHistoryErrors(error)) {
+    const kind = classifyHistoryError(candidate);
+    if (kind !== undefined) return kind;
+  }
+  return 'persistence';
+}
+
+function classifyHistoryError(error: unknown): NonLLMTurnErrorKind | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const { name, code } = error as { name?: unknown; code?: unknown };
+  if (name === 'HistoryMutationError' && code === 'revision-conflict') return 'revision_conflict';
+  if (name === 'ForceReleasedTurnWriteError') return 'late_write';
+  // Only the append identity conflict is split out. A duplicate identity in a
+  // replacement or a user message is a planning error and stays `persistence`.
+  if (error instanceof TypeError && error.message.startsWith(DUPLICATE_APPEND_MESSAGE)) {
+    return 'duplicate_append';
+  }
+  return undefined;
 }
 
 function summarizeHistoryError(error: unknown): Readonly<Record<string, unknown>> {

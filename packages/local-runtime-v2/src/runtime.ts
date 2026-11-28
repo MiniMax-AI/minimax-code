@@ -23,6 +23,7 @@ import {
   type V1RuntimeCompatibility,
 } from "./compat/v1/runtime.js";
 import { createV2AgentRuntimeManagementPort } from "./local/agent-runtime-port.js";
+import { assertHardLinkPublicationSupported } from "./infra/file/jsonl.js";
 import { DatabaseClient } from "./infra/db/client.js";
 import {
   initializeDatabase,
@@ -176,6 +177,7 @@ async function createLocalRuntimeHostV2Internal(
     // Layout migration must complete before the authoritative V2 target is
     // opened.  The services composition below gates all legacy access on the
     // target Agent row count.
+    await assertHardLinkPublicationSupported(options.dataDir);
     const completedLayoutMigration = measureStage("layout_migration_ms", () =>
       ensureCurrentLocalRuntimeDataMigratedToV2OrThrow(
         () => options.dataDir,

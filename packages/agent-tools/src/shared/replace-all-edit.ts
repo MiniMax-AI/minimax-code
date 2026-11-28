@@ -13,7 +13,8 @@
 
 import { normalizeToLF, stripBom } from '@earendil-works/pi-coding-agent/tools';
 
-import { readFile as fsReadFile } from 'fs/promises';
+import type { CoreToolFs } from '../core-tools/ports.js';
+import { physicalToolFs } from './physical-fs.js';
 
 export interface ReplaceAllEditInput {
   path: string;
@@ -49,6 +50,7 @@ export async function buildReplaceAllEdit(
   absolutePath: string,
   oldString: string,
   newString: string,
+  fs: Pick<CoreToolFs, 'readFile'> = physicalToolFs,
 ): Promise<ReplaceAllEditInput> {
   if (oldString === '') {
     throw new ReplaceAllError(
@@ -59,7 +61,7 @@ export async function buildReplaceAllEdit(
 
   let rawContent: string;
   try {
-    const buffer = await fsReadFile(absolutePath);
+    const buffer = await fs.readFile(absolutePath);
     rawContent = buffer.toString('utf-8');
   } catch (err) {
     const code = (err as { code?: unknown })?.code;

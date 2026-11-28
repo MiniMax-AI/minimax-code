@@ -2,6 +2,8 @@ import type { GlobalEventPublisher } from '../events.js';
 import type { ConversationModelThinkingSelection } from '@mavis/conversation-contract';
 import type { FrozenAgentExecutionDefinition } from '../../service/session-system/index.js';
 import type {
+  AdvisorModelSelectionInput,
+  LocalDefaultAdvisorConfig,
   LocalModelProviderService,
   LocalRuntimeConfig,
   ManagedModelParameterSnapshot,
@@ -10,10 +12,12 @@ import type {
 export interface ModelProviderSessionView {
   /** Trusted persisted definition, omitted from public model projections. */
   readonly frozenModel?: FrozenAgentExecutionDefinition['model'];
+  readonly sessionKind?: string;
   readonly effectiveModelContextWindow?: number | null;
   readonly effectiveModel?: string | null;
   readonly effectiveModelVariant?: string | null;
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
+  readonly advisor?: AdvisorModelSelectionInput | null;
 }
 
 export interface ModelProviderSessionPort {
@@ -29,6 +33,7 @@ export interface ModelProviderSessionPort {
       readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
     },
   ): Promise<unknown>;
+  updateAdvisor(sessionId: string, advisor: AdvisorModelSelectionInput): Promise<unknown>;
 }
 
 export interface ModelProviderApplicationDeps {
@@ -44,6 +49,7 @@ export interface ModelProviderApplicationDeps {
       readonly thinking?: ConversationModelThinkingSelection;
     },
   ) => Promise<void>;
+  readonly setDefaultAdvisor: (selection: LocalDefaultAdvisorConfig) => Promise<void>;
   readonly refreshOfficialModels?: () => Promise<void>;
   readonly implicitCustomProviderThinking?: boolean;
   readonly tuiProductPolicy?: boolean;
@@ -58,4 +64,21 @@ export interface SelectRuntimeModelInput {
   readonly modelId: string;
   readonly variant?: string;
   readonly thinking?: ConversationModelThinkingSelection | null;
+}
+
+export interface SelectAdvisorInput {
+  readonly enabled: boolean;
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly sessionId?: string;
+  readonly thinking?: { readonly effort: string } | null;
+  readonly contextLimit?: number;
+}
+
+export interface AdvisorSelectionView {
+  readonly enabled: boolean;
+  readonly providerId?: string;
+  readonly modelId?: string;
+  readonly thinking?: { readonly effort: string };
+  readonly contextLimit?: number;
 }

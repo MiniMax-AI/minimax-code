@@ -1,7 +1,7 @@
 /**
- * matrix_gen_videos — Pattern D batch: Each request may include input_image_path (image-to-video)
- * and outputs mp4 to output_file_path. Upload failure aborts the batch; response-stage failures are
- * recorded per slot.
+ * matrix_gen_videos —— Pattern D 批量:每个 request 可选带 input_image_path
+ * (image-to-video),输出 mp4 到 output_file_path。上传阶段失败即整 batch 退;
+ * 响应阶段单个 slot 失败只记录。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

@@ -1,7 +1,7 @@
 /**
- * matrix_image_reverse_search — Pattern D-special: Upload a local image to OSS for reverse image
- * search. Format the server's structured results (data: ReverseSearchResultItem[]) as Markdown and
- * write to the LLM-specified path. No remote files are downloaded.
+ * matrix_image_reverse_search —— Pattern D-special:本地图片上传 OSS 后做以图
+ * 搜图,服务端返回结构化结果列表(data: ReverseSearchResultItem[]),本工具
+ * 把它格式化成 markdown 写到 LLM 指定路径。不下载远端文件。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

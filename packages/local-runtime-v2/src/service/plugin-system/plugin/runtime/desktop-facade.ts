@@ -140,7 +140,11 @@ export class PluginDesktopFacade {
         ...response,
         plugin: {
           ...response.plugin,
-          summary: overlayOfficialSummary(response.plugin.summary, installations),
+          summary: overlayOfficialSummary(
+            response.plugin.summary,
+            installations,
+            this.options.system.forbiddenPluginNames,
+          ),
         },
       };
     }
@@ -164,7 +168,11 @@ export class PluginDesktopFacade {
         reuseCached: true,
       }),
     ]);
-    const official = await officialInstalledItems(officialStates, filter);
+    const official = await officialInstalledItems(
+      officialStates,
+      filter,
+      this.options.system.forbiddenPluginNames,
+    );
     const local = localInstalledItems(localSnapshot, filter, official);
     return installedSnapshotPage(
       [...official, ...local],
@@ -380,7 +388,13 @@ export class PluginDesktopFacade {
     const installations = await this.options.system.listOfficialPluginInstallations();
     return {
       ...response,
-      plugins: response.plugins.map((plugin) => overlayOfficialSummary(plugin, installations)),
+      plugins: response.plugins.map((plugin) =>
+        overlayOfficialSummary(
+          plugin,
+          installations,
+          this.options.system.forbiddenPluginNames,
+        ),
+      ),
     };
   }
 
@@ -458,7 +472,9 @@ function localMarketplacePage(
   const cursor = decodeLocalCursor(req.cursor, filter, categoryKey);
   const limit = pageLimit(req.limit);
   const items = snapshot.localPlugins
-    .filter((plugin) => pluginMatchesKeyword(plugin.name, plugin.displayName, filter))
+    .filter((plugin) =>
+      pluginMatchesKeyword([plugin.name, plugin.displayName, plugin.description], filter),
+    )
     .filter((plugin) => category === undefined || category === categoryId(plugin.plugin.category))
     .map(localMarketplaceSummary);
   const offset = cursor?.offset ?? 0;
@@ -512,21 +528,28 @@ function installedSnapshotPage(
 async function officialInstalledItems(
   states: readonly OfficialPluginLocalState[],
   filter: string,
+  forbiddenPluginNames: ReadonlySet<string>,
 ): Promise<InstalledPluginSummary[]> {
-  return states.flatMap((state) => officialInstalledItem(state, filter));
+  return states.flatMap((state) => officialInstalledItem(state, filter, forbiddenPluginNames));
 }
 
 function officialInstalledItem(
   { installation, plugin }: OfficialPluginLocalState,
   filter: string,
+  forbiddenPluginNames: ReadonlySet<string>,
 ): InstalledPluginSummary[] {
-  if (!pluginMatchesKeyword(installation.name, plugin?.displayName, filter)) return [];
-  return [toOfficialInstalledSummary(installation, plugin)];
+  if (
+    !pluginMatchesKeyword([installation.name, plugin?.displayName, plugin?.description], filter)
+  ) {
+    return [];
+  }
+  return [toOfficialInstalledSummary(installation, plugin, forbiddenPluginNames)];
 }
 
 function toOfficialInstalledSummary(
   installation: OfficialPluginInstallationRecord,
   plugin: OfficialPluginLocalState['plugin'],
+  forbiddenPluginNames: ReadonlySet<string>,
 ): InstalledPluginSummary {
   return {
     name: installation.name,
@@ -536,6 +559,9 @@ function toOfficialInstalledSummary(
     enabled: installation.enabled,
     installationPolicy: effectiveInstallationPolicy(installation),
     category: plugin ? categoryId(plugin.category) : MarketplaceCategory.OTHER,
+    ...(forbiddenPluginNames.has(normalizedName(installation.name))
+      ? { unavailableReason: 'FORBIDDEN_BY_CONFIG' }
+      : {}),
   };
 }
 
@@ -566,6 +592,7 @@ function officialInstalledCapabilities(plugin: OfficialPluginLocalState['plugin'
 function overlayOfficialSummary(
   summary: PluginMarketplaceSummary,
   installations: readonly OfficialPluginInstallationRecord[],
+  forbiddenPluginNames: ReadonlySet<string>,
 ): PluginMarketplaceSummary {
   const installation = installations.find(
     (item) => normalizedName(item.name) === normalizedName(summary.name),
@@ -577,6 +604,9 @@ function overlayOfficialSummary(
     installationPolicy: installation
       ? effectiveInstallationPolicy(installation)
       : (summary.installationPolicy ?? PluginInstallationPolicy.USER_MANAGED),
+    ...(forbiddenPluginNames.has(normalizedName(summary.name))
+      ? { unavailableReason: 'FORBIDDEN_BY_CONFIG' }
+      : {}),
   };
 }
 
@@ -588,7 +618,10 @@ function localInstalledItems(
   const reserved = new Set(official.map((item) => normalizedName(item.name)));
   return snapshot.localPlugins.flatMap((plugin) => {
     const key = normalizedName(plugin.name);
-    if (!pluginMatchesKeyword(plugin.name, plugin.displayName, filter) || reserved.has(key)) {
+    if (
+      !pluginMatchesKeyword([plugin.name, plugin.displayName, plugin.description], filter) ||
+      reserved.has(key)
+    ) {
       return [];
     }
     reserved.add(key);
@@ -607,6 +640,7 @@ function localInstalledItems(
         enabled: summary.enabled,
         installationPolicy: PluginInstallationPolicy.USER_MANAGED,
         category: summary.category,
+        ...(plugin.unavailableReason ? { unavailableReason: plugin.unavailableReason } : {}),
       },
     ];
   });
@@ -633,6 +667,7 @@ function localMarketplaceSummary(
     enabled: plugin.enabled,
     installationPolicy: PluginInstallationPolicy.USER_MANAGED,
     category: categoryId(plugin.plugin.category),
+    ...(plugin.unavailableReason ? { unavailableReason: plugin.unavailableReason } : {}),
   };
 }
 
@@ -866,15 +901,8 @@ function normalizedKeyword(value: string | undefined): string {
   return normalizedName(value ?? '');
 }
 
-function pluginMatchesKeyword(
-  name: string,
-  displayName: string | undefined,
-  keyword: string,
-): boolean {
-  return (
-    normalizedName(name).includes(keyword) ||
-    (displayName !== undefined && normalizedName(displayName).includes(keyword))
-  );
+function pluginMatchesKeyword(texts: readonly (string | undefined)[], keyword: string): boolean {
+  return texts.some((text) => text !== undefined && normalizedName(text).includes(keyword));
 }
 
 function normalizedName(value: string): string {

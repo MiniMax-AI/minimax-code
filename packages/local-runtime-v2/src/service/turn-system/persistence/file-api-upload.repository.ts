@@ -6,7 +6,29 @@ import type {
   FileApiUploadKey,
   FileApiUploadStore,
   FileApiUploadStoreSource,
+  MessagesFileApiPatcherLogger,
 } from '../agent-host/assembly/messages-file-api-patcher.js';
+
+export function createFileApiRuntime(options: {
+  readonly db: AppDb;
+  readonly nowMs?: (() => number) | undefined;
+  readonly product?:
+    | { readonly fetchImpl?: typeof fetch; readonly logger?: MessagesFileApiPatcherLogger }
+    | undefined;
+}): {
+  readonly uploadStores: FileApiUploadStoreSource;
+  readonly fetchImpl?: typeof fetch;
+  readonly logger?: MessagesFileApiPatcherLogger;
+} {
+  return {
+    uploadStores: createFileApiUploadStoreSource({
+      db: options.db,
+      ...(options.nowMs ? { nowMs: options.nowMs } : {}),
+    }),
+    ...(options.product?.fetchImpl ? { fetchImpl: options.product.fetchImpl } : {}),
+    ...(options.product?.logger ? { logger: options.product.logger } : {}),
+  };
+}
 
 export function createFileApiUploadStoreSource(options: {
   readonly db: AppDb;

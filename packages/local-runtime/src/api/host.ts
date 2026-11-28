@@ -865,6 +865,7 @@ export class LocalRuntimeApiHost {
             producer: "Thread Goal objective steering",
             matrixLogger: this.matrixLogger,
           });
+          if (result.mode === 'queued') return { turnId: result.turnId, mode: 'steered' as const };
           return result;
         } catch (error) {
           if (internalPromptRead)

@@ -172,7 +172,7 @@ export function buildQuestionnaireServiceDeps(
     enumerable: true,
     get: () => questionnaireRequestAdmissionBindings.get(host),
   });
-  // Long-lived facades (Electron/TUI/CLI/app-server peripheral questionnaires)
+  // Long-lived facades (Electron/TUI/CLI peripheral questionnaires)
   // are assembled before Plan registers its owner. Resolve both the handler and
   // its recovery hook at use time so a live reply reaches the owning workflow
   // instead of waiting for startup reconciliation.

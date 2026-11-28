@@ -3,14 +3,36 @@ import type { RuntimeTool } from '@mavis/agent-core/tools';
 import type { AgentExtension } from '@mavis/agent-runtime';
 import type { LocalBrowserAdapter, LocalBrowserToolExposure } from '@mavis/agent-tools/desktop';
 
-interface BrowserUseConfigSnapshot {
+import type { BrowserUseMetricsClient } from './browser-use-metrics.js';
+
+export interface BrowserUseConfigSnapshot {
   readonly filePanelBrowserEnabled?: boolean;
   readonly browserUseToolingEnabled?: boolean;
+  /** False: a Browser call inside run_code gets no automatic post-action screenshot. */
+  readonly ptcPostActionScreenshot?: boolean;
+  /** `browser.compactInspect` (on by default): compact page reads, short Browser description and Skill. */
+  readonly compactInspect?: boolean;
+}
+
+/** One tab of this chat's Browser as the turn starts (ambient state for the model). */
+export interface InAppBrowserTabState {
+  readonly tabId: number;
+  readonly title?: string;
+  readonly url?: string;
+  readonly owner?: 'user' | 'agent';
+  readonly retention?: 'temporary' | 'carryover' | 'deliverable';
+  readonly surfaceKind?: 'web' | 'miniapp';
+  readonly visible?: boolean;
+  readonly asleep?: boolean;
 }
 
 export interface InAppBrowserSurfaceState {
   readonly visible: boolean;
   readonly selectedTab: boolean;
+  /** This chat's Browser tabs, when the desktop shell reported them. */
+  readonly tabs?: readonly InAppBrowserTabState[];
+  /** Tabs left out of `tabs` because the session has more than the turn context lists. */
+  readonly tabsOmitted?: number;
 }
 
 export interface InAppBrowserReminderState extends InAppBrowserSurfaceState {
@@ -63,6 +85,8 @@ export interface BrowserUseServiceOptions {
   readonly registerGeneratedAsset: BrowserGeneratedAssetRegistrar;
   /** Desktop is Plugin-managed; CLI/TUI retain explicit config enablement. */
   readonly activationMode: 'desktop-plugin' | 'explicit-config';
+  /** Host MetricsClient for the online Browser metrics (browser-use-metrics.ts). */
+  readonly metrics?: BrowserUseMetricsClient;
 }
 
 export interface BrowserUseBoundSkill {
@@ -87,6 +111,12 @@ export interface BrowserUseTurnCapabilityInput {
   readonly workspaceRoot: string;
   readonly baseTools: readonly RuntimeTool[];
   readonly allowedExtensionSkillNames?: readonly string[];
+  /**
+   * PTC is on for this Turn (`isPtcTurnEnabled`, the same decision as the
+   * system prompt and the tool catalog). With a provider that runs page
+   * operations, run_script becomes a Browser program.
+   */
+  readonly ptc?: boolean;
   readonly desktopCapabilities?: {
     readonly hostBindings?: readonly {
       readonly pluginName: string;

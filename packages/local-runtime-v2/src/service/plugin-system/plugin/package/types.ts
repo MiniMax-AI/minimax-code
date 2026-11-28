@@ -43,10 +43,23 @@ export interface PluginDeclaredTool {
   readonly inputSchema: Record<string, unknown>;
 }
 
+export interface PluginMcpOAuthDescriptor {
+  readonly redirectFormat: 'localhost-callback' | 'codex';
+  readonly clientId?: string;
+  readonly scopes?: readonly string[];
+  readonly callbackPort?: number;
+  readonly authServerMetadataUrl?: string;
+  readonly codexCallbackUrl?: string;
+}
+
+export interface PluginResolvedMcpServer extends ResolvedMcpServer {
+  readonly oauth?: PluginMcpOAuthDescriptor;
+}
+
 export interface PluginMcpServer {
   readonly name: string;
   readonly description?: string;
-  readonly resolvedServer: ResolvedMcpServer;
+  readonly resolvedServer: PluginResolvedMcpServer;
   readonly declaredTools: readonly PluginDeclaredTool[];
   readonly configJson: string;
 }

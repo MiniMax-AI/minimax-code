@@ -30,6 +30,18 @@ export function upsertPreferenceValue(db: AppDb, key: string, value: unknown): v
     .run();
 }
 
+/** Insert one JSON value only when the key is still free; the first writer wins. */
+export function insertPreferenceValueIfAbsent(db: AppDb, key: string, value: unknown): void {
+  const valueJson = JSON.stringify(value);
+  if (valueJson === undefined) {
+    throw new TypeError('Preference value must be JSON-serializable');
+  }
+  db.insert(preferences)
+    .values({ key, valueJson })
+    .onConflictDoNothing({ target: preferences.key })
+    .run();
+}
+
 /** Delete one value; deleting a missing row is intentionally idempotent. */
 export function deletePreferenceValue(db: AppDb, key: string): void {
   db.delete(preferences).where(eq(preferences.key, key)).run();

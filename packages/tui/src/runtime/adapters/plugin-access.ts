@@ -134,6 +134,7 @@ function toPluginView(
     ...(plugin.author?.trim() ? { author: plugin.author.trim() } : {}),
     installed,
     enabled,
+    ...(plugin.unavailableReason ? { unavailableReason: plugin.unavailableReason } : {}),
     capabilities: {
       appCount: plugin.capabilities.appCount,
       mcpServerCount: plugin.capabilities.mcpServerCount,

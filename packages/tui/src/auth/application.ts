@@ -1,10 +1,11 @@
 import type { MavisBuildEnv, MavisRegion } from '@mavis/config';
-import type {
-  AuthStatusSnapshot,
-  DeviceAuthorizationPrompt,
-  LoginOptions,
-  LoginResult,
-  LogoutResult,
+import {
+  requiresLocalCredentialReset,
+  type AuthStatusSnapshot,
+  type DeviceAuthorizationPrompt,
+  type LoginOptions,
+  type LoginResult,
+  type LogoutResult,
 } from '@mavis/oauth-core';
 
 import type {
@@ -116,13 +117,13 @@ export class McodeAuthApplication implements McodeAuthPort {
 
   async logout(): Promise<McodeAuthResult> {
     this.track('logout_click', {});
-    const status = await this.options.sharedAuthCore.getStatus();
+    const status = await this.readStatusBeforeLogout();
     // Always run the shared logout: signing out while already signed out is a
     // safe no-op in the core, and never blocking /logout keeps a wedged local
     // state recoverable.
     const result = await this.options.sharedAuthCore.logout({ revoke: true });
     const logoutUrl = buildMcodeLogoutUrl(this.scope);
-    if (status.status === 'anonymous' && result.status === 'anonymous') {
+    if (status?.status === 'anonymous' && result.status === 'anonymous') {
       return { state: 'already-signed-out', message: 'Already signed out of MiniMax.', logoutUrl };
     }
     return {
@@ -133,6 +134,19 @@ export class McodeAuthApplication implements McodeAuthPort {
           ? `Signed out locally from ${formatRegion(this.scope.region)} across MCode. Server revocation is pending until the network recovers.`
           : `Signed out of ${formatRegion(this.scope.region)} on Desktop, CLI/TUI, and embedded mcode-tools.`,
     };
+  }
+
+  /**
+   * An unreadable or corrupt auth.json makes the status unknown; the shared logout
+   * then resets the local credentials instead of failing.
+   */
+  private async readStatusBeforeLogout(): Promise<AuthStatusSnapshot | undefined> {
+    try {
+      return await this.options.sharedAuthCore.getStatus();
+    } catch (error) {
+      if (requiresLocalCredentialReset(error)) return undefined;
+      throw error;
+    }
   }
 
   private trackLoginResult(resultType: '1' | '2', failReason: McodeLoginFailReason): void {

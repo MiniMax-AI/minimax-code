@@ -13,6 +13,7 @@ import {
 } from '../../service/model-system/index.js';
 import { watchGlobalEvents, watchProcessEvents } from '../events.js';
 import type { ModelProviderApplication } from './model-provider-application.js';
+import type { SelectAdvisorInput } from './model-provider-contracts.js';
 import type {
   LocalRuntimeApplication,
   ProcessLocalModelInput,
@@ -34,7 +35,10 @@ export interface ProcessLocalApplicationOptions {
   readonly sessionReports?: SessionReportCapability;
   readonly instructions?: LocalRuntimeApplication['instructions'];
   readonly modelProvider: {
-    readonly application: Pick<ModelProviderApplication, 'list' | 'select'>;
+    readonly application: Pick<
+      ModelProviderApplication,
+      'list' | 'readAdvisor' | 'select' | 'selectAdvisor'
+    >;
     readonly providers: LocalModelProviderService;
     readonly listProviderPresets: ModelSystemOwner['listProviderPresets'];
     readonly oauth: Pick<CodexOAuthManager, 'getStatus' | 'startLogin' | 'cancelLogin'>;
@@ -226,10 +230,17 @@ function createModelsApplication(
   const favorites = modelProvider.favorites;
   const list = (request: { sessionId?: string } = {}) =>
     modelProvider.application.list(request);
+  const advisor = {
+    getAdvisor: (request: { sessionId?: string } = {}) =>
+      modelProvider.application.readAdvisor(request),
+    selectAdvisor: (request: SelectAdvisorInput) =>
+      modelProvider.application.selectAdvisor(request),
+  };
   if (!favorites) {
-    return { list, select: (request) => modelProvider.application.select(request) };
+    return { list, select: (request) => modelProvider.application.select(request), ...advisor };
   }
   return {
+    ...advisor,
     list: async (request = {}) => {
       const models = await list(request);
       // A broken preference row must never hide the catalog.

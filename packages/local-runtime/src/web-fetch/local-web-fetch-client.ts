@@ -32,8 +32,9 @@ export class LocalWebFetchClient implements LocalWebFetchAdapter {
   }
 
   async fetch(
-    input: LocalWebFetchToolInput,
-    signal?: AbortSignal,
+    ctxOrInput: import('@mavis/agent-tools/desktop').LocalWebFetchCallContext | LocalWebFetchToolInput,
+    inputOrSignal?: LocalWebFetchToolInput | AbortSignal,
+    maybeSignal?: AbortSignal,
   ): Promise<{
     content?: string;
     status?: number;
@@ -46,6 +47,12 @@ export class LocalWebFetchClient implements LocalWebFetchAdapter {
     retrievalOutcome?: LocalWebFetchRetrievalOutcome;
     base_resp?: { status_code?: number; status_msg?: string };
   }> {
+    const input = (ctxOrInput && typeof ctxOrInput === 'object' && 'url' in ctxOrInput
+      ? ctxOrInput
+      : inputOrSignal) as LocalWebFetchToolInput;
+    const signal = (ctxOrInput && typeof ctxOrInput === 'object' && 'url' in ctxOrInput
+      ? inputOrSignal
+      : maybeSignal) as AbortSignal | undefined;
     const url = normalizeHttpUrl(input.url);
     if (!url) {
       return failure(

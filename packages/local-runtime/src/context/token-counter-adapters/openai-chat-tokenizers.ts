@@ -22,7 +22,7 @@ const ZHIPU_PATHS = new Set([
 ]);
 const KIMI_PATHS = new Set(['/v1', '/v1/chat/completions', '/v1/tokenizers/estimate-token-count']);
 
-type OpenAICompletionsCompat = Parameters<typeof convertOpenAICompletionsMessages>[2];
+type OpenAICompletionsCompat = NonNullable<Parameters<typeof convertOpenAICompletionsMessages>[2]>;
 
 // Mirrors Pi's resolved compat for the official Zhipu and Moonshot hosts.
 // Pi exports the message converter but keeps its compat resolver private.

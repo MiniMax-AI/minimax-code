@@ -1,7 +1,8 @@
 /**
- * matrix_videos_understand — Pattern B (batch-only): Send up to five local videos per call to
- * mcp-server's Gemini backend and return list<MediaUnderstandResult> text. Callers with multiple
- * videos must send them in one batch rather than loop over calls. No artifact files are downloaded.
+ * matrix_videos_understand —— Pattern B(batch-only):一次调用最多 5 个本地
+ * 视频走 mcp-server 后端 Gemini 理解,返回 list<MediaUnderstandResult> 文本。
+ * 调用方有多个视频时必须 batch 一次性传完,不要 loop 调用本工具。不下载任何
+ * 产物文件。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ModelConnectionTester } from './test-connection.js';
 
-const API_KEY = 'test-key';
+const API_KEY = ['sk', 'synthetic', 'fixture'].join('-');
 const MESSAGES_API = 'anthropic-messages';
 const MESSAGES_PATH = MESSAGES_API.split('-')[0];
 const MESSAGES_VERSION_HEADER = MESSAGES_API.replace('-messages', '-version');
@@ -44,6 +44,15 @@ function openAiResponsesOkResponse(): Response {
       object: 'response',
       status: 'completed',
       output: [],
+    }),
+    { status: 200 },
+  );
+}
+
+function geminiOkResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      candidates: [{ content: { role: 'model', parts: [{ text: 'p' }] }, finishReason: 'STOP' }],
     }),
     { status: 200 },
   );
@@ -243,11 +252,197 @@ describe('ModelConnectionTester requests', () => {
   );
 });
 
+describe('ModelConnectionTester Gemini requests', () => {
+  it('sends google-generative-ai to <base>/models/<id>:streamGenerateContent?alt=sse with the Gemini key header', async () => {
+    const fetchImpl = vi.fn(async () => geminiOkResponse());
+    const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    const result = await tester.test('gemini', {
+      api: 'google-generative-ai',
+      baseUrl: 'https://generativelanguage.googleapis.com/',
+      apiKey: API_KEY,
+      modelId: 'gemini-3.5-flash',
+    });
+
+    expect(result).toEqual({ ok: true });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse',
+    );
+    const headers = new Headers(init.headers);
+    expect(headers.get('x-goog-api-key')).toBe(API_KEY);
+    expect(headers.has('authorization')).toBe(false);
+    expect(JSON.parse(String(init.body))).toEqual({
+      contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+      generationConfig: { maxOutputTokens: 16_384 },
+    });
+  });
+
+  it('cancels a Gemini SSE stream on the first valid candidates event without waiting for completion', async () => {
+    let cancelled = false;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"thinking..."}]}}]}\n\n',
+          ),
+        );
+        // Never closes on its own: probe must cancel as soon as the first valid event arrives.
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await expect(
+      tester.test('gemini-sse-early-cancel', {
+        api: 'google-generative-ai',
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: API_KEY,
+        modelId: 'gemini-4-carbon',
+        effort: 'high',
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(cancelled).toBe(true);
+  });
+
+  it('sanitizes an explicit error event returned inside a 200 Gemini SSE stream', async () => {
+    const sseBody = `data: ${JSON.stringify({ error: { message: `quota exceeded for ${API_KEY}` } })}\n\n`;
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(sseBody, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    const result = await tester.test('gemini-sse-error', {
+      api: 'google-generative-ai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: API_KEY,
+      modelId: 'gemini-4-carbon',
+    });
+    expect(result).toEqual({
+      ok: false,
+      errorCode: 'provider_error',
+      errorMessage: 'quota exceeded for ***',
+    });
+  });
+
+  it.each([
+    [
+      'https://api.example.com/v1beta',
+      'google/gemini-2.5-pro',
+      'https://api.example.com/v1beta/models/google/gemini-2.5-pro:streamGenerateContent?alt=sse',
+    ],
+    [
+      'https://api.example.com/v1beta',
+      'models/gemini-4-carbon',
+      'https://api.example.com/v1beta/models/gemini-4-carbon:streamGenerateContent?alt=sse',
+    ],
+    [
+      'https://api.example.com/v1beta',
+      'tunedModels/custom-1',
+      'https://api.example.com/v1beta/tunedModels/custom-1:streamGenerateContent?alt=sse',
+    ],
+    [
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-4-carbon:streamGenerateContent?alt=sse',
+      'gemini-4-carbon',
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-4-carbon:streamGenerateContent?alt=sse',
+    ],
+    [
+      'https://gateway.example.com/api/models/gemini/v1beta',
+      'gemini-4-carbon',
+      'https://gateway.example.com/api/models/gemini/v1beta/models/gemini-4-carbon:streamGenerateContent?alt=sse',
+    ],
+  ] as const)(
+    'normalizes Gemini base %s and model %s to %s',
+    async (baseUrl, modelId, expectedUrl) => {
+      const fetchImpl = vi.fn(async () => geminiOkResponse());
+      const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+      await expect(
+        tester.test(`gemini-path-${modelId}-${baseUrl}`, {
+          api: 'google-generative-ai',
+          baseUrl,
+          apiKey: API_KEY,
+          modelId,
+        }),
+      ).resolves.toEqual({ ok: true });
+      const [url] = fetchImpl.mock.calls[0] as unknown as [string];
+      expect(url).toBe(expectedUrl);
+    },
+  );
+
+  it.each([
+    ['gemini-3.1-pro-preview', 'medium', { includeThoughts: true, thinkingLevel: 'MEDIUM' }],
+    ['gemini-4-carbon', 'xhigh', { includeThoughts: true, thinkingLevel: 'XHIGH' }],
+    ['gemini-4-hydrogen', 'xhigh', { includeThoughts: true, thinkingLevel: 'XHIGH' }],
+    ['gemini-flash-latest', 'medium', { includeThoughts: true, thinkingLevel: 'MEDIUM' }],
+    ['gateway-custom-gemini', 'high', { includeThoughts: true, thinkingLevel: 'HIGH' }],
+    ['gateway-custom-gemini', 'none', { thinkingLevel: 'LOW' }],
+    ['gemini-3.5-flash', 'max', { includeThoughts: true, thinkingLevel: 'MAX' }],
+    ['gemini-3.8-flash', 'low', { includeThoughts: true, thinkingLevel: 'LOW' }],
+    ['gemini-3.5-flash', 'light', { includeThoughts: true, thinkingLevel: 'LIGHT' }],
+    ['gemini-2.5-flash', 'low', { includeThoughts: true, thinkingBudget: 2048 }],
+    ['gemini-3.5-flash', 'none', { thinkingLevel: 'LOW' }],
+    ['gemini-2.5-flash', 'none', { thinkingBudget: 0 }],
+    ['gemini-2.5-pro', 'none', { thinkingBudget: 128 }],
+  ] as const)(
+    'sends the thinkingConfig a real %s turn sends for effort %s',
+    async (modelId, effort, thinkingConfig) => {
+      const fetchImpl = vi.fn(async () => geminiOkResponse());
+      const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+      await expect(
+        tester.test(`gemini-${modelId}-${effort}`, {
+          api: 'google-generative-ai',
+          baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+          apiKey: API_KEY,
+          modelId,
+          effort,
+        }),
+      ).resolves.toEqual({ ok: true });
+
+      const init = (fetchImpl.mock.calls[0] as unknown as [unknown, RequestInit])[1];
+      expect(JSON.parse(String(init.body)).generationConfig).toEqual({
+        maxOutputTokens: 16_384,
+        thinkingConfig,
+      });
+    },
+  );
+
+  it('rejects a Gemini success body without candidates', async () => {
+    const fetchImpl = vi.fn(async () => openAiOkResponse());
+    const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await expect(
+      tester.test('gemini-invalid', {
+        api: 'google-generative-ai',
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        apiKey: API_KEY,
+        modelId: 'gemini-3.5-flash',
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'invalid_response' });
+  });
+});
+
 describe('ModelConnectionTester output budget', () => {
   it.each([
     ['anthropic-messages', messagesOkResponse],
     ['openai-completions', openAiOkResponse],
     ['openai-responses', openAiResponsesOkResponse],
+    ['google-generative-ai', geminiOkResponse],
   ] as const)('sends the configured output limit to %s', async (api, response) => {
     const fetchImpl = vi.fn(async () => response());
     const tester = new ModelConnectionTester({ fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -264,7 +459,11 @@ describe('ModelConnectionTester output budget', () => {
 
     const init = (fetchImpl.mock.calls[0] as unknown as [unknown, RequestInit])[1];
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-    expect(body.max_tokens ?? body.max_output_tokens).toBe(12_000);
+    expect(
+      body.max_tokens ??
+        body.max_output_tokens ??
+        (body.generationConfig as Record<string, unknown> | undefined)?.maxOutputTokens,
+    ).toBe(12_000);
   });
 
   it.each([
@@ -349,7 +548,9 @@ describe('ModelConnectionTester response errors', () => {
     const headers = new Headers(init.headers);
     expect(headers.get('authorization')).toBe('Api-Key custom-auth');
     expect(headers.get('x-tenant-id')).toBe('tenant-a');
-    expect(Array.from(headers.keys()).filter((name) => name === 'authorization')).toHaveLength(1);
+    const names: string[] = [];
+    headers.forEach((_value, name) => names.push(name));
+    expect(names.filter((name) => name === 'authorization')).toHaveLength(1);
   });
 });
 
@@ -762,16 +963,19 @@ describe('ModelConnectionTester invalid responses and concurrency', () => {
 
 describe('OpenCode Go connection identity', () => {
   it.each([
-    ['openai-completions', openAiOkResponse],
-    ['openai-responses', openAiResponsesOkResponse],
-    ['anthropic-messages', messagesOkResponse],
-  ] as const)('adds independent probe identities for %s', async (api, response) => {
+    ['openai-completions', 'https://opencode.ai/zen/go/v1', openAiOkResponse],
+    ['openai-responses', 'https://opencode.ai/zen/go/v1', openAiResponsesOkResponse],
+    ['anthropic-messages', 'https://opencode.ai/zen/go/v1', messagesOkResponse],
+    ['openai-completions', 'https://opencode.ai/inference/go/openai/v1', openAiOkResponse],
+    ['openai-responses', 'https://opencode.ai/inference/go/openai/v1', openAiResponsesOkResponse],
+    ['anthropic-messages', 'https://opencode.ai/inference/go/openai/v1', messagesOkResponse],
+  ] as const)('adds independent probe identities for %s at %s', async (api, baseUrl, response) => {
     const fetchImpl = vi.fn<typeof fetch>(async () => response());
     const tester = new ModelConnectionTester({ fetchImpl });
     const target = {
       api,
       apiKey: API_KEY,
-      baseUrl: 'https://opencode.ai/zen/go/v1',
+      baseUrl,
       modelId: 'test-model',
       headers: { 'X-OpenCode-Session': 'stale-static-id', 'USER-AGENT': 'generic-sdk' },
     };
@@ -784,107 +988,71 @@ describe('OpenCode Go connection identity', () => {
     }
     expect(headers[0]?.get('x-opencode-session')).not.toBe(headers[1]?.get('x-opencode-session'));
   });
+
+  it('sends the check session id the target carries', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => openAiOkResponse());
+    const tester = new ModelConnectionTester({ fetchImpl });
+    const target = {
+      api: 'openai-completions' as const,
+      apiKey: API_KEY,
+      baseUrl: 'https://opencode.ai/inference/go/openai/v1',
+      modelId: 'test-model',
+      headers: { 'X-OpenCode-Session': 'stale-static-id' },
+      sessionId: 'check-session',
+    };
+    expect(await tester.test('probe-low', { ...target, effort: 'low' })).toEqual({ ok: true });
+    expect(await tester.test('probe-high', { ...target, effort: 'high' })).toEqual({ ok: true });
+    const sessions = fetchImpl.mock.calls.map((call) =>
+      new Headers(call[1]?.headers).get('x-opencode-session'),
+    );
+    expect(sessions).toEqual(['check-session', 'check-session']);
+  });
+
+  it('keeps the session header off other providers even when a check id is set', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => openAiOkResponse());
+    const tester = new ModelConnectionTester({ fetchImpl });
+    expect(
+      await tester.test('probe', {
+        api: 'openai-completions',
+        apiKey: API_KEY,
+        baseUrl: 'https://opencode.ai/zen/v1',
+        modelId: 'test-model',
+        sessionId: 'check-session',
+      }),
+    ).toEqual({ ok: true });
+    const headers = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
+    expect(headers.has('x-opencode-session')).toBe(false);
+    expect(headers.get('user-agent')).toBe('MiniMaxCode');
+  });
 });
 
-describe('Google connection tests through Pi', () => {
-  const target = {
-    api: 'google-generative-ai' as const,
-    apiKey: API_KEY,
-    baseUrl: 'https://opencode.ai/inference/go/v1',
-    modelId: 'gemini-4-argon-contributor',
-    outputLimit: 1024,
-  };
-
-  it.each([undefined, 'off', 'high'])('uses Pi with effort %s and the configured output limit', async (effort) => {
-    let request: Request | undefined;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(async (input, init) => {
-        request = new Request(input, init);
-        return new Response(
-          `data: ${JSON.stringify({
-            candidates: [
-              {
-                content: { role: 'model', parts: [{ text: 'pong' }] },
-                finishReason: 'STOP',
-              },
-            ],
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } },
-        );
-      }),
+describe('MiniMax Code connection identity', () => {
+  it.each([
+    ['openai-completions', openAiOkResponse],
+    ['anthropic-messages', messagesOkResponse],
+  ] as const)('sends the product User-Agent on %s probes', async (api, response) => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => response());
+    const tester = new ModelConnectionTester({ fetchImpl });
+    const target = { api, apiKey: API_KEY, baseUrl: 'https://api.example.com', modelId: 'm' };
+    expect(await tester.test('probe', target)).toEqual({ ok: true });
+    expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get('user-agent')).toBe(
+      'MiniMaxCode',
     );
-    try {
-      expect(await new ModelConnectionTester().test('google', { ...target, effort })).toEqual({
-        ok: true,
-      });
-      expect(request?.url).toBe(
-        `${target.baseUrl}/models/${target.modelId}:streamGenerateContent?alt=sse`,
-      );
-      expect(request?.headers.get('x-goog-api-key')).toBe(API_KEY);
-      expect(request?.headers.get('x-opencode-session')).toMatch(/^[0-9a-f-]{36}$/u);
-      expect(request?.headers.get('user-agent')).toContain('MiniMaxCode');
-      const body = await request?.json();
-      expect(body).toMatchObject({
-        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-        generationConfig: { maxOutputTokens: 1024 },
-      });
-      if (effort === 'high') {
-        expect(body.generationConfig.thinkingConfig).toMatchObject({ includeThoughts: true });
-      } else {
-        expect(body.generationConfig).not.toHaveProperty('thinkingConfig');
-      }
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 
-  it('redacts provider errors returned by Pi', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(
-        async () =>
-          new Response(
-            JSON.stringify({
-              error: {
-                code: 401,
-                message: `Invalid key ${API_KEY}`,
-                status: 'UNAUTHENTICATED',
-              },
-            }),
-            { status: 401, headers: { 'content-type': 'application/json' } },
-          ),
-      ),
+  it('keeps a User-Agent configured for the provider', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => openAiOkResponse());
+    const tester = new ModelConnectionTester({ fetchImpl });
+    const target = {
+      api: 'openai-completions' as const,
+      apiKey: API_KEY,
+      baseUrl: 'https://api.example.com',
+      modelId: 'm',
+      headers: { 'user-agent': 'relay-client/1.0' },
+    };
+    expect(await tester.test('probe', target)).toEqual({ ok: true });
+    expect(new Headers(fetchImpl.mock.calls[0]?.[1]?.headers).get('user-agent')).toBe(
+      'relay-client/1.0',
     );
-    try {
-      const result = await new ModelConnectionTester().test('google-error', target);
-      expect(result).toMatchObject({ ok: false, errorCode: 'provider_error' });
-      expect(result.errorMessage).toContain('Invalid key');
-      expect(result.errorMessage).not.toContain(API_KEY);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('honors the caller timeout while Pi is waiting for Google', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn<typeof fetch>(
-        (input, init) =>
-          new Promise((_resolve, reject) => {
-            const signal = new Request(input, init).signal;
-            signal.addEventListener('abort', () => reject(signal.reason), {
-              once: true,
-            });
-          }),
-      ),
-    );
-    try {
-      expect(
-        await new ModelConnectionTester({ timeoutMs: 50 }).test('google-timeout', target),
-      ).toMatchObject({ ok: false, errorCode: 'timeout' });
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 });

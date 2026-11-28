@@ -83,34 +83,39 @@ export function resolveReadPath(filePath: string, cwd: string): string {
 	return resolved;
 }
 
-export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
+/** Hosts can keep path probes on the same filesystem as their read operations. */
+export async function resolveReadPathAsync(
+	filePath: string,
+	cwd: string,
+	probe: (filePath: string) => Promise<boolean> = pathExists,
+): Promise<string> {
 	const resolved = resolveToCwd(filePath, cwd);
 
-	if (await pathExists(resolved)) {
+	if (await probe(resolved)) {
 		return resolved;
 	}
 
 	// Try macOS AM/PM variant (narrow no-break space before AM/PM)
 	const amPmVariant = tryMacOSScreenshotPath(resolved);
-	if (amPmVariant !== resolved && (await pathExists(amPmVariant))) {
+	if (amPmVariant !== resolved && (await probe(amPmVariant))) {
 		return amPmVariant;
 	}
 
 	// Try NFD variant (macOS stores filenames in NFD form)
 	const nfdVariant = tryNFDVariant(resolved);
-	if (nfdVariant !== resolved && (await pathExists(nfdVariant))) {
+	if (nfdVariant !== resolved && (await probe(nfdVariant))) {
 		return nfdVariant;
 	}
 
 	// Try curly quote variant (macOS uses U+2019 in screenshot names)
 	const curlyVariant = tryCurlyQuoteVariant(resolved);
-	if (curlyVariant !== resolved && (await pathExists(curlyVariant))) {
+	if (curlyVariant !== resolved && (await probe(curlyVariant))) {
 		return curlyVariant;
 	}
 
 	// Try combined NFD + curly quote (for French macOS screenshots like "Capture d'écran")
 	const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
-	if (nfdCurlyVariant !== resolved && (await pathExists(nfdCurlyVariant))) {
+	if (nfdCurlyVariant !== resolved && (await probe(nfdCurlyVariant))) {
 		return nfdCurlyVariant;
 	}
 

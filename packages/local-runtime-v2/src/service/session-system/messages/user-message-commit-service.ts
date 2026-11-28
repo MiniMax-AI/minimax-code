@@ -82,17 +82,20 @@ export interface UserMessageCommitServiceOptions {
   }) => string;
 }
 
+/** A Message commit rejection that every retry of the same input meets again. */
+export function isDeterministicUserMessageCommitRejection(error: unknown): boolean {
+  return (
+    error instanceof UserMessageCommitAdmissionError ||
+    error instanceof UserMessageCommitConflictError
+  );
+}
+
 /** Retries transient Message writes once without repeating deterministic rejections. */
 export async function retryUserMessageCommit<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    if (
-      error instanceof UserMessageCommitAdmissionError ||
-      error instanceof UserMessageCommitConflictError
-    ) {
-      throw error;
-    }
+    if (isDeterministicUserMessageCommitRejection(error)) throw error;
     return operation();
   }
 }

@@ -27,15 +27,35 @@ export function applyEdit(
   return { content, replacements: replaceAll ? matches : 1 };
 }
 
+export function parseSearchTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
+}
+
+export function countMatchedTerms(text: string, terms: readonly string[]): number {
+  const lower = text.toLowerCase();
+  return terms.reduce((count, term) => (lower.includes(term) ? count + 1 : count), 0);
+}
+
+export function rankByScore<T>(items: readonly T[], score: (item: T) => number): T[] {
+  return items
+    .map((item) => ({ item, score: score(item) }))
+    .sort((a, b) => b.score - a.score)
+    .map(({ item }) => item);
+}
+
 export function searchLines(content: string, query: string): LocalMemorySearchResult[] {
-  const lower = query.toLowerCase();
-  if (!lower) return [];
+  const terms = parseSearchTerms(query);
+  if (terms.length === 0) return [];
   const lines = content.split(/\r?\n/);
-  return lines.flatMap((line, index) =>
-    line.toLowerCase().includes(lower)
-      ? [{ lineNumber: index + 1, line, context: lines.slice(Math.max(0, index - 1), index + 2) }]
-      : [],
-  );
+  return lines
+    .flatMap((line, index) => {
+      const score = countMatchedTerms(line, terms);
+      if (score === 0) return [];
+      const context = lines.slice(Math.max(0, index - 1), index + 2);
+      return [{ score, result: { lineNumber: index + 1, line, context } }];
+    })
+    .sort((a, b) => b.score - a.score)
+    .map(({ result }) => result);
 }
 
 const TOPIC_HEADER_RE = /^---\ndescription: ([\s\S]*?)\n---\n\n/;

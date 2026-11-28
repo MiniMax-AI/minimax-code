@@ -74,6 +74,7 @@ export interface LocalRuntimeConfig {
   defaultModel?: string;
   defaultModelVariant?: string;
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'auto' | 'off';
+  smartCleanup?: Config['smartCleanup'];
   /** Permission policy rollout; omitted local views inherit the config default. */
   permission?: Partial<Config['permission']>;
   skipWindowsHardSafetyChecks?: Config['skipWindowsHardSafetyChecks'];
@@ -84,6 +85,7 @@ export interface LocalRuntimeConfig {
    */
   builtinSkillsDir?: string;
   beta?: LocalBetaConfig;
+  advisor?: Config['advisor'];
   agents?: Config['agents'];
   skills?: Config['skills'];
   asr?: Partial<AsrConfig>;

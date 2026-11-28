@@ -1,3 +1,4 @@
+import type { BrowserJsDialogSource } from './browser-js-dialog.js';
 import type { BrowserTransportCommandParams } from './browser-transport-types.js';
 
 export interface BrowserEvaluateOptions {
@@ -35,6 +36,12 @@ export interface BrowserAttachedFrame {
 
 export interface BrowserPageLifecycle {
   readonly sessionId: string;
+  /**
+   * Attach the page. A provider without `jsDialogs` must return with the CDP
+   * Page domain enabled on the page session (also after `resetConnection`):
+   * Browser Core then learns about JavaScript dialogs only from
+   * `Page.javascriptDialogOpening/Closed`.
+   */
   start(signal?: AbortSignal): Promise<void>;
   /**
    * Reset the provider connection/session without closing the page.
@@ -91,6 +98,20 @@ export interface BrowserTransport extends BrowserPageLifecycle {
   ): Promise<readonly T[]>;
   /** Current flattened OOPIF sessions attached below this page. */
   listAttachedFrames?(): readonly BrowserAttachedFrame[];
+  /**
+   * Provider-owned JavaScript dialog source. Providers whose dialogs cannot be
+   * suppressed through CDP alone (Electron) supply it; others omit it and
+   * Browser Core tracks dialogs through the CDP Page domain.
+   */
+  readonly jsDialogs?: BrowserJsDialogSource;
+  /**
+   * CDP-tracked providers only: `Page.javascriptDialogOpening` params of a
+   * dialog that is still open and was observed before this Browser Core
+   * session subscribed to events (a popup that opened a dialog while loading,
+   * before the first Agent action). Chromium reports a dialog only once, so
+   * the session's dialog tracker starts from it.
+   */
+  pendingJavaScriptDialog?(): Record<string, unknown> | undefined;
   onEvent(listener: BrowserTransportEventListener): () => void;
   waitForEvent(
     method: string,

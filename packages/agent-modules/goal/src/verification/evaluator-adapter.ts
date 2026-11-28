@@ -9,6 +9,32 @@ import {
   type VerifierPort,
 } from './verifier-port.js';
 
+/** Narrow host capability for one logical evaluator lease. Legacy hosts may omit it. */
+export type EvaluatorRetryDecision = {
+  readonly kind: 'terminal' | 'retry' | 'recover';
+  readonly errorKind?: string;
+  readonly retryAfterMs?: number;
+};
+
+export interface EvaluatorCallLease {
+  readonly signal: AbortSignal;
+  /** The host model port already owns physical-attempt wrapping. */
+  /** `undefined` has no opinion: the adapter's own retry decides. */
+  readonly classifyFailure?: (
+    error: unknown,
+  ) => EvaluatorRetryDecision | undefined | Promise<EvaluatorRetryDecision | undefined>;
+  readonly recover?: (input: {
+    readonly signal: AbortSignal;
+    readonly deadlineAt: number;
+  }) => Promise<void>;
+  readonly close: () => Promise<void>;
+}
+
+export interface EvaluatorCallLifecycle {
+  readonly lease: EvaluatorCallLease;
+  readonly deadlineAt: number;
+}
+
 export type EvaluatorRouteKind =
   | 'managed_token_plan'
   | 'minimax_api_key'
@@ -68,6 +94,10 @@ export interface EvaluatorAdapterOptions {
   readonly timeoutSeconds: number;
   readonly maxRetries: number;
   readonly nowMs?: () => number;
+  /** Optional host-owned logical lease; all physical attempts share this deadline. */
+  readonly lifecycle?: EvaluatorCallLifecycle;
+  readonly sessionId?: string;
+  readonly turnId?: string;
 }
 
 const VERDICT_SCHEMA = {
@@ -152,6 +182,8 @@ export function createEvaluatorVerifierAdapter(options: EvaluatorAdapterOptions)
   const maxTokens = positiveInteger(options.maxTokens);
   const timeoutMs = positiveInteger(options.timeoutSeconds) * 1_000;
   const maxRetries = Math.min(1, nonNegativeInteger(options.maxRetries));
+  // One total budget covers all physical attempts and recovery, not one fresh timeout per try.
+  const retryWindowMs = timeoutMs;
 
   return {
     async dispatch(attempt, signal): Promise<VerificationResult> {
@@ -164,6 +196,12 @@ export function createEvaluatorVerifierAdapter(options: EvaluatorAdapterOptions)
       }
 
       const samples: PhysicalUsageSample[] = [];
+      const deadlineAt = options.lifecycle?.deadlineAt ?? Date.now() + retryWindowMs;
+      const lease = options.lifecycle?.lease;
+      const ownedSignal = lease ? AbortSignal.any([signal, lease.signal]) : signal;
+      const close = async (): Promise<void> => {
+        if (lease) await lease.close();
+      };
       let serializedTail =
         attempt.evidence.mode === 'brief'
           ? attempt.evidence.serializedEvaluatorTail
@@ -176,70 +214,105 @@ export function createEvaluatorVerifierAdapter(options: EvaluatorAdapterOptions)
           }
         | undefined;
 
-      for (let physicalCall = 0; physicalCall <= maxRetries; physicalCall += 1) {
-        if (signal.aborted) {
-          throw dispatchFailure(
-            'aborted',
-            'Evaluator dispatch was aborted.',
-            samples,
-            signal.reason,
-          );
+      try {
+        for (let physicalCall = 0; physicalCall <= maxRetries; physicalCall += 1) {
+          if (ownedSignal.aborted) {
+            const timedOut =
+              ownedSignal.reason instanceof Error && ownedSignal.reason.name === 'TimeoutError';
+            throw dispatchFailure(
+              timedOut ? 'timeout' : 'aborted',
+              timedOut ? 'Evaluator dispatch timed out.' : 'Evaluator dispatch was aborted.',
+              samples,
+              ownedSignal.reason,
+            );
+          }
+          if (Date.now() >= deadlineAt) {
+            throw dispatchFailure('timeout', 'Evaluator dispatch timed out.', samples);
+          }
+          const startedAt = nowMs();
+          const remainingMs = Math.max(1, Math.min(timeoutMs, deadlineAt - Date.now()));
+          const timeoutSignal = AbortSignal.timeout(remainingMs);
+          const callSignal = AbortSignal.any([ownedSignal, timeoutSignal]);
+          try {
+            const response = await options.model.call({
+              systemPrompt: SYSTEM_PROMPT,
+              userPrompt: buildEvaluatorPrompt(attempt, serializedTail),
+              ...(attempt.objectiveImages?.length ? { images: attempt.objectiveImages } : {}),
+              outputSchema: VERDICT_SCHEMA,
+              maxTokens,
+              timeoutMs: remainingMs,
+              tools: [],
+              thinking: 'off',
+              signal: callSignal,
+            });
+            samples.push({
+              tokens: nonNegativeTokens(response.tokens),
+              incomplete: response.incomplete || response.tokens === null,
+              activeSeconds: elapsedSeconds(startedAt, nowMs()),
+            });
+            const parsed = parseVerdict(response.text);
+            if (!parsed) {
+              lastFailure = { code: 'schema_error', error: new Error('Invalid evaluator JSON') };
+              continue;
+            }
+            lastVerdict = parsed;
+            if (parsed.verdict === 'inconclusive' && physicalCall < maxRetries) continue;
+            return { backend: 'evaluator', verdict: parsed, usage: aggregateUsage(samples) };
+          } catch (error) {
+            const failure = classifyCallFailure(error, ownedSignal, timeoutSignal);
+            samples.push({
+              tokens: failure.tokens,
+              incomplete: failure.incomplete,
+              activeSeconds: elapsedSeconds(startedAt, nowMs()),
+            });
+            if (failure.code === 'aborted') {
+              throw dispatchFailure('aborted', failure.message, samples, error);
+            }
+            lastFailure = { code: failure.code, error };
+            const decision = await lease?.classifyFailure?.(error);
+            const recover = decision?.kind === 'recover' ? lease?.recover : undefined;
+            const retryable = decision?.kind === 'retry' || !!recover || !decision;
+            if (failure.code === 'input_too_large' && physicalCall < maxRetries) {
+              serializedTail = shrinkSerializedMessages(serializedTail);
+            }
+            if (retryable && physicalCall < maxRetries && Date.now() < deadlineAt) {
+              if (recover) await recover({ signal: callSignal, deadlineAt });
+              const retryDelayMs = normalizedRetryAfterMs(decision?.retryAfterMs);
+              const waitResult = await waitForRetry(retryDelayMs, ownedSignal, deadlineAt);
+              if (waitResult === 'aborted') {
+                throw dispatchFailure(
+                  'aborted',
+                  'Evaluator dispatch was aborted during retry backoff.',
+                  samples,
+                  ownedSignal.reason,
+                );
+              }
+              if (waitResult === 'deadline') {
+                throw dispatchFailure(
+                  'timeout',
+                  'Evaluator dispatch timed out before retry.',
+                  samples,
+                );
+              }
+              continue;
+            }
+            break;
+          }
         }
-        const startedAt = nowMs();
-        const timeoutSignal = AbortSignal.timeout(timeoutMs);
-        const callSignal = AbortSignal.any([signal, timeoutSignal]);
-        try {
-          const response = await options.model.call({
-            systemPrompt: SYSTEM_PROMPT,
-            userPrompt: buildEvaluatorPrompt(attempt, serializedTail),
-            ...(attempt.objectiveImages?.length ? { images: attempt.objectiveImages } : {}),
-            outputSchema: VERDICT_SCHEMA,
-            maxTokens,
-            timeoutMs,
-            tools: [],
-            thinking: 'off',
-            signal: callSignal,
-          });
-          samples.push({
-            tokens: nonNegativeTokens(response.tokens),
-            incomplete: response.incomplete || response.tokens === null,
-            activeSeconds: elapsedSeconds(startedAt, nowMs()),
-          });
-          const parsed = parseVerdict(response.text);
-          if (!parsed) {
-            lastFailure = { code: 'schema_error', error: new Error('Invalid evaluator JSON') };
-            continue;
-          }
-          lastVerdict = parsed;
-          if (parsed.verdict === 'inconclusive' && physicalCall < maxRetries) continue;
-          return { backend: 'evaluator', verdict: parsed, usage: aggregateUsage(samples) };
-        } catch (error) {
-          const failure = classifyCallFailure(error, signal, timeoutSignal);
-          samples.push({
-            tokens: failure.tokens,
-            incomplete: failure.incomplete,
-            activeSeconds: elapsedSeconds(startedAt, nowMs()),
-          });
-          if (failure.code === 'aborted') {
-            throw dispatchFailure('aborted', failure.message, samples, error);
-          }
-          lastFailure = { code: failure.code, error };
-          if (failure.code === 'input_too_large' && physicalCall < maxRetries) {
-            serializedTail = shrinkSerializedMessages(serializedTail);
-          }
-        }
-      }
 
-      if (lastVerdict?.verdict === 'inconclusive') {
-        return { backend: 'evaluator', verdict: lastVerdict, usage: aggregateUsage(samples) };
+        if (lastVerdict?.verdict === 'inconclusive') {
+          return { backend: 'evaluator', verdict: lastVerdict, usage: aggregateUsage(samples) };
+        }
+        const code = lastFailure?.code ?? 'api_error';
+        throw dispatchFailure(
+          code,
+          `Evaluator ${code.replaceAll('_', ' ')} after ${samples.length} physical call(s).`,
+          samples,
+          lastFailure?.error,
+        );
+      } finally {
+        await close();
       }
-      const code = lastFailure?.code ?? 'api_error';
-      throw dispatchFailure(
-        code,
-        `Evaluator ${code.replaceAll('_', ' ')} after ${samples.length} physical call(s).`,
-        samples,
-        lastFailure?.error,
-      );
     },
   };
 }
@@ -293,11 +366,15 @@ function buildEvaluatorPrompt(attempt: VerificationAttempt, serializedTail: stri
         ? {
             goalResources: {
               trust: 'untrusted_data',
-              value: attempt.objectiveResources.map(({ fileName, filePath, mimeType }) => ({
-                fileName,
-                filePath,
-                mimeType,
-              })),
+              value: attempt.objectiveResources.map(
+                ({ fileName, filePath, mimeType, driveNodeId, drivePath }) => ({
+                  fileName,
+                  filePath,
+                  mimeType,
+                  ...(driveNodeId ? { driveNodeId } : {}),
+                  ...(drivePath ? { drivePath } : {}),
+                }),
+              ),
             },
           }
         : {}),
@@ -381,9 +458,11 @@ function classifyCallFailure(
     };
   }
   if (parentSignal.aborted) {
+    const timedOut =
+      parentSignal.reason instanceof Error && parentSignal.reason.name === 'TimeoutError';
     return {
-      code: 'aborted',
-      message: 'Evaluator dispatch was aborted.',
+      code: timedOut ? 'timeout' : 'aborted',
+      message: timedOut ? 'Evaluator dispatch timed out.' : 'Evaluator dispatch was aborted.',
       tokens: null,
       incomplete: true,
     };
@@ -402,6 +481,42 @@ function classifyCallFailure(
     tokens: null,
     incomplete: true,
   };
+}
+
+function normalizedRetryAfterMs(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.ceil(value)) : 0;
+}
+
+/** Never shorten a provider backoff to squeeze another request into the budget. */
+async function waitForRetry(
+  delayMs: number,
+  signal: AbortSignal,
+  deadlineAt: number,
+): Promise<'ready' | 'aborted' | 'deadline'> {
+  const stopped = (): 'aborted' | 'deadline' | undefined => {
+    if (signal.aborted) {
+      return signal.reason instanceof Error && signal.reason.name === 'TimeoutError'
+        ? 'deadline'
+        : 'aborted';
+    }
+    return Date.now() >= deadlineAt ? 'deadline' : undefined;
+  };
+  const initial = stopped();
+  if (initial) return initial;
+  if (Date.now() + delayMs >= deadlineAt) return 'deadline';
+  if (delayMs > 0) {
+    await new Promise<void>((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, delayMs);
+      signal.addEventListener('abort', finish, { once: true });
+      if (signal.aborted) finish();
+    });
+  }
+  return stopped() ?? 'ready';
 }
 
 function elapsedSeconds(startedAt: number, endedAt: number): number {

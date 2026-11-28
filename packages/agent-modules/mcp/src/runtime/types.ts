@@ -9,6 +9,7 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { McpAuthRequiredError, McpRequestAuthorizer } from './auth.js';
 
 export interface StdioTransportConfig {
   type: 'stdio';
@@ -90,6 +91,8 @@ export interface McpConnection {
   tools: McpToolInfo[] | null;
   lastUsed: number;
   error?: string;
+  /** Set by the authorized fetch layer when this connection can no longer authorize. */
+  lastAuthFailure?: McpAuthRequiredError;
 }
 
 /**
@@ -111,6 +114,12 @@ export interface McpConnectionTokenOverrides {
   serverOverride?: ResolvedMcpServer;
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  /**
+   * OAuth request authorizer for http/sse transports. Never serialized into config or
+   * snapshots; when present the transport uses the authorized fetch layer and the pool
+   * classifies authorization failures as `McpAuthRequiredError`.
+   */
+  authorizer?: McpRequestAuthorizer;
 }
 
 export interface McpCallOptions {
@@ -126,6 +135,11 @@ export interface McpCallOptions {
    * without waiting for the tool to complete.
    */
   signal?: AbortSignal;
+  /**
+   * Request `_meta` sent with this `tools/call`. Hosts use it for call context the
+   * tool schema does not carry, such as an opaque conversation id.
+   */
+  meta?: Record<string, unknown>;
 }
 
 /**

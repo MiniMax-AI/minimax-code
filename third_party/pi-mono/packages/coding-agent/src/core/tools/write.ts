@@ -1,4 +1,4 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import { withFileMutationQueue, type RealpathFn } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -27,6 +27,8 @@ export interface WriteOperations {
 	writeFile: (absolutePath: string, content: string) => Promise<void>;
 	/** Create directory recursively */
 	mkdir: (dir: string) => Promise<void>;
+	/** Resolve an absolute path to its canonical form for queue selection. Defaults to `node:fs/promises.realpath`. */
+	realpath?: RealpathFn;
 }
 
 const defaultWriteOperations: WriteOperations = {
@@ -200,7 +202,7 @@ export function createWriteToolDefinition(
 		) {
 			const absolutePath = resolveToCwd(path, cwd);
 			const dir = dirname(absolutePath);
-			return withFileMutationQueue(absolutePath, async () => {
+			const mutate = async (): Promise<AgentToolResult<undefined>> => {
 				// Do not reject from an abort event listener here: that would release the
 				// mutation queue while an in-flight filesystem operation may still finish.
 				// Checking signal.aborted after each await observes the same aborts while
@@ -222,7 +224,8 @@ export function createWriteToolDefinition(
 					content: [{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` }],
 					details: undefined,
 				};
-			});
+			};
+			return withFileMutationQueue(absolutePath, mutate, ops.realpath?.bind(ops));
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;

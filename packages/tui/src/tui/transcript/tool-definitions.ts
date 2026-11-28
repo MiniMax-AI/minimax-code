@@ -125,6 +125,14 @@ const BUILTIN_TOOL_DEFINITIONS: readonly TranscriptToolDefinition[] = [
     accentLabel: 'WebFetch',
   },
   {
+    // A user steer ends the consultation with a normal result; only a stop or a
+    // provider failure comes back as an error.
+    names: ['advisor'],
+    runningAction: 'Consulting advisor',
+    completedAction: 'Consulted advisor',
+    failedAction: 'Advisor failed',
+  },
+  {
     names: ['mcp'],
     family: 'mcp',
     runningAction: 'Calling',

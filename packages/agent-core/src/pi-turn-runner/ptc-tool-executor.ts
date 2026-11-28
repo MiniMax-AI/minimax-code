@@ -12,6 +12,8 @@ import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type {
   ProgrammaticToolResult,
   PtcChildDeadline,
+  PtcChildDisplayResult,
+  PtcChildDisplayResultShaper,
   PtcChildTimeoutDecision,
   PtcRetainedFact,
   PtcToolCallRecord,
@@ -53,6 +55,21 @@ interface PtcToolExecutorOptions<TCtx extends ToolExecutionContext> {
   readonly turn: turnState<TCtx>;
   readonly emit: (event: AgentEvent) => Promise<void>;
   readonly nowMs: () => number;
+  /**
+   * Synchronous observer for child lifecycle events, called when each event is
+   * produced and before the serialized emit. Only the LLM Context Inspector
+   * capture passes it, so child timing is not delayed by the event writer;
+   * without it the executor behaves exactly as before.
+   */
+  readonly observeChildLifecycle?: (event: AgentEvent) => void;
+  /**
+   * Host hook over the child display copy, applied in
+   * `emitPtcChildTerminalEvent` right before the terminal event is emitted.
+   * The tool's own result, the guest projection and the model-visible result
+   * never pass through it, so a host can bound what a child writes into
+   * conversation history without changing what the program received.
+   */
+  readonly shapePtcChildDisplayResult?: PtcChildDisplayResultShaper;
 }
 
 /**
@@ -216,6 +233,7 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
       let terminalEmissionAttempted = false;
       let finalizedOutcome: PtcToolExecutionOutcome | undefined;
       const emitChildLifecycleEvent = async (event: AgentEvent): Promise<void> => {
+        options.observeChildLifecycle?.(event);
         if (event.type === 'tool_execution_end') {
           deferredTerminalEvent = event;
           return;
@@ -254,7 +272,7 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
         );
         finalizedOutcome = outcome;
         terminalEmissionAttempted = true;
-        await emitPtcChildTerminalEvent(options.emit, deferredTerminalEvent, request, outcome);
+        await emitPtcChildTerminalEvent(options, deferredTerminalEvent, request, outcome);
         return outcome;
       } catch {
         const unknown = unknownOutcome(
@@ -274,7 +292,7 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
         if (startAcknowledged && !terminalEmissionAttempted) {
           try {
             terminalEmissionAttempted = true;
-            await emitPtcChildTerminalEvent(options.emit, deferredTerminalEvent, request, outcome);
+            await emitPtcChildTerminalEvent(options, deferredTerminalEvent, request, outcome);
           } catch {
             // A failed durable end is itself unknown; the persisted start lets recovery mark it so.
           }
@@ -286,20 +304,79 @@ export function createPtcToolExecutor<TCtx extends ToolExecutionContext>(
 }
 
 async function emitPtcChildTerminalEvent(
-  emit: (event: AgentEvent) => Promise<void>,
+  options: Pick<
+    PtcToolExecutorOptions<ToolExecutionContext>,
+    'emit' | 'observeChildLifecycle' | 'shapePtcChildDisplayResult' | 'turn'
+  >,
   terminal: PtcChildTerminalEvent | undefined,
   request: PtcToolExecutionRequest,
   outcome: PtcToolExecutionOutcome,
 ): Promise<void> {
   const rawResult = terminal?.result ?? unknownPtcChildResult(outcome);
-  await emit({
+  const displayResult = withPtcChildExecutionDetails(rawResult, outcome);
+  const event: PtcChildTerminalEvent = {
     type: 'tool_execution_end',
     toolCallId: terminal?.toolCallId ?? request.toolCallId,
     toolName: terminal?.toolName ?? request.toolName,
-    result: withPtcChildExecutionDetails(rawResult, outcome),
+    result: await shapeChildDisplayResult(options, request, displayResult),
     isError: outcome.isError === true,
     parentToolCallId: terminal?.parentToolCallId ?? request.parentToolCallId,
-  });
+  };
+  // The observer already saw Pi's own end; a synthesized end is new to it.
+  if (!terminal) options.observeChildLifecycle?.(event);
+  await options.emit(event);
+}
+
+/**
+ * Applies the host hook to the display copy. A hook that throws must not
+ * change what the program received or stop the child from being recorded, so
+ * the untouched display copy is emitted and one warning line is written.
+ * What the hook returns is emitted as it is; agent-core does not inspect it.
+ */
+async function shapeChildDisplayResult(
+  options: Pick<
+    PtcToolExecutorOptions<ToolExecutionContext>,
+    'shapePtcChildDisplayResult' | 'turn'
+  >,
+  request: PtcToolExecutionRequest,
+  displayResult: AgentToolResult<unknown>,
+): Promise<AgentToolResult<unknown>> {
+  const shape = options.shapePtcChildDisplayResult;
+  if (!shape) return displayResult;
+  try {
+    const shaped = await shape({
+      childToolCallId: request.toolCallId,
+      parentToolCallId: request.parentToolCallId,
+      toolName: request.toolName,
+      args: request.args,
+      // Pi content blocks are the same TextContent / ImageContent shapes
+      // ToolResultContent names, plus a wider union agent-core does not model.
+      result: displayResult as PtcChildDisplayResult,
+    });
+    return shaped as AgentToolResult<unknown>;
+  } catch {
+    logChildDisplayShapingFailed(readTurnLogger(options.turn), request);
+    return displayResult;
+  }
+}
+
+/** One line per failed shaping; never logs arguments, content or file paths. */
+function logChildDisplayShapingFailed(
+  logger: Partial<PiTurnRunnerLogger> | undefined,
+  request: PtcToolExecutionRequest,
+): void {
+  try {
+    logger?.warn?.(
+      {
+        child_tool_call_id: request.toolCallId,
+        parent_tool_call_id: request.parentToolCallId,
+        tool_name: request.toolName,
+      },
+      'ptc child display copy shaping failed',
+    );
+  } catch {
+    // Diagnostics must not change the child outcome.
+  }
 }
 
 function withPtcChildExecutionDetails(

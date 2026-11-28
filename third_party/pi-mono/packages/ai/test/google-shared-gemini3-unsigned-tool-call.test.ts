@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { convertMessages } from "../src/providers/google-shared.ts";
-import type { Context, Model } from "../src/types.ts";
+import type { AssistantMessage, Context, Model } from "../src/types.ts";
 
 function makeGemini3Model<TApi extends "google-generative-ai" | "google-vertex">(
 	api: TApi,
@@ -62,22 +62,36 @@ function makeContext(model: { api: string; provider: string; id: string }, thoug
 }
 
 describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () => {
-	it("does not add skip_thought_signature_validator for unsigned Google Gen AI tool calls", () => {
+	// Gemini 3+ rejects the request with 400 when the first function call of a current-turn step
+	// is unsigned; the Gemini Developer API accepts the documented placeholder instead.
+	it("signs only the first unsigned current-turn call with the placeholder for Google Gen AI", () => {
 		const model = makeGemini3Model("google-generative-ai", "google");
 		const contents = convertMessages(model, makeContext({ ...model, id: "other-model" }));
 
 		const modelTurn = contents.find((c) => c.role === "model");
-		expect(modelTurn).toBeTruthy();
-
 		const functionCallParts = modelTurn?.parts?.filter((p) => p.functionCall !== undefined) ?? [];
 		expect(functionCallParts).toHaveLength(2);
-		expect(functionCallParts[0]?.thoughtSignature).toBeUndefined();
+		expect(functionCallParts[0]?.thoughtSignature).toBe("skip_thought_signature_validator");
 		expect(functionCallParts[1]?.thoughtSignature).toBeUndefined();
-		expect(JSON.stringify(modelTurn)).not.toContain("skip_thought_signature_validator");
 
 		const textParts = modelTurn?.parts?.filter((p) => p.text !== undefined) ?? [];
 		const historicalText = textParts.filter((p) => p.text?.includes("Historical context"));
 		expect(historicalText).toHaveLength(0);
+	});
+
+	it("leaves unsigned calls of earlier turns untouched for Google Gen AI", () => {
+		const model = makeGemini3Model("google-generative-ai", "google");
+		const context = makeContext({ ...model, id: "other-model" });
+		const toolCallTurn = context.messages[1] as AssistantMessage;
+		context.messages.push(
+			{ role: "toolResult", toolCallId: "call_1", toolName: "bash", content: [], isError: false, timestamp: 1 },
+			{ role: "toolResult", toolCallId: "call_2", toolName: "bash", content: [], isError: false, timestamp: 1 },
+			{ ...toolCallTurn, content: [{ type: "text", text: "Done" }], stopReason: "stop" },
+			{ role: "user", content: "Next question", timestamp: 2 },
+		);
+		const contents = convertMessages(model, context);
+
+		expect(JSON.stringify(contents)).not.toContain("skip_thought_signature_validator");
 	});
 
 	it("does not add skip_thought_signature_validator for unsigned Vertex tool calls", () => {

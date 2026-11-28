@@ -17,6 +17,12 @@ export type PluginHookEventName = (typeof PLUGIN_HOOK_EVENTS)[number];
 
 export type PluginHookSourceFormat = 'MINIMAX' | 'CLAUDE' | 'CODEX';
 
+/**
+ * Host-declared handler owner. User and project handlers come from host config
+ * files rather than a Plugin package; an absent origin means a Plugin handler.
+ */
+export type PluginHookHandlerOrigin = 'user' | 'project';
+
 export interface PluginHookEffort {
   readonly level: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
@@ -32,6 +38,12 @@ export type PluginHookSessionStartSource =
 export interface PluginHookCommandHandler {
   readonly kind: 'command';
   readonly sourceFormat: PluginHookSourceFormat;
+  /**
+   * Config-file handlers run before Plugin handlers and receive
+   * `MINIMAX_HOOKS_DIR` / `MINIMAX_HOOKS_DATA` instead of Plugin variables.
+   * `pluginRoot` is then the config directory and `pluginName` a host owner id.
+   */
+  readonly origin?: PluginHookHandlerOrigin;
   readonly pluginName: string;
   readonly pluginRoot: string;
   /** Host-owned writable state directory; the Plugin package root is immutable. */
@@ -60,12 +72,31 @@ export interface PluginHookDiagnostic {
   readonly sourcePath: string;
   readonly event?: PluginHookEventName;
   readonly declarationOrder?: number;
+  /** Actionable correction an author or agent can apply directly. */
+  readonly fix?: string;
+}
+
+/**
+ * The `modules` key of one hooks document. It names an extension module and is
+ * never a Hook event; the parser records it without reading the module.
+ */
+export interface PluginHookModulesDeclaration {
+  readonly sourcePath: string;
+  /**
+   * The single module path as written, relative to the hooks document. Absent
+   * when the value is not exactly one relative path with a supported extension.
+   */
+  readonly modulePath?: string;
 }
 
 export interface PluginHookSet {
   readonly handlers: readonly PluginHookCommandHandler[];
   readonly diagnostics: readonly PluginHookDiagnostic[];
+  readonly modules: readonly PluginHookModulesDeclaration[];
 }
+
+export const HOOK_MODULES_INVALID_FIX =
+  '让 `hooks/hooks.json` 的 `modules` 只含一个相对路径，后缀为 `.js .mjs .cjs .jsx .ts .mts .cts .tsx`，文件存在';
 
 export interface PluginHookEventInput {
   readonly event: PluginHookEventName;
@@ -102,6 +133,13 @@ export interface PluginHookEventInput {
     readonly pluginName: string;
   };
   readonly matcherValue?: string;
+  /**
+   * Extra values a handler's matcher may name for this event, beyond
+   * `matcherValue`. A host uses it to keep a matcher written for a tool's former
+   * identity matching after that tool was split up; the payload still carries
+   * the tool's own name and input.
+   */
+  readonly matcherAliases?: readonly string[];
   readonly payload?: Readonly<Record<string, unknown>>;
 }
 
@@ -233,6 +271,7 @@ export interface PluginHookObserver {
   onHandler(input: {
     readonly event: PluginHookEventName;
     readonly format: PluginHookSourceFormat;
+    readonly origin: PluginHookHandlerOrigin | 'plugin';
     readonly outcome: 'success' | 'deny' | 'ask' | 'error' | 'timeout' | 'aborted';
     readonly durationMs: number;
     readonly processKilled: boolean;

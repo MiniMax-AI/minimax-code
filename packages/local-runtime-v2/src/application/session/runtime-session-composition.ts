@@ -36,6 +36,7 @@ import {
   type SessionSystemOwner,
 } from '../../service/session-system/index.js';
 import {
+  createFileApiRuntime,
   createProductionAgentPreparation,
   createProductionRootArchiveTitleModel,
   createProductionSessionTitleModel,
@@ -47,6 +48,7 @@ import {
 } from '../../service/turn-system/index.js';
 import type { AgentSessionPorts } from '../agent/agent-application.js';
 import { createRuntimeAgentProduct } from '../agent/runtime-agent-product.js';
+import { withAdvisorAgentProduct } from './advisor-agent-product.js';
 import {
   createApplicationFactPorts,
   createCommittedModelProviderSessionPort,
@@ -106,7 +108,7 @@ export function createProductionSessionComposition(
 ): ProductionSessionComposition {
   const tuiProductPolicy = input.runtimeOwnerKind === 'tui';
   let executionSessionSystem: SessionSystemOwner | undefined;
-  const product = createRuntimeAgentProduct({
+  const rawProduct = createRuntimeAgentProduct({
     baseProduct: input.baseProduct,
     agentService: input.agentService,
     ensureSessionAgentDefinition: async (sessionId) => {
@@ -132,6 +134,21 @@ export function createProductionSessionComposition(
     globalInstructions: input.globalInstructions,
     ...(input.promptSnapshots ? { promptSnapshots: input.promptSnapshots } : {}),
   });
+  const product = withAdvisorAgentProduct(rawProduct, {
+    preparation: () => preparation,
+    sessions: () => {
+      const owner = executionSessionSystem;
+      if (!owner) throw new Error('Session system is unavailable for the advisor tool.');
+      return {
+        getExecutionSnapshot: (sessionId) =>
+          owner.sessions.execution.getExecutionSnapshot(sessionId),
+        recordUsage: (record) => owner.usage.projector.record(record),
+      };
+    },
+    fileApi: createFileApiRuntime({ db: input.db, nowMs: input.nowMs, product: rawProduct.fileApi }),
+    logger: input.logger,
+    nowMs: input.nowMs,
+  });
   const modelSystem = initializeModelSystem({
     config: input.modelConfig,
     resolverOptions: product.preparation.modelResolver,
@@ -149,6 +166,7 @@ export function createProductionSessionComposition(
   const preparation = createProductionAgentPreparation({
     configBuilder: product.preparation.configBuilder,
     modelResolver: modelSystem.resolver,
+    logger: input.logger,
   });
   const facts = createApplicationFactPorts({ publish: input.publishGlobalEvent });
   const archiveTitleModel = createProductionRootArchiveTitleModel(
@@ -260,6 +278,7 @@ export function createProductionSessionComposition(
       onCommittedUpdate: (session) => facts.session.handle({ kind: 'model-updated', session }),
     }),
     setDefaultModel: input.modelConfig.setDefaultModel,
+    setDefaultAdvisor: input.modelConfig.setDefaultAdvisor,
     refreshOfficialModels: input.refreshOfficialModels,
     ...(tuiProductPolicy ? { implicitCustomProviderThinking: true } : {}),
   });

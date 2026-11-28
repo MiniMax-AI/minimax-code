@@ -55,6 +55,7 @@ import { rebuildSessionMutationTransport } from '../../features/session-mutation
 import { toTuiTranscriptAttachments } from '../../features/composer/attachments.js';
 import { resolveTuiRuntimeFailure } from '../runtime/runtime-error-presentation.js';
 import type { TuiEditMessageAttachment, TuiPtcSetting, TuiSession } from '../../../runtime/port.js';
+import { tuiParentSessionId } from '../../../runtime/delegation.js';
 import type { TuiAttachment, TuiTransportAttachment } from '../../../types/invocation.js';
 import { sessionMutationText } from '../../features/session-mutation/copy.js';
 import { parseTuiBashInput } from '../../commands/bash-input.js';
@@ -114,6 +115,8 @@ export interface TuiCommandFlowOptions {
   readonly showTheme?: () => void;
   readonly persistTuiMode?: (mode: TuiMode) => void;
   readonly queueEnabled: boolean;
+  /** False in a package that does not ship the advisor; `/advisor` is then unavailable. */
+  readonly advisorAvailable?: boolean;
   readonly liveRunId: () => string | undefined;
   readonly runtimeStopping: () => boolean;
   readonly isLlmRetrying?: () => boolean;
@@ -154,7 +157,10 @@ export interface TuiCommandSubmitOptions {
   /** Keep an atomic restored Edit pending until Runtime durably accepts it. */
   readonly requireRuntimeAcceptance?: boolean;
   readonly onSubmissionPrepared?: (submission: TuiSubmissionSnapshot) => void;
-  /** Explicit keyboard intent while a Turn is active. Enter steers; Alt+Enter queues. */
+  /**
+   * Explicit keyboard intent while a Turn is active: `run.submit-guidance` steers and
+   * `run.queue-draft` queues.
+   */
   readonly busyAction?: 'steer' | 'queue';
   readonly reviewRequest?: { readonly scope: 'local_changes' };
 }
@@ -1424,6 +1430,7 @@ export class TuiCommandFlow {
         this.options.onChanged();
       },
       model: async ({ args }) => this.options.featureFlow.showModelPicker(args),
+      advisor: async ({ args }) => this.options.featureFlow.showAdvisorPicker(args),
       provider: async () => this.options.featureFlow.showProviderManager(),
       plugins: async ({ args }) => this.options.featureFlow.showPlugins(args),
       skills: async ({ args }) => this.options.featureFlow.showSkills(args),
@@ -1435,7 +1442,7 @@ export class TuiCommandFlow {
           const added = this.options.workspaceRoots.list().length > before;
           this.options.append(
             added
-              ? `Added workspace directory: ${root.path}\nIt is available to @ path completion and future Runs in this CLI process.`
+              ? `Added workspace directory: ${root.path}\nIt is only available to @ path completion in this CLI process. Runs keep the permissions of the folder this CLI started in.`
               : `Workspace directory is already available: ${root.path}`,
           );
           this.options.activeRunFlow.refreshAutocomplete();
@@ -1484,7 +1491,7 @@ export class TuiCommandFlow {
     const session = snapshot.session;
     return {
       hasSession: Boolean(session),
-      hasParentSession: Boolean(session?.parentSessionId),
+      hasParentSession: tuiParentSessionId(session) !== undefined,
       managedTokenPresent: snapshot.account?.managedTokenPresent === true,
       queueEnabled: this.options.queueEnabled,
       hasLiveRun: this.hasLiveRun(),
@@ -1492,6 +1499,7 @@ export class TuiCommandFlow {
       queuedCount: this.options.runProjection.snapshot().queuedCount,
       canRetry: this.isSessionRetryable(session) && !this.options.isLlmRetrying?.(),
       sideMode: this.options.sessionFlow.isSideModeActive?.() === true,
+      advisorAvailable: this.options.advisorAvailable !== false,
     };
   }
 
@@ -1917,6 +1925,7 @@ export class TuiCommandFlow {
       return undefined;
     }
   }
+
 
   private appendProtectedActionError(error: unknown, message?: string): void {
     this.options.append(

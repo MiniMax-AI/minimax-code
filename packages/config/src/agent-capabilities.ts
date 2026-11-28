@@ -11,6 +11,10 @@ export const AGENT_BUILTIN_TOOL_IDS = [
   'todowrite',
   'web_fetch',
   'website_deploy',
+  'advisor',
+  'skill',
+  // A run_code child on PTC Turns; without it no Agent could save its first script.
+  'save_run_code_script',
 ] as const;
 
 export type AgentBuiltinToolId = (typeof AGENT_BUILTIN_TOOL_IDS)[number];
@@ -72,12 +76,21 @@ export type AgentBuiltinSkillId = (typeof AGENT_BUILTIN_SKILL_IDS)[number];
 
 export const AGENT_CAPABILITY_OWNED_SKILL_IDS = [
   'control-in-app-browser',
-  'cu-desktop',
   'resume-codex',
   'mavis',
+  'agent-manage',
+  'session-manage',
+  'session-dispatch',
+  'mcp-manage',
+  'cron-manage',
+  'memory-manage',
+  'im-routing',
+  'skill-management',
+  'windows-tool-bootstrap',
   'create-agent',
   'minimax-code-product',
   'miniapp-creator',
+  'plugin-management',
 ] as const;
 
 export interface AgentCapabilityConfig {
@@ -99,6 +112,11 @@ export interface AgentCapabilityConfig {
 
 export interface AgentsConfig {
   default: AgentCapabilityConfig;
+  /**
+   * Corrections made while parsing, such as tool IDs this version does not know. A parser shared
+   * with the interactive TUI must not write to the console, so the runtime logs these instead.
+   */
+  warnings?: readonly string[];
 }
 
 export interface ResolvedAgentCapabilities {
@@ -130,12 +148,16 @@ const SKILL_IDS = new Set<string>(AGENT_BUILTIN_SKILL_IDS);
 const OWNED_SKILL_IDS = new Set<string>(AGENT_CAPABILITY_OWNED_SKILL_IDS);
 // Preserve existing user allowlists while removing a retired ID. The strict
 // bundled-agent parser intentionally continues to reject retired IDs.
+// The Office Skills (docx / pdf / pptx / xlsx) moved to the official Word /
+// Excel / PDF / PPT plugins, which are not gated by this allowlist.
 const RETIRED_TOLERANT_SKILL_IDS = new Set(['plan-mode']);
 
 export function parseAgentsConfig(raw: unknown): AgentsConfig {
   const root = asRecord(raw);
   const defaults = asRecord(root?.default);
-  return { default: defaults ? parseTolerantAgentCapabilityConfig(defaults) : {} };
+  const warnings: string[] = [];
+  const parsed = defaults ? parseTolerantAgentCapabilityConfig(defaults, warnings) : {};
+  return { default: parsed, ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 /** Strict parser for bundled built-in agent.md capability overrides. */
@@ -227,7 +249,10 @@ export function parseAgentCapabilityConfig(raw: unknown, path = 'agent'): AgentC
   return result;
 }
 
-function parseTolerantAgentCapabilityConfig(obj: Record<string, unknown>): AgentCapabilityConfig {
+function parseTolerantAgentCapabilityConfig(
+  obj: Record<string, unknown>,
+  warnings: string[],
+): AgentCapabilityConfig {
   const result: AgentCapabilityConfig = {};
   if (typeof obj.modelConfigId === 'string' && obj.modelConfigId.trim()) {
     result.modelConfigId = obj.modelConfigId.trim();
@@ -237,8 +262,15 @@ function parseTolerantAgentCapabilityConfig(obj: Record<string, unknown>): Agent
     result.persona = { enabled: persona.enabled };
   }
 
-  if (isKnownIdArray(obj.tools, TOOL_IDS)) {
-    const tools = [...obj.tools] as AgentBuiltinToolId[];
+  // User config may name tool IDs this build does not know (newer builds, removed tools, typos).
+  // Drop those one by one: discarding the whole list would widen it to "every tool".
+  if (Array.isArray(obj.tools)) {
+    const tools = dropUnknownIds(
+      obj.tools,
+      TOOL_IDS,
+      'agents.default.tools',
+      warnings,
+    ) as AgentBuiltinToolId[];
     // Older user allowlists predate configurable task controls: those tools
     // remained available even with tools: [] or delegation disabled. Preserve
     // that behavior unless the list explicitly selects the new control IDs.
@@ -293,6 +325,25 @@ function isKnownIdArray(
   return (
     Array.isArray(value) && value.every((item) => typeof item === 'string' && knownIds.has(item))
   );
+}
+
+/**
+ * Keeps the IDs this build knows. Each dropped ID narrows the list the user wrote, so it becomes a
+ * warning and a tool missing from the Agent can be traced back to the config.
+ */
+function dropUnknownIds(
+  values: readonly unknown[],
+  known: ReadonlySet<string>,
+  path: string,
+  warnings: string[],
+): string[] {
+  const isKnown = (item: unknown): item is string => typeof item === 'string' && known.has(item);
+  const dropped = values.filter((item) => !isKnown(item));
+  if (dropped.length > 0) {
+    const ids = dropped.map((item) => String(JSON.stringify(item)).slice(0, 64)).join(', ');
+    warnings.push(`${path}: ignored IDs this version does not know: ${ids}`);
+  }
+  return values.filter(isKnown);
 }
 
 export function resolveAgentCapabilities(

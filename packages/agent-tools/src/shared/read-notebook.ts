@@ -27,7 +27,8 @@
  * huge-notebook case.
  */
 
-import { readFile } from 'node:fs/promises';
+import type { CoreToolFs } from '../core-tools/ports.js';
+import { physicalToolFs } from './physical-fs.js';
 import { extname } from 'node:path';
 
 import type { ToolResult, ToolResultContent } from '@mavis/agent-core/tools';
@@ -69,14 +70,16 @@ export interface ReadNotebookOptions {
   toolName: string;
   absolutePath: string;
   signal?: AbortSignal;
+  /** Filesystem port; defaults to physical-fs. */
+  fs?: Pick<CoreToolFs, 'readFile'>;
 }
 
 export async function readNotebookAsToolResult(opts: ReadNotebookOptions): Promise<ToolResult> {
-  const { toolName, absolutePath } = opts;
+  const { toolName, absolutePath, fs = physicalToolFs } = opts;
 
   let raw: string;
   try {
-    raw = await readFile(absolutePath, 'utf-8');
+    raw = (await fs.readFile(absolutePath)).toString('utf-8');
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === 'ENOENT') {

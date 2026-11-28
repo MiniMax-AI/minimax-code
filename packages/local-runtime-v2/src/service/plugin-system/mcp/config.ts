@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { ResolvedMcpServer, TransportConfig } from '@mavis/mcp';
+import type { TransportConfig } from '@mavis/mcp';
 
 import {
   isRecord,
@@ -11,8 +11,10 @@ import {
 import { PluginReaderError, readerFail } from '../plugin/package/reader-errors.js';
 import type {
   PluginDeclaredTool,
+  PluginMcpOAuthDescriptor,
   PluginMcpServer,
   PluginReaderDiagnostic,
+  PluginResolvedMcpServer,
 } from '../plugin/package/types.js';
 import type { ParsedMcpServers } from './contracts.js';
 
@@ -37,22 +39,35 @@ const OFFICIAL_REMOTE_FIELDS = new Set([
   'timeout',
   'tools',
 ]);
-const COMPATIBLE_FIELDS = new Set([...OFFICIAL_STDIO_FIELDS, ...OFFICIAL_REMOTE_FIELDS]);
-const OAUTH_FIELDS = new Set([
+const COMPATIBLE_FIELDS = new Set([...OFFICIAL_STDIO_FIELDS, ...OFFICIAL_REMOTE_FIELDS, 'oauth']);
+const CODEX_FIELDS = new Set([...COMPATIBLE_FIELDS, 'scopes']);
+/** Declaration fields that describe a server without changing what is started. */
+const NON_LAUNCH_FIELDS = new Set(['description', 'timeout', 'tools']);
+/** Credential-bearing or non-standard auth fields a server entry may never declare. */
+const LEGACY_AUTH_FIELDS = new Set([
   'auth',
-  'oauth',
   'oauth2',
   'accessToken',
   'refreshToken',
   'clientId',
   'clientSecret',
 ]);
+const LOCALHOST_CALLBACK_OAUTH_FIELDS = new Set([
+  'clientId',
+  'scopes',
+  'callbackPort',
+  'authServerMetadataUrl',
+]);
+const CODEX_OAUTH_FIELDS = new Set(['clientId', 'callbackPort', 'callbackUrl']);
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 const COMPATIBLE_PLUGIN_ROOT_TOKEN = [
   '$',
   '{\u0043\u004c\u0041\u0055\u0044\u0045_PLUGIN_ROOT}',
 ].join('');
 
-type McpConfigMode = 'official' | 'compatible';
+/** `official` covers official and MiniMax local packages; the others are compatible formats. */
+type McpConfigMode = 'official' | 'localhost-callback' | 'codex';
+export type CompatibleMcpFormat = Exclude<McpConfigMode, 'official'>;
 type McpTransportType = 'stdio' | 'http' | 'streamable-http' | 'sse';
 
 export async function readOfficialMcpFile(
@@ -81,9 +96,21 @@ export async function readOfficialMcpFile(
   return { servers, diagnostics: [] };
 }
 
+/**
+ * What a declared server starts: its validated declaration without the descriptive fields.
+ * Root-relative values stay as declared, so the same package in another directory compares equal.
+ */
+export function mcpServerLaunchConfig(server: PluginMcpServer): Record<string, unknown> {
+  const declared = JSON.parse(server.configJson) as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(declared).filter(([field]) => !NON_LAUNCH_FIELDS.has(field)),
+  );
+}
+
 export async function parseCompatibleMcpObject(
   root: CanonicalPluginRoot,
   value: Record<string, unknown>,
+  format: CompatibleMcpFormat,
 ): Promise<ParsedMcpServers> {
   const map = isRecord(value.mcpServers) ? value.mcpServers : value;
   const servers: PluginMcpServer[] = [];
@@ -94,7 +121,7 @@ export async function parseCompatibleMcpObject(
       continue;
     }
     try {
-      servers.push(await normalizeServer(root, name, raw, 'compatible'));
+      servers.push(await normalizeServer(root, name, raw, format));
     } catch (error) {
       if (!(error instanceof PluginReaderError)) throw error;
       diagnostics.push({ code: error.code, capability: 'MCP', name });
@@ -109,7 +136,7 @@ async function normalizeServer(
   raw: Record<string, unknown>,
   mode: McpConfigMode,
 ): Promise<PluginMcpServer> {
-  assertNoMcpOauth(raw, name, mode);
+  assertSupportedAuthFields(raw, name, mode);
   const transportType = resolveTransportType(raw, name, mode);
   const allowedFields = fieldsForTransport(transportType, mode);
   const unknown = Object.keys(raw).find((key) => !allowedFields.has(key));
@@ -124,11 +151,13 @@ async function normalizeServer(
   const description = optionalString(raw.description, name);
   const declaredTools = readDeclaredTools(raw.tools, name);
   const transport = await normalizeTransport({ root, raw, type: transportType, mode, name });
-  const resolvedServer: ResolvedMcpServer = {
+  const oauth = readRemoteOAuth(raw, name, mode, transport);
+  const resolvedServer: PluginResolvedMcpServer = {
     name,
     transport,
     enabled: true,
     ...(timeout !== undefined ? { timeout } : {}),
+    ...(oauth ? { oauth } : {}),
   };
   return {
     name,
@@ -139,10 +168,159 @@ async function normalizeServer(
   };
 }
 
-function assertNoMcpOauth(raw: Record<string, unknown>, name: string, mode: McpConfigMode): void {
-  if (!Object.keys(raw).some((key) => OAUTH_FIELDS.has(key))) return;
-  if (mode === 'official') readerFail('MCP_SCHEMA_INVALID', `${name} declares MCP OAuth`);
-  readerFail('MCP_OAUTH_UNSUPPORTED', `${name} declares MCP OAuth`);
+function assertSupportedAuthFields(
+  raw: Record<string, unknown>,
+  name: string,
+  mode: McpConfigMode,
+): void {
+  if (mode === 'codex' && raw.oauth_resource !== undefined) {
+    readerFail('MCP_OAUTH_UNSUPPORTED', `${name} declares an OAuth resource override`);
+  }
+  const keys = Object.keys(raw);
+  if (mode === 'official') {
+    // The MiniMax format declares no OAuth; remote servers still authorize through 401 discovery.
+    if (keys.some((key) => key === 'oauth' || LEGACY_AUTH_FIELDS.has(key))) {
+      readerFail('MCP_SCHEMA_INVALID', `${name} declares MCP OAuth`);
+    }
+    return;
+  }
+  if (keys.some((key) => LEGACY_AUTH_FIELDS.has(key))) {
+    readerFail('MCP_OAUTH_UNSUPPORTED', `${name} declares MCP credentials`);
+  }
+}
+
+/** OAuth applies to remote transports only and never together with a static Authorization. */
+function readRemoteOAuth(
+  raw: Record<string, unknown>,
+  name: string,
+  mode: McpConfigMode,
+  transport: TransportConfig,
+): PluginMcpOAuthDescriptor | undefined {
+  if (mode === 'official') return undefined;
+  const oauth =
+    mode === 'codex'
+      ? readCodexOAuth(raw.oauth, raw.scopes, name)
+      : readLocalhostCallbackOAuth(raw.oauth, name);
+  if (!oauth || transport.type === 'stdio') return undefined;
+  if (hasAuthorizationHeader(transport.headers)) {
+    readerFail('MCP_SCHEMA_INVALID', `${name} declares both OAuth and an Authorization header`);
+  }
+  return oauth;
+}
+
+function readLocalhostCallbackOAuth(
+  value: unknown,
+  name: string,
+): PluginMcpOAuthDescriptor | undefined {
+  if (value === undefined) return undefined;
+  const label = `${name}.oauth`;
+  const oauth = compatibleOAuthObject(value, LOCALHOST_CALLBACK_OAUTH_FIELDS, label);
+  return oauthDescriptor({
+    redirectFormat: 'localhost-callback',
+    clientId: optionalString(oauth.clientId, `${label}.clientId`),
+    scopes: oauth.scopes === undefined ? undefined : spaceSeparatedScopes(oauth.scopes, label),
+    callbackPort: optionalCallbackPort(oauth.callbackPort, label),
+    authServerMetadataUrl: optionalHttpsUrl(oauth.authServerMetadataUrl, label),
+  });
+}
+
+function readCodexOAuth(
+  value: unknown,
+  scopes: unknown,
+  name: string,
+): PluginMcpOAuthDescriptor | undefined {
+  if (value === undefined && scopes === undefined) return undefined;
+  const label = `${name}.oauth`;
+  const oauth = value === undefined ? {} : compatibleOAuthObject(value, CODEX_OAUTH_FIELDS, label);
+  const clientId = optionalString(oauth.clientId, `${label}.clientId`);
+  const codexCallbackUrl = optionalLoopbackCallbackUrl(oauth.callbackUrl, label);
+  if (clientId !== undefined && codexCallbackUrl === undefined) {
+    // Codex derives an unpublished per-server callback path without callbackUrl.
+    readerFail('MCP_OAUTH_UNSUPPORTED', `${label} pre-registers a client without callbackUrl`);
+  }
+  return oauthDescriptor({
+    redirectFormat: 'codex',
+    clientId,
+    scopes: scopes === undefined ? undefined : scopeArray(scopes, `${name}.scopes`),
+    callbackPort: optionalCallbackPort(oauth.callbackPort, label),
+    codexCallbackUrl,
+  });
+}
+
+function compatibleOAuthObject(
+  value: unknown,
+  allowed: ReadonlySet<string>,
+  label: string,
+): Record<string, unknown> {
+  if (!isRecord(value)) readerFail('MCP_SCHEMA_INVALID', `${label} is not an object`);
+  if (value.clientSecret !== undefined) {
+    readerFail('MCP_OAUTH_SECRET_UNSUPPORTED', `${label} declares a client secret`);
+  }
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    readerFail('MCP_CONFIG_UNSUPPORTED', `${label} contains an unsupported field`);
+  }
+  return value;
+}
+
+/** Drops absent fields so snapshots and lifecycle keys stay canonical. */
+function oauthDescriptor(input: PluginMcpOAuthDescriptor): PluginMcpOAuthDescriptor {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  ) as PluginMcpOAuthDescriptor;
+}
+
+function scopeArray(value: unknown, label: string): string[] {
+  const scopes = stringArray(value, label);
+  if (scopes.some((scope) => !scope || /\s/u.test(scope))) {
+    readerFail('MCP_SCHEMA_INVALID', `${label} contains an invalid scope`);
+  }
+  return scopes;
+}
+
+function spaceSeparatedScopes(value: unknown, label: string): string[] {
+  if (typeof value !== 'string')
+    readerFail('MCP_SCHEMA_INVALID', `${label}.scopes is not a string`);
+  return value.split(/\s+/u).filter(Boolean);
+}
+
+function optionalCallbackPort(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || (value as number) < 1024 || (value as number) > 65535) {
+    readerFail('MCP_SCHEMA_INVALID', `${label}.callbackPort must be within 1024-65535`);
+  }
+  return value as number;
+}
+
+function optionalHttpsUrl(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  const url = parseUrl(value);
+  if (url?.protocol !== 'https:') {
+    readerFail('MCP_SCHEMA_INVALID', `${label}.authServerMetadataUrl must be an https URL`);
+  }
+  return url.href;
+}
+
+function optionalLoopbackCallbackUrl(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  const url = parseUrl(value);
+  if (!url) readerFail('MCP_SCHEMA_INVALID', `${label}.callbackUrl is not a URL`);
+  if (url.protocol !== 'http:' || !LOOPBACK_HOSTNAMES.has(url.hostname)) {
+    readerFail('MCP_OAUTH_UNSUPPORTED', `${label}.callbackUrl is not a loopback http URL`);
+  }
+  return (value as string).trim();
+}
+
+function parseUrl(value: unknown): URL | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    return new URL(value.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+  return Object.keys(headers ?? {}).some((key) => key.toLowerCase() === 'authorization');
 }
 
 function resolveTransportType(
@@ -178,7 +356,8 @@ function isMcpTransportType(value: string | undefined): value is McpTransportTyp
 }
 
 function fieldsForTransport(type: McpTransportType, mode: McpConfigMode): ReadonlySet<string> {
-  if (mode === 'compatible') return COMPATIBLE_FIELDS;
+  if (mode === 'codex') return CODEX_FIELDS;
+  if (mode === 'localhost-callback') return COMPATIBLE_FIELDS;
   return type === 'stdio' ? OFFICIAL_STDIO_FIELDS : OFFICIAL_REMOTE_FIELDS;
 }
 
@@ -265,7 +444,7 @@ async function resolveRuntimeString(
   mode: McpConfigMode,
   mustExist = false,
 ): Promise<string> {
-  const containsRoot = mode === 'compatible' && value.includes(COMPATIBLE_PLUGIN_ROOT_TOKEN);
+  const containsRoot = mode !== 'official' && value.includes(COMPATIBLE_PLUGIN_ROOT_TOKEN);
   const expanded = expandCompatibleRoot(value, root.path, mode);
   const isExplicitRelative = /^\.{1,2}[/\\]/u.test(value);
   if (!containsRoot && !isExplicitRelative) return expanded;
@@ -294,7 +473,7 @@ function isCrossPlatformAbsolutePath(value: string): boolean {
 }
 
 function expandCompatibleRoot(value: string, root: string, mode: McpConfigMode): string {
-  return mode === 'compatible' ? value.replaceAll(COMPATIBLE_PLUGIN_ROOT_TOKEN, root) : value;
+  return mode === 'official' ? value : value.replaceAll(COMPATIBLE_PLUGIN_ROOT_TOKEN, root);
 }
 
 function readDeclaredTools(value: unknown, serverName: string): PluginDeclaredTool[] {

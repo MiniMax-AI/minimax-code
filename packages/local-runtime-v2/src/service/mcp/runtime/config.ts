@@ -1,5 +1,6 @@
 import { buildMcpToolRuntimeName } from '@mavis/mcp';
 
+import { MCP_DEFAULTS } from '@mavis/mcp/runtime/types';
 import type { TransportConfig } from '@mavis/mcp/runtime/types';
 import type { LocalMcpServerConfig, LocalMcpToolInfo } from '../contracts.js';
 import { isBuiltinMatrixConfig } from './builtin-matrix.js';
@@ -55,7 +56,7 @@ export function normalizeServerConfig(config: Record<string, unknown>): LocalMcp
     ...(readRecord(config['env']) ? { env: readStringRecord(config['env']) } : {}),
     ...(readString(config['url']) ? { url: readString(config['url']) } : {}),
     ...(readTransport(config['type']) ? { type: readTransport(config['type']) } : {}),
-    ...(readRecord(config['auth']) ? { auth: readRecord(config['auth']) } : {}),
+    ...(readRecord(config['oauth']) ? { oauth: readRecord(config['oauth']) } : {}),
     enabled: config['enabled'] !== false,
     configured: config['configured'] !== false,
     builtin: config['builtin'] === true,
@@ -88,15 +89,6 @@ export function inferTransport(config: LocalMcpServerConfig): string {
   return 'none';
 }
 
-export function inferAuthStatus(config: LocalMcpServerConfig): string {
-  if (!config.auth) return 'none';
-  if (readString(config.auth['token']) || readString(config.auth['accessToken'])) {
-    return 'authenticated';
-  }
-  if (config.auth['type'] === 'oauth2') return 'pending_auth';
-  return 'configured';
-}
-
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
 }
@@ -104,12 +96,6 @@ function readString(value: unknown): string | undefined {
 export function readRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-export function readStringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
     : undefined;
 }
 
@@ -155,4 +141,33 @@ function readTransport(value: unknown): LocalMcpServerConfig['type'] | undefined
   return value === 'stdio' || value === 'http' || value === 'sse' || value === 'streamable-http'
     ? value
     : undefined;
+}
+
+function discoveryTimeoutFromEnv(name: string, fallback: number): number {
+  const value = process.env[name]?.trim() ?? '';
+  const timeout = Number(value);
+  // Node timers overflow beyond signed int32 and would fire after 1 ms instead.
+  return /^\d+$/.test(value) &&
+    Number.isSafeInteger(timeout) &&
+    timeout > 0 &&
+    timeout <= 2_147_483_647
+    ? timeout
+    : fallback;
+}
+
+export function stdioDiscoveryTimeoutFromEnv(): number {
+  return discoveryTimeoutFromEnv('MCODE_MCP_STDIO_DISCOVERY_TIMEOUT_MS', 30_000);
+}
+
+/**
+ * Turn discovery budget for http/sse/streamable-http servers. A cold remote
+ * handshake (connect + initialize + tools/list) routinely takes 1-3.5 s and can
+ * be much slower behind proxies or OAuth, so the default matches stdio.
+ */
+export function remoteDiscoveryTimeoutFromEnv(): number {
+  return discoveryTimeoutFromEnv('MCODE_MCP_REMOTE_DISCOVERY_TIMEOUT_MS', 30_000);
+}
+
+export function configuredTimeout(config: LocalMcpServerConfig): number {
+  return config.timeout && config.timeout > 0 ? config.timeout : MCP_DEFAULTS.timeout;
 }

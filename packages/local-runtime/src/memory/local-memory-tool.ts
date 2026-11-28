@@ -2,7 +2,12 @@ import type { LocalMemoryToolInput, LocalRuntimeToolContext } from '@mavis/agent
 
 import type { ModuleMetricsReporter } from '../common/metrics.js';
 import { LocalMemoryFacade } from './local-memory-facade.js';
-import { formatLocalDate } from './local-memory-store-utils.js';
+import {
+  countMatchedTerms,
+  formatLocalDate,
+  parseSearchTerms,
+  rankByScore,
+} from './local-memory-store-utils.js';
 import { LocalMemoryError, type LocalMemoryScope } from './types.js';
 import { emitResourceAmbiguityTelemetry } from '../agent/subagent-telemetry.js';
 
@@ -293,8 +298,12 @@ async function searchMainMemory(
     facade.searchMemory(sourceAgent, query),
   );
   if (sourceNames.length <= 1) return entries[0]?.value ?? [];
-  return entries.flatMap(({ sourceAgent, value }) =>
-    value.map((result) => ({ ...result, sourceAgent })),
+  const terms = parseSearchTerms(query);
+  return rankByScore(
+    entries.flatMap(({ sourceAgent, value }) =>
+      value.map((result) => ({ ...result, sourceAgent })),
+    ),
+    ({ line }) => countMatchedTerms(line, terms),
   );
 }
 
@@ -336,10 +345,14 @@ async function searchTopicMemory(
   const entries = await readSources(sourceNames, (sourceAgent) =>
     facade.searchTopics(sourceAgent, query),
   );
-  if (sourceNames.length <= 1) return entries[0]?.value ?? [];
-  return entries.flatMap(({ sourceAgent, value }) =>
-    value.map((result) => ({ ...result, sourceAgent })),
+  if (sourceNames.length <= 1) return (entries[0]?.value ?? []).map(({ topic }) => topic);
+  const merged = entries.flatMap(({ sourceAgent, value }) =>
+    value.map((match) => ({ ...match, sourceAgent })),
   );
+  return rankByScore(merged, ({ matchedTerms }) => matchedTerms).map(({ topic, sourceAgent }) => ({
+    ...topic,
+    sourceAgent,
+  }));
 }
 
 async function readSources<T>(

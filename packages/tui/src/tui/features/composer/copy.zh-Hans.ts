@@ -5,6 +5,8 @@ export const ZH_HANS_COMPOSER_COPY = {
   imagePreviewUnavailable: '无法预览 · 附件仍可发送',
   imagePreviewTextOnly: '当前终端不支持显示图片预览',
   imagePreviewHint: 'Esc 收起 · Enter 发送',
+  pastedTextPreviewLines: '{count} 行',
+  pastedTextPreviewHint: '作为文本文件发送 · Backspace 删除 · Esc 收起',
   placeholder: 'Ask Mcode to do anything',
   draftSaveFailed: '无法保存草稿恢复备份。',
   draftCleanupFailed: '无法清理草稿恢复备份。',

@@ -37,10 +37,7 @@ export function withPluginHookCompatibleToolResponseDetails(
   details: ToolResult['details'],
   response: Readonly<Record<string, unknown>>,
 ): ToolResultDetailsWithVendorResponse {
-  return Object.assign(
-    { ...(details ?? {}) },
-    { [PLUGIN_HOOK_COMPATIBLE_TOOL_RESPONSE]: response },
-  );
+  return { ...(details ?? {}), [PLUGIN_HOOK_COMPATIBLE_TOOL_RESPONSE]: response };
 }
 
 export function readPluginHookCompatibleToolResponse(
@@ -62,7 +59,7 @@ export function withPluginHookCodexToolResponseDetails(
   details: ToolResult['details'],
   response: unknown,
 ): ToolResultDetailsWithVendorResponse {
-  return Object.assign({ ...(details ?? {}) }, { [PLUGIN_HOOK_CODEX_TOOL_RESPONSE]: response });
+  return { ...(details ?? {}), [PLUGIN_HOOK_CODEX_TOOL_RESPONSE]: response };
 }
 
 export function readPluginHookCodexToolResponse(result: HookToolResultView): unknown | undefined {

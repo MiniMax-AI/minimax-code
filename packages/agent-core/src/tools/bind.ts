@@ -1,14 +1,14 @@
 /**
- * `@bindTool(def)`: TC39 stage-3 class decorator associating a `ToolDefinition` with a `ToolImpl`
- * class. Different implementations of the same tool (`CloudBashTool` / `LocalBashTool`) can each
- * use `@bindTool(BashToolDef)`.
+ * `@bindTool(def)` —— TC39 stage-3 类装饰器,把 `ToolDefinition` 关联到一个
+ * `ToolImpl` 实现类。同名工具的不同实现(`CloudBashTool` / `LocalBashTool`)
+ * 各自 `@bindTool(BashToolDef)` 即可。
  *
- * `toRuntimeTool(instance)`: Converts a decorated class instance to a `RuntimeTool`; PiTurnRunner
- * accepts `RuntimeTool[]`.
+ * `toRuntimeTool(instance)` —— 把装饰过的 class 实例换成 `RuntimeTool`,
+ * PiTurnRunner 接受 `RuntimeTool[]` 作为输入。
  *
- * Decorator timing: TC39 stage-3 decorators run during class evaluation, so `CLASS_TO_DEF.set`
- * completes when the decorated class's file is imported. `toRuntimeTool` can find the definition
- * any time after instantiation.
+ * 装饰器执行时机:TC39 stage-3 装饰器在 class evaluation 时跑,`CLASS_TO_DEF.set`
+ * 在 import 装饰类的文件时就完成。`toRuntimeTool` 在实例化后任何时间调用都
+ * 能找到 def。
  */
 
 import type { TSchema } from '@sinclair/typebox';
@@ -19,12 +19,12 @@ import type { RuntimeTool, ToolDefinition, ToolExecutionContext, ToolImpl } from
 const CLASS_TO_DEF = new WeakMap<Function, ToolDefinition>();
 
 /**
- * Class decorator associating a `ToolDefinition` with a `ToolImpl<S, TCtx>` implementation class.
+ * Class 装饰器:把 `ToolDefinition` 关联到 `ToolImpl<S, TCtx>` 实现类。
  *
  * ```ts
  * @bindTool(BashToolDef)
  * export class CloudBashTool implements ToolImpl<typeof BashToolDef.schema, CloudRuntimeContext> {
- *   async execute(ctx, input) { ... }   // input is inferred as Static<typeof BashToolDef.schema>
+ *   async execute(ctx, input) { ... }   // input 自动推导成 Static<typeof BashToolDef.schema>
  * }
  * ```
  */
@@ -40,8 +40,8 @@ export function bindTool<S extends TSchema>(def: ToolDefinition<S>) {
 }
 
 /**
- * Converts a decorated class instance to a `RuntimeTool`. Throws for undecorated classes:
- * forgetting `@bindTool` is a programming error and must not silently degrade.
+ * 把装饰过的 class 实例换成 `RuntimeTool`。class 未装饰直接抛错 —— 这是
+ * 编程错误(忘记 `@bindTool`),不应该 silent 退化。
  */
 export function toRuntimeTool<
   S extends TSchema = TSchema,

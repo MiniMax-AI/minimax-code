@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { LogoutResult } from '@mavis/oauth-core';
+import {
+  CredentialRecordCorruptError,
+  CredentialStorePermissionError,
+  type LogoutResult,
+} from '@mavis/oauth-core';
 
 import { createLocalAuthFixture } from '../../../oauth-core/test/helpers/local-auth.js';
 
@@ -80,7 +84,7 @@ describe('McodeAuthApplication', () => {
 
         await expect(application.login()).resolves.toMatchObject({ state: 'already-authenticated' });
         await expect(core.getAccessToken({ minValidityMs: 30_000 })).resolves.toEqual(lease);
-        expect(fixture.calls).toEqual({ device: 1, refresh: 0 });
+        expect(fixture.calls).toEqual({ device: 1, refresh: 0, revoke: 0 });
       } finally {
         await fixture.cleanup();
       }
@@ -214,6 +218,33 @@ describe('McodeAuthApplication', () => {
       logoutUrl:
         'https://agent.minimax.io/auth/logout?logout_redirect_uri=https%3A%2F%2Fagent.minimax.io',
     });
+  });
+
+  // Core 的 logout 遇到这两类错误会改为本地重置，真实文件场景见 oauth-core auth-core.test.ts。
+  it.each([
+    ['corrupt', () => new CredentialRecordCorruptError()],
+    ['unrepairable', () => new CredentialStorePermissionError()],
+  ])('still runs the shared logout when auth.json is %s', async (_label, failure) => {
+    const core = sharedCore('authenticated');
+    core.getStatus.mockRejectedValueOnce(failure());
+    const application = new McodeAuthApplication({
+      dataDir: '/data',
+      sharedAuthCore: core,
+      region: 'cn',
+      buildEnv: 'test',
+    });
+
+    await expect(application.logout()).resolves.toMatchObject({ state: 'signed-out' });
+    expect(core.logout).toHaveBeenCalledWith({ revoke: true });
+  });
+
+  it('does not start logout when the status fails for another reason', async () => {
+    const core = sharedCore('authenticated');
+    core.getStatus.mockRejectedValueOnce(new Error('state store offline'));
+    const application = new McodeAuthApplication({ dataDir: '/data', sharedAuthCore: core });
+
+    await expect(application.logout()).rejects.toThrow('state store offline');
+    expect(core.logout).not.toHaveBeenCalled();
   });
 
   it('reports OAuth telemetry and preserves login failures', async () => {

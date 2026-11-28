@@ -25,6 +25,7 @@ import {
   type McodePackageManagerInstallSource,
   type McodePackageManagerRunOptions,
 } from './install-source.js';
+import { stableProcessNodeExecutable } from './homebrew-node-path.js';
 import { compareMcodeVersions } from './release.js';
 import { reportMcodeUpdatePhase } from './progress.js';
 import {
@@ -110,6 +111,8 @@ export interface McodeUpdateApplicationOptions {
   readonly prefixInstall?: McodeNpmPrefixInstall;
   readonly entryFile?: string;
   readonly runtimeExecutable?: string;
+  /** Reinstall the current exact version to rebind launchers and native addons to a new Node. */
+  readonly forceReinstallWhenCurrent?: boolean;
 }
 
 export interface McodeUpdateApplicationDependencies {
@@ -146,6 +149,7 @@ export class McodeUpdateApplication {
   private readonly prefixInstall?: McodeNpmPrefixInstall;
   private readonly entryFile?: string;
   private readonly runtimeExecutable: string;
+  private readonly forceReinstallWhenCurrent: boolean;
   private readonly environment: NodeJS.ProcessEnv;
   private readonly dependencies: McodeUpdateApplicationDependencies;
 
@@ -160,13 +164,16 @@ export class McodeUpdateApplication {
     this.platform = platform;
     this.environment = environment;
     this.entryFile = options.entryFile ?? process.argv[1];
+    this.forceReinstallWhenCurrent = options.forceReinstallWhenCurrent === true;
     this.prefixInstall =
       options.prefixInstall ?? resolveMcodeNpmPrefixInstall(this.entryFile, platform);
-    // Keep updates on the Node executable recorded in the install receipt. On
-    // macOS process.execPath resolves Homebrew's stable bin/node symlink into a
-    // versioned Cellar path that `brew upgrade` removes.
+    // Keep updates on the Node executable recorded in the install receipt.
+    // process.execPath resolves Homebrew symlinks into a versioned Cellar keg
+    // that `brew upgrade` removes, so the fallback maps it to the opt path.
     this.runtimeExecutable =
-      options.runtimeExecutable ?? this.prefixInstall?.nodeExecutable ?? process.execPath;
+      options.runtimeExecutable ??
+      this.prefixInstall?.nodeExecutable ??
+      stableProcessNodeExecutable();
     const packageManagerEnvironment = this.prefixInstall
       ? createMcodeNpmRuntimeEnvironment(environment, this.runtimeExecutable, platform)
       : environment;
@@ -288,7 +295,7 @@ export class McodeUpdateApplication {
     const latestVersion = await this.dependencies.resolveLatestPackageVersion(this.packageTag);
     const comparison = compareMcodeVersions(this.currentVersion, latestVersion);
     const followsRollingTag = this.packageTag !== 'latest';
-    if (comparison === 0) {
+    if (comparison === 0 && !this.forceReinstallWhenCurrent) {
       return {
         kind: 'current',
         source,

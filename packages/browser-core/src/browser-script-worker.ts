@@ -1,6 +1,7 @@
 import { Worker } from 'node:worker_threads';
 
 import { isRecord } from './browser-state.js';
+import { withTimeout } from './operation-timeout.js';
 
 /**
  * Isolated execution host for Browser `run_script`.
@@ -20,6 +21,8 @@ export const BROWSER_SCRIPT_RUNTIME_FILENAME = 'browser-script-runtime.js';
 const MAX_LOG_ENTRY_CHARS = 4_000;
 export const BROWSER_SCRIPT_MAX_LOG_ENTRIES = 200;
 export const BROWSER_SCRIPT_MAX_LOG_BYTES = 16 * 1024;
+/** How long aborted operation handlers get to settle; a transport may never answer them. */
+const INFLIGHT_SETTLE_MS = 1_500;
 
 const CONTEXT_BOOTSTRAP = String.raw`(function (hostCall, hostLog, scriptFilename) {
   'use strict';
@@ -367,6 +370,8 @@ export interface BrowserScriptWorkerOptions {
   readonly onOmittedLogs: (count: number) => void;
   /** Called once when the outcome is decided, before waiting for in-flight handlers. */
   readonly onSettle: () => void;
+  /** Called with the number of operation handlers that did not settle after the abort. */
+  readonly onStalled: (count: number) => void;
 }
 
 /** Thrown by an operation handler to surface a stable code to the script. */
@@ -383,8 +388,10 @@ export class BrowserScriptOperationError extends Error {
 /**
  * Run one script to completion, timeout, call-limit, or cancellation.
  *
- * Resolves only after the worker is terminated and every in-flight operation
- * handler has settled, so callers can safely release held input afterwards.
+ * Resolves after the worker is terminated and the in-flight operation handlers
+ * have settled, so callers can safely release held input afterwards. A handler
+ * still pending after INFLIGHT_SETTLE_MS is reported to `onStalled` and left
+ * behind: the script's deadline must hold whatever a command does.
  */
 export async function runBrowserScriptWorker(
   options: BrowserScriptWorkerOptions,
@@ -487,7 +494,11 @@ export async function runBrowserScriptWorker(
     options.signal.removeEventListener('abort', onAbort);
     await worker.terminate().catch(() => undefined);
     options.onSettle();
-    await Promise.allSettled([...inflight]);
+    await withTimeout(
+      Promise.allSettled([...inflight]),
+      INFLIGHT_SETTLE_MS,
+      'run_script operations',
+    ).catch(() => options.onStalled(inflight.size));
   }
 }
 

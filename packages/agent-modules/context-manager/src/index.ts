@@ -1,9 +1,14 @@
 export { ContextManager } from './manager.js';
+export { countProjectedReplayMessages } from './replay-token-counting.js';
 export { computeCompactionTriggerAt, DEFAULT_CONTEXT_MANAGER_SETTINGS } from './settings.js';
 export {
   isValidCompactionTriggerSetting,
   resolveCompactionTokenBudget,
   resolveConfiguredCompactionTrigger,
+  resolveSegmentCompactionBudget,
+  type SegmentCompactionTokenBudget,
+  type SegmentForegroundBudget,
+  type SegmentRebuildShares,
   resolveDynamicMaxTokens,
 } from './provider-budget.js';
 export {
@@ -14,6 +19,32 @@ export {
   type EncodeFn,
   type TokenEstimator,
 } from './token-estimator.js';
+export {
+  countMessagesWithVisualPricing,
+  estimateImageBlockTokens,
+  estimateMiniMaxMVisualTokensForDimensions,
+  estimateVisualTokensForDimensions,
+  FALLBACK_IMAGE_TOKENS,
+  messagesContainImageData,
+  parseImageDimensionsFromBase64,
+  type ImageTokenEstimateOptions,
+  type VisualPricingModel,
+} from './visual-token-pricing.js';
+export {
+  measureSkillCatalogDescriptionTokens,
+  normalizeSkillCatalogDescription,
+  normalizeSkillUsageKey,
+  renderLocalSkillsCatalogResult,
+  resolveSkillCatalogBudgetTokens,
+  SKILL_NAME_ONLY_NOTICE,
+  skillCatalogDescription,
+  type LocalSkillCatalogTokenEstimator,
+  type LocalSkillsCatalogEntry,
+  type LocalSkillsCatalogRenderOptions,
+  type LocalSkillsCatalogRenderResult,
+  type SkillCatalogUsage,
+  type SkillCatalogUsageMap,
+} from './skill-catalog.js';
 export {
   buildCountTokensRequestBody,
   cjkFallbackTokens,
@@ -44,7 +75,22 @@ export type {
   ContextTriggerEvaluatedEvent,
 } from './types.js';
 export {
-  archivedImageText,
+  acquireImageDecode,
+  configureImageDecoding,
+  IMAGE_DECODE_DEFER_REASONS,
+  IMAGE_DECODE_SKIP_REASONS,
+  imageDecodeLimits,
+  imageDecodeStats,
+  isImageDecodeDeferral,
+  recordImageDecodeSkipped,
+  type ImageDecodeDeferReason,
+  type ImageDecodeDeferral,
+  type ImageDecodeLease,
+  type ImageDecodeLimits,
+  type ImageDecodeSkipReason,
+  type ImageDecodeStats,
+} from './image-decode-gate.js';
+export {
   boundRequestMedia,
   checkpointImageText,
   DEFAULT_REQUEST_IMAGE_ENCODING,
@@ -69,3 +115,7 @@ export {
   OUTPUT_LIMIT_RETRY_REASON,
   type OutputLimitRecoveryDecision,
 } from './output-limit.js';
+
+export function archivedImageText(mimeType = 'image'): string {
+  return `[Archived image (${mimeType}) omitted during compaction]`;
+}

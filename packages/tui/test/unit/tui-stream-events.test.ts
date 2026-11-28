@@ -133,6 +133,40 @@ describe("Minimax Code stream event projection", () => {
     });
   });
 
+  // Automation summaries read advisor facts only from this field; before it, the facts sat
+  // unread in the opaque Tool Call output next to the advice text.
+  it('keeps the advisor result facts, without the advice, on an advisor Tool Call', () => {
+    const details = {
+      providerId: 'custom_provider:acme',
+      modelId: 'critic',
+      durationMs: 4200,
+      inputTokens: 18000,
+      outputTokens: 240,
+      outcome: 'advice',
+      omittedMessages: 12,
+    };
+    const toolCall = (name: string, result?: unknown) => ({
+      tool_name: name,
+      tool_call_id: `call-${name}`,
+      tool_call_status: result === undefined ? 1 : 2,
+      ...(result === undefined ? {} : { tool_call_result_data: JSON.stringify(result) }),
+    });
+    const message = normalizeTuiMessage({
+      msg_id: 'message-advisor',
+      role: 'assistant',
+      tool_calls: [
+        toolCall('advisor', { content: [{ type: 'text', text: 'Check the null case.' }], details }),
+        toolCall('read', { details }),
+      ],
+    });
+
+    expect(message.toolCalls?.[0]?.advisor).toEqual(details);
+    expect(message.toolCalls?.[1]).not.toHaveProperty('advisor');
+    expect(
+      normalizeTuiMessage({ role: 'assistant', tool_calls: [toolCall('advisor')] }).toolCalls?.[0],
+    ).not.toHaveProperty('advisor');
+  });
+
   it('restores the PTC parent of a history Tool Call view from the message rawJson', () => {
     const historyView = (rawJson: string | undefined) =>
       normalizeTuiMessage({
@@ -222,6 +256,42 @@ describe("Minimax Code stream event projection", () => {
     expect(rendered).toContain('Code failed · Scan the repo · 2 calls · 1 interrupted');
     expect(rendered).toContain('⊘ Reading src/b.ts · interrupted');
     expect(rendered).not.toContain('Read 2 files');
+  });
+
+  it('keeps subagent execution facts out of reopened history', () => {
+    const fact = (eventType: string, status: string) =>
+      normalizeTuiMessage({
+        msgId: `${eventType}-${status}`,
+        msgType: 3,
+        msgContent: JSON.stringify({
+          eventType,
+          parent_session_id: 'parent',
+          child_session_id: 'child',
+          turn_id: 'child-turn',
+          agent_name: 'worker',
+          status,
+        }),
+      });
+    const transcript = new TranscriptStore();
+    hydrateTuiHistory({
+      messages: [
+        normalizeTuiMessage({ msgId: 'user-1', turnId: 'turn-1', role: 'user', msgContent: 'delegate' }),
+        fact('subagent.execution', 'started'),
+        fact('subagent.execution', 'completed'),
+        fact('subagent.execution.recovery', 'started'),
+        normalizeTuiMessage({ msgId: 'reply-1', turnId: 'turn-1', role: 'assistant', msgContent: 'done' }),
+      ],
+      transcript,
+      toolProjection: new TuiToolProjection(transcript),
+      todoProjection: new TuiTodoProjection(() => undefined),
+      userProjection: new TuiUserProjection(transcript),
+      now: () => 100,
+    });
+
+    const rendered = stripVTControlCharacters(new TranscriptView(transcript).render(100).join('\n'));
+    expect(rendered).toContain('done');
+    expect(rendered).not.toContain('subagent.execution');
+    expect(rendered).not.toContain('child_session_id');
   });
 
   it('decodes generated Session Tool Call payloads while normalizing durable history', () => {

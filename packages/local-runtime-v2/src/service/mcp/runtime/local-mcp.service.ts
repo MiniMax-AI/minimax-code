@@ -1,16 +1,25 @@
 import { ProjectMcpRuntime } from '../project-mcp.service.js';
 import { SessionMcpServers } from './session-servers.js';
 import { projectNativeTools, reserveConfiguredServerNames } from './native-tool-projection.js';
-import { McpNameRegistry } from '@mavis/mcp';
+import {
+  McpNameRegistry,
+  McpToolCallNotDispatchedError,
+  type McpRequestAuthorizer,
+} from '@mavis/mcp';
 import type { RuntimeTool, ToolResult } from '@mavis/agent-core/tools';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { LocalMavisMcpServiceAdapter } from '../tools/local-mavis-adapter.js';
 import { mapMcpContent, normalizeCallResult } from '../tools/result-mapping.js';
 import { localMcpCallFailureResult, withMcpProgrammatic } from '../tools/programmatic-result.js';
+import { callLocalMcpToolUnfolded, type LocalMcpUnfoldedCall } from '../tools/miniapp-call.js';
 import { listMcpRuntimeToolEntriesForTurn } from '../tools/runtime-tools.js';
 import { readConfiguredMcpServerNames } from './config-file.js';
-import { readLocalMcpFile, writeLocalMcpFile } from './configuration.repository.js';
+import {
+  readLocalMcpFile,
+  writeLocalMcpFile,
+  writeLocalMcpRawDocument,
+} from './configuration.repository.js';
 import {
   configuredConnectionFailure,
   configuredDetail,
@@ -25,30 +34,30 @@ import {
   toTypeSchema,
   toManagedServerSummary,
   validateConfiguredServerName,
-  withConfiguredConnectionTimeout,
+  withValidatedOAuth,
 } from './settings-config.js';
-
 import type { McpServerLookup } from '@mavis/mcp/runtime/connection-pool';
 import type { McpConnectionTokenOverrides, ResolvedMcpServer } from '@mavis/mcp/runtime/types';
-import { MCP_DEFAULTS } from '@mavis/mcp/runtime/types';
+import { authFailureMessage, CONNECTION_FAILED_ERROR, McpServerAuth } from '../auth/server-auth.js';
 import {
   buildBuiltinMatrixServerConfig,
-  buildBuiltinMatrixTokenOverrides,
   BUILTIN_MATRIX_SERVER_NAME,
   isBuiltinMatrixConfig,
   isRetiredLegacyMatrixMcpServerConfig,
   listBuiltinMatrixMcpToolDescriptors,
+  matrixTokenOverrides,
 } from './builtin-matrix.js';
 import {
   configToTransportConfig,
+  configuredTimeout,
+  remoteDiscoveryTimeoutFromEnv,
+  stdioDiscoveryTimeoutFromEnv,
   hasLocalCallAdapter,
-  inferAuthStatus,
   inferTransport,
   normalizeServerConfig,
   normalizeServerName,
   readConfiguredTools,
   readRecord,
-  readStringArray,
 } from './config.js';
 import { isRetiredLegacyCuMcpServerConfig } from './retired-cu.js';
 
@@ -57,6 +66,7 @@ import type {
   ConfiguredMcpServerDetail,
   ConfiguredMcpServerInput,
   ConfiguredMcpServerSummary,
+  LocalMcpCallOptions,
   LocalMcpCallResult,
   LocalMcpManagedServerSummary,
   LocalMcpNativeToolInfo,
@@ -73,6 +83,9 @@ import { LocalMcpSettingsError } from '../errors.js';
 interface LocalMcpFile extends Record<string, unknown> {
   mcpServers: Record<string, LocalMcpServerConfig>;
 }
+
+const CONNECTION_TIMEOUT_ERROR =
+  'MCP server connection timed out. Retry or check its configuration.';
 
 interface LocalMcpRawDocument {
   document: Record<string, unknown>;
@@ -106,6 +119,7 @@ export class LocalMcpService {
   private readonly serverChangeListeners = new Set<() => void>();
   private readonly sessionServers: SessionMcpServers;
   private readonly projectMcp: ProjectMcpRuntime;
+  readonly serverAuth: McpServerAuth;
 
   constructor(
     private readonly dataDir: () => string,
@@ -113,6 +127,30 @@ export class LocalMcpService {
   ) {
     this.sessionServers = new SessionMcpServers(options.connectionPool);
     this.projectMcp = new ProjectMcpRuntime(options.connectionPool);
+    this.serverAuth = new McpServerAuth({
+      runtime: options,
+      dataDir,
+      projectSource: (config) => this.projectMcp.authSource(config),
+      isSessionServer: (server, context) => this.isSessionServer(server, context),
+      resolveOverrides: ({ server, config, context }, authorizer) =>
+        this.resolveConnectionOverrides(server, config, context, authorizer),
+      owner: {
+        assertOpen: () => this.assertOpen(),
+        readUserServers: async () => (await this.readFile()).mcpServers,
+        resolveProject: (context) => this.enqueueMutation(() => this.projectMcp.resolve(context)),
+        getServerConfig: (name, context) => this.getServerConfig(name, context),
+        connectionSignal: (config, signal) => this.connectionSignal(config, signal),
+        record: ({ server, context, config }, error) =>
+          error
+            ? this.recordPublicRuntimeFailure(server, context, error, config)
+            : this.recordPublicRuntimeSuccess(server, context, config),
+        reset: async (target) => {
+          await this.options.connectionPool?.disconnect(target.serverName);
+          if (target.kind === 'user') this.resetPublicRuntimeStatus(target.serverName);
+          this.notifyServerChangeListeners();
+        },
+      },
+    });
   }
 
   getSessionMcpServers(sessionId: string) {
@@ -120,6 +158,7 @@ export class LocalMcpService {
   }
 
   async disposeSession(sessionId: string): Promise<void> {
+    this.serverAuth.gate.forgetSession(sessionId);
     await this.enqueueMutation(async () => {
       await this.projectMcp.clearSession(sessionId);
       await this.sessionServers.remove(sessionId);
@@ -314,12 +353,13 @@ export class LocalMcpService {
   async listServers(context?: LocalMcpRuntimeContext) {
     this.assertOpen();
     const file = this.withBuiltinServers(await this.readFile(), context);
-    return Object.entries(file.mcpServers).map(([name, config]) => {
+    const statuses = await this.serverAuth.legacyStatuses(file.mcpServers);
+    return Object.entries(file.mcpServers).map(([name, config], index) => {
       const tools = readConfiguredTools(config);
       return {
         name,
         transport: inferTransport(config),
-        authStatus: inferAuthStatus(config),
+        authStatus: statuses[index]?.status ?? 'none',
         skillStatus: tools.length > 0 ? 'active' : 'not_generated',
         enabled: config.enabled !== false,
         configured: config.configured !== false,
@@ -341,13 +381,14 @@ export class LocalMcpService {
     this.assertOpen();
     const file = await this.readFile(true);
     const normalizedKeyword = keyword?.trim().toLocaleLowerCase();
-    return Object.entries(file.mcpServers).flatMap(([name, config]) => {
+    const summaries = Object.entries(file.mcpServers).flatMap(([name, config]) => {
       if (!isUserConfiguredServer(config)) return [];
       if (normalizedKeyword && !name.toLocaleLowerCase().includes(normalizedKeyword)) return [];
       const input = configuredInputFromStored(config);
       if (!input) return [];
-      return [configuredSummary(name, config, input)];
+      return [{ summary: configuredSummary(name, config, input), config }];
     });
+    return this.serverAuth.withAuthStates(summaries);
   }
 
   /** Existing configuration keys must be addressed exactly, without creation-time normalization. */
@@ -416,13 +457,14 @@ export class LocalMcpService {
     const serverName = name;
     return this.enqueueMutation(async () => {
       const file = await this.readFileWithinMutation(true);
-      requireUserConfiguredServer(file, serverName);
+      const removed = requireUserConfiguredServer(file, serverName);
       const remainingServers = { ...file.mcpServers };
       delete remainingServers[serverName];
       await this.writeConfiguredMutation(serverName, {
         ...file,
         mcpServers: remainingServers,
       });
+      await this.serverAuth.deleteUnusedUserCredentials(serverName, removed, remainingServers);
       return true;
     });
   }
@@ -473,24 +515,16 @@ export class LocalMcpService {
         errorMessage: 'MCP connections are unavailable in this runtime.',
       };
     }
-    const controller = new AbortController();
-    const signal = AbortSignal.any([controller.signal, this.shutdownSignal.signal]);
     try {
-      const timeoutMs =
-        config.timeout && config.timeout > 0 ? config.timeout : MCP_DEFAULTS.timeout;
-      const tools = await withConfiguredConnectionTimeout(
-        (async () => {
-          const overrides = await this.resolveConnectionOverrides(serverName, config);
-          this.assertOpen();
-          signal.throwIfAborted();
-          return pool.listTools(serverName, overrides, { signal });
-        })(),
-        timeoutMs,
-        () => controller.abort(),
+      const tools = await this.serverAuth.listToolsInteractive(
+        { server: serverName, config },
+        pool,
       );
       return { success: true, toolCount: tools.length };
     } catch (error) {
-      return configuredConnectionFailure(error, config);
+      return (
+        this.serverAuth.connectionTestFailure(error) ?? configuredConnectionFailure(error, config)
+      );
     }
   }
 
@@ -506,13 +540,13 @@ export class LocalMcpService {
         enabled: next.enabled ?? true,
         configured: next.configured ?? true,
       };
-      file.mcpServers[serverName] = serverConfig;
+      file.mcpServers[serverName] = withValidatedOAuth(serverConfig);
       await this.writeConfiguredMutation(serverName, file);
       const tools = readConfiguredTools(serverConfig);
       return {
         name: serverName,
         transport: inferTransport(serverConfig),
-        authStatus: inferAuthStatus(serverConfig),
+        authStatus: await this.serverAuth.legacyStatus(serverName, serverConfig),
         skillStatus: tools.length > 0 ? 'active' : 'not_generated',
         enabled: serverConfig.enabled !== false,
         configured: serverConfig.configured !== false,
@@ -560,26 +594,17 @@ export class LocalMcpService {
   async getAuthStatus() {
     this.assertOpen();
     const file = this.withBuiltinServers(await this.readFile());
-    return Object.entries(file.mcpServers).map(([name, config]) => ({
-      name,
-      status: inferAuthStatus(config),
-      authenticated: inferAuthStatus(config) === 'authenticated',
-      scopes: readStringArray(config.auth?.['scopes']),
-    }));
+    return this.serverAuth.legacyStatuses(file.mcpServers);
   }
 
+  /** Old single-server entry: starts OAuth for a user `mcp.json` server only. */
   async startAuth(server: string) {
     this.assertOpen();
-    const config = await this.getServerConfig(server);
+    const config = (await this.readFile()).mcpServers[server];
     if (!config) {
       return { ok: false, status: 'not_found', error: `MCP server "${server}" not found` };
     }
-    return {
-      ok: true,
-      status: inferAuthStatus(config),
-      authUrl: undefined,
-      localRuntime: true,
-    };
+    return this.serverAuth.startLegacy(server, config);
   }
 
   async sync() {
@@ -628,29 +653,7 @@ export class LocalMcpService {
     server: string,
     context?: LocalMcpRuntimeContext,
   ): Promise<LocalMcpToolInfo[]> {
-    this.assertOpen();
-    const config = await this.getServerConfig(server, context);
-    if (!config || config.enabled === false) return [];
-    const pool = this.options.connectionPool;
-    if (!pool) return readConfiguredTools(config);
-    if (!configToTransportConfig(config)) return readConfiguredTools(config);
-    try {
-      const overrides = await this.resolveConnectionOverrides(server, config, context);
-      this.assertOpen();
-      const tools = await pool.listTools(server, overrides, {
-        signal: this.connectionSignal(config),
-      });
-      this.recordPublicRuntimeSuccess(server, context, config);
-      return tools;
-    } catch {
-      this.recordPublicRuntimeFailure(
-        server,
-        context,
-        'MCP server connection failed. Retry or check its configuration.',
-        config,
-      );
-      return readConfiguredTools(config);
-    }
+    return (await this.serverAuth.listToolsLive(server, context)).tools;
   }
 
   async listNativeTools(context?: LocalMcpRuntimeContext): Promise<LocalMcpNativeToolInfo[]> {
@@ -749,27 +752,23 @@ export class LocalMcpService {
     const pool = this.options.connectionPool;
     const transport = configToTransportConfig(config);
     if (!pool || !transport) return [];
-    const turnDiscoveryTimeoutMs = this.options.turnDiscoveryTimeoutMs ?? 2_000;
     const discoveryTimeoutMs =
       transport.type === 'stdio'
         ? (this.options.turnStdioDiscoveryTimeoutMs ??
           this.options.turnDiscoveryTimeoutMs ??
-          30_000)
-        : turnDiscoveryTimeoutMs;
+          stdioDiscoveryTimeoutFromEnv())
+        : (this.options.turnDiscoveryTimeoutMs ?? remoteDiscoveryTimeoutFromEnv());
     const timeoutMs = Math.min(configuredTimeout(config), discoveryTimeoutMs);
     const controller = new AbortController();
     try {
-      const tools = await withConfiguredConnectionTimeout(
-        (async () => {
-          const overrides = await this.resolveConnectionOverrides(server, config, context);
-          this.assertOpen();
-          return pool.listTools(server, overrides, {
+      const tools = await this.serverAuth.connect(
+        { server, config, context },
+        { background: true, announce: true, timeoutMs, onTimeout: () => controller.abort() },
+        (overrides) =>
+          pool.listTools(server, overrides, {
             signal: this.connectionSignal(config, controller.signal),
             timeout: timeoutMs,
-          });
-        })(),
-        timeoutMs,
-        () => controller.abort(),
+          }),
       );
       this.recordPublicRuntimeSuccess(server, context, config);
       return tools;
@@ -777,9 +776,10 @@ export class LocalMcpService {
       this.recordPublicRuntimeFailure(
         server,
         context,
-        error instanceof ConfiguredMcpConnectionTimeoutError
-          ? 'MCP server connection timed out. Retry or check its configuration.'
-          : 'MCP server connection failed. Retry or check its configuration.',
+        authFailureMessage(error) ??
+          (error instanceof ConfiguredMcpConnectionTimeoutError
+            ? CONNECTION_TIMEOUT_ERROR
+            : CONNECTION_FAILED_ERROR),
         config,
       );
       return [];
@@ -818,9 +818,9 @@ export class LocalMcpService {
     server: string,
     toolName: string,
     args: Record<string, unknown>,
-    options: { context?: LocalMcpRuntimeContext; signal?: AbortSignal } = {},
+    options: LocalMcpCallOptions = {},
   ): Promise<LocalMcpCallResult> {
-    const { context, signal } = options;
+    const { context } = options;
     this.assertOpen();
     const config = await this.getServerConfig(server, context);
     if (!config || config.enabled === false) {
@@ -830,32 +830,28 @@ export class LocalMcpService {
       };
     }
     const configuredTool = readConfiguredTools(config).find((item) => item.name === toolName);
-    const tool =
-      configuredTool ??
-      (await this.listToolsLive(server, context)).find((item) => item.name === toolName);
+    const live = configuredTool ? undefined : await this.serverAuth.listToolsLive(server, context);
+    const tool = configuredTool ?? live?.tools.find((item) => item.name === toolName);
     if (!tool) {
-      return {
-        isError: true,
-        content: [{ type: 'text', text: `MCP tool "${toolName}" not found on "${server}".` }],
-      };
+      return (
+        this.serverAuth.callFailure(live?.authError) ?? {
+          isError: true,
+          content: [{ type: 'text', text: `MCP tool "${toolName}" not found on "${server}".` }],
+        }
+      );
     }
     const mockResponses = readRecord(config.metadata?.['mockResponses']);
     const key = toolName;
     const mocked = readRecord(mockResponses?.[key]);
     if (mocked) return normalizeCallResult(mocked);
 
-    return this.callLive(server, config, { toolName, args, context, signal });
+    return this.callLive(server, config, { ...options, toolName, args });
   }
 
   private async callLive(
     server: string,
     config: LocalMcpServerConfig,
-    input: {
-      toolName: string;
-      args: Record<string, unknown>;
-      context?: LocalMcpRuntimeContext;
-      signal?: AbortSignal;
-    },
+    input: LocalMcpCallOptions & { toolName: string; args: Record<string, unknown> },
   ): Promise<LocalMcpCallResult> {
     const { toolName, args, context, signal } = input;
     // Live path: route through the injected connection pool when configured.
@@ -876,22 +872,27 @@ export class LocalMcpService {
         };
       }
       try {
-        const overrides = await this.resolveConnectionOverrides(server, config, context);
-        this.assertOpen();
-        const result = await pool.callTool(server, toolName, args, overrides, {
-          ...(config.timeout && config.timeout > 0 ? { timeout: config.timeout } : {}),
-          signal: this.connectionSignal(config, signal),
-        });
+        const result = await this.serverAuth.connect(
+          { server, config, context },
+          { background: true, announce: true },
+          (overrides) =>
+            pool.callTool(server, toolName, args, overrides, {
+              ...(config.timeout && config.timeout > 0 ? { timeout: config.timeout } : {}),
+              signal: this.connectionSignal(config, signal),
+            }),
+        );
         this.recordPublicRuntimeSuccess(server, context, config);
         return result;
       } catch (err) {
+        // An abort that never reached the server is the caller's, not a server failure.
+        if (err instanceof McpToolCallNotDispatchedError) throw err;
         this.recordPublicRuntimeFailure(
           server,
           context,
-          'MCP server connection failed. Retry or check its configuration.',
+          authFailureMessage(err) ?? CONNECTION_FAILED_ERROR,
           config,
         );
-        return localMcpCallFailureResult(err);
+        return this.serverAuth.callFailure(err) ?? localMcpCallFailureResult(err);
       }
     }
 
@@ -906,6 +907,16 @@ export class LocalMcpService {
         },
       ],
     };
+  }
+
+  /** Mini App tool port only; the Agent path is `call`. See `callLocalMcpToolUnfolded`. */
+  callForMiniApp(input: LocalMcpUnfoldedCall): Promise<LocalMcpCallResult> {
+    return callLocalMcpToolUnfolded(this, input, {
+      pool: this.options.connectionPool,
+      overrides: (config) => this.serverAuth.authorizedOverrides(input.server, config),
+      signal: (config) => this.connectionSignal(config, input.signal),
+      recorded: (config) => this.recordPublicRuntimeSuccess(input.server, undefined, config),
+    });
   }
 
   /**
@@ -977,17 +988,20 @@ export class LocalMcpService {
     server: string,
     config: LocalMcpServerConfig,
     context?: LocalMcpRuntimeContext,
+    authorizer?: McpRequestAuthorizer,
   ): Promise<McpConnectionTokenOverrides | undefined> {
     if (context?.sessionId && this.isSessionServer(server, context)) {
       return this.sessionServers.overrides(context.sessionId, server, config);
     }
     const project = this.projectMcp.overrides(config);
-    if (project) return project;
+    if (project) return authorizer ? { ...project, authorizer } : project;
     const base =
       context === undefined
         ? await this.options.resolveTokenOverrides?.(server, config)
         : await this.options.resolveTokenOverrides?.(server, config, context);
-    if (!isBuiltinMatrixConfig(server, config)) return base ?? undefined;
+    if (!isBuiltinMatrixConfig(server, config)) {
+      return authorizer ? { ...base, authorizer } : (base ?? undefined);
+    }
     return matrixTokenOverrides(this.dataDir(), base, context);
   }
 
@@ -1066,7 +1080,7 @@ export class LocalMcpService {
   }
 
   private async readFileWithinMutation(failClosed = false): Promise<LocalMcpFile> {
-    const pending = readLocalMcpFile(this.filePath(), failClosed);
+    const pending = readLocalMcpFile(this.filePath(), failClosed, this.serverAuth.ignoreLegacyAuth);
     this.pendingReads.add(pending);
     try {
       const file = await pending;
@@ -1094,9 +1108,7 @@ export class LocalMcpService {
   }
 
   private async writeRawDocument(document: Record<string, unknown>): Promise<void> {
-    const filePath = this.filePath();
-    await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(filePath, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
+    await writeLocalMcpRawDocument(this.filePath(), document);
   }
 
   private async writeConfiguredMutation(serverName: string, file: LocalMcpFile): Promise<void> {
@@ -1164,27 +1176,4 @@ export class LocalMcpService {
     })();
     return result;
   }
-}
-
-function configuredTimeout(config: LocalMcpServerConfig): number {
-  return config.timeout && config.timeout > 0 ? config.timeout : MCP_DEFAULTS.timeout;
-}
-function matrixTokenOverrides(
-  dataDir: string,
-  base: McpConnectionTokenOverrides | undefined,
-  context?: LocalMcpRuntimeContext,
-): McpConnectionTokenOverrides {
-  const matrixOverrides = buildBuiltinMatrixTokenOverrides({
-    ...(context ?? {}),
-    dataDir,
-  });
-  return {
-    ...(base ?? {}),
-    connectionKey: matrixOverrides.connectionKey,
-    env: {
-      ...(base?.env ?? {}),
-      ...matrixOverrides.env,
-    },
-    ...(base?.headers ? { headers: base.headers } : {}),
-  };
 }

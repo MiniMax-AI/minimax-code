@@ -123,6 +123,7 @@ export interface ForkSessionPort {
     readonly effectiveModelThinking?: SessionRecord['effectiveModelThinking'];
     readonly effectiveModelContextWindow?: SessionRecord['effectiveModelContextWindow'];
     readonly effectiveModelMaxOutputTokens?: SessionRecord['effectiveModelMaxOutputTokens'];
+    readonly advisor?: SessionRecord['advisor'];
     readonly parentSessionId?: string;
     readonly visibility?: 'hidden' | 'visible';
     readonly purpose?: string;

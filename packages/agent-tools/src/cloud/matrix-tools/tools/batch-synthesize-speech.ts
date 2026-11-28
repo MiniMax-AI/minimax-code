@@ -1,8 +1,8 @@
 /**
- * matrix_batch_synthesize_speech — Pattern C batch: The server performs TTS for N requests and
- * splits success_items/failed_items. Send `slot_<i>.mp3` as the `output_file` placeholder, map the
- * echoed field back to the LLM's local path, and download each `output_url`. Individual failures do
- * not block the batch.
+ * matrix_batch_synthesize_speech —— Pattern C 批量:服务端按 N 个请求做 TTS,
+ * 返回 success_items/failed_items 切分列表。本工具用 `slot_<i>.mp3` 当
+ * `output_file` 占位符喂给服务端,响应里靠回显的同名字段反查 LLM 给的本地
+ * 路径,逐个下载 `output_url`。单个失败不阻断 batch。
  */
 
 import { bindTool, type ToolImpl, type ToolResult } from '@mavis/agent-core/tools';

@@ -3,30 +3,35 @@
  *
  * # Why this exists
  *
- * Multiple daemon subsystems generate user-visible strings without going through an LLM (permission
- * decision reasons, team-plan engine notifications, etc.). Hardcoding English biases the UX for
- * English speakers; hardcoding Chinese biases the other way. This helper inspects recent user
- * messages and returns a coarse locale hint that callers can use to pick a localized template.
+ * Multiple daemon subsystems generate user-visible strings without going
+ * through an LLM (permission decision reasons, team-plan engine
+ * notifications, etc.). Hardcoding English biases the UX for English
+ * speakers; hardcoding Chinese biases the other way. This helper inspects
+ * recent user messages and returns a coarse locale hint that callers can
+ * use to pick a localized template.
  *
  * # Scope
  *
- * Coarse classification only — `zh` (Chinese), `en` (English-like), or `unknown` (insufficient
- * signal). Callers must default to English when the hint is `unknown` to preserve backward
- * compatibility.
+ * Coarse classification only — `zh` (Chinese), `en` (English-like), or
+ * `unknown` (insufficient signal). Callers must default to English when
+ * the hint is `unknown` to preserve backward compatibility.
  *
  * # Heuristic
  *
- * Count CJK Han characters across the latest user messages. If the Han ratio is high enough (>= 20%
- * of non-whitespace characters), classify as `zh`. Otherwise classify as `en` when at least one
- * Latin letter is present, and `unknown` when there is no actionable signal (empty/only
+ * Count CJK Han characters across the latest user messages. If the Han
+ * ratio is high enough (>= 20% of non-whitespace characters), classify as
+ * `zh`. Otherwise classify as `en` when at least one Latin letter is
+ * present, and `unknown` when there is no actionable signal (empty/only
  * symbols/numbers).
  *
- * The threshold is intentionally low — even a single Chinese instruction meaning "add Chinese
- * support to the feature above" wins over an English-heavy conversation, because the most recent
- * user instruction reflects current intent better than the long tail of prior turns.
+ * The threshold is intentionally low — even a single Chinese instruction
+ * like "把上面这个功能加上中文支持" wins over an English-heavy
+ * conversation, because the most recent user instruction reflects current
+ * intent better than the long tail of prior turns.
  *
- * The classifier is **not** language detection in the linguistic sense — it is a one-bit signal:
- * "produce the Chinese template or the English template?". Treat any other language as `unknown`.
+ * The classifier is **not** language detection in the linguistic sense —
+ * it is a one-bit signal: "produce the Chinese template or the English
+ * template?". Treat any other language as `unknown`.
  */
 
 import type { AgentMessageProtocol } from '@mavis/agent-core/protocol/agent-message';

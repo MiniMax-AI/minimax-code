@@ -4,7 +4,7 @@ import type {
   LocalAgentService,
 } from '../../service/agent/index.js';
 import { describeAgentPromptSnapshot } from '../../service/agent/index.js';
-import { isLocalSourceProvenanceEnabled } from '@mavis/config';
+import { isLocalSourceProvenanceEnabled, normalizePluginName } from '@mavis/config';
 import {
   omitManagedSourceCitationInstructions,
   restoreLegacyFileReferenceInstructions,
@@ -28,9 +28,18 @@ export function createV2AgentProfileSource(
   runtimeOwnerKind: string | undefined,
   capabilityProfile: 'cli' | undefined,
 ): LocalAgentProfileSource {
+  const forbiddenPluginNames = new Set(
+    (configGetter().plugins?.forbidden ?? []).map(normalizePluginName),
+  );
+  const onlyOfficialPlugins = configGetter().plugins?.onlyOfficial === true;
   return {
     render: async ({ session, agent, agentBinding, promptRead, ptcRequested }) => {
-      const definition = requireCurrentDefinition(session, agentBinding);
+      const definition = requireCurrentDefinition(
+        session,
+        agentBinding,
+        forbiddenPluginNames,
+        onlyOfficialPlugins,
+      );
       const metadata = agent.metadata ?? {};
       // Freeze one config snapshot for the complete profile render so a live
       // preference update cannot mix capability, memory, and dataDir versions.
@@ -96,6 +105,8 @@ function resolveConfiguredCapabilities(
 function requireCurrentDefinition(
   session: SessionRecord,
   binding: SessionAgentDefinition | undefined,
+  forbiddenPluginNames: ReadonlySet<string> = new Set(),
+  onlyOfficialPlugins = false,
 ): Extract<SessionAgentDefinition['definition'], { readonly definitionVersion: 2 }> | undefined {
   if (!isTaskSession(session)) return undefined;
   const { sessionId } = session;
@@ -104,6 +115,15 @@ function requireCurrentDefinition(
     throw new Error(`Session Agent definition owner mismatch: ${sessionId}`);
   if (!isCurrentSessionAgentDefinition(binding.definition)) {
     throw new Error(`Session Agent definition requires migration: ${sessionId}`);
+  }
+  const pluginName = binding.definition.pluginSource?.pluginName;
+  if (pluginName && forbiddenPluginNames.has(normalizePluginName(pluginName))) {
+    throw new Error(`Plugin forbidden by local config: ${pluginName}`);
+  }
+  if (pluginName && onlyOfficialPlugins && binding.definition.pluginSource?.origin !== 'official') {
+    throw new Error(
+      `Plugin blocked until the plugins section of config.yaml is fixed: ${pluginName}`,
+    );
   }
   return binding.definition;
 }

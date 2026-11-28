@@ -72,6 +72,7 @@ function transcriptCellTitle(cell: TranscriptCell): string {
     return cell.status === 'resolved' ? 'Answers sent' : 'Agent question';
   if (cell.kind === 'turn-duration') return 'Run duration';
   if (cell.kind === 'compaction') return cell.title ?? 'Context compacted';
+  if (cell.kind === 'context-reset') return cell.content;
   if (cell.kind === 'usage') return 'Usage';
   if (cell.kind === 'inspection') return cell.inspection?.title ?? cell.title ?? 'Inspection';
   if (cell.kind === 'warning') return sanitizeTerminalText(cell.title ?? 'Warning');
@@ -83,6 +84,7 @@ function transcriptCellTitle(cell: TranscriptCell): string {
 
 function transcriptCellSummary(cell: TranscriptCell): string | undefined {
   if (cell.kind === 'shell') return cell.title;
+  if (cell.kind === 'context-reset') return undefined;
   if (cell.kind === 'thinking') {
     const durationMs = cell.durationMs ?? Math.max(0, cell.updatedAtMs - cell.createdAtMs);
     return durationMs > 0 ? formatDuration(durationMs) : undefined;
@@ -137,7 +139,12 @@ function statusPresentation(
   if (cell.kind === 'thinking') return { marker: '◆', tone: 'neutral' };
   if (cell.kind === 'assistant-preamble') return { marker: '·', tone: 'neutral' };
   if (cell.kind === 'review') return { marker: '✓', tone: 'success' };
-  if (cell.kind === 'turn-duration' || cell.kind === 'usage' || cell.kind === 'compaction') {
+  if (
+    cell.kind === 'turn-duration' ||
+    cell.kind === 'usage' ||
+    cell.kind === 'compaction' ||
+    cell.kind === 'context-reset'
+  ) {
     return { marker: '·', tone: 'neutral' };
   }
   if (cell.kind === 'diff') return { marker: '±', tone: 'success' };

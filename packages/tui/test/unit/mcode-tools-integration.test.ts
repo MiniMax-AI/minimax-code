@@ -1,3 +1,4 @@
+import { stableProcessNodeExecutable } from '../../src/update/homebrew-node-path.js';
 import { execFileSync } from 'node:child_process';
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,6 @@ import {
   configureMcodeToolsChildEnvironment,
 } from '../../src/cli/mcode-tools-environment.js';
 import {
-  createTuiMcodeToolsRuntimeDir,
   prepareTuiMcodeToolsIntegration,
   resolveBundledMcodeToolsResourceDir,
 } from '../../src/runtime/mcode-tools-integration.js';
@@ -25,24 +25,13 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
 describe('TUI mcode-tools integration readiness', () => {
-  it.skipIf(process.platform === 'win32')(
-    'keeps the POSIX broker socket path below platform limits',
-    async () => {
-      const runtimeDir = await createTuiMcodeToolsRuntimeDir();
-      temporaryDirectories.push(runtimeDir);
-
-      expect(runtimeDir).toMatch(/^\/tmp\/mcode-tools-tui-\d+-/u);
-      expect(path.join(runtimeDir, 'run', 'mcode-auth-lease-v1.sock').length).toBeLessThan(100);
-    },
-  );
-
   it('does no resource or broker work when the capability is not requested', async () => {
     const validateResource = vi.fn();
     const startBroker = vi.fn();
@@ -65,13 +54,12 @@ describe('TUI mcode-tools integration readiness', () => {
 
   it('keeps the package-owned command active while the broker owns authentication', async () => {
     const dataDir = await makeTemporaryDirectory();
-    const runtimeDir = path.join(dataDir, 'run', 'mcode-tools', 'tui', 'runtime');
+    const runtimeDir = path.join(dataDir, 'run', 'mt-AbCdEf');
     const environment: Record<string, string | undefined> = {
       PATH: ['/usr/bin', '/bin'].join(path.delimiter),
     };
     const auth = createSession({ status: 'anonymous', generation: 1 });
     const brokerDispose = vi.fn(async () => undefined);
-    const removeRuntimeDir = vi.fn(async () => undefined);
     const validateResource = vi.fn(() => validatedResource('/package/embedded/mcode-tools'));
     const startBroker = vi.fn(async () => ({
       endpoint: path.join(runtimeDir, 'broker.sock'),
@@ -93,8 +81,6 @@ describe('TUI mcode-tools integration readiness', () => {
       {
         validateResource,
         startBroker,
-        createRuntimeDir: vi.fn(async () => runtimeDir),
-        removeRuntimeDir,
       },
     );
 
@@ -106,11 +92,12 @@ describe('TUI mcode-tools integration readiness', () => {
       version: '0.0.0-test.1',
     });
     expect(validateResource).toHaveBeenCalledWith({
-      resourceDir: path.resolve('/package', 'embedded', 'mcode-tools'),
+      resourceDir: path.join('/package', 'embedded', 'mcode-tools'),
       expectedBuildEnv: 'test',
     });
     expect(startBroker).toHaveBeenCalledWith({
-      dataDir: runtimeDir,
+      dataDir,
+      isolateInstance: true,
       session: auth.session,
       logger: expect.any(Object),
     });
@@ -127,23 +114,20 @@ describe('TUI mcode-tools integration readiness', () => {
     expect(environment.__MAVIS_MCODE_TOOLS_EXTRA_HEADERS).toBe(
       'bedrock_lane:oauth2,bedrock-lane:oauth2',
     );
-    expect(environment.__MAVIS_MCODE_TOOLS_RUNTIME_EXECUTABLE).toBe(process.execPath);
-    expect(environment.PATH?.split(path.delimiter)[0]).toBe(
-      path.resolve('/package', 'internal-bin'),
-    );
+    expect(environment.__MAVIS_MCODE_TOOLS_RUNTIME_EXECUTABLE).toBe(stableProcessNodeExecutable());
+    expect(environment.PATH?.split(path.delimiter)[0]).toBe(path.join('/package', 'internal-bin'));
 
     environment.PATH = ['/stale/profile/bin', environment.PATH ?? ''].join(path.delimiter);
     result.ensureCommandPath();
-    expect(environment.PATH.split(path.delimiter)[0]).toBe(path.resolve('/package', 'internal-bin'));
+    expect(environment.PATH.split(path.delimiter)[0]).toBe(path.join('/package', 'internal-bin'));
 
     await result.dispose();
     await result.dispose();
     expect(brokerDispose).toHaveBeenCalledOnce();
-    expect(removeRuntimeDir).toHaveBeenCalledOnce();
     expect(environment.__MAVIS_MCODE_TOOLS_BROKER_ENDPOINT).toBeUndefined();
     expect(environment.__MAVIS_MCODE_TOOLS_RUNTIME_EXECUTABLE).toBeUndefined();
     expect(environment.PATH?.split(path.delimiter)).not.toContain(
-      path.resolve('/package', 'internal-bin'),
+      path.join('/package', 'internal-bin'),
     );
   });
 
@@ -156,8 +140,8 @@ describe('TUI mcode-tools integration readiness', () => {
       const dispose = vi.fn(async () => undefined);
       brokerDisposals.push(dispose);
       return {
-        endpoint: path.join(dataDir, 'broker.sock'),
-        capabilityFile: path.join(dataDir, 'broker.cap'),
+        endpoint: path.join(dataDir, String(brokerDisposals.length), 'broker.sock'),
+        capabilityFile: path.join(dataDir, String(brokerDisposals.length), 'broker.cap'),
         dispose,
       };
     });
@@ -174,14 +158,8 @@ describe('TUI mcode-tools integration readiness', () => {
       entryUrl: pathToFileURL('/package/cli.js').href,
     };
     const [first, second] = await Promise.all([
-      prepareTuiMcodeToolsIntegration(
-        { ...options, environment: firstEnvironment },
-        dependencies,
-      ),
-      prepareTuiMcodeToolsIntegration(
-        { ...options, environment: secondEnvironment },
-        dependencies,
-      ),
+      prepareTuiMcodeToolsIntegration({ ...options, environment: firstEnvironment }, dependencies),
+      prepareTuiMcodeToolsIntegration({ ...options, environment: secondEnvironment }, dependencies),
     ]);
 
     try {
@@ -191,10 +169,10 @@ describe('TUI mcode-tools integration readiness', () => {
         secondEnvironment.__MAVIS_MCODE_TOOLS_BROKER_ENDPOINT,
       );
       expect(firstEnvironment.PATH?.split(path.delimiter)[0]).toBe(
-        path.resolve('/package', 'internal-bin'),
+        path.join('/package', 'internal-bin'),
       );
       expect(secondEnvironment.PATH?.split(path.delimiter)[0]).toBe(
-        path.resolve('/package', 'internal-bin'),
+        path.join('/package', 'internal-bin'),
       );
 
       await first.dispose();
@@ -239,9 +217,9 @@ describe('TUI mcode-tools integration readiness', () => {
     expect(
       resolveBundledMcodeToolsResourceDir(pathToFileURL('/pkg/cli.js').href, {
         MAVIS_DEV_MCODE_TOOLS_MODE: 'published',
-        MAVIS_DEV_MCODE_TOOLS_RESOURCE_DIR: path.resolve(tmpdir(), 'mcode-tools-resource'),
+        MAVIS_DEV_MCODE_TOOLS_RESOURCE_DIR: '/tmp/mcode-tools-resource',
       }),
-    ).toBe(path.resolve(tmpdir(), 'mcode-tools-resource'));
+    ).toBe('/tmp/mcode-tools-resource');
     expect(() =>
       resolveBundledMcodeToolsResourceDir(pathToFileURL('/pkg/cli.js').href, {
         MAVIS_DEV_MCODE_TOOLS_MODE: 'published',
@@ -297,8 +275,8 @@ describe('mcode-tools command environment', () => {
         process.platform === 'win32'
           ? execFileSync(
               process.env.ComSpec ?? 'cmd.exe',
-              ['/d', '/s', '/c', `""${launcher}" probe "two words""`],
-              { encoding: 'utf8', env: environment, windowsVerbatimArguments: true },
+              ['/d', '/s', '/c', `"${launcher}" probe "two words"`],
+              { encoding: 'utf8', env: environment },
             )
           : execFileSync(launcher, ['probe', 'two words'], {
               encoding: 'utf8',

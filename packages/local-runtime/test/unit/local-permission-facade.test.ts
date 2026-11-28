@@ -2986,10 +2986,15 @@ describe('LocalPermissionFacade', () => {
     });
 
     it('write to a path inside dataDir still ASKs (sandbox is read-only)', async () => {
-      const { facade, dataDir } = freshFacade({ permissionMode: 'default' });
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dataDirParent: homedir(),
+        workspaceDir: path.join(homedir(), 'synthetic-workspace'),
+      });
       try {
         const r = await facade.checkPermission({
           toolName: 'write',
+          agentName: 'mavis',
           input: { path: path.join(dataDir, 'skills', 'generated', 'SKILL.md') },
         });
         // Writes to dataDir go through normal review. The sandbox
@@ -3086,13 +3091,18 @@ describe('LocalPermissionFacade', () => {
 
   describe('turn-scoped trusted exact writes', () => {
     it('allows only the supplied exact Plan target without persisting a rule', async () => {
-      const { facade, ruleStore, dataDir } = freshFacade({ permissionMode: 'default' });
+      const { facade, ruleStore, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dataDirParent: homedir(),
+        workspaceDir: path.join(homedir(), 'synthetic-workspace'),
+      });
       const planPath = path.join(dataDir, 'v2', 'sessions', 'session-a', 'artifacts', 'plan.md');
       try {
         await expect(
           facade.checkPermission({
             toolName: 'write',
             input: { path: planPath, content: '# Plan' },
+            agentName: 'mavis',
             sessionId: 'session-a',
             trustedExactWritePaths: [planPath],
           }),
@@ -3101,6 +3111,7 @@ describe('LocalPermissionFacade', () => {
           facade.checkPermission({
             toolName: 'write',
             input: { path: `${planPath}.bak`, content: '# Escape' },
+            agentName: 'mavis',
             sessionId: 'session-a',
             trustedExactWritePaths: [planPath],
           }),

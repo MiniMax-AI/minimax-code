@@ -72,8 +72,8 @@ export function normalizeCompatibleAgentFrontmatter(
   const effort = optionalText(frontmatter, 'effort');
   const tools = mapTools(frontmatter, 'tools', agentPath, diagnostics);
   const disallowedTools = mapTools(frontmatter, 'disallowedTools', agentPath, diagnostics);
+  // A preload list, as for every Agent: listed Skills are injected on the first Turn.
   const skills = toolList(frontmatter, 'skills');
-  if (skills !== undefined) diagnostics.push(agentDiagnostic('AGENT_SKILLS_ALLOWLIST', agentPath));
   diagnostics.push(...fieldDiagnostics(frontmatter, agentPath));
   return {
     fields: {

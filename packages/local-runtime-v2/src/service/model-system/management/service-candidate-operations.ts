@@ -1,4 +1,6 @@
 import { CUSTOM_PROVIDER_ID_PREFIX, formatModelKey } from '../resolution/model-key.js';
+import { resolveProviderCredential } from '@mavis/config';
+import { normalizeProviderIdentityBaseUrl, isApiKeyProvider } from '../provider-identity.js';
 import {
   LocalModelProviderError,
   type LocalByokConfigDraft,
@@ -26,12 +28,18 @@ import {
   requireCacheStatusView,
 } from './service-helpers.js';
 import { modelsFromInputs } from './service-input.js';
+import { readApiKeys } from '../byok-keys/key-list.js';
+import { byokTestKeyLabel, forgetDroppedApiKeys } from '../byok-keys/operations.js';
 
 interface SaveCandidateInput {
   candidate: UserModelProviderCandidateView;
   modelId?: string;
   saveAndUse?: boolean;
   skipConnectionTest?: boolean;
+  /** Process-local admission guard, checked inside the config transaction. */
+  beforeCommit?: () => void;
+  /** Import-only idempotency, checked inside the config transaction. */
+  importIfExisting?: boolean;
 }
 
 interface PreparedCandidateTest {
@@ -53,6 +61,7 @@ interface CandidateSaveTransaction {
   modelId?: string;
   test: PreparedCandidateTest;
   commit: CandidateCommitState;
+  existingProviderId?: string;
 }
 
 interface UpdateModelParametersInput {
@@ -96,9 +105,11 @@ export async function testUserModelCandidate(
     customProviderOverride: resolved.provider,
   });
   const result = await context.testResolvedTarget(target);
+  const keyLabel = byokTestKeyLabel(resolved.provider);
   return {
     ok: result.ok,
     status: requireCacheStatusView(context.toCacheEntry(result, target.fingerprint)),
+    ...(keyLabel ? { keyLabel } : {}),
   };
 }
 
@@ -134,17 +145,24 @@ export async function saveUserModelProviderCandidate(
     candidateCacheWritten: false,
   };
   const transaction: CandidateSaveTransaction = { resolved, input, modelId, test, commit };
+  const keysBefore = readApiKeys(
+    context.deps.configGetter().custom_provider?.[resolved.providerKey],
+  );
   try {
     await persistCandidate(context, transaction);
   } catch (error) {
     await restoreCandidateAfterFailure(context, transaction, error);
   }
   throwCandidateCommitError(commit.blocked, input.skipConnectionTest === true);
+  if (!transaction.existingProviderId)
+    forgetDroppedApiKeys(context, resolved.providerKey, keysBefore);
   return {
     ok: true,
     ...(test.status ? { status: test.status } : {}),
     ...(input.skipConnectionTest ? { skippedTest: true } : {}),
-    provider: context.requireCustomProviderView(resolved.providerKey),
+    provider: context.requireCustomProviderView(
+      transaction.existingProviderId ?? resolved.providerKey,
+    ),
   };
 }
 
@@ -189,17 +207,55 @@ async function persistCandidate(
   transaction: CandidateSaveTransaction,
 ): Promise<void> {
   await context.deps.updateByokConfig(async (draft, currentConfig) => {
+    transaction.input.beforeCommit?.();
     const tree = (draft.custom_provider ?? {}) as LocalCustomProvidersConfig;
+    if (transaction.input.importIfExisting) {
+      const existingProviderId = findMatchingByokProvider(currentConfig, transaction.input.candidate);
+      if (existingProviderId) {
+        transaction.existingProviderId = existingProviderId;
+        return;
+      }
+    }
     if (candidateRevisionChanged(transaction.resolved, tree, currentConfig)) {
       transaction.commit.blocked = 'config_changed';
       return;
     }
     if (!(await persistCandidateCache(context, transaction))) return;
+    transaction.input.beforeCommit?.();
     tree[transaction.resolved.providerKey] = transaction.resolved.provider;
     draft.custom_provider = tree as Record<string, unknown>;
     activateSavedCandidate(draft, transaction);
-    resetUnavailableCustomDefaultModel(draft);
-  });
+    resetUnavailableCustomDefaultModel(draft, currentConfig);
+  }, transaction.input.beforeCommit);
+}
+
+function findMatchingByokProvider(
+  config: LocalRuntimeConfig,
+  candidate: UserModelProviderCandidateView,
+): string | undefined {
+  const key = candidate.apiKey?.trim();
+  const baseUrl = normalizeProviderIdentityBaseUrl(candidate.baseUrl);
+  if (!key || !baseUrl) return undefined;
+  for (const [id, provider] of Object.entries(config.custom_provider ?? {})) {
+    if (!isApiKeyProvider(provider)) continue;
+    let providerKey: string | undefined;
+    try {
+      providerKey = resolveProviderCredential({
+        field: 'custom_provider options.apiKey',
+        provider: id,
+        value: provider.options?.apiKey,
+      })?.trim();
+    } catch {
+      continue;
+    }
+    if (
+      providerKey === key &&
+      provider.options?.baseURL &&
+      normalizeProviderIdentityBaseUrl(provider.options.baseURL) === baseUrl
+    )
+      return id;
+  }
+  return undefined;
 }
 
 function candidateRevisionChanged(

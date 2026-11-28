@@ -1,4 +1,8 @@
 import {
+  isTurnStoppingToolResultDetails,
+  isTurnTerminatingToolResultDetails,
+} from '@mavis/agent-core/tools';
+import {
   validateCanonicalHistoryMessages,
   validateCanonicalHistorySnapshot,
 } from './canonical-history-validation.js';
@@ -20,9 +24,12 @@ export function inspectContinuationHistory(
   messages: readonly unknown[],
 ): CanonicalContinuationState {
   validateCanonicalHistoryMessages(messages);
-  const last = continuationTail(messages)?.message;
+  const last = decidingTail(messages);
   if (!last || last.role === 'compactionSummary') return 'unavailable';
-  if (last.role === 'toolResult' && isWaitingForUser(last)) return 'waiting-for-user';
+  if (last.role === 'toolResult') {
+    if (isWaitingForUser(last)) return 'waiting-for-user';
+    if (isTurnTerminatingToolResultDetails(last.details)) return 'unavailable';
+  }
   if (last.role !== 'assistant') return 'available';
   return last.stopReason === 'stop' ? 'unavailable' : 'available';
 }
@@ -59,6 +66,31 @@ function continuationTail(
     index -= 1;
   }
   return undefined;
+}
+
+function decidingTail(
+  messages: readonly CanonicalHistoryMessage[],
+): CanonicalHistoryMessage | undefined {
+  const tail = continuationTail(messages);
+  if (!tail) return undefined;
+  const batch: CanonicalHistoryMessage[] = [];
+  for (let at = tail.index; at >= 0; at -= 1) {
+    const message = messages[at];
+    if (message?.role !== 'toolResult') break;
+    batch.push(message);
+  }
+  const stop = batch.find(
+    (message) => message.role === 'toolResult' && isTurnStoppingToolResultDetails(message.details),
+  );
+  if (!stop) return tail.message;
+  return (
+    batch.find(
+      (message) =>
+        message.role === 'toolResult' &&
+        isRecord(message.details) &&
+        message.details.waiting_for_user === true,
+    ) ?? stop
+  );
 }
 
 function isWaitingForUser(message: {

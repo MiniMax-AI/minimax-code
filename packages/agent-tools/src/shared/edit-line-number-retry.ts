@@ -25,6 +25,16 @@ interface EditInputShape {
   edits: EditReplacement[];
 }
 
+function isStorageExhausted(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const { code, errno } = error as NodeJS.ErrnoException;
+  return (
+    code === 'EDQUOT' ||
+    code === 'ENOSPC' ||
+    (code === 'Unknown system error -122' && errno === -122)
+  );
+}
+
 /**
  * Strip read line-number prefixes from every edit block that is fully
  * prefix-shaped. Returns null when nothing changed (no retry warranted).
@@ -50,7 +60,8 @@ export function normalizeEditsForLineNumberRetry(
  * `details.line_number_prefixes_stripped: true` for observability. If the
  * retry fails too (or nothing was normalizable), the ORIGINAL error is
  * rethrown — the model should see the failure for the text it actually
- * sent.
+ * sent. Storage exhaustion is the exception: never retry it or hide it behind
+ * an earlier text mismatch, since line-number normalization cannot fix it.
  */
 export async function executeEditWithLineNumberRetry(
   tool: AgentTool,
@@ -60,7 +71,7 @@ export async function executeEditWithLineNumberRetry(
   try {
     return await tool.execute('', input, signal);
   } catch (originalError) {
-    if (signal?.aborted) throw originalError;
+    if (signal?.aborted || isStorageExhausted(originalError)) throw originalError;
     const normalized = Array.isArray(input.edits)
       ? normalizeEditsForLineNumberRetry(input.edits)
       : null;
@@ -74,7 +85,8 @@ export async function executeEditWithLineNumberRetry(
           line_number_prefixes_stripped: true,
         },
       };
-    } catch {
+    } catch (retryError) {
+      if (isStorageExhausted(retryError)) throw retryError;
       throw originalError;
     }
   }

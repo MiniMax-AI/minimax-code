@@ -41,6 +41,12 @@ export interface LocalMemoryTopicEntry {
   updatedAt: string;
 }
 
+/** A topic search hit; `matchedTerms` counts the query keywords found in its name or body. */
+export interface LocalMemoryTopicMatch {
+  topic: LocalMemoryTopicEntry;
+  matchedTerms: number;
+}
+
 export interface LocalMemoryDailyEntry {
   date: string;
   sizeBytes: number;

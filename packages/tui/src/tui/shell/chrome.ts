@@ -10,7 +10,11 @@ import {
 } from '../../application/permission-mode.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../theme/runtime.js';
 import { getCapabilities, hyperlink } from '../engine/public.js';
-import type { TuiTokenPlanQuota, TuiWorkspaceGitMetadata } from '../../runtime/port.js';
+import type {
+  TuiReviewStatus,
+  TuiTokenPlanQuota,
+  TuiWorkspaceGitMetadata,
+} from '../../runtime/port.js';
 import { sanitizeTerminalText } from '../rendering/terminal-text.js';
 import type { TuiShellState } from './contracts.js';
 import { fitFirstStatusCandidate, fitLine, normalizeWidth } from './frame.js';
@@ -323,6 +327,7 @@ function renderBuildMode(state: TuiShellState): string {
     requestId: state.agentRequestId,
     activeAgents: state.agentActiveCount,
     totalAgents: state.agentTotalCount,
+    waitingAgents: state.agentWaitingCount,
     backgroundTasks: state.agentBackgroundCount,
   });
 }
@@ -422,7 +427,12 @@ function renderStatusIdentity(
       : density === 'compact'
         ? `Eff ${state.effort}`
         : `Effort ${state.effort}`;
-  const detail = [thinking, effort]
+  // The advisor yields with the other details: minimal keeps only the model.
+  const advisor =
+    density === 'minimal' || !state.advisor
+      ? undefined
+      : `adv ${sanitizeTerminalText(formatStatusContextLabel(state.advisor))}`;
+  const detail = [thinking, effort, advisor]
     .filter((part): part is string => Boolean(part))
     .map((part) => `${statusDot()}${chalk.hex(colors.muted)(part)}`)
     .join('');
@@ -510,10 +520,10 @@ function renderGitContext(
 /**
  * Renders the pull request / merge request the current branch belongs to.
  *
- * Renders nothing when no review was recorded for the branch, which is the
- * common case: the link only exists once an agent turn has run `gh pr` or
- * `glab mr` on this machine. The vendor prefix (`#` / `!`) matches each host's
- * own shorthand so the number reads the way it does everywhere else.
+ * Renders nothing when the Runtime knows no review for the branch. The vendor
+ * prefix (`#` / `!`) matches each host's own shorthand so the number reads the
+ * way it does everywhere else, and its color shows the review's last known
+ * status, so a failed pipeline or a conflict stands out without opening it.
  *
  * The whole segment is wrapped in an OSC 8 hyperlink so the review can be
  * opened straight from the status line, but only where the terminal forwards
@@ -529,12 +539,36 @@ function renderReviewLink(
   const review = metadata?.reviewLink;
   if (!metadata?.isGitRepo || !review) return '';
   const isMergeRequest = review.vendor === 'gitlab';
-  const number = chalk.hex(colors.muted)(`${isMergeRequest ? '!' : '#'}${review.number}`);
+  const number = chalk.hex(reviewStatusColor(review.status))(
+    `${isMergeRequest ? '!' : '#'}${review.number}`,
+  );
   const rendered =
     density === 'full'
       ? `${chalk.hex(colors.accent)(isMergeRequest ? 'MR' : 'PR')} ${number}`
       : number;
   return getCapabilities().hyperlinks ? hyperlink(rendered, review.url) : rendered;
+}
+
+/**
+ * Red when the author must act, yellow for review feedback, the accent while
+ * CI runs, green once it can merge or has merged, muted for everything else.
+ */
+function reviewStatusColor(status: TuiReviewStatus | undefined): string {
+  switch (status) {
+    case 'pipeline_failed':
+    case 'conflict':
+      return colors.error;
+    case 'changes_requested':
+    case 'unresolved_discussions':
+      return colors.warning;
+    case 'pipeline_running':
+      return colors.accent;
+    case 'ready_to_merge':
+    case 'merged':
+      return colors.success;
+    default:
+      return colors.muted;
+  }
 }
 
 function renderTokenPlanAlert(

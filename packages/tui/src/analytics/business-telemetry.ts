@@ -25,6 +25,12 @@ interface ChatContextProperties {
 }
 
 export interface McodeBusinessEventMap {
+  readonly plugin_install: {
+    readonly install_entry: 'cli';
+    readonly entry: 'cli';
+    readonly source: 'official' | 'local' | 'custom';
+    readonly plugin_id?: string;
+  };
   readonly tui_launch: { readonly launch_type: 'cold' | 'hot' };
   readonly login_click: Record<string, never>;
   readonly logout_click: Record<string, never>;
@@ -121,6 +127,7 @@ export interface SensorsPayload {
 
 const DEFAULT_QUEUE_LIMIT = 100;
 const EVENT_PROPERTY_KEYS = {
+  plugin_install: ['install_entry', 'entry', 'source', 'plugin_id'],
   tui_launch: ['launch_type'],
   login_click: [],
   logout_click: [],

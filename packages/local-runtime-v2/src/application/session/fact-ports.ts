@@ -15,7 +15,9 @@ export interface CreateApplicationFactPortsOptions {
   readonly publish: GlobalEventPublisher;
 }
 
-type ModelProviderSessionUpdate = Parameters<ModelProviderSessionPort['update']>[1];
+type ModelProviderSessionUpdate =
+  | Parameters<ModelProviderSessionPort['update']>[1]
+  | { readonly advisor: Parameters<ModelProviderSessionPort['updateAdvisor']>[1] };
 
 /** Preserves write-before-event ordering for model selection composed before SessionLifecycleService. */
 export function createCommittedModelProviderSessionPort<TSession extends ModelProviderSessionView>(
@@ -29,6 +31,11 @@ export function createCommittedModelProviderSessionPort<TSession extends ModelPr
     get: input.get,
     update: async (sessionId, fields) => {
       const updated = await input.update(sessionId, fields);
+      input.onCommittedUpdate(updated);
+      return updated;
+    },
+    updateAdvisor: async (sessionId, advisor) => {
+      const updated = await input.update(sessionId, { advisor });
       input.onCommittedUpdate(updated);
       return updated;
     },

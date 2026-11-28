@@ -1,4 +1,7 @@
+import type { BrowserFormState } from './browser-core-contracts.js';
+import { formatBrowserErrorTriple } from './browser-errors.js';
 import type { BrowserTransport } from './browser-transport.js';
+import type { BrowserMainFrameLoad } from './browser-main-frame-load.js';
 import type { AgentSemanticTreePage, SemanticPageTree } from './browser-semantic-tree.js';
 import type { CDPHelper } from './cdp-helper.js';
 import type { ElementMapManager } from './element-map-manager.js';
@@ -55,6 +58,8 @@ export interface ElementRecord {
   parentRegionPath?: Array<{ role: string; name?: string }>;
   virtualEditor?: boolean;
   attributes: Record<string, string>;
+  /** Live form-control state; present only when the session reads live form state. */
+  formState?: BrowserFormState;
 }
 
 export interface Snapshot {
@@ -115,12 +120,29 @@ export interface BrowserSessionState {
   ) => Promise<void> | void;
   /** Provider compatibility budget for detecting navigation after an ordinary click. */
   clickNavigationDetectionMs?: number;
+  /**
+   * The main frame's navigation between its start and its commit. Renderer
+   * reads wait for the commit in that window, so actions consult it first.
+   */
+  mainFrameLoad?: BrowserMainFrameLoad;
   /** Provider capture seam; absent providers use Browser Core's CDP implementation. */
   captureScreenshot?: BrowserScreenshotCapture;
+  /**
+   * `beta.browserReadV2`: DOM reads and inspect records carry live form-control
+   * state. Absent or false keeps the serialized-attribute output unchanged.
+   */
+  readLiveFormState?: () => boolean;
+  /**
+   * backendNodeIds of inputs an inspect scan saw as type=password while live
+   * form state was on; they stay credentials after a "show password" toggle.
+   */
+  passwordFields?: Set<number>;
   /** Optional child-target CDP session. Main-page commands leave this unset. */
   commandSessionId?: string;
   commandSignal?: AbortSignal;
   commandTimeoutMs?: number;
+  /** When the running action's deadline fires (epoch ms); waits inside it end before. */
+  actionDeadlineAt?: number;
   /** Bounded, current-generation observations retained for independent continuations. */
   snapshots?: Map<string, Snapshot>;
   /**
@@ -161,6 +183,11 @@ export interface BrowserSessionState {
    * if it is still busy; a reconnect alone does not stop a page-side loop.
    */
   pageUnresponsive?: boolean;
+  /**
+   * Refs the running action bound to the element that replaced their own
+   * (browser-ref-rebind.ts); Browser Core reports them with the action result.
+   */
+  reboundRefs?: Set<string>;
 }
 
 export interface BrowserFrameIdentity {
@@ -208,6 +235,12 @@ function recordIssuedBrowserRefs(session: BrowserSessionState, snapshot: Snapsho
   }
 }
 
+/** Whether this session issued `ref` (its id, under any generation). */
+export function isBrowserRefIssued(session: BrowserSessionState, ref: string): boolean {
+  const id = BROWSER_REF_PATTERN.exec(ref)?.[2];
+  return id !== undefined && session.issuedRefIds?.has(id) === true;
+}
+
 export function storeBrowserSnapshot(session: BrowserSessionState, snapshot: Snapshot): void {
   session.snapshotAuthorityEstablished = true;
   recordIssuedBrowserRefs(session, snapshot);
@@ -253,34 +286,118 @@ function pruneRetiredBrowserSnapshots(session: BrowserSessionState): Map<string,
   return retired;
 }
 
+const MAX_LISTED_REF_EXAMPLES = 3;
+
 /**
- * Explain why an opaque ref no longer resolves. The generation embedded in
+ * What the latest observation issued, so a model that invented or edited a
+ * ref sees the real ref shape (TUI evaluation runs invented refs).
+ */
+function latestIssuedRefsHint(session: BrowserSessionState): string {
+  const snapshot = session.snapshot;
+  if (!snapshot || snapshot.elements.length === 0) {
+    return 'No inspect or query has issued refs for this page yet.';
+  }
+  if (snapshot.generation !== session.generation) {
+    return 'The page navigated after the latest inspect, so none of its refs are valid now.';
+  }
+  const refs = snapshot.elements.map((element) => element.ref);
+  const prefixes = [
+    ...new Set(
+      refs.flatMap((issued) => {
+        const match = BROWSER_REF_PATTERN.exec(issued);
+        return match ? [`browser-element:${match[1]}-`] : [];
+      }),
+    ),
+  ];
+  return `The latest inspect issued ${refs.length} refs starting with ${prefixes.join(', ')} (for example ${refs.slice(0, MAX_LISTED_REF_EXAMPLES).join(', ')}).`;
+}
+
+/** Whether `ref` has the shape of a Browser element ref, issued or not. */
+export function hasBrowserRefForm(ref: string): boolean {
+  return BROWSER_REF_PATTERN.test(ref);
+}
+
+/**
+ * Explain why an opaque ref no longer resolves. A ref the session never
+ * issued (including any ref before the session issued its first one) is
+ * INVALID_ELEMENT_REF; one it issued but can no longer resolve is
+ * STALE_ELEMENT_REF. The generation embedded in
  * `browser-element:<generation>-<id>` distinguishes a ref from an earlier page
  * (navigation revoked it) from one that simply aged out of retention.
+ * `selectorMatches` is how many elements a ref that is not in ref form
+ * matches when read as a CSS selector (a lone match is used as the selector
+ * and never gets here).
  */
-export function describeUnresolvedBrowserRef(session: BrowserSessionState, ref: string): string {
+export function describeUnresolvedBrowserRef(
+  session: BrowserSessionState,
+  ref: string,
+  selectorMatches?: number,
+): string {
   const match = BROWSER_REF_PATTERN.exec(ref);
   const generation = match?.[1];
+  const hint = latestIssuedRefsHint(session);
+  const copyExactly =
+    'Copy a ref exactly from the latest inspect or query output; inspect again if none fits.';
+  const observeAgain = 'Inspect or query the current page and use a new ref.';
   // Eval 777827: `e1` / `e28` (another tool's ref dialect) were sent before
   // the ledger existed and fell through to "no longer retained". The shape
   // check is a pure message decision made after resolution already failed.
   if (!match) {
-    return `STALE_ELEMENT_REF: "${ref}" is not a Browser element ref; refs have the form browser-element:<n>-<id> and must be copied exactly from the latest inspect or query output`;
+    const asSelector =
+      selectorMatches === undefined
+        ? ''
+        : selectorMatches === 0
+          ? ' Read as a CSS selector it matches no element on this page either.'
+          : ` Read as a CSS selector it matches ${selectorMatches} elements, so it does not name one target.`;
+    return formatBrowserErrorTriple({
+      code: 'INVALID_ELEMENT_REF',
+      reason: `"${ref}" is not a Browser element ref; refs have the form browser-element:<n>-<id>.${asSelector} ${hint}`,
+      next:
+        selectorMatches === undefined
+          ? copyExactly
+          : `${copyExactly} A CSS selector goes in input.selector and must match exactly one element.`,
+    });
   }
   const ledger = session.snapshotAuthorityEstablished ? session.issuedRefIds : undefined;
-  if (ledger && ledger.size > 0) {
-    const issuedGeneration = ledger.get(match[2] ?? '');
-    if (issuedGeneration !== undefined && issuedGeneration !== Number(generation)) {
-      return `STALE_ELEMENT_REF: element ref was altered: this id was issued as browser-element:${issuedGeneration}-${match[2]}, and refs must be copied verbatim (editing the number does not refresh them); inspect or query the current page and use a new ref`;
-    }
-    if (issuedGeneration === undefined && !session.issuedRefIdsTruncated) {
-      return 'STALE_ELEMENT_REF: element ref was never issued by this Browser session (a tab reset after a timeout also discards earlier refs); copy refs exactly from the latest inspect or query output instead of composing them';
-    }
+  // A ref sent before any inspect (a Skill example or an invented id) found no
+  // ledger, and the error said "no longer retained": most such
+  // STALE_ELEMENT_REF reports were the first ref of a session.
+  // A session that has not published a ref cannot have one to expire.
+  if (!ledger || ledger.size === 0) {
+    return formatBrowserErrorTriple({
+      code: 'INVALID_ELEMENT_REF',
+      reason:
+        'element ref was never issued: this Browser session has not issued any ref yet (a tab reset after a timeout also discards earlier refs).',
+      next: 'Inspect or query the current page first, then copy a ref exactly from that output.',
+    });
+  }
+  const issuedGeneration = ledger.get(match[2] ?? '');
+  if (issuedGeneration !== undefined && issuedGeneration !== Number(generation)) {
+    return formatBrowserErrorTriple({
+      code: 'INVALID_ELEMENT_REF',
+      reason: `element ref was altered: this id was issued as browser-element:${issuedGeneration}-${match[2]}, and editing the number does not refresh it. ${hint}`,
+      next: copyExactly,
+    });
+  }
+  if (issuedGeneration === undefined && !session.issuedRefIdsTruncated) {
+    return formatBrowserErrorTriple({
+      code: 'INVALID_ELEMENT_REF',
+      reason: `element ref was never issued by this Browser session (a tab reset after a timeout also discards earlier refs). ${hint}`,
+      next: copyExactly,
+    });
   }
   if (generation !== undefined && Number(generation) !== session.generation) {
-    return 'STALE_ELEMENT_REF: element ref is from an earlier page state (the page navigated after it was observed); inspect or query the current page and use a new ref';
+    return formatBrowserErrorTriple({
+      code: 'STALE_ELEMENT_REF',
+      reason: `element ref is from an earlier page state (the page navigated after it was observed). ${hint}`,
+      next: observeAgain,
+    });
   }
-  return 'STALE_ELEMENT_REF: element ref is not from the current inspect snapshot (it is no longer retained); inspect or query the current page and use a new ref';
+  return formatBrowserErrorTriple({
+    code: 'STALE_ELEMENT_REF',
+    reason: `element ref is not from the current inspect snapshot (it is no longer retained). ${hint}`,
+    next: observeAgain,
+  });
 }
 
 export function getBrowserSnapshot(

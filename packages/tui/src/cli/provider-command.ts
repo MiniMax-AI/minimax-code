@@ -181,9 +181,11 @@ function formatSnapshot(snapshot: McodeProviderSnapshot, json: boolean): string 
     const credential =
       provider.kind === 'minimax-oauth'
         ? 'managed login'
-        : provider.hasApiKey
-          ? (provider.maskedApiKey ?? 'key saved')
-          : 'no key';
+        : provider.apiKeys && provider.apiKeys.length > 1
+          ? `${provider.apiKeys.length} API keys`
+          : provider.hasApiKey
+            ? (provider.maskedApiKey ?? 'key saved')
+            : 'no key';
     return `${provider.active ? '*' : ' '} ${provider.providerId}\t${state}\t${credential}`;
   });
   return lines.join('\n');

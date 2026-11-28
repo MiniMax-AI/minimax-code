@@ -1,20 +1,18 @@
 /**
- * `@mavis/agent-runtime` — pluggable extension SPI + per-turn assembler on top of
- * `@mavis/agent-core`.
+ * `@mavis/agent-runtime` — pluggable extension SPI + per-turn assembler
+ * on top of `@mavis/agent-core`.
  *
- * Aligned with the `packages/agent-runtime` Feishu design document v1.0 after review. Key
- * constraints:
- * - Extensions must not import one another; host assembly load order alone determines execution
- *   order.
- * - `assembleTurn(ctx)` only assembles contributions; the host constructs `RunTurnInput` from the
- *   result.
- * - Registry state is in-memory only; the host owns persistence (e.g. `extensionOverrides`).
+ * 设计对齐 `packages/agent-runtime` 飞书设计文档 v1.0（吸收 review 后）。
+ * 关键约束：
+ *   - Extension 之间不允许相互 import；顺序仅由 host 装配加载顺序决定。
+ *   - `assembleTurn(ctx)` 只做装配，不越界造 `RunTurnInput`——host 拿结果自己拼。
+ *   - Registry 只做 in-memory 状态；持久化（例如 `extensionOverrides`）由 host 负责。
  *
- * Event names follow document §4.2, including `on_step_end` aligned with pi's current
- * step-completion semantics. `AssemblyResult.hooks` maps to agent-core's
- * `PiTurnHooks.onStepEndHook` (the preferred name introduced in §11.6 Step A). agent-core still
- * reads the deprecated per-step slot `onTurnEndHook`, but agent-runtime only writes the new,
- * semantically explicit field; see `HOOK_MAPPINGS` in `registry.ts`.
+ * 事件名沿用文档 §4.2 的新命名（含 `on_step_end` 对齐 pi 当前的 step completion 语义）；
+ * `AssemblyResult.hooks` 映射到 `agent-core` 的 `PiTurnHooks.onStepEndHook`（§11.6
+ * Step A 引入的首选名）。agent-core 侧仍兼容读取 deprecated per-step slot
+ * `onTurnEndHook`，但 agent-runtime 单一写入语义明确的新字段——见 `registry.ts`
+ * 的 `HOOK_MAPPINGS`。
  */
 
 import type {
@@ -54,13 +52,12 @@ export type MaybePromise<T> = T | Promise<T>;
 // ─────────────────────────── Turn assembly ctx ────────────────────────
 
 /**
- * Read-only per-turn context exposed to extensions. **Intentionally excludes** `eventWriter`,
- * `llm`, `signal`, and `toolContext`, which belong to the host. See document §6.2 for the minimal
- * field set.
+ * Extension 端拿到的 per-turn 只读上下文。**故意不含 **`eventWriter`、
+ * `llm`、`signal`、`toolContext`——这些是 host 所有物。字段最小集见文档 §6.2。
  *
- * `agentConfig` / `model` are declared only as `Readonly<unknown>` to keep agent-runtime neutral to
- * host-specific schemas (local-runtime's `AgentConfigRecord`, cloud-runtime's `ResolvedModel`).
- * Extensions assert types when they need specific fields.
+ * `agentConfig` / `model` 只声明为 `Readonly<unknown>` 是为了保持 agent-runtime
+ * 对具体 host schema（local-runtime 的 `AgentConfigRecord`、cloud-runtime 的
+ * `ResolvedModel`）中立——extension 需要具体字段时自行断言。
  */
 export interface UserMessageContribution {
   readonly text: string;
@@ -77,6 +74,22 @@ export interface TurnIntent {
 }
 
 export interface ModelContextAssemblyCtx {
+  /**
+   * Host-validated Session that carries wrap_up and its guidance on every Turn, so the
+   * request prefix stays the same across Turn sources; absent means wrap_up is unavailable.
+   */
+  readonly nextStepSessionEligible?: boolean;
+  /** Foreground user action (including a card reply or resend), excluding peer and channel input. */
+  readonly directUserInput?: boolean;
+  /** Host-validated Turn that may show a card; other Turns get no card. */
+  readonly nextStepEligible?: boolean;
+  /**
+   * Nobody is waiting on this Turn (a cron run or a background-task notice). Its card never
+   * holds the queue, and a notice that starts it counts as its first message.
+   */
+  readonly nextStepUnattended?: boolean;
+  /** Interactive channel ingress may only offer textual replies, even on a Desktop-bound Session. */
+  readonly nextStepReplyOnly?: boolean;
   readonly sessionId: string;
   readonly turnId: string;
   readonly agentName: string;
@@ -94,17 +107,32 @@ export interface ModelContextAssemblyCtx {
     readonly canonicalPath: string;
   };
   /**
+   * Who created this session when it was not the user. Extensions use it to withhold
+   * capabilities that must not recurse (a Mini App session must not control Mini Apps).
+   */
+  readonly sessionOrigin?: {
+    readonly miniApp?: { readonly pluginId: string };
+  };
+  /**
    * Optional host-captured template snapshot for this model call. Extensions
    * use it only for their managed prompt keys; its absence preserves bundled
    * prompt behavior for hosts that have not opted into dynamic templates.
    */
   readonly promptRead?: PromptReadScope;
-  // Per-profile config lives on `ExtensionAPI.params` (document §4.4 line 281 + §5 line 749),
-  // not TurnAssemblyCtx, preserving the minimal read-only projection in §6.2.
+  // Per-profile config lives on `ExtensionAPI.params`（文档 §4.4 line 281 + §5 line 749），
+  // 不放进 TurnAssemblyCtx——保持 §6.2 只读投影最小集。
 }
 
 export interface TurnAssemblyCtx extends ModelContextAssemblyCtx {
   readonly userInput: UserMessageContribution;
+  /**
+   * Whether the host delivers this Turn's user message, and with it any
+   * `userPromptPrefix` the assembly produced. A continuation resumes the
+   * interrupted loop without appending a message, so a prefix it renders would
+   * never reach the model; a contributor that must land in context reads this
+   * instead of assuming every Turn sends one.
+   */
+  readonly sendsUserMessage: boolean;
   /** Host-captured output requirements; no credentials or mutable Runtime configuration. */
   readonly outputContract?: {
     readonly schema?: Readonly<Record<string, unknown>>;
@@ -115,9 +143,9 @@ export interface TurnAssemblyCtx extends ModelContextAssemblyCtx {
 // ─────────────────────────── Tool contribution ────────────────────────
 
 /**
- * Per-turn dynamic tool factory used by `registerTool(fn)`. Return `null` to contribute no tool
- * this turn, or an array to contribute a whole domain catalog at once (e.g. local native + MCP
- * progressive disclosure).
+ * Per-turn 动态 tool 工厂——`registerTool(fn)` 的实现形态。
+ * 返回 `null` 表示本 turn 不贡献 tool；返回数组用于一次贡献同一
+ * domain catalog（例如本地 native + MCP progressive disclosure）。
  */
 export type RuntimeToolFactory<
   S extends TSchema = TSchema,
@@ -148,6 +176,8 @@ export interface Reminder {
    * The host preserves provider order and must not add another wrapper.
    */
   readonly content: string;
+  /** Attach to the provider request only; never append to canonical history. */
+  readonly requestOnly?: boolean;
   readonly priority?: number;
   readonly cooldownKey?: string;
 }
@@ -176,6 +206,15 @@ export type HookName = (typeof HOOK_NAMES)[number];
 // ─────────────────────────── Turn / step events ───────────────────────
 
 export interface TurnStartEvent {
+  /** Host 判定的普通用户输入；自动续跑、恢复与重试为 false。 */
+  readonly isOrdinaryInputTurn?: boolean;
+  /**
+   * 本轮输入由用户本人撰写：`api`、`code_review`、`channel*`，以及编辑重发自己消息的
+   * `conversation-mutation`。其他 Agent 的 session send（`communication`）、`cron`、
+   * `background-task` 与 `questionnaire` 为 false——它们照常触发 `isOrdinaryInputTurn`，
+   * 但不应被当成用户的记忆写入授权。以 `api` 重排的问卷答复按 `api` 处理。
+   */
+  readonly isUserAuthoredInput?: boolean;
   readonly sessionId: string;
   readonly turnId: string;
   readonly agentName: string;
@@ -205,8 +244,8 @@ export type TurnEndHandler = ExtensionHandler<TurnEndEvent, void>;
 export type HistoryChangedHandler = ExtensionHandler<PiHistoryChangedHookInput, void>;
 
 /**
- * Step-level handlers reuse existing `agent-core` hook input types, keeping one contract instead of
- * redefining pi's per-step payloads in the SPI.
+ * Step-level handlers reuse `agent-core` 现有 hook input 类型——保持一份契约，
+ * 避免 SPI 里再重复定义"pi 每 step 前会传什么"。
  */
 export type BeforeLlmCallHandler = ExtensionHandler<
   PiBeforeLlmCallHookInput,
@@ -262,10 +301,9 @@ export type HandlerFor<K extends HookName> = HookHandlerMap[K];
 
 export interface ExtensionAPI {
   /**
-   * Per-profile params merged from `ProfileOverlay.param` (document §4.4 line 281 / §5 line 749:
-   * per-profile config read during extension init). Extensions read them in `init`, for example to
-   * select behavior or consume host flags. An empty object means the profile has no overlay or no
-   * param definition.
+   * Per-profile params merged from `ProfileOverlay.param`（文档 §4.4 line 281 / §5 line 749
+   * "per-profile config，传给 extension init 时读"）。Extension 在 `init` 里读取，例如
+   * 决定内部行为或读取 host 传入的 flag。为空对象时表示当前 profile 无 overlay 或未定义 param。
    */
   readonly params: Readonly<Record<string, unknown>>;
 
@@ -280,12 +318,12 @@ export interface ExtensionAPI {
   contributeUserPromptPrefix(fn: UserPromptContributor): void;
   registerReminderProvider(provider: ReminderProvider): void;
 
-  // Turn level
+  // Turn 级
   on(event: 'turn_start', handler: TurnStartHandler): void;
   on(event: 'turn_end', handler: TurnEndHandler): void;
   on(event: 'on_history_changed', handler: HistoryChangedHandler): void;
 
-  // Step level
+  // Step 级
   on(event: 'before_llm_call', handler: BeforeLlmCallHandler): void;
   on(event: 'on_llm_call_prepared', handler: LlmCallPreparedHandler): void;
   on(event: 'after_llm_call', handler: AfterLlmCallHandler): void;
@@ -329,9 +367,9 @@ export interface AssemblyDiagnostic {
 }
 
 /**
- * `PiTurnHooks` covers agent-core's existing step-level contract; the host explicitly consumes turn
- * lifecycle handlers as raw arrays. This lets agent-runtime land without modifying
- * `@mavis/agent-core` (see document §11.6 migration strategy).
+ * `PiTurnHooks` 覆盖 `agent-core` 已有的 step 级契约；turn lifecycle handlers
+ * 作为 raw arrays 由 host 显式取用。这样 agent-runtime 不需要改动
+ * `@mavis/agent-core` 就能落地（见文档 §11.6 迁移策略）。
  */
 export interface AssemblyResult<TCtx extends ToolExecutionContext = ToolExecutionContext> {
   readonly systemPromptPrefix: string;

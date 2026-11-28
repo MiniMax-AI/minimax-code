@@ -25,13 +25,31 @@ import {
 } from './browser-state.js';
 import type { CDPConsoleDiagnosticLevelFilter } from './cdp-helper-contracts.js';
 import { sanitizeConsoleDiagnosticUrl } from './console-diagnostic-sanitizer.js';
-import { isBrowserOperationInterruption } from './operation-timeout.js';
+import { isBrowserOperationInterruption, withTimeout } from './operation-timeout.js';
+import { BrowserProgramError, pageScriptUnsupportedPageMessage } from './program/errors.js';
+import {
+  assertPageScriptExpression,
+  isPageScriptWebPage,
+  PAGE_SCRIPT_EFFECT_COUNTER,
+  PageScriptEffectWindow,
+  pageScriptOrigin,
+} from './program/page-evaluate.js';
+import type { ProgramPageScriptEffects, ProgramPageScriptRequest } from './program/types.js';
 
 export const BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS = 30_000;
 export const BROWSER_SCRIPT_MAX_TIMEOUT_MS = 120_000;
 /** Release, recovery and result assembly run after the script deadline. */
 export const BROWSER_SCRIPT_CLEANUP_BUDGET_MS = 5_000;
 export const BROWSER_SCRIPT_MAX_CODE_BYTES = 200 * 1024;
+export function browserScriptTimeoutMs(input: Record<string, unknown>): number {
+  const requested = asNumber(input.timeout, BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS);
+  return Math.max(1_000, Math.min(BROWSER_SCRIPT_MAX_TIMEOUT_MS, Math.floor(requested)));
+}
+
+export function browserScriptActionDeadlineMs(input: Record<string, unknown>): number {
+  return browserScriptTimeoutMs(input) + BROWSER_SCRIPT_CLEANUP_BUDGET_MS;
+}
+
 const SHIFT_MODIFIER = 8;
 const MAX_SCRIPT_CALLS = 20_000;
 const MAX_SCREENSHOTS = 4;
@@ -41,11 +59,54 @@ const MAX_EVALUATE_RESULT_BYTES = 256 * 1024;
 const MAX_EVALUATE_SOURCE_BYTES = 64 * 1024;
 const MAX_EVALUATE_RECORDS = 50;
 const MAX_HELD_KEYS = 16;
+/** Bridge operations behind the script's keyboard.* and mouse.* APIs. */
+const SCRIPT_INPUT_OPERATIONS: Readonly<Record<string, true>> = {
+  key: true,
+  type: true,
+  insertText: true,
+  mouseMove: true,
+  mouseDown: true,
+  mouseUp: true,
+  wheel: true,
+};
 const MAX_TYPE_CHARS = 2_000;
 const MAX_CONSOLE_ENTRIES = 100;
 const MAX_ERROR_STACK_LINES = 8;
 const EVALUATE_TIMEOUT_MS = 10_000;
 const RELEASE_BUDGET_MS = 2_000;
+/** Ends interception after a stalled call; with the stall wait and the input release it fits the cleanup budget. */
+const FORCED_FETCH_DISABLE_MS = 1_000;
+const MAX_ERROR_CHARS = 2_000;
+const MAX_LISTED_REQUESTS = 20;
+
+/**
+ * The page side of one page.evaluate / waitForFunction poll. `make` is the
+ * model's code as a thunk built at the top of the expression, so it sees only
+ * page globals. In the same evaluation: the page must be a web page and still
+ * on the origin its effect window opened for (`request.origin`, whose site
+ * request blocking is keyed on), else nothing of the model's runs; then the
+ * effect counters run around the call, and a poll is bounded by its
+ * remaining time.
+ */
+const RUN_SCRIPT_PAGE_FUNCTION = `async (make, request) => {
+  const pageOrigin = location.origin === 'null' ? location.protocol : location.origin;
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return { unsupportedPage: pageOrigin };
+  if (pageOrigin !== request.origin) return { moved: pageOrigin };
+  const done = ${PAGE_SCRIPT_EFFECT_COUNTER};
+  try {
+    const pending = Promise.resolve().then(make);
+    if (request.timeoutMs > 0) {
+      const expired = {};
+      let timer;
+      const value = await Promise.race([pending, new Promise((resolve) => { timer = setTimeout(() => resolve(expired), request.timeoutMs); })]);
+      clearTimeout(timer);
+      return done(value === expired ? { timedOut: true } : { value });
+    }
+    return done({ value: await pending });
+  } catch (error) {
+    return done({ thrown: String((error && (error.stack || error.message)) || error).slice(0, ${MAX_ERROR_CHARS}) });
+  }
+}`;
 
 export interface BrowserScriptScreenshot {
   readonly label: string;
@@ -97,10 +158,35 @@ export interface BrowserScriptResult {
     /** Keys and mouse buttons still held when the script ended and released by the runtime. */
     readonly autoReleased: readonly string[];
   };
+  /**
+   * keyboard.* / mouse.* bridge calls the script made, including calls that
+   * were refused and `keyboard.insertText` (which dispatches no key event).
+   * Runtime metrics read it to tell read-only scripts apart; the Browser tool
+   * does not show it to the model.
+   */
+  readonly inputApiCalls: number;
   readonly pageErrors: readonly { readonly level: string; readonly message: string }[];
   readonly screenshots: readonly BrowserScriptScreenshot[];
   readonly screenshotsSkipped?: number;
   readonly recovery?: string;
+  /**
+   * What the page JavaScript the script ran (page.evaluate, waitForFunction)
+   * did while it ran. Absent when it ran none. The code is the action's own
+   * input, so the record does not repeat it.
+   */
+  readonly pageScript?: BrowserScriptPageScriptAudit;
+}
+
+/**
+ * The audit record of a run_script's page JavaScript: the effects of every
+ * window in which page JavaScript ran, added up (program evaluate ops report
+ * the same effects per op, with their source).
+ */
+export interface BrowserScriptPageScriptAudit extends Omit<ProgramPageScriptEffects, 'origin'> {
+  /** Origins of the pages page JavaScript ran on, first use first. */
+  readonly origins: readonly string[];
+  /** page.evaluate calls and waitForFunction polls that reached the page. */
+  readonly calls: number;
 }
 
 export interface BrowserScriptRunOptions {
@@ -110,11 +196,223 @@ export interface BrowserScriptRunOptions {
   /** Provider screenshot path, already bound to the action command budget. */
   readonly captureScreenshot: (input: Record<string, unknown>) => Promise<unknown>;
   readonly signal: AbortSignal;
+  /** Page JavaScript sent a non-GET request, submitted a form or navigated on the page at `url`. */
+  readonly recordPageScriptWrite: (url: string) => void;
 }
 
 interface HeldKey {
   readonly descriptor: BrowserKeyDescriptor;
   readonly modifier: number;
+}
+
+interface OpenedPageWindow {
+  readonly window: PageScriptEffectWindow;
+  readonly url: string;
+  readonly origin: string;
+}
+
+interface OpenPageWindow {
+  readonly opened: Promise<OpenedPageWindow>;
+  /** Set once `opened` settles with a window. */
+  window?: PageScriptEffectWindow;
+  /** Settles when the window has ended (`end`). */
+  readonly ended: Promise<void>;
+  readonly end: () => void;
+  mutations: number;
+  submits: number;
+}
+
+/**
+ * The effect windows (program/page-evaluate.ts) of one run_script's page
+ * JavaScript. One window is open while any page.evaluate call runs:
+ * concurrent calls share its Fetch interception (enabling and disabling it
+ * per call would leave one call unprotected when another one ends), and
+ * their effects are measured together. Input the script sends while a window
+ * is open falls inside it: its requests to another site are failed too.
+ * Once the main frame commits a new document the window stops intercepting
+ * (the calls in it ran in the old document): a call that comes then waits for
+ * it to end and opens its own, on the new page's origin and site.
+ */
+class RunScriptPageWindows {
+  private current: OpenPageWindow | undefined;
+  private users = 0;
+  private closing: Promise<void> = Promise.resolve();
+  private readonly origins = new Set<string>();
+  private readonly requests: ProgramPageScriptRequest[] = [];
+  private totals = {
+    durationMs: 0,
+    mutations: 0,
+    submits: 0,
+    requestCount: 0,
+    nonGetRequests: 0,
+    blockedRequests: 0,
+    writeLike: false,
+  };
+  private navigation: Readonly<Record<string, unknown>> | undefined;
+  /** page.evaluate calls and waitForFunction polls that reached the page. */
+  calls = 0;
+
+  constructor(
+    private readonly session: BrowserSessionState,
+    private readonly readUrl: () => Promise<string>,
+    private readonly recordWrite: (url: string) => void,
+  ) {}
+
+  /**
+   * Joins the open window or opens one, and returns the origin it is open
+   * for. Throws, with nothing of the model's run, when the page is not a web
+   * page or does not allow request interception.
+   */
+  async enter(): Promise<string> {
+    // A window that is closing ends (Fetch.disable) before the next one starts.
+    for (;;) {
+      const closing = this.closing;
+      await closing;
+      if (closing !== this.closing) continue;
+      const current = this.current;
+      if (!current?.window?.released) break;
+      await current.ended;
+    }
+    this.users += 1;
+    if (!this.current) {
+      let end = (): void => undefined;
+      const ended = new Promise<void>((resolve) => {
+        end = resolve;
+      });
+      const current: OpenPageWindow = {
+        opened: this.readUrl().then((url) => this.open(url, pageScriptOrigin(url))),
+        ended,
+        end,
+        mutations: 0,
+        submits: 0,
+      };
+      current.opened.then(
+        (opened) => {
+          current.window = opened.window;
+        },
+        () => undefined,
+      );
+      this.current = current;
+    }
+    try {
+      return (await this.current.opened).origin;
+    } catch (error) {
+      await this.leave({ mutations: 0, submits: 0 });
+      throw error;
+    }
+  }
+
+  /** Leaves the window with this call's page-side counts; the last caller closes it. */
+  async leave(counts: { readonly mutations: number; readonly submits: number }): Promise<void> {
+    const current = this.current;
+    // The window was ended by `finish` while this call was stuck in it.
+    if (!current) return;
+    current.mutations += counts.mutations;
+    current.submits += counts.submits;
+    this.users -= 1;
+    if (this.users > 0) return;
+    this.current = undefined;
+    const closing = this.close(current).finally(current.end);
+    this.closing = closing;
+    await closing;
+  }
+
+  /**
+   * After the script settled and its calls got their time to end: a call still
+   * in the window never came back, and interception must not outlive the
+   * action, so the window ends here on a short budget (its listeners too); the
+   * call's late return finds no window. Returns the added-up effects
+   * (undefined when no page JavaScript ran).
+   */
+  async finish(): Promise<BrowserScriptPageScriptAudit | undefined> {
+    const stuck = this.users > 0 ? this.current : undefined;
+    if (stuck) {
+      this.current = undefined;
+      this.users = 0;
+      try {
+        const opened = await withTimeout(
+          stuck.opened,
+          FORCED_FETCH_DISABLE_MS,
+          'the page JavaScript window',
+        ).catch(() => undefined);
+        if (opened) {
+          this.add(
+            opened,
+            await opened.window.abandon(opened.origin, stuck, FORCED_FETCH_DISABLE_MS),
+          );
+        } else {
+          await withTimeout(
+            this.session.transport.send('Fetch.disable', {}, undefined, {
+              timeoutMs: FORCED_FETCH_DISABLE_MS,
+            }),
+            FORCED_FETCH_DISABLE_MS,
+            'Fetch.disable',
+          ).catch(() => undefined);
+        }
+      } finally {
+        stuck.end();
+      }
+    }
+    if (this.origins.size === 0 && this.calls === 0) return undefined;
+    return {
+      origins: [...this.origins],
+      ...this.totals,
+      requests: this.requests,
+      ...(this.navigation ? { navigation: this.navigation } : {}),
+      calls: this.calls,
+    };
+  }
+
+  private async open(url: string, origin: string): Promise<OpenedPageWindow> {
+    if (!isPageScriptWebPage(url)) {
+      throw new BrowserScriptOperationError(
+        'PAGE_SCRIPT_UNSUPPORTED_PAGE',
+        pageScriptUnsupportedPageMessage(origin),
+      );
+    }
+    const window = await PageScriptEffectWindow.start(this.session, url);
+    try {
+      await window.intercept();
+    } catch (error) {
+      await window.finish(origin, { mutations: 0, submits: 0 });
+      if (!(error instanceof BrowserProgramError)) throw error;
+      // Without interception the call cannot run: nothing would stop a cross-site request.
+      throw new BrowserScriptOperationError(error.code, error.message.replace(/^[A-Z_]+: /u, ''));
+    }
+    return { window, url, origin };
+  }
+
+  private async close(current: OpenPageWindow): Promise<void> {
+    let opened: OpenedPageWindow;
+    try {
+      opened = await current.opened;
+    } catch {
+      return; // Refused before it opened (or the failed open already ended it).
+    }
+    this.add(
+      opened,
+      await opened.window.finish(opened.origin, {
+        mutations: current.mutations,
+        submits: current.submits,
+      }),
+    );
+  }
+
+  /** Adds one window's effects to the run's; a write-like window is recorded. */
+  private add(opened: OpenedPageWindow, effects: ProgramPageScriptEffects): void {
+    if (effects.writeLike) this.recordWrite(opened.url);
+    this.origins.add(opened.origin);
+    const totals = this.totals;
+    totals.durationMs += effects.durationMs;
+    totals.mutations += effects.mutations;
+    totals.submits += effects.submits;
+    totals.requestCount += effects.requestCount;
+    totals.nonGetRequests += effects.nonGetRequests;
+    totals.blockedRequests += effects.blockedRequests;
+    totals.writeLike ||= effects.writeLike;
+    this.requests.push(...effects.requests.slice(0, MAX_LISTED_REQUESTS - this.requests.length));
+    this.navigation ??= effects.navigation;
+  }
 }
 
 /**
@@ -137,6 +435,7 @@ export class BrowserScriptRun {
   private pointer: { x: number; y: number } | undefined;
   private keyEvents = 0;
   private mouseEvents = 0;
+  private inputApiCalls = 0;
   private readonly logs: { level: string; text: string }[] = [];
   private omittedLogs = 0;
   private evaluateCalls = 0;
@@ -163,6 +462,8 @@ export class BrowserScriptRun {
   private inputQueue: Promise<void> = Promise.resolve();
   /** First CDP timeout/transport-closed error seen while the script ran. */
   private transportInterruption: unknown;
+  /** Fetch interception and effect measurement around page JavaScript. */
+  private readonly pageWindows: RunScriptPageWindows;
 
   constructor(
     private readonly session: BrowserSessionState,
@@ -171,6 +472,18 @@ export class BrowserScriptRun {
     const forward = (): void => this.operations.abort();
     if (options.signal.aborted) forward();
     else options.signal.addEventListener('abort', forward, { once: true });
+    this.pageWindows = new RunScriptPageWindows(
+      session,
+      async () => {
+        const payload = await this.send<{ result?: { value?: unknown } }>(
+          'Runtime.evaluate',
+          { expression: 'location.href', returnByValue: true },
+          EVALUATE_TIMEOUT_MS,
+        );
+        return asString(payload.result?.value);
+      },
+      options.recordPageScriptWrite,
+    );
   }
 
   private get operationSignal(): AbortSignal {
@@ -240,7 +553,20 @@ export class BrowserScriptRun {
       // A settled script must not keep sleeping or waiting on the page while
       // the runtime releases input; in-flight operations abort here.
       onSettle: () => this.operations.abort(),
+      // Nothing answered these commands, so what they did is unknown: Browser
+      // Core must reset the connection like after any interrupted command.
+      onStalled: (count) => {
+        this.transportInterruption ??= Object.assign(
+          new Error(
+            `BROWSER_OPERATION_TIMEOUT: ${count} browser operation(s) of run_script did not finish after the script ended`,
+          ),
+          { code: 'BROWSER_OPERATION_TIMEOUT' },
+        );
+      },
     });
+    // Before anything below can throw: interception ends and a page write is
+    // recorded on every exit path.
+    const pageScript = await this.pageWindows.finish();
     const released = await this.releaseHeldInput();
     if (released.failed) {
       // Input may still be held in the page. Report it as an interrupted
@@ -272,7 +598,13 @@ export class BrowserScriptRun {
       await this.captureFailureScreenshot();
     }
     const pageErrors = await this.readPageErrors();
-    return this.buildResult(outcome, released.released, pageErrors, Date.now() - startedAt);
+    return this.buildResult(
+      outcome,
+      released.released,
+      pageErrors,
+      Date.now() - startedAt,
+      pageScript,
+    );
   }
 
   /**
@@ -308,6 +640,7 @@ export class BrowserScriptRun {
   }
 
   private async handle(op: string, args: Record<string, unknown>): Promise<unknown> {
+    if (SCRIPT_INPUT_OPERATIONS[op] === true) this.inputApiCalls += 1;
     switch (op) {
       case 'sleep':
         // The script deadline bounds every wait; no per-call cap that would
@@ -477,6 +810,11 @@ export class BrowserScriptRun {
   }
 
   private async mouseMove(x: number, y: number, steps: number): Promise<void> {
+    // Present the destination once; interpolation must not wait for an animation per step.
+    await this.session.beforePointerAction?.(
+      { action: 'run_script', point: { x, y } },
+      this.operationSignal,
+    );
     // Without a known start the first move jumps straight to the target.
     const from = this.pointer ?? { x, y };
     const count = this.pointer ? Math.max(1, Math.min(100, Math.floor(steps))) : 1;
@@ -538,55 +876,104 @@ export class BrowserScriptRun {
       );
     }
     if (args.record === true) this.recordEvaluate(args);
+    // The source is inserted into the page wrapper: it must be one
+    // expression, or text closing the wrapper could run before the checks.
+    try {
+      assertPageScriptExpression(source, 'page.evaluate');
+    } catch (error) {
+      throw new BrowserScriptOperationError(
+        'PAGE_EVALUATE_FAILED',
+        firstLine(error instanceof Error ? error.message.replace(/^INVALID_OP: /u, '') : ''),
+      );
+    }
     const argJson = JSON.stringify(args.arg ?? null);
-    const call = args.isFunction === true ? `(${source})(${argJson})` : `(() => (${source}))()`;
+    const make =
+      args.isFunction === true ? `() => (${source}\n)(${argJson})` : `() => (${source}\n)`;
     // waitForFunction bounds each poll to its remaining time inside the page:
     // a condition promise that settles too late reports a timeout instead of
     // counting as success. A synchronous loop still hits the transport
     // deadline below and is terminated.
     const pageTimeoutMs = asNumber(args.pageTimeoutMs, 0);
-    const expression =
-      pageTimeoutMs > 0
-        ? `Promise.race([Promise.resolve(${call}).then((value) => ({ value })), new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), ${Math.ceil(pageTimeoutMs)}))])`
-        : call;
-    let payload: {
-      result?: { value?: unknown; unserializableValue?: string; description?: string };
-      exceptionDetails?: { text?: string; exception?: { description?: string } };
+    // Requests to another site fail while page JavaScript runs; without
+    // interception the call does not run.
+    const origin = await this.pageWindows.enter();
+    const request = {
+      origin,
+      timeoutMs: pageTimeoutMs > 0 ? Math.ceil(pageTimeoutMs) : 0,
     };
+    // The page and origin checks run in the same evaluation as the call, so a
+    // navigation in between cannot move the call to a page of another site
+    // than the one requests are checked against.
+    const expression = `(${RUN_SCRIPT_PAGE_FUNCTION})(${make}, ${JSON.stringify(request)})`;
+    let answer: Record<string, unknown> = {};
     try {
-      payload = await this.send(
-        'Runtime.evaluate',
-        { expression, awaitPromise: true, returnByValue: true, userGesture: true },
-        // A waitForFunction poll is bounded inside the page by its remaining
-        // condition budget; the transport deadline only needs to outlast that
-        // plus a response margin. The script deadline still cancels it.
-        pageTimeoutMs > 0 ? Math.ceil(pageTimeoutMs) + RELEASE_BUDGET_MS : EVALUATE_TIMEOUT_MS,
-        pageTimeoutMs <= 0,
-      );
-    } catch (error) {
-      // The page may still be running this code (for example a sync loop):
-      // a transport deadline or abort does not stop it. Stop it explicitly
-      // so the tab stays usable for the rest of the script and later actions.
-      // An async continuation (await on a timer or promise) cannot be
-      // cancelled this way; record it so the result says so.
-      this.interruptedEvaluations += 1;
-      await this.terminatePageExecution();
-      throw error;
+      let payload: {
+        result?: { value?: unknown };
+        exceptionDetails?: { text?: string; exception?: { description?: string } };
+      };
+      try {
+        payload = await this.send(
+          'Runtime.evaluate',
+          { expression, awaitPromise: true, returnByValue: true, userGesture: true },
+          // A waitForFunction poll is bounded inside the page by its remaining
+          // condition budget; the transport deadline only needs to outlast that
+          // plus a response margin. The script deadline still cancels it.
+          pageTimeoutMs > 0 ? Math.ceil(pageTimeoutMs) + RELEASE_BUDGET_MS : EVALUATE_TIMEOUT_MS,
+          pageTimeoutMs <= 0,
+        );
+      } catch (error) {
+        // The page may still be running this code (for example a sync loop):
+        // a transport deadline or the settled script's abort does not stop it.
+        // Stop it explicitly so the tab stays usable for the rest of the script
+        // and later actions. An async continuation (await on a timer or
+        // promise) cannot be cancelled this way; record it so the result says
+        // so. Not when the action itself was ended (a JavaScript dialog
+        // interrupted it, or it was cancelled): the page may be paused on the
+        // dialog, and the termination would kill the page code that runs once
+        // the dialog is answered. Browser Core recovers the page then, as for
+        // a program.
+        this.interruptedEvaluations += 1;
+        if (!this.options.signal.aborted) await this.terminatePageExecution();
+        throw error;
+      }
+      if (payload.exceptionDetails) {
+        const description =
+          payload.exceptionDetails.exception?.description ?? payload.exceptionDetails.text;
+        throw new BrowserScriptOperationError(
+          'PAGE_EVALUATE_FAILED',
+          firstLine(description ?? 'Page evaluation failed'),
+        );
+      }
+      answer = isRecord(payload.result?.value) ? payload.result.value : {};
+    } finally {
+      await this.pageWindows.leave({
+        mutations: asNumber(answer.mutations),
+        submits: asNumber(answer.submits),
+      });
     }
-    if (payload.exceptionDetails) {
-      const description =
-        payload.exceptionDetails.exception?.description ?? payload.exceptionDetails.text;
+    if (typeof answer.unsupportedPage === 'string') {
+      throw new BrowserScriptOperationError(
+        'PAGE_SCRIPT_UNSUPPORTED_PAGE',
+        pageScriptUnsupportedPageMessage(answer.unsupportedPage),
+      );
+    }
+    if (typeof answer.moved === 'string') {
       throw new BrowserScriptOperationError(
         'PAGE_EVALUATE_FAILED',
-        firstLine(description ?? 'Page evaluation failed'),
+        `The page moved from ${origin} to ${answer.moved} as page.evaluate started; the function did not run. Wait for the page to load and call it again.`,
       );
     }
-    const value = payload.result && 'value' in payload.result ? payload.result.value : undefined;
+    this.pageWindows.calls += 1;
+    if (typeof answer.thrown === 'string') {
+      throw new BrowserScriptOperationError('PAGE_EVALUATE_FAILED', firstLine(answer.thrown));
+    }
     // A waitForFunction poll that hit its page-side deadline leaves the
     // condition function running in the page; it can still change the page.
-    if (pageTimeoutMs > 0 && isRecord(value) && value.timedOut === true) {
+    if (pageTimeoutMs > 0 && answer.timedOut === true) {
       this.interruptedEvaluations += 1;
+      return { timedOut: true };
     }
+    const value = pageTimeoutMs > 0 ? { value: answer.value } : answer.value;
     const bytes = Buffer.byteLength(JSON.stringify(value ?? null), 'utf8');
     if (bytes > MAX_EVALUATE_RESULT_BYTES) {
       throw new BrowserScriptOperationError(
@@ -793,6 +1180,7 @@ export class BrowserScriptRun {
     autoReleased: readonly string[],
     pageErrors: { level: string; message: string }[],
     durationMs: number,
+    pageScript: BrowserScriptPageScriptAudit | undefined,
   ): BrowserScriptResult {
     const base = {
       durationMs,
@@ -810,9 +1198,11 @@ export class BrowserScriptRun {
         mouseEvents: this.mouseEvents,
         autoReleased,
       },
+      inputApiCalls: this.inputApiCalls,
       pageErrors,
       screenshots: this.screenshots,
       ...(this.screenshotsSkipped > 0 ? { screenshotsSkipped: this.screenshotsSkipped } : {}),
+      ...(pageScript ? { pageScript } : {}),
       // Interrupted page JavaScript can change the page after this returns,
       // whatever the outcome; say so on every result that has any.
       ...(this.interruptedEvaluations > 0
@@ -909,9 +1299,12 @@ export async function deliverInputRelease(
   const undelivered: Array<{ method: string; params: Record<string, unknown> }> = [];
   for (const event of events) {
     try {
-      await session.transport.send(event.method, event.params, undefined, {
-        timeoutMs: Math.max(1, deadline - Date.now()),
-      });
+      const timeoutMs = Math.max(1, deadline - Date.now());
+      await withTimeout(
+        session.transport.send(event.method, event.params, undefined, { timeoutMs }),
+        timeoutMs,
+        event.method,
+      );
     } catch {
       undelivered.push(event);
     }

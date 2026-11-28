@@ -1,30 +1,33 @@
 /**
- * `permissionExtension`: Installs the permission `PermissionEngine` through the
- * `@mavis/agent-runtime` extension SPI's `pi.on('before_tool_call')` short-circuit event (design
- * document §4.3).
+ * `permissionExtension` —— 把 permission `PermissionEngine` 装进
+ * `@mavis/agent-runtime` 的 extension SPI 的 `pi.on('before_tool_call')`
+ * short-circuit event（设计文档 §4.3）。
  *
- * Boundary policy: `@mavis/permission` is a pure decision engine. `checkPermission(toolName, input,
- * ctx) => PermissionDecision` requires a host-provided `ToolPermissionContext` (including
- * host-specific rules / mode / sandbox state). This factory therefore accepts a host closure
- * `decide(toolName, input, toolCallCtx) => Promise<PermissionDecision>`. The extension only adapts
- * pi context to decision arguments and converts results. The host owns the engine's location:
- * local-runtime uses `LocalPermissionFacade`, cloud-runtime uses `CloudPermissionFacade`; the §4.3
- * table explicitly gives cloud a separate `cloud-permission` extension.
+ * 边界策略：`@mavis/permission` 是纯 decision engine，`checkPermission(toolName,
+ * input, ctx) => PermissionDecision` 需要 host 提供 `ToolPermissionContext`
+ * （含 rules / mode / sandbox 状态等 host-specific 数据）。因此本 factory 接收
+ * host 传入的 `decide(toolName, input, toolCallCtx) => Promise<PermissionDecision>`
+ * closure——extension 内部只做"pi ctx → 决策 args → 结果转换"的胶水，engine
+ * 本身住哪里由 host 决定（local-runtime 用 `LocalPermissionFacade`，cloud-runtime
+ * 用 `CloudPermissionFacade`——设计文档 §4.3 表明确表示 cloud 有独立
+ * `cloud-permission` extension）。
  *
- * Decision mapping (pi's `BeforeToolCallResult` only exposes `{ block?, reason? }`):
- * - `allow`: Write `rewrittenInput` back to live `toolContext.args`, then return `undefined` to
- *   allow execution.
- * - `deny`: Return `{ block: true, reason }`. The host's `reason-format` generates reason for
- *   UI/log consumption; without `formatReason`, fall back to raw JSON.stringify.
- * - `ask`: Default to `{ block: true, reason }`; the pi loop has no native ASK concept, so the
- *   runtime blocks. **If the host provides `onAsk` and it returns a resolved `PermissionDecision`**
- *   (the user actually approved/denied), map that decision instead (allow → undefined; deny/ask →
- *   block). This seam lets the host implement ask fan-out as a blocking promise (UI prompt → user
- *   click → resolve), applying the user's answer to this tool call. **If the host omits `onAsk` or
- *   it returns `void`**, pi immediately sees a block and the LLM receives a denial. The UI must
- *   dispatch ask through a separate event stream (e.g. an HTTP `/permissions` route returns
- *   requestId and the LLM retries in a later turn). This is the current behavior of
- *   `LocalPermissionFacade`.
+ * 决策映射（pi 层 `BeforeToolCallResult` 只有 `{ block?, reason? }` 两态）：
+ *   - `allow` → 先将 `rewrittenInput` 写回 live `toolContext.args`，再 return
+ *     `undefined`（放行）
+ *   - `deny`  → `{ block: true, reason }`（reason 由 host 侧 `reason-format`
+ *     生成，UI/日志侧读；若未提供 `formatReason` 用 raw JSON.stringify 做兜底）
+ *   - `ask`   → default `{ block: true, reason }`——pi loop 无原生 ASK 概念，
+ *     运行时按 block 处理。**若 host 提供 `onAsk` 且它返回一个 resolved
+ *     `PermissionDecision`**（用户实际同意/拒绝了），extension 会以 resolved
+ *     决策的映射结果为准（allow → undefined 放行，deny/ask → block）。这条 seam
+ *     让 host 能够把 ask fan-out 做成阻塞 promise（UI prompt → user click →
+ *     resolve），本轮工具调用可以按用户回复实际放行/拒绝。**若 host 不提供 `onAsk`
+ *     或它返回 `void`**，pi loop 直接看到 block，LLM 会收到拒绝，UI 需通过独立
+ *     event 流分派 ask（比如 HTTP `/permissions` route 返回 requestId、
+ *     LLM 需要在后续 turn 里重试），这是当前 host（`LocalPermissionFacade`）的
+ *     现状。
+ *
  */
 
 import type { AgentExtension, BeforeToolCallHandler, ExtensionAPI } from '@mavis/agent-runtime';
@@ -64,16 +67,19 @@ export interface PermissionExtensionOptions {
   /**
    * Optional side-effect / resume seam for `ask` decisions. Two modes:
    *
-   * - **fire-and-forget**: `onAsk` returns `void | Promise<void>`. The original ask is treated as
-   *   `block` and pi sees the tool call denied. Host must fan out the UI prompt on its own channel
-   *   and the LLM will retry the call in a subsequent turn.
-   * - **await-resolve**: `onAsk` returns `Promise<PermissionDecision>`. The extension awaits it and
-   *   re-maps the resolved decision (allow → let the tool call through, deny / ask → block). This
-   *   lets a host wrap ask as a blocking UI prompt when the pi loop can tolerate the wait.
+   *   - **fire-and-forget**: `onAsk` returns `void | Promise<void>`. The
+   *     original ask is treated as `block` and pi sees the tool call denied.
+   *     Host must fan out the UI prompt on its own channel and the LLM will
+   *     retry the call in a subsequent turn.
    *
-   * The third argument is the pi turn's `AbortSignal`; blocking UI prompts should cancel their wait
-   * when the turn aborts. `onAsk` errors are swallowed (block posture preserved); pass `onAskError`
-   * to observe failures explicitly.
+   *   - **await-resolve**: `onAsk` returns `Promise<PermissionDecision>`. The
+   *     extension awaits it and re-maps the resolved decision (allow → let
+   *     the tool call through, deny / ask → block). This lets a host wrap ask
+   *     as a blocking UI prompt when the pi loop can tolerate the wait.
+   *
+   * 第三个参数是 pi turn 的 `AbortSignal`，blocking UI prompt 应在 turn
+   * abort 时取消等待。`onAsk` errors are swallowed (block posture preserved);
+   * pass `onAskError` to observe failures explicitly.
    */
   readonly onAsk?: (
     decision: PermissionDecision,

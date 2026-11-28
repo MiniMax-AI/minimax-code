@@ -15,6 +15,29 @@ export interface TuiToolCall {
   error?: unknown;
   durationMs?: number;
   structuredPreview?: TuiStructuredPreview;
+  /** Facts of an `advisor` call, present once Runtime returned its result. */
+  advisor?: TuiAdvisorCallFacts;
+}
+
+export const TUI_ADVISOR_TOOL_NAME = 'advisor';
+
+/**
+ * The scalar facts the Runtime advisor tool reports in its result `details`. The advice text
+ * stays in `output` only, so automation summaries never carry it.
+ */
+export interface TuiAdvisorCallFacts {
+  /**
+   * advice, truncated, context_overflow, provider_error, model_unavailable, cancelled, steered,
+   * timed_out or withheld.
+   */
+  outcome?: string;
+  providerId?: string;
+  modelId?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs?: number;
+  /** Older messages the advisor's transcript left out to fit its input limit; absent when none. */
+  omittedMessages?: number;
 }
 
 export interface TuiToolResult {
@@ -60,7 +83,8 @@ export interface TuiMessage {
     | 'review_result'
     | 'review_failed'
     | 'review_aborted'
-    | 'review_interrupted';
+    | 'review_interrupted'
+    | 'context_reset';
   source?: string;
   origin?: unknown;
   error?: string;
@@ -206,6 +230,7 @@ function projectWireMessage(
   raw: Record<string, unknown>,
   turnId: string | undefined,
 ): TuiStreamEvent | undefined {
+  if (isUndeliveredSideMessage(raw)) return undefined;
   const systemEvent = projectWireSystemEvent(raw, turnId);
   if (systemEvent) return systemEvent;
   const message = normalizeTuiMessage(raw, turnId);
@@ -335,12 +360,20 @@ function withFrameCursor<T extends TuiStreamEvent>(event: T, frame: SessionStrea
   return frame.cursor ? ({ ...event, cursor: frame.cursor } as T) : event;
 }
 
+/**
+ * A side message the runtime kept as undelivered while a Goal ran. The TUI has
+ * no retry or delete for it (spec 4.8), so it is not shown as a sent message;
+ * the existing failure notice and the paused Goal banner tell the user.
+ */
+export function isUndeliveredSideMessage(raw: unknown): boolean {
+  return readRecord(raw)?.kind === 'undelivered_user';
+}
+
 export function normalizeTuiMessage(raw: unknown, fallbackTurnId?: string): TuiMessage {
   return normalizeMessage(readRecord(raw) ?? {}, fallbackTurnId);
 }
 
 function normalizeMessage(message: Record<string, unknown>, fallbackTurnId?: string): TuiMessage {
-  // CliService history keeps the PTC parent of a Tool Call only in the raw JSON.
   const rawMetadata = readRecord(parseJsonValue(message.rawJson ?? message.raw_json)) ?? {};
   return compact({
     id: readString(message, ['msg_id', 'msgId', 'id']),
@@ -433,7 +466,8 @@ function normalizeMessageKind(kind: string | undefined): TuiMessage['kind'] {
     kind === 'review_result' ||
     kind === 'review_failed' ||
     kind === 'review_aborted' ||
-    kind === 'review_interrupted'
+    kind === 'review_interrupted' ||
+    kind === 'context_reset'
   ) {
     return kind;
   }
@@ -577,10 +611,38 @@ function normalizeToolCalls(raw: unknown[] | undefined): TuiToolCall[] | undefin
       output: toolCall.output,
       error: toolCall.error,
     });
-    return [{ ...toolCall, ...(structuredPreview ? { structuredPreview } : {}) }];
+    const advisor = readAdvisorCallFacts(toolCall.name, toolCall.output);
+    return [
+      {
+        ...toolCall,
+        ...(structuredPreview ? { structuredPreview } : {}),
+        ...(advisor ? { advisor } : {}),
+      },
+    ];
   });
 
   return toolCalls.length > 0 ? toolCalls : undefined;
+}
+
+function readAdvisorCallFacts(name: string, output: unknown): TuiAdvisorCallFacts | undefined {
+  if (name !== TUI_ADVISOR_TOOL_NAME) return undefined;
+  const details = readRecord(readRecord(output)?.details);
+  if (!details) return undefined;
+  const facts: TuiAdvisorCallFacts = compact({
+    outcome: readString(details, ['outcome']),
+    providerId: readString(details, ['providerId']),
+    modelId: readString(details, ['modelId']),
+    inputTokens: readCount(details, 'inputTokens'),
+    outputTokens: readCount(details, 'outputTokens'),
+    durationMs: readCount(details, 'durationMs'),
+    omittedMessages: readCount(details, 'omittedMessages'),
+  });
+  return Object.keys(facts).length > 0 ? facts : undefined;
+}
+
+function readCount(record: Record<string, unknown>, key: string): number | undefined {
+  const value = readNumber(record, [key]);
+  return value !== undefined && value >= 0 ? value : undefined;
 }
 
 /**

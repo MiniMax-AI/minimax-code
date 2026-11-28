@@ -55,6 +55,13 @@ export function taskMemoryPolicyFor(
   return sessionKind === 'task' ? effectiveSessionMemoryPolicy(parent?.memoryPolicy) : undefined;
 }
 
+export function taskAdvisorFor(
+  sessionKind: SessionKind,
+  parent: SessionRecord | undefined,
+): NonNullable<SessionRecord['advisor']> | undefined {
+  return sessionKind === 'task' ? (parent?.advisor ?? undefined) : undefined;
+}
+
 export function createDefaultWorkspaceIdentity(input: {
   readonly taskWorkspace?: string;
   readonly parent: SessionRecord | undefined;

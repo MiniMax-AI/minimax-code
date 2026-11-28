@@ -134,16 +134,33 @@ export function formatV2TimestampParts(epochMs: number): V2TimestampParts {
   };
 }
 
+const MAX_V2_PATH_SEGMENT_CHARS = 180;
+
 export function sanitizeV2PathSegment(value: string, fallback = 'item'): string {
   const trimmed = value.trim();
-  const sanitized = trimmed
+  const cleaned = trimmed
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
     .replace(/\s+/g, ' ')
     .replace(/^\.+/g, '')
     .replace(/^\.+$/g, '')
-    .slice(0, 180)
     .trim();
+  const sanitized = truncatePathSegmentPreservingExtension(cleaned, MAX_V2_PATH_SEGMENT_CHARS);
   return sanitized || fallback;
+}
+
+function truncatePathSegmentPreservingExtension(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const extMatch = /^(.+?)(\.[A-Za-z0-9]{1,16})$/u.exec(value);
+  const rawStem = extMatch?.[1];
+  const ext = extMatch?.[2];
+  if (rawStem && ext) {
+    const stemBudget = maxChars - ext.length;
+    if (stemBudget > 0) {
+      const stem = rawStem.slice(0, stemBudget).trim();
+      if (stem) return `${stem}${ext}`;
+    }
+  }
+  return value.slice(0, maxChars).trim();
 }
 
 export function isPathInside(parent: string, child: string): boolean {

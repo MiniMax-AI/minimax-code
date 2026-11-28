@@ -9,6 +9,36 @@ export interface MiniAppFailureDiagnostic {
   readonly hint: string;
 }
 
+export interface MiniAppInspectDiagnostics {
+  readonly scope: 'host';
+  readonly retention: 'runtime-memory';
+  readonly failure?: { readonly code: string; readonly message: string };
+  readonly run?: {
+    readonly runId: string;
+    readonly current: boolean;
+    readonly preparationStartedAtMs: number;
+    readonly readyAtMs?: number;
+    readonly exitedAtMs?: number;
+    readonly exit?: {
+      readonly code: number | null;
+      readonly signal: string | null;
+      readonly shutdownRequested: boolean;
+    };
+    readonly failure?: { readonly code: string; readonly message: string };
+  };
+  readonly logs: {
+    readonly entries: readonly {
+      readonly sequence: number;
+      readonly atMs: number;
+      readonly code: string;
+      readonly message: string;
+    }[];
+    readonly truncated: boolean;
+    /** Plugin log events excluded from this Host-only view, including raw stdout and stderr. */
+    readonly omittedCount: number;
+  };
+}
+
 interface MiniAppFailureCatalogEntry {
   readonly lifecycleCode: 'PREPARATION_FAILED' | 'PLUGIN_ALREADY_EXISTS';
   readonly stage: MiniAppFailureStage;
@@ -106,8 +136,8 @@ const MINIAPP_FAILURE_CATALOG = {
     lifecycleCode: 'PREPARATION_FAILED',
     stage: 'workspace',
     recovery: 'edit_workspace',
-    message: 'The Mini App surface path is invalid.',
-    hint: 'Use a canonical Host-relative path such as /dashboard.',
+    message: 'The Mini App surface declaration is invalid.',
+    hint: 'Use a canonical Host-relative path such as /dashboard and, if present, a window block with only the documented whitelisted keys.',
   },
   MINIAPP_MCP_ENDPOINTS_INVALID: {
     lifecycleCode: 'PREPARATION_FAILED',
@@ -120,8 +150,78 @@ const MINIAPP_FAILURE_CATALOG = {
     lifecycleCode: 'PREPARATION_FAILED',
     stage: 'connector',
     recovery: 'edit_workspace',
-    message: 'The Mini App Host Connector access declaration is invalid.',
-    hint: 'Use unique lowercase provider identifiers in hostConnectorAccess.providers.',
+    message: 'The Mini App Connector access declaration is invalid.',
+    hint: 'Use unique lowercase provider identifiers in permissions.connector (the older hostConnectorAccess.providers reads the same).',
+  },
+  MINIAPP_AGENT_ACCESS_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App Agent access declaration is invalid.',
+    hint: 'Declare the older field as ["session.run", "session.read"] only. The current spelling is permissions: { "agent": ["run"], "session": ["read"] } — run drives the Mini App\'s own Agent turns, read lists and reads the user\'s conversations. Do not mix the two fields.',
+  },
+  MINIAPP_PERMISSIONS_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App permissions declaration is invalid.',
+    hint: 'Declare permissions as one object: { "agent": ["run"], "session": ["read"], "tool": ["call"], "device": ["microphone"], "host": ["navigation.read"], "connector": ["notion"] }. Every key is optional and takes a plain array. Each group names the namespace it opens. Do not combine permissions with the older agentAccess / toolAccess / deviceAccess / hostAccess / hostConnectorAccess fields.',
+  },
+  MINIAPP_AGENT_CONCURRENCY_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App Agent concurrency declaration is invalid.',
+    hint: 'Declare agentConcurrency as an integer from 1 to 32, or omit it for the default of 4.',
+  },
+  MINIAPP_HOST_ACCESS_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App Host access declaration is invalid.',
+    hint: 'Declare hostAccess as a string array containing only navigation.read.',
+  },
+  MINIAPP_DEVICE_ACCESS_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App device access declaration is invalid.',
+    hint: 'Declare deviceAccess as a string array that contains only microphone, camera or notifications.',
+  },
+  MINIAPP_FILE_HANDLERS_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App file handlers declaration is invalid.',
+    hint: 'Declare fileHandlers as a non-empty array of { id, path, extensions }: id matches [a-z0-9-]{1,32} and is unique, path follows the surface.path rules, and each extension looks like ".stl" and appears in only one handler.',
+  },
+  MINIAPP_MANIFEST_FIELD_UNSUPPORTED: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App manifest uses a field this MCode version does not support.',
+    hint: 'Update MCode to a version that supports the field, or remove it from miniapp.json. Compare the top-level keys of miniapp.json with the documented fields to find it.',
+  },
+  MINIAPP_ENGINES_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App engines declaration is invalid.',
+    hint: 'Declare engines as { "mcode": ">=MAJOR.MINOR.PATCH" }; only a >= lower bound with three numeric segments is accepted.',
+  },
+  MINIAPP_TOOL_ACCESS_INVALID: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'edit_workspace',
+    message: 'The Mini App tool access declaration is invalid.',
+    hint: 'Declare toolAccess as ["call"]; it is the only accepted value.',
+  },
+  MINIAPP_HOST_TOO_OLD: {
+    lifecycleCode: 'PREPARATION_FAILED',
+    stage: 'workspace',
+    recovery: 'user_action',
+    message: 'This MCode version is older than the Mini App requires.',
+    hint: 'Ask the user to update MCode to a version that satisfies engines.mcode, or lower the requirement if the package does not need newer Host features.',
   },
   WORKSPACE_CHANGED: {
     lifecycleCode: 'PREPARATION_FAILED',
@@ -212,7 +312,7 @@ const MINIAPP_FAILURE_CATALOG = {
     stage: 'connector',
     recovery: 'edit_workspace',
     message: 'The Mini App violated the Host Connector transport contract.',
-    hint: 'Do not write application output to stdout; use context.logger because stdout is reserved for Host transport.',
+    hint: 'Use context.connector for Connector operations and keep its Host transport messages valid.',
   },
   HOST_CAPACITY_UNAVAILABLE: {
     lifecycleCode: 'PREPARATION_FAILED',
@@ -235,7 +335,10 @@ export function projectMiniAppFailure(
   lifecycleCode: string,
   reasonCode: unknown,
 ): MiniAppFailureProjection | undefined {
-  if (typeof reasonCode !== 'string' || !Object.hasOwn(MINIAPP_FAILURE_CATALOG, reasonCode)) {
+  if (
+    typeof reasonCode !== 'string' ||
+    !Object.prototype.hasOwnProperty.call(MINIAPP_FAILURE_CATALOG, reasonCode)
+  ) {
     return undefined;
   }
   const stableReason = reasonCode as MiniAppFailureReasonCode;

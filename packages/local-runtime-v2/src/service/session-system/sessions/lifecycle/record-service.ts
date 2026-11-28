@@ -51,6 +51,7 @@ import {
   optionalModelVariant,
   sessionCaptureCandidate,
   sessionNotFound,
+  taskAdvisorFor,
   taskMemoryPolicyFor,
   taskWorkspaceFor,
   visibilityForInternalKind,
@@ -75,6 +76,7 @@ export interface CapturedTaskAgentBinding {
 }
 
 export interface SessionCreateInput {
+  readonly sessionId?: string;
   readonly agentName: string;
   readonly workspaceDir?: string;
   readonly title?: string | null;
@@ -109,6 +111,7 @@ export interface InternalSessionCreateInput {
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
   readonly effectiveModelContextWindow?: number | null;
   readonly effectiveModelMaxOutputTokens?: number | null;
+  readonly advisor?: SessionRecord['advisor'];
   readonly taskModelSelection?: ConversationTaskModelSelection;
   readonly isDefaultWorkspace?: boolean;
   /** Preserve an owner-supplied Project identity even when Fork adds a run location. */
@@ -260,6 +263,16 @@ export interface SessionRecordServiceDeps {
   };
 }
 
+const RUNTIME_SESSION_ID_PATTERN = /^mvs_[0-9a-f]{32}$/u;
+
+export function createRuntimeSessionId(): string {
+  return `mvs_${randomUUID().replaceAll('-', '')}`;
+}
+
+export function isRuntimeSessionId(value: string): boolean {
+  return RUNTIME_SESSION_ID_PATTERN.test(value);
+}
+
 export class SessionRecordService
   implements SessionRootCreationCapability, SessionInternalCreationCapability
 {
@@ -267,7 +280,7 @@ export class SessionRecordService
   private taskAgentBindingCapture: SessionRecordServiceDeps['taskAgentBindingCapture'];
 
   constructor(private readonly deps: SessionRecordServiceDeps) {
-    this.makeSessionId = deps.makeSessionId ?? (() => `mvs_${randomUUID().replaceAll('-', '')}`);
+    this.makeSessionId = deps.makeSessionId ?? createRuntimeSessionId;
     this.taskAgentBindingCapture = deps.taskAgentBindingCapture;
   }
 
@@ -437,7 +450,7 @@ export class SessionRecordService
   }
 
   private async prepareSessionCreate(requested: SessionCreateInput): Promise<CreateMetadataContext> {
-    const sessionId = this.makeSessionId();
+    const sessionId = requested.sessionId ?? this.makeSessionId();
     const agent = await this.requireAgentDefaults(requested.agentName);
     const parent = await this.resolveParent(requested.parentSessionId);
     const input = this.resolveCreateModel(requested);
@@ -496,6 +509,7 @@ export class SessionRecordService
       isDefaultWorkspace,
       parentVisibility: parent?.visibility,
       taskMemoryPolicy: taskMemoryPolicyFor(sessionKind, parent),
+      taskAdvisor: taskAdvisorFor(sessionKind, parent),
       taskCapture,
     };
   }
@@ -543,6 +557,7 @@ export class SessionRecordService
       taskWorkspace,
       workspace,
       taskMemoryPolicy: taskMemoryPolicyFor(sessionKind, parent),
+      taskAdvisor: taskAdvisorFor(sessionKind, parent),
       workspaceDir,
       isDefaultWorkspace,
       ...definition,
@@ -948,6 +963,7 @@ interface CreateMetadataContext {
   readonly isDefaultWorkspace: boolean;
   readonly parentVisibility: SessionRecord['visibility'];
   readonly taskMemoryPolicy?: SessionRecord['memoryPolicy'];
+  readonly taskAdvisor?: NonNullable<SessionRecord['advisor']>;
   readonly taskCapture?: CapturedTaskAgentBinding;
 }
 
@@ -969,6 +985,7 @@ interface InternalMetadataContext {
   readonly taskWorkspace?: string;
   readonly workspace: ResolvedCreateWorkspace;
   readonly taskMemoryPolicy?: SessionRecord['memoryPolicy'];
+  readonly taskAdvisor?: NonNullable<SessionRecord['advisor']>;
   readonly workspaceDir: string;
   readonly isDefaultWorkspace: boolean;
   readonly taskCapture?: CapturedTaskAgentBinding;
@@ -988,6 +1005,7 @@ function toMetadataCreateInput(context: CreateMetadataContext): SessionMetadataC
     ...whenDefined('memoryPolicy', context.taskMemoryPolicy),
     ...metadataModelFields(context.input, context.taskCapture),
     ...metadataBindingFields(context.taskCapture),
+    ...whenPresent('advisor', context.taskAdvisor),
     origin: 'user',
   };
 }
@@ -1006,6 +1024,7 @@ function toInternalMetadataCreateInput(
     ...internalBindingFields(context.taskCapture, context.forkedAgentDefinition),
     origin: context.input.origin ?? 'user',
     ...whenPresent('toolCallMode', context.input.toolCallMode),
+    ...whenPresent('advisor', context.input.advisor ?? context.taskAdvisor),
   };
 }
 

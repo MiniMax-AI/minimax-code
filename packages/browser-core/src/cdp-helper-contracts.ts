@@ -1,3 +1,5 @@
+import type { BrowserFormState } from './browser-core-contracts.js';
+
 export const DEFAULT_CDP_TIMEOUT_MS = 15_000;
 export const DRAG_PATH_STEPS = 8;
 
@@ -38,9 +40,19 @@ export interface DOMSnapshotResult {
       backendNodeId?: number[];
       nodeName?: number[];
       nodeType?: number[];
+      nodeValue?: number[];
       parentIndex?: number[];
-      attributes?: Array<{ name: number; value: number }[]>;
+      /** Flat `[name, value, ...]` string-table indices per node. */
+      attributes?: number[][];
       isClickable?: { index: number[] };
+      /** input elements: current value (string-table index). */
+      inputValue?: { index: number[]; value: number[] };
+      /** textarea elements: current value (string-table index). */
+      textValue?: { index: number[]; value: number[] };
+      /** checkbox/radio inputs that are currently checked. */
+      inputChecked?: { index: number[] };
+      /** option elements that are currently selected. */
+      optionSelected?: { index: number[] };
     };
     layout?: {
       nodeIndex?: number[];
@@ -205,6 +217,8 @@ export interface CDPNetworkDiagnosticEntry {
   mimeType?: string;
   failureReason?: string;
   durationMs?: number;
+  /** The connection reset while this request was in flight; how it ended is unknown. */
+  interrupted?: true;
 }
 
 export interface CDPNetworkDiagnosticsOptions {
@@ -213,6 +227,12 @@ export interface CDPNetworkDiagnosticsOptions {
   resourceTypes?: readonly CDPNetworkDiagnosticResourceType[];
   filter?: string;
   afterSequence?: number;
+  /**
+   * `beta.browserReadV2`: say when entries after `afterSequence` were evicted
+   * by the per-tab buffer cap, and when this query repeats the previous one
+   * over an unchanged buffer. Absent or false keeps the page unchanged.
+   */
+  readHints?: boolean;
 }
 
 export interface CDPNetworkDiagnosticsPage {
@@ -221,6 +241,24 @@ export interface CDPNetworkDiagnosticsPage {
   totalEntries: number;
   returnedEntries: number;
   truncated: boolean;
+  /** With `readHints`: entries after `afterSequence` evicted by the buffer cap, any filter. */
+  droppedEntries?: number;
+  /** With `readHints`: sequence of the oldest entry still retained. */
+  oldestSequence?: number;
+  /**
+   * With `readHints`: identical queries in a row before this one that saw the
+   * same buffer, so they returned this same page.
+   */
+  unchangedRepeats?: number;
+  /**
+   * Connection resets after interrupted actions since the records started
+   * over (a new document clears it). Records from before a reset are kept.
+   */
+  resetCount?: number;
+  /** ISO time of the last such reset. */
+  lastResetAt?: string;
+  /** What a reset (always) or, with `readHints`, an eviction or repeat means for the next query. */
+  notice?: string;
 }
 
 export type CDPHoverTargetNameSource =
@@ -350,4 +388,16 @@ export interface SnapshotNode {
   paintOrder: number | null;
   /** Owning CDP frame, retained for canonical semantic identity. */
   frameId?: string;
+  /** Raw live control state from this capture; exposure rules live in browser-form-state. */
+  formState?: BrowserFormState;
+}
+
+/** Interactive-element scan options for live form state (`beta.browserReadV2`). */
+export interface FormStateScanOptions {
+  readonly formState?: boolean;
+  /**
+   * backendNodeIds of inputs seen as type=password, owned by the Browser
+   * session: a scan adds new ones and keeps members credential after a type change.
+   */
+  readonly passwordFields?: Set<number>;
 }

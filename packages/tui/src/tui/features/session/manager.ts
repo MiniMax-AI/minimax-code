@@ -20,6 +20,7 @@ import {
   isTuiInternalSubagentSession,
 } from '../../../runtime/delegation.js';
 import { isSurfaceableHiddenBranch } from '../../../runtime/session-visibility.js';
+import { workspacePathKey } from '../../../runtime/workspace-path.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../../theme/runtime.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
 
@@ -629,10 +630,8 @@ export class TuiSessionManager implements Component, Focusable {
         (session.visibility !== 'hidden' || isSurfaceableHiddenBranch(session)),
     );
     if (this.scope === 'all') return visibleCatalog;
-    const workspace = normalizeWorkspace(this.options.workspaceDir);
-    return visibleCatalog.filter(
-      (session) => normalizeWorkspace(session.workspaceDir) === workspace,
-    );
+    const workspace = workspacePathKey(this.options.workspaceDir);
+    return visibleCatalog.filter((session) => workspacePathKey(session.workspaceDir) === workspace);
   }
 
   private moveSelection(delta: number): void {
@@ -1116,16 +1115,11 @@ function formatSessionStatus(status: string | undefined): string | undefined {
   return undefined;
 }
 
-function normalizeWorkspace(value: string | undefined): string {
-  const normalized = (value ?? '').replaceAll('\\', '/').replace(/\/+$/u, '');
-  return /^[A-Za-z]:\//u.test(normalized) ? normalized.toLocaleLowerCase() : normalized;
-}
-
 function shortenHome(value: string): string {
   const home = process.env.HOME ?? process.env.USERPROFILE;
   if (!home) return value;
-  const normalizedHome = normalizeWorkspace(home);
-  const normalizedValue = normalizeWorkspace(value);
+  const normalizedHome = workspacePathKey(home);
+  const normalizedValue = workspacePathKey(value);
   return normalizedValue === normalizedHome || normalizedValue.startsWith(`${normalizedHome}/`)
     ? `~${normalizedValue.slice(normalizedHome.length)}`
     : value;

@@ -1,3 +1,4 @@
+import { probeProviderCredential } from '@mavis/config';
 import { maskSecret } from '../secret.js';
 import { MANAGED_MINIMAX_PROVIDER_ID, MINIMAX_API_PROVIDER_ID } from '../identity.js';
 import type { LocalModelConfig, ModelContextUpdateOutcome } from '../contracts.js';
@@ -38,7 +39,11 @@ export function getMinimaxApiKeyStatus(context: ModelProviderServiceContext): {
   maskedApiKey?: string;
   cachedStatus?: ModelCacheStatusView;
 } {
-  const apiKey = context.deps.configGetter().minimax_api?.apiKey?.trim();
+  const apiKey = probeProviderCredential({
+    field: 'minimax_api.apiKey',
+    provider: 'minimax_api',
+    value: context.deps.configGetter().minimax_api?.apiKey,
+  }).secret;
   if (!apiKey) return { hasApiKey: false };
   const cache = context.deps.cache.load();
   const target = context.resolveTestTarget(MINIMAX_API_PROVIDER_ID, undefined);
@@ -250,6 +255,18 @@ function minimaxContextUpdateSelection(
     expectedContextLimit: input.expectedContextLimit,
     contextLimit: input.contextLimit,
   };
+}
+
+export async function deleteMinimaxApiKey(context: ModelProviderServiceContext): Promise<void> {
+  await context.deps.updateByokConfig((draft) => {
+    if (draft.minimax_api) delete draft.minimax_api.apiKey;
+    if (draft.minimaxModelSource === 'minimax_api_key') draft.minimaxModelSource = 'token_plan';
+  });
+  try {
+    await context.deps.cache.removeProvider(MINIMAX_API_PROVIDER_ID);
+  } catch {
+    // The credential deletion is committed; this derived cache contains no secrets.
+  }
 }
 
 export async function upsertMinimaxApiKey(

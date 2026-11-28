@@ -2,11 +2,13 @@ import {
   compareAndSetLocalModelContext,
   getConfig,
   removeLocalProviderConfig,
+  updateLocalAdvisorSelection,
   updateLocalByokConfig,
   updateLocalModelSelection,
 } from '@mavis/config';
 
 import { LocalModelCache } from './catalog/model-cache.js';
+import type { RankModelsByRecencyInput } from './catalog/provider-presets/model-recency.js';
 import { ProviderPresetCatalog } from './catalog/provider-presets/provider-presets.service.js';
 import { CodexOAuthManager } from './codex-oauth.js';
 import { ModelDiscoveryClient } from './connectivity/discover-models.js';
@@ -30,11 +32,17 @@ export interface InitializeModelSystemOptions {
   readonly implicitCustomProviderThinking?: boolean;
 }
 
+/** Newest-first model ids by models.dev update time; unknown ids keep source order last. */
+export type RankModelsByRecency = (
+  input: RankModelsByRecencyInput & { readonly signal?: AbortSignal },
+) => Promise<string[]>;
+
 export interface ModelSystemOwner {
   readonly resolver: LocalModelResolver;
   readonly providers: LocalModelProviderService;
   readonly oauth: CodexOAuthManager;
   readonly listProviderPresets: () => Promise<ByokProviderPresetView[]>;
+  readonly rankModelsByRecency: RankModelsByRecency;
 }
 
 /** Binds every Model System config operation to the active Runtime profile. */
@@ -50,6 +58,9 @@ export function createLocalModelSystemConfigPort(read: () => LocalRuntimeConfig 
         ...selection,
         ...(variant !== undefined ? { variant } : {}),
       });
+    },
+    setDefaultAdvisor: async (selection) => {
+      await updateLocalAdvisorSelection(selection);
     },
     removeProvider: removeLocalProviderConfig,
   } satisfies ModelSystemConfigPort;
@@ -81,6 +92,7 @@ export function initializeModelSystem(options: InitializeModelSystemOptions): Mo
     removeLegacyProvider: options.config.removeProvider,
   });
   const providers = new LocalModelProviderService({
+    rankModelsByRecency: (input) => providerPresets.rankModelsByRecency(input),
     configGetter: options.config.read,
     updateByokConfig: options.config.updateByok,
     cache: new LocalModelCache(() => options.config.read().dataDir),
@@ -96,5 +108,6 @@ export function initializeModelSystem(options: InitializeModelSystemOptions): Mo
     providers,
     oauth,
     listProviderPresets: () => providerPresets.listProviderPresets(),
+    rankModelsByRecency: (input) => providerPresets.rankModelsByRecency(input),
   };
 }

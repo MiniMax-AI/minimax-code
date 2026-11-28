@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { watchFile, unwatchFile } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { lstat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -11,7 +11,11 @@ import {
   type UnauthorizedContext,
 } from './contracts.js';
 import { CrossProcessAuthLock } from './cross-process-lock.js';
-import type { CredentialStore, StoredCredential } from './credential-store/types.js';
+import {
+  requiresLocalCredentialReset,
+  type CredentialStore,
+  type StoredCredential,
+} from './credential-store/types.js';
 import { FileStore } from './credential-store/file-store.js';
 import {
   persistAuth,
@@ -19,6 +23,8 @@ import {
   type AuthDiagnosticObserver,
   type AuthPersistenceContext,
 } from './diagnostics.js';
+import { prepareAuthDirectory } from './fs/owned-directory.js';
+import { toPosixPermissionError } from './fs/permission-error.js';
 import type { AuthNamespace } from './namespace.js';
 import { currentRefreshOwner, isRefreshOwnerAlive } from './refresh-owner.js';
 import {
@@ -195,11 +201,14 @@ export class MCodeOAuthCore {
   private pendingRefreshInvalidation: RefreshInvalidation | undefined;
 
   constructor(private readonly options: MCodeOAuthCoreOptions) {
-    this.stateStore = new AuthStateStore(options.namespace.statePath);
-    this.lock = new CrossProcessAuthLock(options.namespace.lockPath);
+    this.stateStore = new AuthStateStore(options.namespace.statePath, options.namespace.authHome);
+    this.lock = new CrossProcessAuthLock(options.namespace.lockPath, {
+      root: options.namespace.authHome,
+    });
     // Keep the existing auth.json privacy/exclusion contract for this journal.
     this.refreshStore = new FileStore({
       authHome: join(options.namespace.namespaceHome, 'refresh'),
+      root: options.namespace.authHome,
     });
     this.now = options.now ?? Date.now;
     this.sleep =
@@ -350,14 +359,60 @@ export class MCodeOAuthCore {
   }
 
   async logout(options: { revoke: boolean }): Promise<LogoutResult> {
+    try {
+      return await this.logoutStoredCredential(options);
+    } catch (error) {
+      // An unreadable or corrupt auth.json must not block signing out.
+      if (!requiresLocalCredentialReset(error)) throw error;
+      return this.resetStoredCredentials({ revoke: options.revoke, requireJournalRemoved: false });
+    }
+  }
+
+  /**
+   * Local recovery for a credential file that cannot be read, repaired or parsed.
+   * Removes the stored records without reading them and commits anonymous. The
+   * server grant is not revoked because its refresh token is not readable. Rejects
+   * when the refresh journal cannot be removed either: a broken one would fail the
+   * next refresh and bring the user back here after signing in.
+   */
+  async resetLocalCredentials(): Promise<LogoutResult> {
+    return this.resetStoredCredentials({ revoke: false, requireJournalRemoved: true });
+  }
+
+  /**
+   * Runs the logout steps (pick the credential, bound the generation, commit
+   * anonymous) but tolerates every read failure, so a broken store cannot block
+   * signing out. A logout that falls back here still revokes a refresh token it
+   * can read, best effort. The explicit reset leaves auth.json unread.
+   */
+  private async resetStoredCredentials(options: {
+    revoke: boolean;
+    requireJournalRemoved: boolean;
+  }): Promise<LogoutResult> {
+    const result = await this.lock.withLock(async () => {
+      const state = await this.stateStore.read().catch(() => undefined);
+      const credential = options.revoke
+        ? await this.readLogoutCredential(state, { bestEffort: true })
+        : undefined;
+      if (credential) {
+        await this.options.oauthClient.revokeToken(credential.refreshToken).catch(() => undefined);
+      }
+      // Each cleanup can be retried, including after a partially completed reset.
+      await this.options.credentialStore.clear();
+      if (options.requireJournalRemoved) await this.removeRefreshJournal();
+      return this.commitAnonymous(this.publishedGeneration(state, credential) + 1);
+    });
+    // Run the store health check again on the next request.
+    this.initializePromise = undefined;
+    return result;
+  }
+
+  private async logoutStoredCredential(options: { revoke: boolean }): Promise<LogoutResult> {
     await this.initialize();
     return this.lock.withLock(async () => {
       const state = await this.stateStore.read();
-      const committed = await this.options.credentialStore.get(
-        this.options.namespace.credentialKey,
-      );
-      const credential = (state?.refresh && (await this.readPendingRefresh(state))) || committed;
-      const currentGeneration = Math.max(state?.generation ?? 0, credential?.generation ?? 0);
+      const credential = await this.readLogoutCredential(state, { bestEffort: false });
+      const currentGeneration = this.publishedGeneration(state, credential);
       if (!credential && (!state || state.status === 'anonymous')) {
         return { status: 'anonymous', generation: currentGeneration };
       }
@@ -395,19 +450,69 @@ export class MCodeOAuthCore {
       }
 
       await this.options.credentialStore.delete(this.options.namespace.credentialKey);
-      await this.stateStore.write(
-        baseState(
-          {
-            status: 'anonymous',
-            generation: logoutGeneration,
-            storeKind: this.options.credentialStore.kind,
-          },
-          this.options.namespace,
-        ),
-      );
-      await this.clearPendingRefresh();
-      return { status: 'anonymous', generation: logoutGeneration };
+      return this.commitAnonymous(logoutGeneration);
     });
+  }
+
+  /**
+   * Caller holds auth.lock. Logout revokes the newest refresh token, so a pending
+   * refresh grant supersedes the committed record. With bestEffort a failed read
+   * is not thrown; when nothing was found and a read failed the result is
+   * undefined, so the generation is never bounded by a record nobody could see.
+   */
+  private readLogoutCredential(
+    state: AuthState | null,
+    options: { bestEffort: false },
+  ): Promise<StoredCredential | null>;
+  private readLogoutCredential(
+    state: AuthState | null | undefined,
+    options: { bestEffort: true },
+  ): Promise<StoredCredential | null | undefined>;
+  private async readLogoutCredential(
+    state: AuthState | null | undefined,
+    options: { bestEffort: boolean },
+  ): Promise<StoredCredential | null | undefined> {
+    let unreadable = false;
+    const read = (load: Promise<StoredCredential | null>) =>
+      options.bestEffort
+        ? load.catch(() => {
+            unreadable = true;
+            return null;
+          })
+        : load;
+    const committed = await read(
+      this.options.credentialStore.get(this.options.namespace.credentialKey),
+    );
+    const pending = state ? await read(this.readPendingRefresh(state)) : null;
+    return pending ?? committed ?? (unreadable ? undefined : null);
+  }
+
+  /**
+   * Highest generation the stored session may have handed out. Leaving the
+   * session commits a larger one because callers holding an older lease compare
+   * generations (handleUnauthorized, the mcode-tools lease broker). undefined
+   * marks a record that was not read or could not be read. auth-state.json
+   * bounds the value; without a state file a read auth.json does. Otherwise the
+   * clock is the floor so the next login still outranks every earlier generation.
+   */
+  private publishedGeneration(
+    state: AuthState | null | undefined,
+    credential: StoredCredential | null | undefined,
+  ): number {
+    const bounded = state !== undefined && (state !== null || credential !== undefined);
+    return Math.max(bounded ? 0 : this.now(), state?.generation ?? 0, credential?.generation ?? 0);
+  }
+
+  /** Caller holds auth.lock and has already removed the stored credential. */
+  private async commitAnonymous(generation: number): Promise<LogoutResult> {
+    await this.stateStore.write(
+      baseState(
+        { status: 'anonymous', generation, storeKind: this.options.credentialStore.kind },
+        this.options.namespace,
+      ),
+    );
+    await this.clearPendingRefresh();
+    return { status: 'anonymous', generation };
   }
 
   watch(listener: (status: AuthStatusSnapshot) => void): () => void {
@@ -1049,10 +1154,32 @@ export class MCodeOAuthCore {
     this.pendingRefreshRollback = undefined;
     this.pendingRefreshInvalidation = undefined;
     // State is authoritative; an undeletable stale journal is never adopted by
-    // a later login/refresh because each transaction has a distinct random id.
-    await unlink(join(this.options.namespace.namespaceHome, 'refresh', 'auth.json')).catch(
-      () => undefined,
-    );
+    // a later login/refresh because each transaction has a distinct random id. One
+    // that cannot be read still fails the next refresh; resetLocalCredentials()
+    // removes it or reports that it cannot.
+    await this.removeRefreshJournal().catch(() => undefined);
+  }
+
+  /**
+   * Never deletes through a directory link: a linked or foreign namespace fails
+   * closed, and for a linked refresh directory only the link is removed.
+   */
+  private async removeRefreshJournal(): Promise<void> {
+    const { namespaceHome, authHome } = this.options.namespace;
+    if (!(await prepareAuthDirectory(namespaceHome, { root: authHome }))) return;
+    const refreshHome = join(namespaceHome, 'refresh');
+    const entry = await lstat(refreshHome).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw toPosixPermissionError(error);
+    });
+    if (!entry) return;
+    if (entry.isSymbolicLink()) {
+      await unlink(refreshHome).catch((error: unknown) => {
+        throw toPosixPermissionError(error);
+      });
+      return;
+    }
+    await this.refreshStore.clear();
   }
 }
 

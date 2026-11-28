@@ -63,6 +63,10 @@ import {
 import { createMemoryRecallAdmissionPolicy } from "./application/session/memory-recall-admission.js";
 import { createHostSessionMiniAppLifecycle } from "./application/session/miniapp-host.js";
 import { resolvePluginServiceLogger } from "./application/session/plugin-service-logger.js";
+import {
+  sessionActivityFor,
+  type SessionActivityApplication,
+} from "./application/session/activity-application.js";
 import type { LocalRuntimeApplication } from "./application/session/process-local-application-contract.js";
 import { composeProcessLocalApplication } from "./application/session/process-local-composition.js";
 import { initializeRuntimeServicePromptSupport } from "./application/session/runtime-prompt-support.js";
@@ -134,8 +138,10 @@ import {
   type ComposedInspector,
 } from "./service/llm-context-inspector/index.js";
 import {
-  initializeMcpService,
+  initializeMcpServiceWithOAuth,
+  pluginMcpAuthDependencies,
   type InitializedMcpService,
+  type McpAuthFacade,
   type McpSettingsService,
 } from "./service/mcp/index.js";
 import {
@@ -194,8 +200,11 @@ import {
   createGoalTurnSubmissionPreparation,
   createLocalAgentHost,
   createSessionLLMRetryEventObserver,
+  abortLocalPluginHookSessionTurn,
   deactivateLocalPluginHooks,
   disposeLocalPluginHookSessions,
+  endLocalPluginHookSession,
+  markNextLocalPluginHookSessionStart,
   GlobalInstructions,
   hasPriorityUserQueueItem,
   initializeTurnSystem,
@@ -250,9 +259,11 @@ export interface RuntimeServices extends RuntimeMiniAppServices {
   readonly applications: RuntimeApplications;
   /** Process-local product surface implemented by the v2 owner. */
   readonly application: LocalRuntimeApplication;
+  readonly sessionActivity?: SessionActivityApplication;
   readonly plugin: InitializedPluginService["plugin"];
   readonly mcp: McpSettingsService;
   readonly mcpRuntime: InitializedMcpService["runtime"];
+  readonly mcpAuth?: McpAuthFacade;
   readonly modelSystem: ModelSystemOwner;
   readonly modelProviderApplication: ModelProviderApplication;
   readonly skill: RuntimeSkillApplication;
@@ -537,6 +548,16 @@ export async function createRuntimeServices(
         readLocalInstructionSources({ ...input, dataDir: options.dataDir }),
     },
     mcp: owners.mcp.public,
+    ...(owners.mcp.auth ? { mcpAuth: owners.mcp.auth } : {}),
+    pluginHookSessions: {
+      markNextSessionStart: markNextLocalPluginHookSessionStart,
+      abortSessionTurn: (sessionId) =>
+        abortLocalPluginHookSessionTurn(sessionId, (targetSessionId) =>
+          owners.turnSystem.turns.abort({ sessionId: targetSessionId, reason: "user" }),
+        ),
+      endSession: (sessionId, reason) =>
+        endLocalPluginHookSession(sessionId, reason, owners.plugin.enabledHookPluginNames()),
+    },
     modelProvider: {
       application: modelProviderApplication,
       providers: modelSystem.providers,
@@ -605,9 +626,17 @@ export async function createRuntimeServices(
     conversation,
     applications: owners.applications,
     application,
+    ...sessionActivityFor({
+      sessionSystem,
+      owners,
+      application,
+      goalPort: options.compatibility.sessionV2.goals,
+      nowMs,
+    }),
     plugin: owners.plugin.plugin,
     mcp: owners.mcp.service,
     mcpRuntime: owners.mcp.runtime,
+    ...(owners.mcp.auth ? { mcpAuth: owners.mcp.auth } : {}),
     modelSystem,
     modelProviderApplication,
     skill,
@@ -671,7 +700,7 @@ async function initializeRuntimeServiceOwners(
   let miniAppComposition: RuntimeMiniAppComposition | undefined;
   let resumeSessionDeletion: ((sessionId: string) => Promise<void>) | undefined;
   try {
-    mcp = initializeMcpService({
+    mcp = initializeMcpServiceWithOAuth({
       ...input.options.compatibility.mcp,
       dataDir: input.options.dataDir,
       nowMs: input.nowMs,
@@ -681,6 +710,7 @@ async function initializeRuntimeServiceOwners(
     plugin = initializePluginService(
       {
         ...input.options.compatibility.plugin,
+        ...pluginMcpAuthDependencies(mcp),
         mcp: mcpRuntime,
         listReservations: createPluginNameReservations(
           input.options.compatibility.plugin.skill,
@@ -692,6 +722,7 @@ async function initializeRuntimeServiceOwners(
       input.turnCapabilities,
       deactivateLocalPluginHooks,
     );
+    if (plugin.mcpAuthPort) mcp.bindPluginAuthPort(plugin.mcpAuthPort);
     bindTaskAgentBindingCapture(input, { plugin, mcp }, pluginLogger);
     miniAppComposition = await composeMiniAppRuntimeCapability({
       options: resolveRuntimeMiniAppOptions(input.options),

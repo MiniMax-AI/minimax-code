@@ -1,5 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +17,7 @@ import {
   activateTuiMcodeToolsHostEnvironment,
   type TuiMcodeToolsHostEnvironmentActivation,
 } from '../cli/mcode-tools-environment.js';
+import { stableProcessNodeExecutable } from '../update/homebrew-node-path.js';
 
 export type McodeToolsReadinessCategory =
   | 'disabled'
@@ -51,8 +51,6 @@ export interface PrepareTuiMcodeToolsIntegrationOptions {
 export interface PrepareTuiMcodeToolsIntegrationDependencies {
   validateResource?: typeof validateMcodeToolsResource;
   startBroker?: typeof startMcodeToolsAuthLeaseBroker;
-  createRuntimeDir?: typeof createTuiMcodeToolsRuntimeDir;
-  removeRuntimeDir?: typeof removeTuiMcodeToolsRuntimeDir;
   activateEnvironment?: typeof activateTuiMcodeToolsHostEnvironment;
 }
 
@@ -86,8 +84,6 @@ export async function prepareTuiMcodeToolsIntegration(
 
   const logger = options.logger ?? { info: () => undefined, warn: () => undefined };
   const environment = options.environment ?? process.env;
-  const removeRuntimeDir = dependencies.removeRuntimeDir ?? removeTuiMcodeToolsRuntimeDir;
-  let runtimeDir: string | undefined;
   let broker: McodeToolsAuthLeaseBroker | undefined;
   let activation: TuiMcodeToolsHostEnvironmentActivation | undefined;
   try {
@@ -95,9 +91,9 @@ export async function prepareTuiMcodeToolsIntegration(
       resourceDir: resolveBundledMcodeToolsResourceDir(options.entryUrl, environment),
       expectedBuildEnv: buildEnv,
     });
-    runtimeDir = await (dependencies.createRuntimeDir ?? createTuiMcodeToolsRuntimeDir)();
     broker = await (dependencies.startBroker ?? startMcodeToolsAuthLeaseBroker)({
-      dataDir: runtimeDir,
+      dataDir: options.dataDir,
+      isolateInstance: true,
       session: options.session,
       logger,
     });
@@ -106,7 +102,9 @@ export async function prepareTuiMcodeToolsIntegration(
     activation = (dependencies.activateEnvironment ?? activateTuiMcodeToolsHostEnvironment)(
       environment,
       {
-        runtimeExecutable: process.execPath,
+        // The broker environment lives as long as this process; brew upgrade may
+        // delete the running keg meanwhile.
+        runtimeExecutable: stableProcessNodeExecutable(),
         brokerEndpoint: broker.endpoint,
         brokerCapabilityFile: broker.capabilityFile,
         configDir,
@@ -119,8 +117,6 @@ export async function prepareTuiMcodeToolsIntegration(
       buildEnv,
       resource,
       broker,
-      runtimeDir,
-      removeRuntimeDir,
       activation,
     });
     logger.info(
@@ -130,7 +126,6 @@ export async function prepareTuiMcodeToolsIntegration(
   } catch (error) {
     activation?.restore();
     await broker?.dispose().catch(() => undefined);
-    if (runtimeDir) await removeRuntimeDir(runtimeDir).catch(() => undefined);
     const category = classifyReadinessFailure(error);
     logger.warn(
       `mcode-tools readiness category=${category} buildEnv=${buildEnv} region=${options.region}`,
@@ -143,25 +138,10 @@ export function normalizeMcodeToolsHostBuildEnv(buildEnv: MavisBuildEnv): McodeT
   return buildEnv === 'dev' ? 'test' : buildEnv;
 }
 
-export async function createTuiMcodeToolsRuntimeDir(): Promise<string> {
-  // macOS Unix-domain sockets have a short path limit. `/tmp` keeps the
-  // process-private broker endpoint bounded even when the user's dataDir is long.
-  const parent = process.platform === 'win32' ? tmpdir() : '/tmp';
-  const runtimeDir = await mkdtemp(path.join(parent, `mcode-tools-tui-${process.pid}-`));
-  if (process.platform !== 'win32') await chmod(runtimeDir, 0o700);
-  return runtimeDir;
-}
-
-export function removeTuiMcodeToolsRuntimeDir(runtimeDir: string): Promise<void> {
-  return rm(runtimeDir, { recursive: true, force: true });
-}
-
 function activeReadiness(options: {
   buildEnv: McodeToolsBuildEnv;
   resource: ValidatedMcodeToolsResource;
   broker: McodeToolsAuthLeaseBroker;
-  runtimeDir: string;
-  removeRuntimeDir: (runtimeDir: string) => Promise<void>;
   activation: TuiMcodeToolsHostEnvironmentActivation;
 }): McodeToolsReadiness {
   let disposed = false;
@@ -176,19 +156,7 @@ function activeReadiness(options: {
       if (disposed) return;
       disposed = true;
       options.activation.restore();
-      const errors: unknown[] = [];
-      try {
-        await options.broker.dispose();
-      } catch (error) {
-        errors.push(error);
-      }
-      try {
-        await options.removeRuntimeDir(options.runtimeDir);
-      } catch (error) {
-        errors.push(error);
-      }
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) throw new AggregateError(errors, 'mcode-tools TUI cleanup failed');
+      await options.broker.dispose();
     },
   };
 }

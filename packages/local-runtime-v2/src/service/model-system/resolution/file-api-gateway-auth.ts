@@ -6,7 +6,7 @@ import {
 } from '@mavis/agent-tools/desktop';
 import type { MavisBuildEnv } from '@mavis/config';
 
-import type { LocalRuntimeAuthContext } from '../contracts.js';
+import type { LocalRuntimeAuthContext } from '../../../infra/config/auth-context.js';
 
 export interface LocalFileApiGatewayAuth {
   readonly gatewayHeaders: Readonly<Record<string, string>>;

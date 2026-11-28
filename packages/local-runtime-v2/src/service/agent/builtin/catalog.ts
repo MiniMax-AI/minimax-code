@@ -139,7 +139,7 @@ export class BuiltinAgentCatalog {
     const agentDir = join(await this.assetsDir(), canonical);
     const persona = await this.readLocalizedPersona(agentDir, 'en');
     const frontmatter = parseFrontmatter(persona ?? '').frontmatter;
-    const capabilityOverride = await this.readCapabilityOverride(agentDir);
+    const { capabilityOverride, preloadSkills } = await this.readAgentSelectors(agentDir);
     const identity: AgentStoreIdentity = {
       ...(typeof frontmatter.display_name === 'string'
         ? { displayName: frontmatter.display_name }
@@ -155,6 +155,7 @@ export class BuiltinAgentCatalog {
       legacyNames: legacyNamesFor(canonical),
       identity,
       ...(capabilityOverride ? { capabilityOverride } : {}),
+      ...(preloadSkills ? { preloadSkills } : {}),
     };
   }
 
@@ -424,20 +425,26 @@ export class BuiltinAgentCatalog {
     return names.map((name) => canonicalBuiltinName(name));
   }
 
-  private async readCapabilityOverride(
-    agentDir: string,
-  ): Promise<AgentCapabilityConfig | undefined> {
+  private async readAgentSelectors(agentDir: string): Promise<{
+    readonly capabilityOverride?: AgentCapabilityConfig;
+    readonly preloadSkills?: readonly string[];
+  }> {
     const raw = await this.readOptionalFile(join(agentDir, 'agent.md'));
-    if (raw === undefined) return undefined;
+    if (raw === undefined) return {};
+    const path = `${agentDir}/agent.md`;
     const frontmatter = parseFrontmatter(raw).frontmatter;
     const capabilityFields = Object.fromEntries(
-      ['persona', 'tools', 'builtinTools', 'skills', 'features']
+      ['persona', 'tools', 'builtinTools', 'features']
         .filter((key) => Object.hasOwn(frontmatter, key))
         .map((key) => [key, frontmatter[key]]),
     );
-    return Object.keys(capabilityFields).length > 0
-      ? parseAgentCapabilityConfig(capabilityFields, `${agentDir}/agent.md`)
-      : undefined;
+    const preloadSkills = parseBuiltinPreloadSkills(frontmatter.skills, path);
+    return {
+      ...(Object.keys(capabilityFields).length > 0
+        ? { capabilityOverride: parseAgentCapabilityConfig(capabilityFields, path) }
+        : {}),
+      ...(preloadSkills ? { preloadSkills } : {}),
+    };
   }
 
   private async renderFeaturePrompts(
@@ -638,4 +645,15 @@ function v2PromptReadContext(input: BuiltinRenderInput): BuiltinPromptReadScope 
 
 function isPromptReadScope(value: BuiltinPromptReadScope | undefined): value is PromptReadScope {
   return Boolean(value && 'source' in value && 'snapshot' in value);
+}
+
+function parseBuiltinPreloadSkills(value: unknown, path: string): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== 'string' || entry.trim().length === 0)
+  ) {
+    throw new Error(`Invalid configuration at ${path}.skills: must be an array of Skill names`);
+  }
+  return value.map((entry: string) => entry.trim());
 }

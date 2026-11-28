@@ -1,3 +1,4 @@
+import { formatSavedPtcScripts } from './saved-ptc-scripts.js';
 import type { LocalTaskRunResult, ModelVerdict } from './types.js';
 
 interface VerdictCandidate {
@@ -59,8 +60,7 @@ function verdictCandidates(lines: readonly string[]): readonly VerdictCandidate[
     }
     const valueLineIndex = nextNonEmptyLine(lines, lineIndex + 1);
     candidates.push({
-      lineIndexes:
-        valueLineIndex === undefined ? [lineIndex] : [lineIndex, valueLineIndex],
+      lineIndexes: valueLineIndex === undefined ? [lineIndex] : [lineIndex, valueLineIndex],
       ...(valueLineIndex === undefined ? {} : { token: verdictToken(lines[valueLineIndex] ?? '') }),
     });
   });
@@ -72,9 +72,7 @@ function candidatePayload(line: string): string | null | undefined {
   const normalized = stripLeadingDecoration(line);
   const inline = /^VERDICT\s*:(.*)$/iu.exec(normalized);
   if (inline) return inline[1] ?? '';
-  return /^VERDICT(?:\s*(?:\*{1,2}|_{1,2}|`{1,3}|~{2}))*\s*$/iu.test(normalized)
-    ? null
-    : undefined;
+  return /^VERDICT(?:\s*(?:\*{1,2}|_{1,2}|`{1,3}|~{2}))*\s*$/iu.test(normalized) ? null : undefined;
 }
 
 function stripLeadingDecoration(line: string): string {
@@ -95,9 +93,7 @@ function verdictToken(payload: string): ModelVerdict | undefined {
   const token = match?.[1]?.toLowerCase() as ModelVerdict | undefined;
   if (!token || !match) return undefined;
   const tail = payload.slice(match[0].length);
-  const uppercaseTokens = tail.match(
-    /(?<![\p{L}\p{N}_])(?:PASS|FAIL|PARTIAL)(?![\p{L}\p{N}_])/gu,
-  );
+  const uppercaseTokens = tail.match(/(?<![\p{L}\p{N}_])(?:PASS|FAIL|PARTIAL)(?![\p{L}\p{N}_])/gu);
   if (uppercaseTokens?.some((candidate) => candidate.toLowerCase() !== token)) return undefined;
   return token;
 }
@@ -121,7 +117,7 @@ export function formatLocalTaskParentReport(result: LocalTaskRunResult): string 
   const changedFiles = verification?.changedFiles ?? [];
   const observationNotes = verification?.observationNotes ?? [];
 
-  return [
+  const report = [
     `run_status: ${result.status}`,
     `requested_agent_name: ${result.requestedAgentName}`,
     `resolved_agent_name: ${result.resolvedAgentName ?? 'missing'}`,
@@ -134,4 +130,7 @@ export function formatLocalTaskParentReport(result: LocalTaskRunResult): string 
     result.finalText ?? '',
     `error_message: ${result.errorMessage ?? ''}`,
   ].join('\n');
+  // Absent when the child saved nothing, so today's report stays byte-identical.
+  const savedScripts = formatSavedPtcScripts(result.savedPtcScripts);
+  return savedScripts ? `${report}\n${savedScripts}` : report;
 }

@@ -1,5 +1,7 @@
 import { posix, win32 } from 'node:path';
 
+import { inferTuiAudioPdfMimeType } from '../../../application/audio-pdf-mime.js';
+
 const TERMINAL_IMAGE_EXTENSIONS = new Set([
   '.avif',
   '.bmp',
@@ -22,7 +24,9 @@ export function isTuiTerminalImagePaste(value: string): boolean {
     return false;
   }
   const extension = posix.extname(normalized).toLocaleLowerCase();
-  return TERMINAL_IMAGE_EXTENSIONS.has(extension);
+  return (
+    TERMINAL_IMAGE_EXTENSIONS.has(extension) || inferTuiAudioPdfMimeType(normalized) !== undefined
+  );
 }
 
 export function getTuiTerminalImagePasteFallbackPath(

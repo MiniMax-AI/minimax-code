@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { Command, InvalidArgumentError } from 'commander';
 import type { MavisRegion } from '@mavis/config';
+import { parsePluginSelector } from '@mavis/shared';
 import { TuiContributionRegistry } from '../contributions/index.js';
 import type { RawTuiExecOptions } from '../headless/invocation.js';
 import {
@@ -12,6 +13,7 @@ import {
   type TuiInteractiveLaunchRequest,
 } from './contract.js';
 import type { McodeProviderCliRequest } from './provider-command.js';
+import type { McodeMcpCliRequest, McodeMcpPluginSelector } from './mcp-command.js';
 import {
   isModelProviderApiFormat,
   MCODE_PROVIDER_API_FORMATS,
@@ -54,6 +56,10 @@ export interface CreateTuiProgramOptions {
   runProvider?: (request: McodeProviderCliRequest, lane?: string) => Promise<void>;
   runPlugin?: (request: McodePluginCliRequest, lane?: string) => Promise<void>;
   runTelemetry?: (action: McodeTelemetryCliAction) => Promise<void>;
+  runMcp?: (request: McodeMcpCliRequest, lane?: string) => Promise<void>;
+  exposeManagedBackendLane?: boolean;
+  /** False in a package without the advisor (`beta.advisor`): `--advisor` is not registered. */
+  exposeAdvisor?: boolean;
   resolveLane?: typeof resolveTuiManagedBackendLane;
   allowStartupEnvironmentSelection?: boolean;
   commandContributions?: readonly TuiCliCommandContribution[];
@@ -73,13 +79,21 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     activeLane
       ? requirePluginRunner(options)(request, activeLane)
       : requirePluginRunner(options)(request);
+  const runMcp = (request: McodeMcpCliRequest) =>
+    activeLane
+      ? requireMcpRunner(options)(request, activeLane)
+      : requireMcpRunner(options)(request);
   const program = applyInteractiveCliContract(
     new Command()
       .name('mcode')
       .description('Minimax Code — terminal coding agent')
       .version(options.version)
       .enablePositionalOptions(),
-    { allowStartupEnvironmentSelection: options.allowStartupEnvironmentSelection },
+    {
+      allowStartupEnvironmentSelection: options.allowStartupEnvironmentSelection,
+      exposeManagedBackendLane: options.exposeManagedBackendLane,
+      exposeAdvisor: options.exposeAdvisor,
+    },
   ).action((prompt: string | undefined, commandOptions: RawTuiInteractiveOptions) =>
     options.launchTui(withLane(resolveInteractiveLaunchRequest(prompt, commandOptions))),
   );
@@ -101,8 +115,9 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       options.launchTui(withLane({ initialPrompt: '/init', workspaceDir: resolve(directory) })),
     );
 
+
   const exec = program.command('exec').description('Run one prompt without starting the TUI');
-  applyExecCliContract(exec).action(
+  applyExecCliContract(exec, { exposeAdvisor: options.exposeAdvisor }).action(
     (prompt: string | undefined, commandOptions: RawTuiExecOptions) => {
       const resolved = inheritSystemPromptOptions(exec, commandOptions);
       return activeLane
@@ -366,6 +381,53 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       }),
     );
 
+  const mcp = program
+    .command('mcp')
+    .description('Manage MCP server authorization')
+    .allowExcessArguments(false)
+    .action(() => options.launchTui(withLane({ initialPrompt: '/mcp' })));
+
+  mcp
+    .command('login')
+    .description('Authorize a remote MCP server in the browser')
+    .argument('<name>', 'MCP server name', requiredText('an MCP server name'))
+    .option(
+      '--plugin <plugin[@marketplace]>',
+      'server provided by a local (custom) Plugin; official Plugin servers need no OAuth',
+      parseMcpPluginSelector,
+    )
+    .option('--project [dir]', "server from a project's .mcp.json (default: current directory)")
+    .option('--no-browser', 'print the sign-in address and paste the redirect URL')
+    .option('--client-secret', 'enter a client secret first; input is hidden (user servers only)')
+    .allowExcessArguments(false)
+    .action(
+      (
+        name: string,
+        commandOptions: McpTargetOptions & { browser?: boolean; clientSecret?: boolean },
+      ) =>
+        runMcp({
+          action: 'login',
+          ...mcpTarget(name, commandOptions),
+          openBrowser: commandOptions.browser !== false,
+          setClientSecret: Boolean(commandOptions.clientSecret),
+        }),
+    );
+
+  mcp
+    .command('logout')
+    .description('Remove the stored authorization for a remote MCP server')
+    .argument('<name>', 'MCP server name', requiredText('an MCP server name'))
+    .option(
+      '--plugin <plugin[@marketplace]>',
+      'server provided by a local (custom) Plugin; official Plugin servers need no OAuth',
+      parseMcpPluginSelector,
+    )
+    .option('--project [dir]', "server from a project's .mcp.json (default: current directory)")
+    .allowExcessArguments(false)
+    .action((name: string, commandOptions: McpTargetOptions) =>
+      runMcp({ action: 'logout', ...mcpTarget(name, commandOptions) }),
+    );
+
   const contributionRegistry = new TuiContributionRegistry<TuiCliCommandContribution>();
   contributionRegistry.registerAll(options.commandContributions ?? []);
   for (const contribution of contributionRegistry.freeze()) {
@@ -426,6 +488,42 @@ function parsePluginMarketplace(value: string): McodePluginMarketplace {
   throw new InvalidArgumentError('expected "official" or "local"');
 }
 
+interface McpTargetOptions {
+  readonly plugin?: McodeMcpPluginSelector;
+  readonly project?: string | true;
+}
+
+function mcpTarget(
+  serverName: string,
+  commandOptions: McpTargetOptions,
+): { serverName: string; plugin?: McodeMcpPluginSelector; projectDir?: string } {
+  if (commandOptions.plugin && commandOptions.project !== undefined) {
+    throw new Error('Use either --plugin or --project, not both.');
+  }
+  return {
+    serverName,
+    ...(commandOptions.plugin ? { plugin: commandOptions.plugin } : {}),
+    ...(commandOptions.project !== undefined
+      ? { projectDir: resolve(commandOptions.project === true ? '.' : commandOptions.project) }
+      : {}),
+  };
+}
+
+function parseMcpPluginSelector(value: string): McodeMcpPluginSelector {
+  const parsed = parsePluginSelector(value);
+  if (!parsed.name) throw new InvalidArgumentError('expected <plugin> or <plugin>@<marketplace>');
+  if (parsed.marketplace === undefined) return { name: parsed.name };
+  return { name: parsed.name, marketplace: parsePluginMarketplace(parsed.marketplace) };
+}
+
+function requiredText(label: string): (value: string) => string {
+  return (value) => {
+    const trimmed = value.trim();
+    if (!trimmed) throw new InvalidArgumentError(`expected ${label}`);
+    return trimmed;
+  };
+}
+
 function pluginActionLabel(action: 'add' | 'remove' | 'enable' | 'disable'): string {
   if (action === 'add') return 'Install';
   if (action === 'remove') return 'Uninstall';
@@ -440,6 +538,11 @@ function requireProviderRunner(options: CreateTuiProgramOptions) {
 function requirePluginRunner(options: CreateTuiProgramOptions) {
   if (!options.runPlugin) throw new Error('Plugin management is unavailable.');
   return options.runPlugin;
+}
+
+function requireMcpRunner(options: CreateTuiProgramOptions) {
+  if (!options.runMcp) throw new Error('MCP management is unavailable.');
+  return options.runMcp;
 }
 
 function requireAcpRunner(options: CreateTuiProgramOptions) {

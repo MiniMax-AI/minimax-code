@@ -71,6 +71,7 @@ export {
 } from './native-production-dependencies.js';
 export * from './preparation/index.js';
 export {
+  ADVISOR_TOOL_NAME,
   buildLocalTurnToolCatalog,
   createLocalAgentCapabilitySelector,
   filterLocalTurnCapabilityInventory,
@@ -83,7 +84,11 @@ export {
   type LocalTurnRawToolSources,
   type LocalTurnToolCatalog,
 } from './assembly/local-turn-tool-catalog.js';
-export { buildLocalTurnPayloadTransform } from './assembly/local-turn-payload-transform.js';
+export {
+  buildLocalRequestPayloadTransform,
+  buildLocalTurnPayloadTransform,
+} from './assembly/local-turn-payload-transform.js';
+export { readAdvisorBinding } from './assembly/local-turn-tool-catalog-source.js';
 export { NativeLocalTurnExecutionPreparationSource } from './assembly/local-turn-execution-preparation.js';
 export {
   LocalTurnInputPreparer,

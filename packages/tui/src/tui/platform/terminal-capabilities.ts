@@ -111,6 +111,6 @@ export function detectTerminalMultiplexer(
   return term.startsWith('screen') ? 'screen' : 'none';
 }
 
-function isSshSession(env: Readonly<Record<string, string | undefined>>): boolean {
+export function isSshSession(env: Readonly<Record<string, string | undefined>>): boolean {
   return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY);
 }

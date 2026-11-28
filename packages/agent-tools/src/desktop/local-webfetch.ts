@@ -8,7 +8,11 @@ import {
 import { LocalWebFetchToolDef, type LocalWebFetchToolInput } from './builtin-defs.js';
 import { isPtcChildCall } from './output-limit.js';
 import { withDesktopCompletenessReport } from './ptc-result-projection.js';
-import type { LocalRuntimeToolContext, LocalWebFetchAdapter } from './types.js';
+import type {
+  LocalRuntimeToolContext,
+  LocalWebFetchAdapter,
+  LocalWebFetchAdapterResult,
+} from './types.js';
 
 const WEB_FETCH_MAX_RESULT_TOKENS = 16_000;
 const MAX_BINARY_SEARCH_ITERATIONS = 64;
@@ -26,7 +30,11 @@ export class LocalWebFetchTool implements ToolImpl<
     signal?: AbortSignal,
   ): Promise<ToolResult> {
     if (signal?.aborted) throw new Error('Operation aborted');
-    const resp = await this.adapter.fetch(input, signal);
+    const resp = await this.adapter.fetch(
+      { sessionId: ctx.sessionId, turnId: ctx.turnId },
+      input,
+      signal,
+    );
     const retrievalOutcome = resp.retrievalOutcome;
 
     const statusCode = resp.base_resp?.status_code ?? 0;
@@ -49,6 +57,7 @@ export class LocalWebFetchTool implements ToolImpl<
             ...(resp.contentType ? { content_type: resp.contentType } : {}),
             ...(resp.retryAfter ? { retry_after: resp.retryAfter } : {}),
             ...(retrievalOutcome ? { retrieval_outcome: retrievalOutcome } : {}),
+            ...routeDetails(resp),
           },
         },
         {
@@ -61,7 +70,7 @@ export class LocalWebFetchTool implements ToolImpl<
       );
     }
 
-    const body = resp.content ?? '';
+    const body = presentWebFetchBody(resp);
     // A run_code child gets the whole body (see isPtcChildCall); the adapter's
     // own download limit still applies and stays reported as details.truncated.
     const childCall = isPtcChildCall(ctx);
@@ -94,6 +103,7 @@ export class LocalWebFetchTool implements ToolImpl<
             }
           : {}),
         ...(retrievalOutcome ? { retrieval_outcome: retrievalOutcome } : {}),
+        ...routeDetails(resp),
       },
     };
     // The adapter hands back an HTTP error page as a normal body (status_code 0),
@@ -113,21 +123,67 @@ export class LocalWebFetchTool implements ToolImpl<
       );
     }
     // The completeness statement and data for PTC; details and text are unchanged.
-    // data.content is the text itself, so it is cut exactly where output is.
+    // A program gets the page body itself: the provenance line is for the model,
+    // and the route stays readable in details.via / details.route_reason.
     const data = {
       url: input.url,
       ...(resp.finalUrl ? { finalUrl: resp.finalUrl } : {}),
       ...(resp.status !== undefined ? { httpStatus: resp.status } : {}),
       ...(resp.contentType ? { contentType: resp.contentType } : {}),
       ...(resp.bytes !== undefined ? { bytes: resp.bytes } : {}),
-      content,
+      content: childCall ? (resp.content ?? '') : content,
     };
-    const uncappedOutput = childCall && estimateTextTokens(body) > WEB_FETCH_MAX_RESULT_TOKENS;
+    const uncappedOutput =
+      childCall && estimateTextTokens(data.content) > WEB_FETCH_MAX_RESULT_TOKENS;
     return withDesktopCompletenessReport(LocalWebFetchToolDef.name, result, {
       data,
       ...(uncappedOutput ? { uncappedOutput } : {}),
     });
   }
+}
+
+/**
+ * Model-visible body. The router's provenance is stated in the first line so the
+ * model never reads server-extracted Markdown as the page's raw response, and a
+ * quota fallback never passes silently as a normal read.
+ */
+function presentWebFetchBody(resp: LocalWebFetchAdapterResult): string {
+  const body = resp.content ?? '';
+  if (resp.via === 'server') {
+    const fetchedAt = serverFetchedAt(resp.server?.fetchedAtMs);
+    return `[web_fetch: page text extracted by the minimax server reader${fetchedAt ? `, fetched ${fetchedAt}` : ''}; not raw HTML]\n${
+      resp.title ? `# ${resp.title}\n\n` : ''
+    }${body}`;
+  }
+  if (resp.routeReason === 'server_quota_fallback') {
+    return (
+      '[web_fetch: the server reader is unavailable for this account right now; ' +
+      `this page was fetched directly from this device]\n${body}`
+    );
+  }
+  return body;
+}
+
+function serverFetchedAt(fetchedAtMs: number | undefined): string | undefined {
+  if (fetchedAtMs === undefined || !Number.isFinite(fetchedAtMs) || fetchedAtMs <= 0) {
+    return undefined;
+  }
+  return new Date(fetchedAtMs).toISOString();
+}
+
+/**
+ * Routing facts for the tool result. Absent when the adapter made no routing
+ * decision, which keeps a non-routed fetch identical to the pre-router result.
+ */
+function routeDetails(resp: LocalWebFetchAdapterResult): Record<string, unknown> {
+  if (!resp.via || !resp.routeReason) return {};
+  return {
+    via: resp.via,
+    route_reason: resp.routeReason,
+    ...(resp.server?.provider ? { provider: resp.server.provider } : {}),
+    ...(resp.server?.cacheHit !== undefined ? { cache_hit: resp.server.cacheHit } : {}),
+    ...(resp.server?.fetchedAtMs !== undefined ? { fetched_at_ms: resp.server.fetchedAtMs } : {}),
+  };
 }
 
 function truncateWebFetchContentByEstimatedTokens(

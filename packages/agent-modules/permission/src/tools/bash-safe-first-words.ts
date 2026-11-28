@@ -6,9 +6,9 @@
  *   1. `SAFE_BASH_FIRST_WORDS` — curated set of first-word commands the
  *      bash-permission pipeline (`tools/bash-permission.ts`) treats as
  *      fast-allow once the SOFT pre-scan + path-write gates are clean.
- *   2. `isDestructiveKillCommand` — detects `kill -9 / -KILL / -SIGKILL` so
- *      the fast-allow path can demote `kill` back to ASK when it carries a
- *      SIGKILL-class signal.
+ *   2. `isDestructiveKillCommand` — detects `kill -9 / -KILL / -SIGKILL` and
+ *      `kill` aimed at a process group or every process (`0`, `-1`, `-<pgid>`)
+ *      so the fast-allow path can demote `kill` back to ASK.
  *
  * Pure data + helpers. No orchestration, no LLM, no host-port dependencies.
  * Sibling to `bash-fast-allow.ts` (which handles first-word EXTRACTION) —
@@ -35,6 +35,13 @@ export const SAFE_BASH_FIRST_WORDS: ReadonlySet<string> = new Set([
   'which',
   'type',
   'whereis',
+  // `where` is where.exe on Windows (zsh builtin elsewhere); PowerShell's
+  // Where-Object alias is normalised away by pureReadFirstWord.
+  'where',
+  'basename',
+  'dirname',
+  'realpath',
+  'readlink',
   'date',
   'whoami',
   'hostname',
@@ -116,7 +123,8 @@ export const SAFE_BASH_FIRST_WORDS: ReadonlySet<string> = new Set([
   // Process inspection / control
   'ps',
   'kill',
-  'pkill',
+  // `pkill` matches by name and can end unrelated processes (including this app's
+  // own helpers), so it goes to the LLM gate instead of fast-allow.
   'lsof',
   'strings',
   // Binary / object-file inspection
@@ -191,13 +199,30 @@ function extractKillCommandWordFromTokens(tokens: string[]): string {
 }
 
 /**
+ * True when a `kill` operand after the optional single signal spec is `0` (own
+ * process group), `-1` (every process the user owns) or `-<pgid>` (a group).
+ */
+function killTargetsProcessGroup(tokens: string[]): boolean {
+  const start = tokens.findIndex((t) => (t.split('/').pop() ?? t).toLowerCase() === 'kill');
+  if (start < 0) return false;
+  let i = start + 1;
+  const first = tokens[i] ?? '';
+  if (first === '-s' || first === '-n' || first === '--signal') i += 2;
+  else if (first.startsWith('-') && first !== '--') i += 1;
+  if (tokens[i] === '--') i += 1;
+  return tokens.slice(i).some((t) => t === '0' || /^-\d+$/.test(t));
+}
+
+/**
  * Return true when the bash command is a `kill` / `pkill` invocation using
- * a SIGKILL-class signal. Default SIGTERM forms return false.
+ * a SIGKILL-class signal, or a `kill` aimed at a process group / every process.
+ * Default SIGTERM forms on explicit PIDs return false.
  */
 export function isDestructiveKillCommand(command: string, normalizedFirstWord?: string): boolean {
   const tokens = shellTokenize(command.trim());
   const cmdWord = (normalizedFirstWord ?? extractKillCommandWordFromTokens(tokens)).toLowerCase();
   if (cmdWord !== 'kill' && cmdWord !== 'pkill') return false;
+  if (cmdWord === 'kill' && killTargetsProcessGroup(tokens)) return true;
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i] ?? '';
     if (SIGKILL_SHORT_TOKEN.test(t)) return true;

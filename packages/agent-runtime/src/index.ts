@@ -1,17 +1,16 @@
 /**
- * `@mavis/agent-runtime` — pluggable extension SPI + assembleTurn assembler.
+ * `@mavis/agent-runtime` —— pluggable extension SPI + assembleTurn assembler.
  *
- * See design doc: Feishu wiki "agent-runtime: A pluggable extension layer above agent-core" v1.0
- * (`.harness/docs/adr/agent-runtime-extension-layer.md` when ADR lands).
+ * See design doc: 飞书 wiki《agent-runtime：agent-core 之上的可插拔扩展层》v1.0
+ * (`.harness/docs/adr/agent-runtime-extension-layer.md` when ADR lands)
  *
  * Public surface:
- * - `createAgentRuntime(opts)`: Host entry point.
- * - `AgentRuntime` interface.
- * - `AgentExtension / ExtensionAPI / TurnAssemblyCtx / AssemblyResult` SPI types.
- * - `resolveExtensions()`: Directly callable in unit tests; hosts generally do not need it.
+ *   - `createAgentRuntime(opts)` —— host 入口
+ *   - `AgentRuntime` interface
+ *   - `AgentExtension / ExtensionAPI / TurnAssemblyCtx / AssemblyResult` SPI types
+ *   - `resolveExtensions()` —— 单元测试可直接调；host 通常无需直接使用
  *
- * The internal `Registry` implementation is a named export for tests; application code uses
- * `createAgentRuntime`.
+ * 内部实现 (`Registry`) 通过 named export 暴露给 test 使用，业务代码走 `createAgentRuntime`。
  */
 
 export { createAgentRuntime } from './api.js';
@@ -40,7 +39,11 @@ export type {
 export { isPromptSnapshotInvalidError, PromptSnapshotInvalidError } from './prompt-read.js';
 export { BoundedInternalTurnPromptReadRegistry } from './internal-turn-prompt-read.js';
 export type { InternalTurnPromptReadRegistry } from './internal-turn-prompt-read.js';
-export { defineRuntimeTool } from '@mavis/agent-core/tools';
+export {
+  defineRuntimeTool,
+  TURN_STOPPING_TOOL_RESULT_DETAIL,
+  TURN_TERMINATING_TOOL_RESULT_DETAIL,
+} from '@mavis/agent-core/tools';
 export type { ToolExecutionContext } from '@mavis/agent-core/tools';
 export {
   buildToolCallCitationId,
@@ -48,6 +51,7 @@ export {
   collectFetchedWebSources,
   collectWebSourceCitations,
   collectUsedWebEvidenceIds,
+  readMcpInvokeArguments,
   shellSourceStages,
   type ContextualWebCitation,
   compactToolCallCitationKey,
@@ -55,3 +59,22 @@ export {
   resolveKnownCitationAlias,
 } from '@mavis/agent-core';
 export * from './types.js';
+export {
+  NEXT_STEP_APP_ACTIONS,
+  NEXT_STEP_ASK_MAX,
+  NEXT_STEP_ASK_TARGET,
+  NEXT_STEP_LABEL_MAX,
+  NEXT_STEP_LABEL_MIN,
+  NEXT_STEP_MAX_ACTIONS,
+  NEXT_STEP_RECAP_MAX,
+  breaksAppActionLimits,
+  isBackgroundTaskUserMessage,
+  isHostSubmittedUserInput,
+  isNextStepAction,
+  readNextStepCard,
+  trimNextStepActions,
+  type NextStepAction,
+  type NextStepAppAction,
+} from '@mavis/agent-core';
+
+export { readMiniAppSuggestion, type MiniAppSuggestionBrief } from '@mavis/agent-core';
