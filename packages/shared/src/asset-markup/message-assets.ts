@@ -84,9 +84,15 @@ export function stripDeliverAssetsWrappers(content: string): string {
  * asset index: strip `:line`, unify separators, drop trailing slashes, and
  * lowercase Windows drive letters.
  */
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 export function normalizeAssetPathKey(path: string): string {
   const trimmed = stripLineNumber(path.trim()).replace(/\\/g, '/');
-  const withoutTrailingSlash = trimmed.length > 1 ? trimmed.replace(/\/+$/u, '') : trimmed;
+  const withoutTrailingSlash = trimmed.length > 1 ? trimTrailingSlashes(trimmed) : trimmed;
   return /^[A-Z]:\//u.test(withoutTrailingSlash)
     ? withoutTrailingSlash[0]!.toLowerCase() + withoutTrailingSlash.slice(1)
     : withoutTrailingSlash;
